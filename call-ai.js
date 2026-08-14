@@ -1,119 +1,55 @@
-#!/usr/bin/env node
-
 /**
- * call-ai.js — Call an OpenAI-compatible endpoint with a system prompt + user input.
+ * call-ai.js — A single function that calls an OpenAI-compatible endpoint.
  *
- * Usage:
- *   node call-ai.js "Your question or instruction here"
- *   node call-ai.js --prompt custom-system.txt "Your question"
- *   node call-ai.js --file input.txt              # reads input from a file
- *   echo "Your question" | node call-ai.js        # reads input from stdin
+ * @param {string} systemPrompt - The system prompt to send.
+ * @param {string} filePath     - Path to a file (text, image, video, PDF, etc.).
+ * @param {string} userInput    - The user's message/input.
+ * @returns {Promise<string>}   - Resolves with the API response text.
  *
- * Environment variables (via .env file or shell):
- *   OPENAI_BASE_URL   — Base URL of the API (default: https://api.openai.com/v1)
- *   OPENAI_API_KEY    — Your API key
- *   OPENAI_MODEL      — Model name (default: gpt-4o-mini)
- *   MAX_TOKENS        — Max response tokens (default: 1024)
- *   TEMPERATURE       — Sampling temperature (default: 0.7)
+ * @example
+ * const result = await callAI(
+ *   "You are a helpful assistant.",
+ *   "./document.pdf",
+ *   "Summarize this document."
+ * );
  */
 
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
+const { fileTypeFromBuffer } = require("file-type");
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-function exitWithError(message) {
-  console.error(`\x1b[31mError:\x1b[0m ${message}`);
-  process.exit(1);
-}
-
-function printUsage() {
-  console.log(`
-\x1b[36mUsage:\x1b[0m
-  node call-ai.js "Your question or instruction here"
-  node call-ai.js --prompt <system-prompt-file> "Your question"
-  node call-ai.js --file <input-file>
-  echo "Your question" | node call-ai.js
-
-\x1b[36mOptions:\x1b[0m
-  --prompt <file>   Path to a file containing the system prompt (default: system-prompt.txt)
-  --file <file>     Read user input from a file instead of CLI argument
-  --help            Show this help message
-
-\x1b[36mEnvironment:\x1b[0m
-  OPENAI_BASE_URL   Base URL of the OpenAI-compatible endpoint
-  OPENAI_API_KEY    Your API key
-  OPENAI_MODEL      Model to use (default: gpt-4o-mini)
-  MAX_TOKENS        Max tokens in response (default: 1024)
-  TEMPERATURE       Temperature 0.0–2.0 (default: 0.7)
-`.trim());
-}
-
-// ─── Parse arguments ────────────────────────────────────────────────────────
-
-function parseArgs(argv) {
-  const args = {
-    userInput: null,
-    systemPromptFile: path.join(__dirname, "system-prompt.txt"),
-    help: false,
+/**
+ * Convert a file to a base64 data URI.
+ * Uses `file-type` to detect the MIME type from magic bytes.
+ * Returns null if the file type cannot be determined.
+ */
+async function fileToDataURI(filePath) {
+  const buffer = fs.readFileSync(path.resolve(filePath));
+  const fileType = await fileTypeFromBuffer(buffer);
+  if (!fileType) return null;
+  return {
+    uri: `data:${fileType.mime};base64,${buffer.toString("base64")}`,
+    mimeType: fileType.mime,
   };
-
-  let i = 0;
-  while (i < argv.length) {
-    switch (argv[i]) {
-      case "--help":
-        args.help = true;
-        i++;
-        break;
-      case "--prompt":
-        i++;
-        args.systemPromptFile = argv[i];
-        i++;
-        break;
-      case "--file":
-        i++;
-        args.userInput = fs.readFileSync(argv[i], "utf-8").trim();
-        i++;
-        break;
-      default:
-        if (!args.userInput) {
-          args.userInput = argv[i];
-        }
-        i++;
-        break;
-    }
-  }
-
-  return args;
 }
 
-// ─── Read system prompt ─────────────────────────────────────────────────────
-
-function readSystemPrompt(filePath) {
-  try {
-    return fs.readFileSync(filePath, "utf-8").trim();
-  } catch (err) {
-    exitWithError(`Could not read system prompt file: ${filePath}\n  ${err.message}`);
-  }
+/**
+ * Read a text file and return its content as a string.
+ */
+async function readTextFile(filePath) {
+  const contents = await fs.promises.readFile(path.resolve(filePath), { encoding: "utf-8" });
+  return contents.trim();
 }
 
-// ─── Read stdin ─────────────────────────────────────────────────────────────
-
-function readStdin() {
-  return new Promise((resolve) => {
-    let data = "";
-    process.stdin.on("data", (chunk) => {
-      data += chunk;
-    });
-    process.stdin.on("end", () => resolve(data.trim()));
-    process.stdin.on("error", () => resolve(""));
-  });
-}
-
-// ─── API call ───────────────────────────────────────────────────────────────
-
-async function callAI(systemPrompt, userInput) {
+/**
+ * Main function: call an OpenAI-compatible endpoint.
+ *
+ * For text files, the content is sent as text.
+ * For binary files (images, video, audio, PDF, etc.), the file is
+ * base64-encoded and sent as a data URI in a multimodal message part.
+ */
+async function callAI(systemPrompt, filePath, userInput) {
   const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
   const apiKey = process.env.OPENAI_API_KEY;
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -121,28 +57,67 @@ async function callAI(systemPrompt, userInput) {
   const temperature = parseFloat(process.env.TEMPERATURE) || 0.7;
 
   if (!apiKey) {
-    exitWithError(
+    throw new Error(
       "OPENAI_API_KEY is not set.\n" +
-        "  Set it in a .env file or as an environment variable.\n" +
-        "  See .env.example for reference."
+        "  Set it in a .env file or as an environment variable."
     );
   }
 
-  const url = `${baseUrl}/chat/completions`;
+  const resolvedPath = path.resolve(filePath);
+  if (!fs.existsSync(resolvedPath)) {
+    throw new Error(`File not found: ${resolvedPath}`);
+  }
+
+  const messages = [{ role: "system", content: systemPrompt }];
+
+  const fileData = await fileToDataURI(resolvedPath);
+
+  if (fileData) {
+    // Binary / recognized file — send as base64 data URI
+    let contentParts;
+    if (fileData.mimeType.startsWith("image/")) {
+      contentParts = [
+        { type: "image_url", image_url: { url: fileData.uri } },
+        { type: "text", text: userInput },
+      ];
+    } else if (fileData.mimeType.startsWith("video/")) {
+      contentParts = [
+        { type: "video_url", video_url: { url: fileData.uri } },
+        { type: "text", text: userInput },
+      ];
+    } else if (fileData.mimeType.startsWith("audio/")) {
+      contentParts = [
+        { type: "input_audio", input_audio: { data: fileData.uri.split(",")[1], format: "wav" } },
+        { type: "text", text: userInput },
+      ];
+    } else {
+      // Unrecognized binary (PDF, etc.) — send as base64 attachment
+      contentParts = [
+        { type: "file_url", file_url: { url: fileData.uri } },
+        { type: "text", text: userInput },
+      ];
+    }
+    messages.push({ role: "user", content: contentParts });
+  } else {
+    // Unrecognized / text file — read as plain text
+    const content = await readTextFile(resolvedPath);
+    messages.push({
+      role: "user",
+      content: [
+        { type: "text", text: `File: \`${path.basename(filePath)}\`\nContent:\n\n${content}`},
+        { type: "text", text: userInput },
+      ],
+    });
+  }
 
   const body = {
     model,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userInput },
-    ],
+    messages,
     max_tokens: maxTokens,
     temperature,
   };
 
-  console.log(`\x1b[33m→\x1b[0m Calling ${model} at ${baseUrl} ...`);
-
-  const response = await fetch(url, {
+  const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -153,59 +128,31 @@ async function callAI(systemPrompt, userInput) {
 
   if (!response.ok) {
     const errorBody = await response.text();
-    exitWithError(
+    throw new Error(
       `API request failed with status ${response.status}:\n  ${errorBody}`
     );
   }
 
   const data = await response.json();
-
-  // Extract and print the assistant's reply
-  const content =
-    data.choices?.[0]?.message?.content || "(no content in response)";
-  console.log(`\n\x1b[32m←\x1b[0m ${content}\n`);
-
-  // Optionally print usage stats
-  const usage = data.usage;
-  if (usage) {
-    console.log(
-      `\x1b[90m[Tokens — prompt: ${usage.prompt_tokens}, completion: ${usage.completion_tokens}, total: ${usage.total_tokens}]\x1b[0m`
-    );
-  }
-
-  return content;
+  return data.choices?.[0]?.message?.content ?? "(no content in response)";
 }
 
-// ─── Main ───────────────────────────────────────────────────────────────────
+// ─── Export for use as a module ─────────────────────────────────────────────
 
-async function main() {
-  const rawArgs = process.argv.slice(2);
+module.exports = { callAI };
 
-  // If no CLI arguments, try reading from stdin
-  if (rawArgs.length === 0) {
-    const stdinInput = await readStdin();
-    if (!stdinInput) {
-      printUsage();
-      process.exit(0);
-    }
-    rawArgs.push(stdinInput);
+// ─── CLI fallback (run directly for quick testing) ──────────────────────────
+
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  if (args.length < 3) {
+    console.error("Usage: node call-ai.js <system-prompt> <file-path> <user-input>");
+    process.exit(1);
   }
-
-  const args = parseArgs(rawArgs);
-
-  if (args.help) {
-    printUsage();
-    process.exit(0);
-  }
-
-  if (!args.userInput) {
-    exitWithError("No user input provided. Pass a message or use --file <path>.");
-  }
-
-  const systemPrompt = readSystemPrompt(args.systemPromptFile);
-  await callAI(systemPrompt, args.userInput);
+  callAI(args[0], args[1], args.slice(2).join(" "))
+    .then((result) => console.log(result))
+    .catch((err) => {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    });
 }
-
-main().catch((err) => {
-  exitWithError(err.message);
-});
