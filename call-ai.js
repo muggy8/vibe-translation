@@ -1,10 +1,16 @@
 /**
  * call-ai.js — A single function that calls an OpenAI-compatible endpoint.
  *
+ * Uses the official `openai` SDK, which works with any OpenAI-compatible
+ * endpoint (OpenAI, Ollama, LM Studio, vLLM, etc.) via the `baseURL` option.
+ * The endpoint streams its response one token at a time (SSE); this module
+ * consumes the stream and concatenates the fragments into a single coherent
+ * string before resolving.
+ *
  * @param {string} systemPrompt - The system prompt to send.
  * @param {string} filePath     - Path to a file (text, image, video, PDF, etc.).
  * @param {string} userInput    - The user's message/input.
- * @returns {Promise<string>}   - Resolves with the API response text.
+ * @returns {Promise<string>}   - Resolves with the full API response text.
  *
  * @example
  * const result = await callAI(
@@ -18,6 +24,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { fileTypeFromBuffer } = require("file-type");
+const OpenAI = require("openai");
 
 /**
  * Convert a file to a base64 data URI.
@@ -43,18 +50,11 @@ async function readTextFile(filePath) {
 }
 
 /**
- * Main function: call an OpenAI-compatible endpoint.
- *
- * For text files, the content is sent as text.
- * For binary files (images, video, audio, PDF, etc.), the file is
- * base64-encoded and sent as a data URI in a multimodal message part.
+ * Build the OpenAI client from environment variables.
  */
-async function callAI(systemPrompt, filePath, userInput) {
+function createClient() {
   const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
   const apiKey = process.env.OPENAI_API_KEY;
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  const maxTokens = parseInt(process.env.MAX_TOKENS, 10) || 1024;
-  const temperature = parseFloat(process.env.TEMPERATURE) || 0.7;
 
   if (!apiKey) {
     throw new Error(
@@ -62,6 +62,25 @@ async function callAI(systemPrompt, filePath, userInput) {
         "  Set it in a .env file or as an environment variable."
     );
   }
+
+  return new OpenAI({ baseURL: baseUrl, apiKey });
+}
+
+/**
+ * Main function: call an OpenAI-compatible endpoint.
+ *
+ * For text files, the content is sent as text.
+ * For binary files (images, video, audio, PDF, etc.), the file is
+ * base64-encoded and sent as a data URI in a multimodal message part.
+ *
+ * The request is made with `stream: true`; the streamed chunks are
+ * concatenated into a single coherent string before resolving.
+ */
+async function callAI(systemPrompt, filePath, userInput) {
+  const openai = createClient();
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const maxTokens = parseInt(process.env.MAX_TOKENS, 10) || 1024;
+  const temperature = parseFloat(process.env.TEMPERATURE) || 0.7;
 
   const resolvedPath = path.resolve(filePath);
   if (!fs.existsSync(resolvedPath)) {
@@ -110,31 +129,26 @@ async function callAI(systemPrompt, filePath, userInput) {
     });
   }
 
-  const body = {
+  messages.push({
+    role: "system",
+    content: `Reminder:\n\n${systemPrompt}`
+  })
+
+  const stream = await openai.chat.completions.create({
     model,
     messages,
     max_tokens: maxTokens,
     temperature,
-  };
-
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
+    stream: true,
   });
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(
-      `API request failed with status ${response.status}:\n  ${errorBody}`
-    );
+  // Consume the SSE stream and concatenate the token fragments.
+  let content = "";
+  for await (const chunk of stream) {
+    content += chunk.choices?.[0]?.delta?.content ?? "";
   }
 
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content ?? "(no content in response)";
+  return content || "(no content in response)";
 }
 
 // ─── Export for use as a module ─────────────────────────────────────────────
