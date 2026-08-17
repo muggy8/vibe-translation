@@ -9,9 +9,10 @@
 Read the following materials **in full** before writing anything:
 
 1. **The source text of volume {{INSTALLMENT_NUMBER}}** of {{SOURCE_NAME}} — the only volume source you will receive. This is the **single source of truth** for what happens in volume {{INSTALLMENT_NUMBER}}.
-2. **The shared wiki** (`jump-in-wiki-shared.md`) — the "living section" holding the series-general current state, as it stands before volume {{INSTALLMENT_NUMBER}} is processed.
+2. **The Wiki Of The Previous Volume** (`previous-jump-in-wiki.md`) - the wiki of the previous volume.
+3. **The shared wiki** (`jump-in-wiki-shared.md`) — the "living section" holding the series-general current state, as it stands before volume {{INSTALLMENT_NUMBER}} is processed.
 
-*(If this is the first volume, only material 1 is provided. Materials 2 is absent.)*
+*(If this is the first volume, only material 1 is provided. Materials 2 and 3 are absent.)*
 
 ## Task
 

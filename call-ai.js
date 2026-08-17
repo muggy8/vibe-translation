@@ -1,22 +1,14 @@
 /**
- * call-ai.js — A single function that calls an OpenAI-compatible endpoint.
- *
- * Uses the official `openai` SDK, which works with any OpenAI-compatible
- * endpoint (OpenAI, Ollama, LM Studio, vLLM, etc.) via the `baseURL` option.
- * The endpoint streams its response one token at a time (SSE); this module
- * consumes the stream and concatenates the fragments into a single coherent
- * string before resolving.
- *
- * @param {string} systemPrompt - The system prompt to send.
- * @param {string} filePath     - Path to a file (text, image, video, PDF, etc.).
- * @param {string} userInput    - The user's message/input.
- * @returns {Promise<string>}   - Resolves with the full API response text.
+ * call-ai.js — Call an OpenAI-compatible endpoint with a system prompt
+ * and a sequence of text / file messages.
  *
  * @example
- * const result = await callAI(
+ * const { callAi } = require("./call-ai");
+ *
+ * const result = await callAi(
  *   "You are a helpful assistant.",
- *   "./document.pdf",
- *   "Summarize this document."
+ *   { text: "What is in this file?" },
+ *   { file: "./document.pdf", name: "document.pdf" }
  * );
  */
 
@@ -24,128 +16,216 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { fileTypeFromBuffer } = require("file-type");
-const OpenAI = require("openai");
+const { Agent } = require("undici");
+
+// Local LLM servers (e.g. llama.cpp) can take many minutes to prefill a huge
+// prompt and to generate a long answer. undici's default fetch timeouts
+// (300 s for response headers and between body chunks) would abort such
+// requests with an opaque "TypeError: fetch failed", so disable them.
+const noTimeoutAgent = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
+
+/**
+ * A text message to send to the AI.
+ * @typedef {Object} TextMessage
+ * @property {string} text The message text to be sent.
+ */
+
+/**
+ * A file message to send to the AI.
+ * @typedef {Object} FileMessage
+ * @property {string} file Path to the file on disk.
+ * @property {string} name The file name to present to the AI.
+ */
+
+/**
+ * A message that is either text or a file.
+ * @typedef {TextMessage|FileMessage} IMessage
+ */
 
 /**
  * Convert a file to a base64 data URI.
  * Uses `file-type` to detect the MIME type from magic bytes.
- * Returns null if the file type cannot be determined.
+ *
+ * @param {string} filePath - Path to the file.
+ * @returns {Promise<{uri: string, mimeType: string, ext: string}|null>}
+ *   The data URI, MIME type and file extension, or null if the file type
+ *   cannot be determined (e.g. plain text files).
  */
 async function fileToDataURI(filePath) {
-  const buffer = fs.readFileSync(path.resolve(filePath));
+  const buffer = fs.readFileSync(filePath);
   const fileType = await fileTypeFromBuffer(buffer);
   if (!fileType) return null;
   return {
     uri: `data:${fileType.mime};base64,${buffer.toString("base64")}`,
     mimeType: fileType.mime,
+    ext: fileType.ext,
   };
 }
 
 /**
- * Read a text file and return its content as a string.
+ * Read a file as UTF-8 text.
+ *
+ * @param {string} filePath - Path to the file.
+ * @returns {Promise<string>} The trimmed file contents.
  */
 async function readTextFile(filePath) {
-  const contents = await fs.promises.readFile(path.resolve(filePath), { encoding: "utf-8" });
+  const contents = await fs.promises.readFile(filePath, { encoding: "utf-8" });
   return contents.trim();
 }
 
 /**
- * Build the OpenAI client from environment variables.
+ * Convert a single IMessage into an OpenAI chat-completion message.
+ *
+ * Text messages become plain user messages. File messages are detected
+ * with `file-type` and sent as a base64 data URI (image / video / audio /
+ * other binary). Files whose type cannot be determined are read as plain
+ * text and embedded in the message.
+ *
+ * @param {IMessage} message - The message to convert.
+ * @returns {Promise<{role: string, content: (string|Array<Object>)}>}
+ *   The formatted API message.
  */
-function createClient() {
-  const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-  const apiKey = process.env.OPENAI_API_KEY;
+async function toApiMessage(message) {
+  if (message.text !== undefined) {
+    return { role: "user", content: message.text };
+  }
 
-  if (!apiKey) {
+  if (message.file === undefined) {
     throw new Error(
-      "OPENAI_API_KEY is not set.\n" +
-        "  Set it in a .env file or as an environment variable."
+      "Each message must have either a `text` or a `file` property."
     );
   }
 
-  return new OpenAI({ baseURL: baseUrl, apiKey });
+  if (typeof message.name !== "string" || !message.name) {
+    throw new Error("File messages require a `name` property.");
+  }
+
+  const filePath = path.resolve(message.file);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`File not found: ${filePath}`);
+  }
+
+  const fileData = await fileToDataURI(filePath);
+
+  if (fileData) {
+    let filePart;
+    if (fileData.mimeType.startsWith("image/")) {
+      filePart = { type: "image_url", image_url: { url: fileData.uri } };
+    } else if (fileData.mimeType.startsWith("video/")) {
+      filePart = { type: "video_url", video_url: { url: fileData.uri } };
+    } else if (fileData.mimeType.startsWith("audio/")) {
+      filePart = {
+        type: "input_audio",
+        input_audio: { data: fileData.uri.split(",")[1], format: fileData.ext },
+      };
+    } else {
+      filePart = { type: "file_url", file_url: { url: fileData.uri } };
+    }
+
+    return {
+      role: "user",
+      content: [filePart, { type: "text", text: `File: ${message.name}` }],
+    };
+  }
+
+  // Unrecognized binary — treat as plain text
+  const content = await readTextFile(filePath);
+  return {
+    role: "user",
+    content: `File: ${message.name}\nContent:\n\n${content}`,
+  };
 }
 
 /**
- * Main function: call an OpenAI-compatible endpoint.
+ * Call an OpenAI-compatible endpoint.
  *
- * For text files, the content is sent as text.
- * For binary files (images, video, audio, PDF, etc.), the file is
- * base64-encoded and sent as a data URI in a multimodal message part.
- *
- * The request is made with `stream: true`; the streamed chunks are
- * concatenated into a single coherent string before resolving.
+ * @param {string} systemPrompt - The system prompt.
+ * @param {...IMessage} messages - The messages to send, in order.
+ * @returns {Promise<string>} Resolves to the entire output of the AI's API response.
  */
-async function callAI(systemPrompt, filePath, userInput) {
-  const openai = createClient();
+async function callAi(systemPrompt, ...messages) {
+  const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+  const apiKey = process.env.OPENAI_API_KEY;
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
   const maxTokens = parseInt(process.env.MAX_TOKENS, 10) || 1024;
   const temperature = parseFloat(process.env.TEMPERATURE) || 0.7;
 
-  const resolvedPath = path.resolve(filePath);
-  if (!fs.existsSync(resolvedPath)) {
-    throw new Error(`File not found: ${resolvedPath}`);
+  if (!apiKey) {
+    throw new Error(
+      "OPENAI_API_KEY is not set.\n  Set it in a .env file or as an environment variable."
+    );
   }
 
-  const messages = [{ role: "system", content: systemPrompt }];
-
-  const fileData = await fileToDataURI(resolvedPath);
-
-  if (fileData) {
-    // Binary / recognized file — send as base64 data URI
-    let contentParts;
-    if (fileData.mimeType.startsWith("image/")) {
-      contentParts = [
-        { type: "image_url", image_url: { url: fileData.uri } },
-        { type: "text", text: userInput },
-      ];
-    } else if (fileData.mimeType.startsWith("video/")) {
-      contentParts = [
-        { type: "video_url", video_url: { url: fileData.uri } },
-        { type: "text", text: userInput },
-      ];
-    } else if (fileData.mimeType.startsWith("audio/")) {
-      contentParts = [
-        { type: "input_audio", input_audio: { data: fileData.uri.split(",")[1], format: "wav" } },
-        { type: "text", text: userInput },
-      ];
-    } else {
-      // Unrecognized binary (PDF, etc.) — send as base64 attachment
-      contentParts = [
-        { type: "file_url", file_url: { url: fileData.uri } },
-        { type: "text", text: userInput },
-      ];
-    }
-    messages.push({ role: "user", content: contentParts });
-  } else {
-    // Unrecognized / text file — read as plain text
-    const content = await readTextFile(resolvedPath);
-    messages.push({
-      role: "user",
-      content: [
-        { type: "text", text: `File: \`${path.basename(filePath)}\`\nContent:\n\n${content}`},
-        { type: "text", text: userInput },
-      ],
-    });
+  if (typeof systemPrompt !== "string" || !systemPrompt.trim()) {
+    throw new Error("systemPrompt must be a non-empty string.");
   }
 
-  messages.push({
-    role: "system",
-    content: `Reminder:\n\n${systemPrompt}`
-  })
+  const apiMessages = [{ role: "system", content: systemPrompt }];
+  for (const message of messages) {
+    apiMessages.push(await toApiMessage(message));
+  }
 
-  const stream = await openai.chat.completions.create({
+  const body = {
     model,
-    messages,
+    messages: apiMessages,
     max_tokens: maxTokens,
     temperature,
     stream: true,
+  };
+
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+    dispatcher: noTimeoutAgent,
   });
 
-  // Consume the SSE stream and concatenate the token fragments.
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(
+      `API request failed with status ${response.status}:\n  ${errorBody}`
+    );
+  }
+
+  // Parse the SSE stream and accumulate the generated content. Streaming
+  // also means the response headers arrive immediately, so long prefills
+  // and generations no longer trip fetch's header/body timeouts.
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
   let content = "";
-  for await (const chunk of stream) {
-    content += chunk.choices?.[0]?.delta?.content ?? "";
+  let lastReported = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop(); // keep the (possibly incomplete) last line
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice(5).trim();
+      if (payload === "[DONE]") continue;
+      try {
+        const json = JSON.parse(payload);
+        const delta = json.choices?.[0]?.delta?.content;
+        if (typeof delta === "string") {
+          content += delta;
+          if (content.length - lastReported >= 1000) {
+            lastReported = content.length;
+            console.error(`  …generated ${lastReported} chars so far`);
+          }
+        }
+      } catch {
+        // Ignore malformed or keep-alive lines.
+      }
+    }
   }
 
   return content || "(no content in response)";
@@ -153,17 +233,53 @@ async function callAI(systemPrompt, filePath, userInput) {
 
 // ─── Export for use as a module ─────────────────────────────────────────────
 
-module.exports = { callAI };
+module.exports = { callAi };
 
 // ─── CLI fallback (run directly for quick testing) ──────────────────────────
+//
+// Usage:
+//   node call-ai.js --system "You are helpful" --text "Hello"
+//   node call-ai.js --system "You are helpful" --file ./img.png --name "img.png" --text "Describe this"
 
 if (require.main === module) {
   const args = process.argv.slice(2);
-  if (args.length < 3) {
-    console.error("Usage: node call-ai.js <system-prompt> <file-path> <user-input>");
+  let systemPrompt = null;
+  let pendingFile = null;
+  const messages = [];
+
+  for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+      case "--system":
+        systemPrompt = args[++i];
+        break;
+      case "--text":
+        messages.push({ text: args[++i] });
+        break;
+      case "--file":
+        pendingFile = args[++i];
+        break;
+      case "--name":
+        if (pendingFile === null) {
+          console.error("--name must follow a --file argument.");
+          process.exit(1);
+        }
+        messages.push({ file: pendingFile, name: args[++i] });
+        pendingFile = null;
+        break;
+      default:
+        console.error(`Unknown argument: ${args[i]}`);
+        process.exit(1);
+    }
+  }
+
+  if (systemPrompt === null || messages.length === 0) {
+    console.error(
+      "Usage: node call-ai.js --system <prompt> (--text <message> | --file <path> --name <name>) ..."
+    );
     process.exit(1);
   }
-  callAI(args[0], args[1], args.slice(2).join(" "))
+
+  callAi(systemPrompt, ...messages)
     .then((result) => console.log(result))
     .catch((err) => {
       console.error(`Error: ${err.message}`);

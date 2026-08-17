@@ -14,7 +14,9 @@
   "dependencies": {
     "dotenv": "^17.4.2",
     "file-type": "^22.0.1",
-    "openai": "^7.4.0"
+    "natural-orderby": "^5.0.0",
+    "openai": "^7.4.0",
+    "undici": "^8.10.0"
   },
   "devDependencies": {
     "gulp": "^5.0.1"
