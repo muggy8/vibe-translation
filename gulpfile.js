@@ -198,7 +198,8 @@ async function jumpInWiki() {
         { text: userPrompt },
       );
     } else {
-      const previousVolumeDir = folderWithSourceMaterial[i-1];
+      const previousFolderName = sortedFolderWithSourceMaterial[i-1];
+      const previousVolumeDir = path.join(seriesDir, previousFolderName);
       const previousWikiOutputFile = path.join(previousVolumeDir, "wiki.md");
       const previousSharedWikiOutputFile = path.join(previousVolumeDir, "shared-wiki.md");
 
