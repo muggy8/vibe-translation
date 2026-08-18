@@ -14,16 +14,20 @@
  *      user prompt, and the volume source file.
  *   5. Saves the generated volume wiki to <volume folder>/wiki.md and the
  *      updated shared wiki to <volume folder>/shared-wiki.md.
- *   6. Validates the generated wiki: calls the AI again with the validator
- *      prompts (system-prompts/jump-in-wiki-validator.md and
- *      user-prompts/jump-in-wiki-validator.md) and saves the report to
- *      <volume folder>/jump-in-wiki-validation-NN.md.
- *   7. Applies the validation feedback: calls the AI a third time with the
- *      feedback prompts (system-prompts/jump-in-wiki-feedback.md and
- *      user-prompts/jump-in-wiki-feedback.md), the validation report, and the
- *      generated wiki, and saves the corrected volume wiki back to
- *      <volume folder>/wiki.md and the corrected shared wiki back to
- *      <volume folder>/shared-wiki.md.
+ *   6. Repeats the following until the wiki passes the acceptance check or the
+ *      iteration cap (MAX_VALIDATION_ITERATIONS, default 3) is reached:
+ *        a. Validates the wiki with the validator prompts
+ *           (system-prompts/jump-in-wiki-validator.md and
+ *           user-prompts/jump-in-wiki-validator.md), saving the report to
+ *           <volume folder>/jump-in-wiki-validation-NN.md.
+ *        b. Asks the acceptance prompts (system-prompts/jump-in-wiki-acceptance.md
+ *           and user-prompts/jump-in-wiki-acceptance.md) whether the wiki is a
+ *           passing grade (PASS) or not (FAIL).
+ *        c. On PASS, stops. Otherwise, applies the feedback prompts
+ *           (system-prompts/jump-in-wiki-feedback.md and
+ *           user-prompts/jump-in-wiki-feedback.md) to correct the wiki, saving
+ *           back to <volume folder>/wiki.md and <volume folder>/shared-wiki.md,
+ *           then repeats from (a).
  *
  * Usage:
  *   npx gulp jump-in-wiki             # run the full task
@@ -46,6 +50,15 @@ const validatorSystemPromptFile = path.join(clientDir, "system-prompts", "jump-i
 const validatorUserPromptTemplateFile = path.join(clientDir, "user-prompts", "jump-in-wiki-validator.md");
 const feedbackSystemPromptFile = path.join(clientDir, "system-prompts", "jump-in-wiki-feedback.md");
 const feedbackUserPromptTemplateFile = path.join(clientDir, "user-prompts", "jump-in-wiki-feedback.md");
+const acceptanceSystemPromptFile = path.join(clientDir, "system-prompts", "jump-in-wiki-acceptance.md");
+const acceptanceUserPromptTemplateFile = path.join(clientDir, "user-prompts", "jump-in-wiki-acceptance.md");
+
+// Maximum number of validation -> acceptance -> feedback iterations per volume
+// before the wiki is left as-is. Read from .env, defaulting to 3.
+const maxValidationIterations = Math.max(
+  1,
+  parseInt(process.env.MAX_VALIDATION_ITERATIONS, 10) || 3
+);
 
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -171,6 +184,10 @@ async function jumpInWiki() {
   const validatorTemplate = await fs.readFile(validatorUserPromptTemplateFile, "utf-8");
   const feedbackSystemPrompt = await fs.readFile(feedbackSystemPromptFile, "utf-8");
   const feedbackTemplate = await fs.readFile(feedbackUserPromptTemplateFile, "utf-8");
+  const acceptanceSystemPrompt = await fs.readFile(acceptanceSystemPromptFile, "utf-8");
+  const acceptanceTemplate = await fs.readFile(acceptanceUserPromptTemplateFile, "utf-8");
+
+  let limitReachedCount = 0;
 
   for (let i = 0; i < sortedFolderWithSourceMaterial.length; i++) {
     const folderName = sortedFolderWithSourceMaterial[i];
@@ -215,6 +232,12 @@ async function jumpInWiki() {
     };
     const feedbackUserPrompt = transformUserPrompt(feedbackTemplate, feedbackValues);
 
+    const acceptanceValues = {
+      INSTALLMENT_NUMBER: values.INSTALLMENT_NUMBER,
+      SOURCE_NAME: values.SOURCE_NAME,
+    };
+    const acceptanceUserPrompt = transformUserPrompt(acceptanceTemplate, acceptanceValues);
+
     console.log(`Installment number:      ${values.INSTALLMENT_NUMBER}`);
     console.log(`Source name:             ${values.SOURCE_NAME}`);
     console.log(`Source language:         ${values.SOURCE_LANGUAGE}`);
@@ -230,6 +253,8 @@ async function jumpInWiki() {
       console.log(validatorUserPrompt);
       console.log("\n--dry-run: transformed feedback user prompt follows:");
       console.log(feedbackUserPrompt);
+      console.log("\n--dry-run: transformed acceptance user prompt follows:");
+      console.log(acceptanceUserPrompt);
       continue;
     }
 
@@ -273,56 +298,99 @@ async function jumpInWiki() {
     await fs.writeFile(sharedWikiOutputFile, sharedWiki, "utf-8");
 
     /**
-     * the logic for validating the generated wiki
+     * the logic for validating the generated wiki, checking acceptance, and
+     * applying the validation feedback — repeated until the wiki passes the
+     * acceptance check or the iteration cap is reached.
      */
-    console.log("Calling the AI for validation...");
+    for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
+      console.log(`Validation iteration ${iteration}/${maxValidationIterations}...`);
 
-    const validationMessages = [
-      { file: sourceFile, name: path.basename(sourceFile) },
-      { file: wikiOutputFile, name: `jump-in-wiki-${values.INSTALLMENT_NUMBER}.md` },
-      { file: sharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
-    ];
-    if (!isFirst) {
-      validationMessages.push({
-        file: previousSharedWikiOutputFile,
-        name: "jump-in-wiki-shared.old.md",
-      });
+      /**
+       * the logic for validating the generated wiki
+       */
+      console.log("Calling the AI for validation...");
+
+      const validationMessages = [
+        { file: sourceFile, name: path.basename(sourceFile) },
+        { file: wikiOutputFile, name: `jump-in-wiki-${values.INSTALLMENT_NUMBER}.md` },
+        { file: sharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
+      ];
+      if (!isFirst) {
+        validationMessages.push({
+          file: previousSharedWikiOutputFile,
+          name: "jump-in-wiki-shared.old.md",
+        });
+      }
+      validationMessages.push({ text: validatorUserPrompt });
+
+      const validationReport = await callAi(validatorSystemPrompt, ...validationMessages);
+
+      await fs.writeFile(validationOutputFile, validationReport, "utf-8");
+
+      /**
+       * the logic for checking whether the validated wiki is acceptable
+       */
+      console.log("Calling the AI for the acceptance check...");
+
+      const acceptanceOutput = await callAi(
+        acceptanceSystemPrompt,
+        { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
+        { text: acceptanceUserPrompt },
+      );
+      const accepted = acceptanceOutput.toUpperCase().includes("PASS");
+      console.log(`Acceptance check: ${accepted ? "PASS" : "FAIL"}`);
+
+      if (accepted) {
+        break;
+      }
+
+      if (iteration === maxValidationIterations) {
+        limitReachedCount++;
+        console.log(
+          `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
+          `(${maxValidationIterations}) without a passing grade. Leaving the wiki as-is.`
+        );
+        break;
+      }
+
+      /**
+       * the logic for applying the validation feedback to the generated wiki
+       */
+      console.log("Calling the AI to apply the validation feedback...");
+
+      const feedbackMessages = [
+        { file: sourceFile, name: path.basename(sourceFile) },
+        { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
+        { file: wikiOutputFile, name: `jump-in-wiki-${values.INSTALLMENT_NUMBER}.md` },
+        { file: sharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
+      ];
+      if (!isFirst) {
+        feedbackMessages.push({
+          file: previousWikiOutputFile,
+          name: `jump-in-wiki-${validatorValues.INSTALLMENT_NUMBER_MINUS_ONE}.md`,
+        });
+        feedbackMessages.push({
+          file: previousSharedWikiOutputFile,
+          name: "jump-in-wiki-shared.old.md",
+        });
+      }
+      feedbackMessages.push({ text: feedbackUserPrompt });
+
+      const feedbackOutput = await callAi(feedbackSystemPrompt, ...feedbackMessages);
+
+      const [correctedWiki, correctedSharedWiki] = splitJumpInWikiGenerationOutput(feedbackOutput);
+
+      await fs.writeFile(wikiOutputFile, correctedWiki, "utf-8");
+      await fs.writeFile(sharedWikiOutputFile, correctedSharedWiki, "utf-8");
     }
-    validationMessages.push({ text: validatorUserPrompt });
+  }
 
-    const validationReport = await callAi(validatorSystemPrompt, ...validationMessages);
-
-    await fs.writeFile(validationOutputFile, validationReport, "utf-8");
-
-    /**
-     * the logic for applying the validation feedback to the generated wiki
-     */
-    console.log("Calling the AI to apply the validation feedback...");
-
-    const feedbackMessages = [
-      { file: sourceFile, name: path.basename(sourceFile) },
-      { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
-      { file: wikiOutputFile, name: `jump-in-wiki-${values.INSTALLMENT_NUMBER}.md` },
-      { file: sharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
-    ];
-    if (!isFirst) {
-      feedbackMessages.push({
-        file: previousWikiOutputFile,
-        name: `jump-in-wiki-${validatorValues.INSTALLMENT_NUMBER_MINUS_ONE}.md`,
-      });
-      feedbackMessages.push({
-        file: previousSharedWikiOutputFile,
-        name: "jump-in-wiki-shared.old.md",
-      });
-    }
-    feedbackMessages.push({ text: feedbackUserPrompt });
-
-    const feedbackOutput = await callAi(feedbackSystemPrompt, ...feedbackMessages);
-
-    const [correctedWiki, correctedSharedWiki] = splitJumpInWikiGenerationOutput(feedbackOutput);
-
-    await fs.writeFile(wikiOutputFile, correctedWiki, "utf-8");
-    await fs.writeFile(sharedWikiOutputFile, correctedSharedWiki, "utf-8");
+  if (limitReachedCount > 0) {
+    console.log(
+      `\n${limitReachedCount} of ${sortedFolderWithSourceMaterial.length} volume(s) reached the ` +
+      `validation iteration limit (${maxValidationIterations}). Consider increasing ` +
+      `MAX_VALIDATION_ITERATIONS if this is unexpected.`
+    );
   }
 }
 
