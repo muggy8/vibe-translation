@@ -18,6 +18,12 @@
  *      prompts (system-prompts/jump-in-wiki-validator.md and
  *      user-prompts/jump-in-wiki-validator.md) and saves the report to
  *      <volume folder>/jump-in-wiki-validation-NN.md.
+ *   7. Applies the validation feedback: calls the AI a third time with the
+ *      feedback prompts (system-prompts/jump-in-wiki-feedback.md and
+ *      user-prompts/jump-in-wiki-feedback.md), the validation report, and the
+ *      generated wiki, and saves the corrected volume wiki back to
+ *      <volume folder>/wiki.md and the corrected shared wiki back to
+ *      <volume folder>/shared-wiki.md.
  *
  * Usage:
  *   npx gulp jump-in-wiki             # run the full task
@@ -38,6 +44,8 @@ const systemPromptFile = path.join(clientDir, "system-prompts", "jump-in-wiki.md
 const userPromptTemplateFile = path.join(clientDir, "user-prompts", "jump-in-wiki.md");
 const validatorSystemPromptFile = path.join(clientDir, "system-prompts", "jump-in-wiki-validator.md");
 const validatorUserPromptTemplateFile = path.join(clientDir, "user-prompts", "jump-in-wiki-validator.md");
+const feedbackSystemPromptFile = path.join(clientDir, "system-prompts", "jump-in-wiki-feedback.md");
+const feedbackUserPromptTemplateFile = path.join(clientDir, "user-prompts", "jump-in-wiki-feedback.md");
 
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -161,6 +169,8 @@ async function jumpInWiki() {
   const template = await fs.readFile(userPromptTemplateFile, "utf-8");
   const validatorSystemPrompt = await fs.readFile(validatorSystemPromptFile, "utf-8");
   const validatorTemplate = await fs.readFile(validatorUserPromptTemplateFile, "utf-8");
+  const feedbackSystemPrompt = await fs.readFile(feedbackSystemPromptFile, "utf-8");
+  const feedbackTemplate = await fs.readFile(feedbackUserPromptTemplateFile, "utf-8");
 
   for (let i = 0; i < sortedFolderWithSourceMaterial.length; i++) {
     const folderName = sortedFolderWithSourceMaterial[i];
@@ -198,6 +208,13 @@ async function jumpInWiki() {
     };
     const validatorUserPrompt = transformUserPrompt(validatorTemplate, validatorValues);
 
+    const feedbackValues = {
+      INSTALLMENT_NUMBER: values.INSTALLMENT_NUMBER,
+      SOURCE_NAME: values.SOURCE_NAME,
+      SOURCE_LANGUAGE: values.SOURCE_LANGUAGE,
+    };
+    const feedbackUserPrompt = transformUserPrompt(feedbackTemplate, feedbackValues);
+
     console.log(`Installment number:      ${values.INSTALLMENT_NUMBER}`);
     console.log(`Source name:             ${values.SOURCE_NAME}`);
     console.log(`Source language:         ${values.SOURCE_LANGUAGE}`);
@@ -211,6 +228,8 @@ async function jumpInWiki() {
       console.log(userPrompt);
       console.log("\n--dry-run: transformed validator user prompt follows:");
       console.log(validatorUserPrompt);
+      console.log("\n--dry-run: transformed feedback user prompt follows:");
+      console.log(feedbackUserPrompt);
       continue;
     }
 
@@ -221,7 +240,17 @@ async function jumpInWiki() {
      */
 
     const isFirst = i === 0;
-    let output
+    let previousFolderName = null;
+    let previousWikiOutputFile = null;
+    let previousSharedWikiOutputFile = null;
+    if (!isFirst) {
+      previousFolderName = sortedFolderWithSourceMaterial[i-1];
+      const previousVolumeDir = path.join(seriesDir, previousFolderName);
+      previousWikiOutputFile = path.join(previousVolumeDir, "wiki.md");
+      previousSharedWikiOutputFile = path.join(previousVolumeDir, "shared-wiki.md");
+    }
+
+    let output;
     if (isFirst) {
       output = await callAi(
         systemPrompt,
@@ -229,11 +258,6 @@ async function jumpInWiki() {
         { text: userPrompt },
       );
     } else {
-      const previousFolderName = sortedFolderWithSourceMaterial[i-1];
-      const previousVolumeDir = path.join(seriesDir, previousFolderName);
-      const previousWikiOutputFile = path.join(previousVolumeDir, "wiki.md");
-      const previousSharedWikiOutputFile = path.join(previousVolumeDir, "shared-wiki.md");
-
       output = await callAi(
         systemPrompt,
         { file: sourceFile, name: path.basename(sourceFile) },
@@ -260,7 +284,7 @@ async function jumpInWiki() {
     ];
     if (!isFirst) {
       validationMessages.push({
-        file: path.join(seriesDir, previousFolderName, "shared-wiki.md"),
+        file: previousSharedWikiOutputFile,
         name: "jump-in-wiki-shared.old.md",
       });
     }
@@ -269,6 +293,36 @@ async function jumpInWiki() {
     const validationReport = await callAi(validatorSystemPrompt, ...validationMessages);
 
     await fs.writeFile(validationOutputFile, validationReport, "utf-8");
+
+    /**
+     * the logic for applying the validation feedback to the generated wiki
+     */
+    console.log("Calling the AI to apply the validation feedback...");
+
+    const feedbackMessages = [
+      { file: sourceFile, name: path.basename(sourceFile) },
+      { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
+      { file: wikiOutputFile, name: `jump-in-wiki-${values.INSTALLMENT_NUMBER}.md` },
+      { file: sharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
+    ];
+    if (!isFirst) {
+      feedbackMessages.push({
+        file: previousWikiOutputFile,
+        name: `jump-in-wiki-${validatorValues.INSTALLMENT_NUMBER_MINUS_ONE}.md`,
+      });
+      feedbackMessages.push({
+        file: previousSharedWikiOutputFile,
+        name: "jump-in-wiki-shared.old.md",
+      });
+    }
+    feedbackMessages.push({ text: feedbackUserPrompt });
+
+    const feedbackOutput = await callAi(feedbackSystemPrompt, ...feedbackMessages);
+
+    const [correctedWiki, correctedSharedWiki] = splitJumpInWikiGenerationOutput(feedbackOutput);
+
+    await fs.writeFile(wikiOutputFile, correctedWiki, "utf-8");
+    await fs.writeFile(sharedWikiOutputFile, correctedSharedWiki, "utf-8");
   }
 }
 
