@@ -12,7 +12,12 @@
  *        {{SOURCE_LANGUAGE}}    — SOURCE_LANGUAGE from .env (default: Japanese)
  *   4. Calls the AI (call-ai.js) with the system prompt, the transformed
  *      user prompt, and the volume source file.
- *   5. Saves the raw AI output to <volume folder>/wiki.md.
+ *   5. Saves the generated volume wiki to <volume folder>/wiki.md and the
+ *      updated shared wiki to <volume folder>/shared-wiki.md.
+ *   6. Validates the generated wiki: calls the AI again with the validator
+ *      prompts (system-prompts/jump-in-wiki-validator.md and
+ *      user-prompts/jump-in-wiki-validator.md) and saves the report to
+ *      <volume folder>/jump-in-wiki-validation-NN.md.
  *
  * Usage:
  *   npx gulp jump-in-wiki             # run the full task
@@ -31,6 +36,8 @@ const clientDir = __dirname;
 const seriesDir = process.env.SERIES_LOCATION;
 const systemPromptFile = path.join(clientDir, "system-prompts", "jump-in-wiki.md");
 const userPromptTemplateFile = path.join(clientDir, "user-prompts", "jump-in-wiki.md");
+const validatorSystemPromptFile = path.join(clientDir, "system-prompts", "jump-in-wiki-validator.md");
+const validatorUserPromptTemplateFile = path.join(clientDir, "user-prompts", "jump-in-wiki-validator.md");
 
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -152,6 +159,8 @@ async function jumpInWiki() {
 
   const systemPrompt = await fs.readFile(systemPromptFile, "utf-8");
   const template = await fs.readFile(userPromptTemplateFile, "utf-8");
+  const validatorSystemPrompt = await fs.readFile(validatorSystemPromptFile, "utf-8");
+  const validatorTemplate = await fs.readFile(validatorUserPromptTemplateFile, "utf-8");
 
   for (let i = 0; i < sortedFolderWithSourceMaterial.length; i++) {
     const folderName = sortedFolderWithSourceMaterial[i];
@@ -174,16 +183,34 @@ async function jumpInWiki() {
 
     const userPrompt = transformUserPrompt(template, values);
 
+    const validationOutputFile = path.join(
+      volumeDir,
+      `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md`
+    );
+
+    const validatorValues = {
+      INSTALLMENT_NUMBER: values.INSTALLMENT_NUMBER,
+      SOURCE_NAME: values.SOURCE_NAME,
+      SOURCE_LANGUAGE: values.SOURCE_LANGUAGE,
+      INSTALLMENT_NUMBER_MINUS_ONE: String(
+        parseInt(values.INSTALLMENT_NUMBER, 10) - 1
+      ).padStart(2, "0"),
+    };
+    const validatorUserPrompt = transformUserPrompt(validatorTemplate, validatorValues);
+
     console.log(`Installment number:      ${values.INSTALLMENT_NUMBER}`);
     console.log(`Source name:             ${values.SOURCE_NAME}`);
     console.log(`Source language:         ${values.SOURCE_LANGUAGE}`);
     console.log(`Source file:             ${sourceFile}`);
     console.log(`Wiki Output file:        ${wikiOutputFile}`);
     console.log(`Shared Wiki Output file: ${sharedWikiOutputFile}`);
+    console.log(`Validation Output file:  ${validationOutputFile}`);
 
     if (dryRun) {
       console.log("--dry-run: skipping the AI call. Transformed user prompt follows:");
       console.log(userPrompt);
+      console.log("\n--dry-run: transformed validator user prompt follows:");
+      console.log(validatorUserPrompt);
       continue;
     }
 
@@ -222,9 +249,26 @@ async function jumpInWiki() {
     await fs.writeFile(sharedWikiOutputFile, sharedWiki, "utf-8");
 
     /**
-     * the logic for generating the wiki
+     * the logic for validating the generated wiki
      */
-    // todo: implement validation AI workflow
+    console.log("Calling the AI for validation...");
+
+    const validationMessages = [
+      { file: sourceFile, name: path.basename(sourceFile) },
+      { file: wikiOutputFile, name: `jump-in-wiki-${values.INSTALLMENT_NUMBER}.md` },
+      { file: sharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
+    ];
+    if (!isFirst) {
+      validationMessages.push({
+        file: path.join(seriesDir, previousFolderName, "shared-wiki.md"),
+        name: "jump-in-wiki-shared.old.md",
+      });
+    }
+    validationMessages.push({ text: validatorUserPrompt });
+
+    const validationReport = await callAi(validatorSystemPrompt, ...validationMessages);
+
+    await fs.writeFile(validationOutputFile, validationReport, "utf-8");
   }
 }
 
