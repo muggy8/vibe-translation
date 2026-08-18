@@ -189,6 +189,10 @@ async function jumpInWiki() {
 
     console.log("Calling the AI...");
 
+    /**
+     * the logic for generating the wiki
+     */
+
     const isFirst = i === 0;
     let output
     if (isFirst) {
@@ -216,6 +220,11 @@ async function jumpInWiki() {
     
     await fs.writeFile(wikiOutputFile, wiki, "utf-8");
     await fs.writeFile(sharedWikiOutputFile, sharedWiki, "utf-8");
+
+    /**
+     * the logic for generating the wiki
+     */
+    // todo: implement validation AI workflow
   }
 }
 
