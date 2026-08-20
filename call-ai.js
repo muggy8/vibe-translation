@@ -219,7 +219,7 @@ async function callAi(systemPrompt, ...messages) {
           content += delta;
           if (content.length - lastReported >= 1000) {
             lastReported = content.length;
-            console.error(`  …generated ${lastReported} chars so far`);
+            console.error(`  …generated ${lastReported} tokens so far`);
           }
         }
       } catch {

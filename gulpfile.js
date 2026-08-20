@@ -258,7 +258,7 @@ async function jumpInWiki() {
       continue;
     }
 
-    console.log("Calling the AI...");
+    console.log("Calling the AI for initial wiki generation...");
 
     /**
      * the logic for generating the wiki
@@ -340,19 +340,6 @@ async function jumpInWiki() {
       const accepted = acceptanceOutput.toUpperCase().includes("PASS");
       console.log(`Acceptance check: ${accepted ? "PASS" : "FAIL"}`);
 
-      if (accepted) {
-        break;
-      }
-
-      if (iteration === maxValidationIterations) {
-        limitReachedCount++;
-        console.log(
-          `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
-          `(${maxValidationIterations}) without a passing grade. Leaving the wiki as-is.`
-        );
-        break;
-      }
-
       /**
        * the logic for applying the validation feedback to the generated wiki
        */
@@ -382,6 +369,20 @@ async function jumpInWiki() {
 
       await fs.writeFile(wikiOutputFile, correctedWiki, "utf-8");
       await fs.writeFile(sharedWikiOutputFile, correctedSharedWiki, "utf-8");
+
+      // prevent next loop after adding in feedback.
+      if (accepted) {
+        break;
+      }
+
+      if (iteration === maxValidationIterations) {
+        limitReachedCount++;
+        console.log(
+          `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
+          `(${maxValidationIterations}) without a passing grade. Leaving the wiki as-is.`
+        );
+        break;
+      }
     }
   }
 
