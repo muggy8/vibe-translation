@@ -258,16 +258,51 @@ async function jumpInWiki() {
       continue;
     }
 
-    console.log("Calling the AI for initial wiki generation...");
+    /**
+     * Logic to make sure we don't redo any work that has already been done.
+     */
+    let currentVolumeHasAlreadyBeenProcessed = true;
+    try {
+      await fs.access(validationOutputFile)
+
+      console.log("checking if the current version is already deemed acceptable in a previous run.");
+
+      const acceptanceOutput = await callAi(
+        acceptanceSystemPrompt,
+        { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
+        { text: acceptanceUserPrompt },
+      );
+      const accepted = acceptanceOutput.toUpperCase().includes("PASS");
+    } catch (err) {
+      currentVolumeHasAlreadyBeenProcessed = false;
+    }
+    
+    if (currentVolumeHasAlreadyBeenProcessed) {
+      console.log('the current volume has already been processed by a previous run. skipping the current volume.')
+      continue;
+    }
 
     /**
-     * the logic for generating the wiki
+     * generating the initial wiki is expensive, so we gotta check if it's already been
+     * generated and if so, we can skip the initial generation step.
      */
 
+    let wikiAndSharedWikiExists = true;
+    try {
+      await fs.access(wikiOutputFile);
+      await fs.access(sharedWikiOutputFile);
+    } catch (err) {
+      wikiAndSharedWikiExists = false;
+    }
+
+    /**
+     * set some variables
+     */
     const isFirst = i === 0;
     let previousFolderName = null;
     let previousWikiOutputFile = null;
     let previousSharedWikiOutputFile = null;
+    
     if (!isFirst) {
       previousFolderName = sortedFolderWithSourceMaterial[i-1];
       const previousVolumeDir = path.join(seriesDir, previousFolderName);
@@ -275,27 +310,37 @@ async function jumpInWiki() {
       previousSharedWikiOutputFile = path.join(previousVolumeDir, "shared-wiki.md");
     }
 
-    let output;
-    if (isFirst) {
-      output = await callAi(
-        systemPrompt,
-        { file: sourceFile, name: path.basename(sourceFile) },
-        { text: userPrompt },
-      );
+    /**
+     * the logic for generating the wiki
+     */      
+
+    if (wikiAndSharedWikiExists) {
+      console.log("Wiki for the current volume exists. skipping initial generation and proceeding to validation");
     } else {
-      output = await callAi(
-        systemPrompt,
-        { file: sourceFile, name: path.basename(sourceFile) },
-        { file: previousWikiOutputFile, name: "previous-jump-in-wiki.md" },
-        { file: previousSharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
-        { text: userPrompt },
-      )
+      console.log("Calling the AI for initial wiki generation...");
+      let output;
+      if (isFirst) {
+        output = await callAi(
+          systemPrompt,
+          { file: sourceFile, name: path.basename(sourceFile) },
+          { text: userPrompt },
+        );
+      } else {
+        output = await callAi(
+          systemPrompt,
+          { file: sourceFile, name: path.basename(sourceFile) },
+          { file: previousWikiOutputFile, name: "previous-jump-in-wiki.md" },
+          { file: previousSharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
+          { text: userPrompt },
+        )
+      }
+
+      const [wiki, sharedWiki] = splitJumpInWikiGenerationOutput(output);
+      
+      await fs.writeFile(wikiOutputFile, wiki, "utf-8");
+      await fs.writeFile(sharedWikiOutputFile, sharedWiki, "utf-8");
     }
 
-    const [wiki, sharedWiki] = splitJumpInWikiGenerationOutput(output);
-    
-    await fs.writeFile(wikiOutputFile, wiki, "utf-8");
-    await fs.writeFile(sharedWikiOutputFile, sharedWiki, "utf-8");
 
     /**
      * the logic for validating the generated wiki, checking acceptance, and
