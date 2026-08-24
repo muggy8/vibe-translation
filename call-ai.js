@@ -17,6 +17,7 @@ const fs = require("fs");
 const path = require("path");
 const { fileTypeFromBuffer } = require("file-type");
 const { Agent } = require("undici");
+const OpenAI = require("openai");
 
 // Local LLM servers (e.g. llama.cpp) can take many minutes to prefill a huge
 // prompt and to generate a long answer. undici's default fetch timeouts
@@ -137,6 +138,29 @@ async function toApiMessage(message) {
 }
 
 /**
+ * Create an OpenAI client configured for the endpoint in the environment.
+ *
+ * Local LLM servers (e.g. llama.cpp, Ollama, LM Studio) can take many minutes
+ * to prefill a huge prompt and to generate a long answer. We disable the
+ * client's request timeout and undici's header/body timeouts so such requests
+ * are not aborted with an opaque error.
+ *
+ * @param {string} apiKey - The API key for authentication.
+ * @param {string} baseUrl - The base URL of the OpenAI-compatible endpoint.
+ * @returns {OpenAI} The configured client.
+ */
+function createClient(apiKey, baseUrl) {
+  return new OpenAI({
+    apiKey,
+    baseURL: baseUrl,
+    // Effectively no timeout: local LLMs can take a long time to prefill.
+    timeout: 24 * 60 * 60 * 1000,
+    // Disable undici's header/body timeouts for the underlying fetch calls.
+    fetchOptions: { dispatcher: noTimeoutAgent },
+  });
+}
+
+/**
  * Call an OpenAI-compatible endpoint.
  *
  * @param {string} systemPrompt - The system prompt.
@@ -165,67 +189,43 @@ async function callAi(systemPrompt, ...messages) {
     apiMessages.push(await toApiMessage(message));
   }
 
-  const body = {
+  const client = createClient(apiKey, baseUrl);
+  const params = {
     model,
     messages: apiMessages,
     max_tokens: maxTokens,
     temperature,
-    stream: true,
   };
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    dispatcher: noTimeoutAgent,
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(
-      `API request failed with status ${response.status}:\n  ${errorBody}`
-    );
-  }
-
-  // Parse the SSE stream and accumulate the generated content. Streaming
-  // also means the response headers arrive immediately, so long prefills
-  // and generations no longer trip fetch's header/body timeouts.
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  // Prefer streaming: it avoids a total-request timeout on slow local LLMs
+  // (the timeout only covers the prefill / response headers) and lets us
+  // report progress. If the endpoint doesn't actually stream (some servers
+  // return a single JSON body even when `stream: true` is requested) or the
+  // stream fails, fall back to a non-streaming call.
   let content = "";
   let lastReported = 0;
+  let streamFailed = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const lines = buffer.split("\n");
-    buffer = lines.pop(); // keep the (possibly incomplete) last line
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice(5).trim();
-      if (payload === "[DONE]") continue;
-      try {
-        const json = JSON.parse(payload);
-        const delta = json.choices?.[0]?.delta?.content;
-        if (typeof delta === "string") {
-          content += delta;
-          if (content.length - lastReported >= 1000) {
-            lastReported = content.length;
-            console.error(`  …generated ${lastReported} tokens so far`);
-          }
+  try {
+    const stream = await client.chat.completions.create({ ...params, stream: true });
+    for await (const chunk of stream) {
+      const delta = chunk.choices?.[0]?.delta?.content;
+      if (typeof delta === "string") {
+        content += delta;
+        if (content.length - lastReported >= 1000) {
+          lastReported = content.length;
+          console.error(`  …generated ${lastReported} tokens so far`);
         }
-      } catch {
-        // Ignore malformed or keep-alive lines.
       }
     }
+  } catch (err) {
+    streamFailed = true;
+    console.error(`  streaming failed (${err.message}); retrying without streaming...`);
+  }
+
+  if (!content || streamFailed) {
+    const completion = await client.chat.completions.create(params);
+    content = completion.choices?.[0]?.message?.content ?? "";
   }
 
   return content || "(no content in response)";
