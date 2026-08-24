@@ -27,4 +27,4 @@ For every finding, provide a concrete fix (exact text and section). Be honest ab
 
 ## Output
 
-Produce the validation report in the exact format from the system prompt. The entire report is written in **{{TARGET_LANGUAGE}}**.
+Produce the validation report in the exact format from the system prompt.

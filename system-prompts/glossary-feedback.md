@@ -22,4 +22,4 @@ You are **not** regenerating the glossary from scratch. You are making **targete
 
 ## Output
 
-Produce the **complete corrected glossary** in Markdown (the whole file, not just the diff), in the same section/table format as the input. Output **only** the glossary Markdown — no preamble, no commentary.
+Follow the existing glossary and produce the **complete corrected glossary** in Markdown (the whole file, not just the diff), in the same section/table format as the input. Output **only** the glossary Markdown — no preamble, no commentary.

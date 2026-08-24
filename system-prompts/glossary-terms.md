@@ -33,7 +33,9 @@ Respond with **only** a JSON array — no prose, no markdown fences, no commenta
 If there are **no new terms**, respond with an empty JSON array: `[]`
 
 Example shape (do not copy these values):
+```
 [
   { "term": "例 名前", "type": "character", "query": "例 名前" },
   { "term": "例の町", "type": "place", "query": "例の町" }
 ]
+```

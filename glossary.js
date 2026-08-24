@@ -153,24 +153,6 @@ async function glossary() {
 
   console.log(`Found ${sorted.length} volume folder(s). Processing in order...`);
 
-  // Dry-run: print the first volume's transformed prompts and exit.
-  if (dryRun) {
-    const firstVolumeDir = path.join(seriesDir, sorted[0]);
-    const values = {
-      INSTALLMENT_NUMBER: installmentNumberFromDir(firstVolumeDir),
-      SOURCE_NAME: process.env.SERIES_NAME_SOURCE,
-      SOURCE_LANGUAGE: process.env.SOURCE_LANGUAGE || "Japanese",
-      TARGET_LANGUAGE: process.env.TARGET_LANGUAGE || "English",
-    };
-    console.log("\n--dry-run: skipping the AI calls and research. Transformed prompts (volume 1) follow.");
-    console.log("\n--- new-term extraction user prompt ---\n" + transformUserPrompt(termsTemplate, values));
-    console.log("\n--- validator user prompt ---\n" + transformUserPrompt(validatorTemplate, values));
-    console.log("\n--- feedback user prompt ---\n" + transformUserPrompt(feedbackTemplate, values));
-    console.log("\n--- acceptance user prompt ---\n" + transformUserPrompt(acceptanceTemplate, values));
-    console.log("\n--- amend user prompt (template; {{TERMS_LIST}} and {{RESEARCH_NOTES}} are filled at runtime) ---\n" + glossaryTemplate);
-    return;
-  }
-
   // Once any volume is regenerated, all later volumes must be regenerated too
   // (each volume's glossary is built on the previous one's).
   let regeneratedAny = false;
@@ -192,6 +174,17 @@ async function glossary() {
       SOURCE_LANGUAGE: process.env.SOURCE_LANGUAGE || "Japanese",
       TARGET_LANGUAGE: process.env.TARGET_LANGUAGE || "English",
     };
+
+    console.log("\n--dry-run: skipping the AI calls and research. Transformed prompts (volume 1) follow.");
+    console.log("\n--- new-term extraction user prompt ---\n" + transformUserPrompt(termsTemplate, values));
+    console.log("\n--- validator user prompt ---\n" + transformUserPrompt(validatorTemplate, values));
+    console.log("\n--- feedback user prompt ---\n" + transformUserPrompt(feedbackTemplate, values));
+    console.log("\n--- acceptance user prompt ---\n" + transformUserPrompt(acceptanceTemplate, values));
+    console.log("\n--- amend user prompt (template; {{TERMS_LIST}} and {{RESEARCH_NOTES}} are filled at runtime) ---\n" + glossaryTemplate);
+
+    if (dryRun) {
+      continue;
+    }
 
     // The previous volume's glossary (the in-progress glossary). Absent for the first volume.
     const isFirst = i === 0;
@@ -296,15 +289,6 @@ async function glossary() {
       const accepted = acceptanceOutput.toUpperCase().includes("PASS");
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: ${accepted ? "PASS" : "FAIL"}`);
 
-      if (accepted) {
-        break;
-      }
-
-      if (iteration === maxValidationIterations) {
-        console.log(`Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit. Leaving the glossary as-is.`);
-        break;
-      }
-
       // Apply the feedback.
       const feedbackOutput = await callAi(
         feedbackSystemPromptFile,
@@ -314,6 +298,15 @@ async function glossary() {
         { text: feedbackPrompt },
       );
       await fs.writeFile(glossaryOutputFile, feedbackOutput.trim(), "utf-8");
+      
+      if (accepted) {
+        break;
+      }
+
+      if (iteration === maxValidationIterations) {
+        console.log(`Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit. Leaving the glossary as-is.`);
+        break;
+      }
     }
   }
 
