@@ -160,6 +160,54 @@ function createClient(apiKey, baseUrl) {
   });
 }
 
+// Diagnostics: log the response shape (field names) once per process so a
+// first run reveals whether the server separates reasoning from content.
+let loggedStreamShape = false;
+let loggedMessageShape = false;
+
+// ─── Run logging ────────────────────────────────────────────────────────────
+// Every call's diagnostic output is also written to a per-run log file under
+// .logs/ (one file per process) so runs can be inspected after the fact.
+const logsDir = path.join(__dirname, ".logs");
+let logStream = null;
+let logFilePath = null;
+
+/**
+ * Get (and lazily create) the writable stream for the current run's log file.
+ * @returns {import("fs").WriteStream} The log file stream.
+ */
+function getLogStream() {
+  if (!logStream) {
+    fs.mkdirSync(logsDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    logFilePath = path.join(logsDir, `call-ai-${stamp}.log`);
+    logStream = fs.createWriteStream(logFilePath, { flags: "a" });
+    // Header is written directly (not via logLine) to avoid recursion.
+    logStream.write(`=== call-ai run log started: ${new Date().toISOString()} ===\n`);
+    logStream.write(
+      `model=${process.env.OPENAI_MODEL || "gpt-4o-mini"} ` +
+        `base_url=${process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"} ` +
+        `max_tokens=${process.env.MAX_TOKENS || "1024"}\n`
+    );
+    // Tell the user where this run's log is (console only, to avoid recursion).
+    console.error(`[call-ai] logging to ${logFilePath}`);
+  }
+  return logStream;
+}
+
+/**
+ * Log a line to both stderr and the current run's log file.
+ * @param {string} message - The line to log.
+ */
+function logLine(message) {
+  console.error(message);
+  try {
+    getLogStream().write(message + "\n");
+  } catch {
+    // Never let logging break the actual AI call.
+  }
+}
+
 /**
  * Call an OpenAI-compatible endpoint.
  *
@@ -197,36 +245,101 @@ async function callAi(systemPrompt, ...messages) {
     temperature,
   };
 
+  // Log which call this is (identified by the system prompt's first line).
+  const systemFirstLine = systemPrompt.trim().split("\n")[0].slice(0, 80);
+  logLine(`[call-ai] CALL system="${systemFirstLine}" messages=${messages.length}`);
+
   // Prefer streaming: it avoids a total-request timeout on slow local LLMs
   // (the timeout only covers the prefill / response headers) and lets us
   // report progress. If the endpoint doesn't actually stream (some servers
   // return a single JSON body even when `stream: true` is requested) or the
   // stream fails, fall back to a non-streaming call.
   let content = "";
+  let reasoningContent = "";
+  let finishReason = null;
+  let usage = null;
   let lastReported = 0;
   let streamFailed = false;
 
   try {
     const stream = await client.chat.completions.create({ ...params, stream: true });
     for await (const chunk of stream) {
-      const delta = chunk.choices?.[0]?.delta?.content;
-      if (typeof delta === "string") {
-        content += delta;
+      // Some servers report token usage on a final chunk that has no choices.
+      if (chunk.usage) {
+        usage = chunk.usage;
+      }
+      const choice = chunk.choices?.[0];
+      if (choice && !loggedStreamShape) {
+        loggedStreamShape = true;
+        logLine(
+          `  [call-ai] stream chunk keys: ${Object.keys(chunk).join(", ")}` +
+            ` | choice keys: ${Object.keys(choice).join(", ")}` +
+            (choice.delta ? ` | delta keys: ${Object.keys(choice.delta).join(", ")}` : "")
+        );
+      }
+      if (!choice) continue;
+      if (choice.finish_reason) {
+        finishReason = choice.finish_reason;
+      }
+      const delta = choice.delta;
+      if (!delta) continue;
+      if (typeof delta.content === "string") {
+        content += delta.content;
         if (content.length - lastReported >= 1000) {
           lastReported = content.length;
-          console.error(`  …generated ${lastReported} tokens so far`);
+          logLine(`  …generated ${lastReported} chars so far`);
         }
+      }
+      // Thinking models may emit reasoning in `reasoning_content` (Qwen/DeepSeek)
+      // or `reasoning`; capture whichever the server uses so we can see it.
+      const reasoningDelta =
+        typeof delta.reasoning_content === "string"
+          ? delta.reasoning_content
+          : typeof delta.reasoning === "string"
+            ? delta.reasoning
+            : "";
+      if (reasoningDelta) {
+        reasoningContent += reasoningDelta;
       }
     }
   } catch (err) {
     streamFailed = true;
-    console.error(`  streaming failed (${err.message}); retrying without streaming...`);
+    logLine(`  streaming failed (${err.message}); retrying without streaming...`);
   }
 
   if (!content || streamFailed) {
     const completion = await client.chat.completions.create(params);
-    content = completion.choices?.[0]?.message?.content ?? "";
+    const choice = completion.choices?.[0];
+    const message = choice?.message;
+    content = message?.content ?? "";
+    if (message && !loggedMessageShape) {
+      loggedMessageShape = true;
+      logLine(`  [call-ai] non-stream message keys: ${Object.keys(message).join(", ")}`);
+    }
+    const reasoningField =
+      typeof message?.reasoning_content === "string"
+        ? message.reasoning_content
+        : typeof message?.reasoning === "string"
+          ? message.reasoning
+          : "";
+    if (reasoningField) {
+      reasoningContent = reasoningField;
+    }
+    finishReason = choice?.finish_reason ?? finishReason;
+    usage = completion.usage ?? usage;
   }
+
+  // Diagnostic summary: pinpoints empty/truncated responses, e.g. a thinking
+  // model that spends its budget on reasoning and is cut off (finish_reason
+  // "length") before emitting any content.
+  const usageText = usage
+    ? `usage: prompt=${usage.prompt_tokens} completion=${usage.completion_tokens} total=${usage.total_tokens}`
+    : "usage: n/a";
+  logLine(
+    `  [call-ai] RESULT finish_reason=${finishReason ?? "n/a"} ` +
+      `content=${content.length} chars reasoning=${reasoningContent.length} chars ${usageText}` +
+      (content.length === 0 ? "  <-- NO CONTENT (empty response)" : "")
+  );
 
   return content || "(no content in response)";
 }
