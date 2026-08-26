@@ -132,6 +132,13 @@ async function glossary() {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
   }
 
+  // Load the system prompts.
+  const termsSystemPrompt = await fs.readFile(termsSystemPromptFile, "utf-8");
+  const glossarySystemPrompt = await fs.readFile(glossarySystemPromptFile, "utf-8");
+  const validatorSystemPrompt = await fs.readFile(validatorSystemPromptFile, "utf-8");
+  const acceptanceSystemPrompt = await fs.readFile(acceptanceSystemPromptFile, "utf-8");
+  const feedbackSystemPrompt = await fs.readFile(feedbackSystemPromptFile, "utf-8");
+
   // Load the prompt templates.
   const termsTemplate = await fs.readFile(termsUserPromptTemplateFile, "utf-8");
   const glossaryTemplate = await fs.readFile(glossaryUserPromptTemplateFile, "utf-8");
@@ -211,9 +218,11 @@ async function glossary() {
     if (!force && !regeneratedAny && (await fileExists(glossaryOutputFile))) {
       try {
         const acceptanceOutput = await callAi(
-          acceptanceSystemPromptFile,
-          { file: validationOutputFile, name: "glossary-validation.md" },
-          { text: acceptancePrompt },
+          acceptanceSystemPrompt,
+          [
+            { file: validationOutputFile, name: "glossary-validation.md" },
+            { text: acceptancePrompt },
+          ],
         );
         skip = acceptanceOutput.toUpperCase().includes("PASS");
       } catch {
@@ -236,7 +245,7 @@ async function glossary() {
 
     // Pass 1: extract the new terms from this volume's source.
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: extracting new terms...`);
-    const termsOutput = await callAi(termsSystemPromptFile, ...baseMessages, { text: termsPrompt });
+    const termsOutput = await callAi(termsSystemPrompt, [...baseMessages, { text: termsPrompt }]);
     let terms = [];
     try {
       terms = parseTerms(termsOutput);
@@ -263,7 +272,7 @@ async function glossary() {
       TERMS_LIST: termsListText,
       RESEARCH_NOTES: researchNotesText,
     });
-    const amendOutput = await callAi(glossarySystemPromptFile, ...baseMessages, { text: amendPrompt });
+    const amendOutput = await callAi(glossarySystemPrompt, [...baseMessages, { text: amendPrompt }]);
     await fs.writeFile(glossaryOutputFile, amendOutput.trim(), "utf-8");
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved the glossary to ${glossaryOutputFile}`);
 
@@ -273,29 +282,35 @@ async function glossary() {
 
       // Validate the amended glossary against the source.
       const validationReport = await callAi(
-        validatorSystemPromptFile,
-        ...baseMessages,
-        { file: glossaryOutputFile, name: "glossary.md" },
-        { text: validatorPrompt },
+        validatorSystemPrompt,
+        [
+          ...baseMessages,
+          { file: glossaryOutputFile, name: "glossary.md" },
+          { text: validatorPrompt },
+        ],
       );
       await fs.writeFile(validationOutputFile, validationReport, "utf-8");
 
       // Acceptance check.
       const acceptanceOutput = await callAi(
-        acceptanceSystemPromptFile,
-        { file: validationOutputFile, name: "glossary-validation.md" },
-        { text: acceptancePrompt },
+        acceptanceSystemPrompt,
+        [
+          { file: validationOutputFile, name: "glossary-validation.md" },
+          { text: acceptancePrompt },
+        ],
       );
       const accepted = acceptanceOutput.toUpperCase().includes("PASS");
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: ${accepted ? "PASS" : "FAIL"}`);
 
       // Apply the feedback.
       const feedbackOutput = await callAi(
-        feedbackSystemPromptFile,
-        ...baseMessages,
-        { file: validationOutputFile, name: "glossary-validation.md" },
-        { file: glossaryOutputFile, name: "glossary.md" },
-        { text: feedbackPrompt },
+        feedbackSystemPrompt,
+        [
+          ...baseMessages,
+          { file: validationOutputFile, name: "glossary-validation.md" },
+          { file: glossaryOutputFile, name: "glossary.md" },
+          { text: feedbackPrompt },
+        ],
       );
       await fs.writeFile(glossaryOutputFile, feedbackOutput.trim(), "utf-8");
       

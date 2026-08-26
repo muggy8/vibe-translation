@@ -270,8 +270,10 @@ async function jumpInWiki() {
 
       const acceptanceOutput = await callAi(
         acceptanceSystemPrompt,
-        { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
-        { text: acceptanceUserPrompt },
+        [
+          { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
+          { text: acceptanceUserPrompt },
+        ],
       );
       const accepted = acceptanceOutput.toUpperCase().includes("PASS");
     } catch (err) {
@@ -323,17 +325,21 @@ async function jumpInWiki() {
       if (isFirst) {
         output = await callAi(
           systemPrompt,
-          { file: sourceFile, name: path.basename(sourceFile) },
-          { text: userPrompt },
+          [
+            { file: sourceFile, name: path.basename(sourceFile) },
+            { text: userPrompt },
+          ],
         );
       } else {
         output = await callAi(
           systemPrompt,
-          { file: sourceFile, name: path.basename(sourceFile) },
-          { file: previousWikiOutputFile, name: "previous-jump-in-wiki.md" },
-          { file: previousSharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
-          { text: userPrompt },
-        )
+          [
+            { file: sourceFile, name: path.basename(sourceFile) },
+            { file: previousWikiOutputFile, name: "previous-jump-in-wiki.md" },
+            { file: previousSharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
+            { text: userPrompt },
+          ],
+        );
       }
 
       const [wiki, sharedWiki] = splitJumpInWikiGenerationOutput(output);
@@ -369,7 +375,7 @@ async function jumpInWiki() {
       }
       validationMessages.push({ text: validatorUserPrompt });
 
-      const validationReport = await callAi(validatorSystemPrompt, ...validationMessages);
+      const validationReport = await callAi(validatorSystemPrompt, validationMessages);
 
       await fs.writeFile(validationOutputFile, validationReport, "utf-8");
 
@@ -380,8 +386,10 @@ async function jumpInWiki() {
 
       const acceptanceOutput = await callAi(
         acceptanceSystemPrompt,
-        { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
-        { text: acceptanceUserPrompt },
+        [
+          { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
+          { text: acceptanceUserPrompt },
+        ],
       );
       const accepted = acceptanceOutput.toUpperCase().includes("PASS");
       console.log(`Acceptance check: ${accepted ? "PASS" : "FAIL"}`);
@@ -409,7 +417,7 @@ async function jumpInWiki() {
       }
       feedbackMessages.push({ text: feedbackUserPrompt });
 
-      const feedbackOutput = await callAi(feedbackSystemPrompt, ...feedbackMessages);
+      const feedbackOutput = await callAi(feedbackSystemPrompt, feedbackMessages);
 
       const [correctedWiki, correctedSharedWiki] = splitJumpInWikiGenerationOutput(feedbackOutput);
 

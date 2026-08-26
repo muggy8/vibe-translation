@@ -7,8 +7,10 @@
  *
  * const result = await callAi(
  *   "You are a helpful assistant.",
- *   { text: "What is in this file?" },
- *   { file: "./document.pdf", name: "document.pdf" }
+ *   [
+ *     { text: "What is in this file?" },
+ *     { file: "./document.pdf", name: "document.pdf" },
+ *   ]
  * );
  */
 
@@ -212,15 +214,21 @@ function logLine(message) {
  * Call an OpenAI-compatible endpoint.
  *
  * @param {string} systemPrompt - The system prompt.
- * @param {...IMessage} messages - The messages to send, in order.
+ * @param {IMessage[]} messages - The messages to send, in order.
+ * @param {Object} [configs] - the configs for this call.
+ * @param {number} [configs.retry] - the number of times to retry if the AI API fails to respond for some reason (default 0).
+ * @param {boolean} [configs.thinking] - weather the model should think or not. (default: true)
+ * @param {string} [configs.thinkingLevel] - how much the AI model should think (no default)
  * @returns {Promise<string>} Resolves to the entire output of the AI's API response.
  */
-async function callAi(systemPrompt, ...messages) {
+async function callAi(systemPrompt, messages, configs = {}) {
   const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
   const apiKey = process.env.OPENAI_API_KEY;
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
   const maxTokens = parseInt(process.env.MAX_TOKENS, 10) || 1024;
   const temperature = parseFloat(process.env.TEMPERATURE) || 0.7;
+
+  const { retry = 0, thinking = true, thinkingLevel } = configs;
 
   if (!apiKey) {
     throw new Error(
@@ -230,6 +238,14 @@ async function callAi(systemPrompt, ...messages) {
 
   if (typeof systemPrompt !== "string" || !systemPrompt.trim()) {
     throw new Error("systemPrompt must be a non-empty string.");
+  }
+
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error("messages must be a non-empty array of IMessage objects.");
+  }
+
+  if (!Number.isInteger(retry) || retry < 0) {
+    throw new Error("configs.retry must be a non-negative integer.");
   }
 
   const apiMessages = [{ role: "system", content: systemPrompt }];
@@ -245,103 +261,145 @@ async function callAi(systemPrompt, ...messages) {
     temperature,
   };
 
+  // Thinking mode: `thinking: false` asks the model to skip its reasoning
+  // phase (Qwen3-style chat templates honor `thinking` / `enable_thinking`);
+  // `thinkingLevel` sets how much it should think via the OpenAI-standard
+  // `reasoning_effort` parameter (also supported by llama.cpp and Ollama).
+  if (thinking === false) {
+    params.extra_body = params.extra_body || {};
+    params.extra_body.chat_template_kwargs = params.chat_template_kwargs = { thinking: false, enable_thinking: false };
+  }
+  if (thinkingLevel) {
+    // for qwen 3.8 27b, the options are "xhigh", "medium", and "low" with the default being "xhigh"
+    params.reasoning_effort = thinkingLevel;
+  }
+
   // Log which call this is (identified by the system prompt's first line).
   const systemFirstLine = systemPrompt.trim().split("\n")[0].slice(0, 80);
-  logLine(`[call-ai] CALL system="${systemFirstLine}" messages=${messages.length}`);
+  logLine(`[call-ai] CALL system="${systemFirstLine}" messages=${messages.length} retry=${retry}`);
 
-  // Prefer streaming: it avoids a total-request timeout on slow local LLMs
-  // (the timeout only covers the prefill / response headers) and lets us
-  // report progress. If the endpoint doesn't actually stream (some servers
-  // return a single JSON body even when `stream: true` is requested) or the
-  // stream fails, fall back to a non-streaming call.
-  let content = "";
-  let reasoningContent = "";
-  let finishReason = null;
-  let usage = null;
-  let lastReported = 0;
-  let streamFailed = false;
+  return performAiCall(client, params, configs);
+}
 
+/**
+ * Perform the AI request, retrying recursively up to `configs.retry` extra
+ * times if it fails. The expensive setup (message conversion, client
+ * creation) is done once by the caller, so retries only re-issue the request.
+ *
+ * @param {OpenAI} client - The configured OpenAI client.
+ * @param {Object} params - The chat-completion parameters (without `stream`).
+ * @param {Object} configs - The call configs (only `retry` is used here).
+ * @param {number} [configs.retry] - the number of times to retry if the AI API fails to respond for some reason (default 0).
+ * @returns {Promise<string>} The model's content.
+ */
+async function performAiCall(client, params, configs) {
   try {
-    const stream = await client.chat.completions.create({ ...params, stream: true });
-    for await (const chunk of stream) {
-      // Some servers report token usage on a final chunk that has no choices.
-      if (chunk.usage) {
-        usage = chunk.usage;
-      }
-      const choice = chunk.choices?.[0];
-      if (choice && !loggedStreamShape) {
-        loggedStreamShape = true;
-        logLine(
-          `  [call-ai] stream chunk keys: ${Object.keys(chunk).join(", ")}` +
-            ` | choice keys: ${Object.keys(choice).join(", ")}` +
-            (choice.delta ? ` | delta keys: ${Object.keys(choice.delta).join(", ")}` : "")
-        );
-      }
-      if (!choice) continue;
-      if (choice.finish_reason) {
-        finishReason = choice.finish_reason;
-      }
-      const delta = choice.delta;
-      if (!delta) continue;
-      if (typeof delta.content === "string") {
-        content += delta.content;
-        if (content.length - lastReported >= 1000) {
-          lastReported = content.length;
-          logLine(`  …generated ${lastReported} chars so far`);
+    // Prefer streaming: it avoids a total-request timeout on slow local LLMs
+    // (the timeout only covers the prefill / response headers) and lets us
+    // report progress. If the endpoint doesn't actually stream (some servers
+    // return a single JSON body even when `stream: true` is requested) or the
+    // stream fails, fall back to a non-streaming call.
+    let content = "";
+    let reasoningContent = "";
+    let finishReason = null;
+    let usage = null;
+    let lastReported = 0;
+    let streamFailed = false;
+
+    try {
+      const stream = await client.chat.completions.create({ ...params, stream: true });
+      for await (const chunk of stream) {
+        // Some servers report token usage on a final chunk that has no choices.
+        if (chunk.usage) {
+          usage = chunk.usage;
+        }
+        const choice = chunk.choices?.[0];
+        if (choice && !loggedStreamShape) {
+          loggedStreamShape = true;
+          logLine(
+            `  [call-ai] stream chunk keys: ${Object.keys(chunk).join(", ")}` +
+              ` | choice keys: ${Object.keys(choice).join(", ")}` +
+              (choice.delta ? ` | delta keys: ${Object.keys(choice.delta).join(", ")}` : "")
+          );
+        }
+        if (!choice) continue;
+        if (choice.finish_reason) {
+          finishReason = choice.finish_reason;
+        }
+        const delta = choice.delta;
+        if (!delta) continue;
+        if (typeof delta.content === "string") {
+          content += delta.content;
+          if (content.length - lastReported >= 1000) {
+            lastReported = content.length;
+            logLine(`  …generated ${lastReported} chars so far`);
+          }
+        }
+        // Thinking models may emit reasoning in `reasoning_content` (Qwen/DeepSeek)
+        // or `reasoning`; capture whichever the server uses so we can see it.
+        const reasoningDelta =
+          typeof delta.reasoning_content === "string"
+            ? delta.reasoning_content
+            : typeof delta.reasoning === "string"
+              ? delta.reasoning
+              : "";
+        if (reasoningDelta) {
+          reasoningContent += reasoningDelta;
         }
       }
-      // Thinking models may emit reasoning in `reasoning_content` (Qwen/DeepSeek)
-      // or `reasoning`; capture whichever the server uses so we can see it.
-      const reasoningDelta =
-        typeof delta.reasoning_content === "string"
-          ? delta.reasoning_content
-          : typeof delta.reasoning === "string"
-            ? delta.reasoning
-            : "";
-      if (reasoningDelta) {
-        reasoningContent += reasoningDelta;
+    } catch (err) {
+      streamFailed = true;
+      logLine(`  streaming failed (${err.message}); retrying without streaming...`);
+    }
+
+    if (!content || streamFailed) {
+      const completion = await client.chat.completions.create(params);
+      const choice = completion.choices?.[0];
+      const message = choice?.message;
+      content = message?.content ?? "";
+      if (message && !loggedMessageShape) {
+        loggedMessageShape = true;
+        logLine(`  [call-ai] non-stream message keys: ${Object.keys(message).join(", ")}`);
       }
+      const reasoningField =
+        typeof message?.reasoning_content === "string"
+          ? message.reasoning_content
+          : typeof message?.reasoning === "string"
+            ? message.reasoning
+            : "";
+      if (reasoningField) {
+        reasoningContent = reasoningField;
+      }
+      finishReason = choice?.finish_reason ?? finishReason;
+      usage = completion.usage ?? usage;
     }
+
+    // Diagnostic summary: pinpoints empty/truncated responses, e.g. a thinking
+    // model that spends its budget on reasoning and is cut off (finish_reason
+    // "length") before emitting any content.
+    const usageText = usage
+      ? `usage: prompt=${usage.prompt_tokens} completion=${usage.completion_tokens} total=${usage.total_tokens}`
+      : "usage: n/a";
+    logLine(
+      `  [call-ai] RESULT finish_reason=${finishReason ?? "n/a"} ` +
+        `content=${content.length} chars reasoning=${reasoningContent.length} chars ${usageText}` +
+        (content.length === 0 ? "  <-- NO CONTENT (empty response)" : "")
+    );
+
+    if (!content && configs.retry > 0) {
+      return performAiCall(client, params, { ...configs, retry: configs.retry - 1 });
+    }
+
+    return content || "(no content in response)";
   } catch (err) {
-    streamFailed = true;
-    logLine(`  streaming failed (${err.message}); retrying without streaming...`);
-  }
-
-  if (!content || streamFailed) {
-    const completion = await client.chat.completions.create(params);
-    const choice = completion.choices?.[0];
-    const message = choice?.message;
-    content = message?.content ?? "";
-    if (message && !loggedMessageShape) {
-      loggedMessageShape = true;
-      logLine(`  [call-ai] non-stream message keys: ${Object.keys(message).join(", ")}`);
+    if (configs.retry > 0) {
+      logLine(
+        `  [call-ai] attempt failed (${err.message}); retrying (${configs.retry - 1} left)...`
+      );
+      return performAiCall(client, params, { ...configs, retry: configs.retry - 1 });
     }
-    const reasoningField =
-      typeof message?.reasoning_content === "string"
-        ? message.reasoning_content
-        : typeof message?.reasoning === "string"
-          ? message.reasoning
-          : "";
-    if (reasoningField) {
-      reasoningContent = reasoningField;
-    }
-    finishReason = choice?.finish_reason ?? finishReason;
-    usage = completion.usage ?? usage;
+    throw err;
   }
-
-  // Diagnostic summary: pinpoints empty/truncated responses, e.g. a thinking
-  // model that spends its budget on reasoning and is cut off (finish_reason
-  // "length") before emitting any content.
-  const usageText = usage
-    ? `usage: prompt=${usage.prompt_tokens} completion=${usage.completion_tokens} total=${usage.total_tokens}`
-    : "usage: n/a";
-  logLine(
-    `  [call-ai] RESULT finish_reason=${finishReason ?? "n/a"} ` +
-      `content=${content.length} chars reasoning=${reasoningContent.length} chars ${usageText}` +
-      (content.length === 0 ? "  <-- NO CONTENT (empty response)" : "")
-  );
-
-  return content || "(no content in response)";
 }
 
 // ─── Export for use as a module ─────────────────────────────────────────────
@@ -392,7 +450,7 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  callAi(systemPrompt, ...messages)
+  callAi(systemPrompt, messages)
     .then((result) => console.log(result))
     .catch((err) => {
       console.error(`Error: ${err.message}`);
