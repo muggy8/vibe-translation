@@ -10,7 +10,12 @@
  *   [
  *     { text: "What is in this file?" },
  *     { file: "./document.pdf", name: "document.pdf" },
- *   ]
+ *   ],
+ *   // optional
+ *   {
+ *     retry: 2,
+ *     thinkingLevel: 'medium'
+ *   }
  * );
  */
 
