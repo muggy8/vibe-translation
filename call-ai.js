@@ -304,6 +304,8 @@ async function performAiCall(client, params, configs) {
     // report progress. If the endpoint doesn't actually stream (some servers
     // return a single JSON body even when `stream: true` is requested) or the
     // stream fails, fall back to a non-streaming call.
+    let startTime = Date.now();
+    let firstTokenTime = null;
     let content = "";
     let reasoningContent = "";
     let finishReason = null;
@@ -312,7 +314,13 @@ async function performAiCall(client, params, configs) {
     let streamFailed = false;
 
     try {
-      const stream = await client.chat.completions.create({ ...params, stream: true });
+      const stream = await client.chat.completions.create({
+        ...params,
+        stream: true,
+        // Ask the server to include token usage in the final stream chunk
+        // (OpenAI-standard option; honored by llama.cpp, vLLM, Ollama, ...).
+        stream_options: { include_usage: true },
+      });
       for await (const chunk of stream) {
         // Some servers report token usage on a final chunk that has no choices.
         if (chunk.usage) {
@@ -334,6 +342,9 @@ async function performAiCall(client, params, configs) {
         const delta = choice.delta;
         if (!delta) continue;
         if (typeof delta.content === "string") {
+          if (delta.content !== "" && firstTokenTime === null) {
+            firstTokenTime = Date.now();
+          }
           content += delta.content;
           if (content.length - lastReported >= 1000) {
             lastReported = content.length;
@@ -349,6 +360,9 @@ async function performAiCall(client, params, configs) {
               ? delta.reasoning
               : "";
         if (reasoningDelta) {
+          if (firstTokenTime === null) {
+            firstTokenTime = Date.now();
+          }
           reasoningContent += reasoningDelta;
         }
       }
@@ -358,6 +372,9 @@ async function performAiCall(client, params, configs) {
     }
 
     if (!content || streamFailed) {
+      // The stats below describe the attempt that produced the final content.
+      startTime = Date.now();
+      firstTokenTime = null;
       const completion = await client.chat.completions.create(params);
       const choice = completion.choices?.[0];
       const message = choice?.message;
@@ -385,9 +402,29 @@ async function performAiCall(client, params, configs) {
     const usageText = usage
       ? `usage: prompt=${usage.prompt_tokens} completion=${usage.completion_tokens} total=${usage.total_tokens}`
       : "usage: n/a";
+    // Performance statistics: total wall time plus, when the first token was
+    // observed (streaming), the time to first token (TTFT) and derived
+    // throughputs. TTFT approximates the server's prompt prefill time, so
+    // prompt_tokens / TTFT ≈ prefill speed; the remaining wall time is
+    // generation, so completion_tokens / genTime ≈ generation speed. Rates are
+    // only meaningful when the server reports usage.
+    const totalMs = Date.now() - startTime;
+    const perf = [`time=${(totalMs / 1000).toFixed(1)}s`];
+    if (firstTokenTime !== null) {
+      const prefillMs = firstTokenTime - startTime;
+      const genMs = totalMs - prefillMs;
+      perf.push(`ttft=${(prefillMs / 1000).toFixed(1)}s`);
+      if (prefillMs > 0 && usage?.prompt_tokens) {
+        perf.push(`prefill=${(usage.prompt_tokens / (prefillMs / 1000)).toFixed(1)} tok/s`);
+      }
+      if (genMs > 0 && usage?.completion_tokens) {
+        perf.push(`gen=${(usage.completion_tokens / (genMs / 1000)).toFixed(1)} tok/s`);
+      }
+    }
     logLine(
       `  [call-ai] RESULT finish_reason=${finishReason ?? "n/a"} ` +
-        `content=${content.length} chars reasoning=${reasoningContent.length} chars ${usageText}` +
+        `content=${content.length} chars reasoning=${reasoningContent.length} chars ${usageText} ` +
+        perf.join(" ") +
         (content.length === 0 ? "  <-- NO CONTENT (empty response)" : "")
     );
 
