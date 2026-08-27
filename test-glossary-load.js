@@ -1,15 +1,33 @@
 /**
- * test-glossary-load.js — self-checks for the pure parsing helpers in
- * glossary.js and jump-in-wiki.js. Run with `npm test`.
+ * test-glossary-load.js — self-checks for the pure parsing helpers, the
+ * agent-mode prompt builders, and the agent safety nets in glossary.js and
+ * jump-in-wiki.js. Run with `npm test`.
  */
 const assert = require("assert");
+const os = require("os");
+const path = require("path");
+const fsp = require("fs").promises;
 
-const { parseTerms } = require("./glossary");
+const {
+  parseTerms,
+  buildGlossaryResearcherTurnPrompt,
+  buildGlossaryAuthorTurnPrompt,
+  buildGlossaryValidatorTurnPrompt,
+  buildGlossaryFeedbackTurnPrompt,
+} = require("./glossary");
 const {
   transformUserPrompt,
   splitJumpInWikiGenerationOutput,
   isPassingVerdict,
   installmentNumberFromDir,
+  agentOutputNames,
+  validatorMaxStepsFor,
+  adoptStrayOutput,
+  buildWikiAuthorSystemPrompt,
+  buildWikiValidatorSystemPrompt,
+  buildWikiAuthorTurnPrompt,
+  buildWikiValidatorTurnPrompt,
+  buildWikiFeedbackTurnPrompt,
 } = require("./jump-in-wiki");
 
 // ─── parseTerms ─────────────────────────────────────────────────────────────
@@ -80,4 +98,200 @@ assert.strictEqual(installmentNumberFromDir("Series(1)"), "01");
 assert.strictEqual(installmentNumberFromDir("Series(12)"), "12");
 assert.throws(() => installmentNumberFromDir("Series"), /Cannot derive/);
 
-console.log("All parse-helper tests passed.");
+// ─── agentOutputNames ───────────────────────────────────────────────────────
+// Maps every classic marker file name onto the real agent-mode file names.
+assert.strictEqual(agentOutputNames("save it to jump-in-wiki-01.md"), "save it to wiki.md");
+assert.strictEqual(agentOutputNames("the shared part is jump-in-wiki-shared.md"), "the shared part is shared-wiki.md");
+assert.strictEqual(agentOutputNames("generic volume article jump-in-wiki-NN.md"), "generic volume article wiki.md");
+assert.strictEqual(agentOutputNames("previous was jump-in-wiki-(NN-1).md"), "previous was ../(previous volume folder)/wiki.md");
+assert.strictEqual(
+  agentOutputNames("old state jump-in-wiki-shared.old.md"),
+  "old state the previous shared wiki (path in the materials list)"
+);
+// The template placeholder form (pre-transformation) is also rewritten.
+assert.strictEqual(agentOutputNames("jump-in-wiki-{{INSTALLMENT_NUMBER}}.md"), "wiki.md");
+// Names that are not wiki outputs are left alone.
+assert.strictEqual(agentOutputNames("keep jump-in-wiki-validation-01.md"), "keep jump-in-wiki-validation-01.md");
+// The classic inlined-message name for the previous volume's wiki is rewritten too.
+assert.strictEqual(
+  agentOutputNames("materials: previous-jump-in-wiki.md"),
+  "materials: ../(previous volume folder)/wiki.md"
+);
+
+// ─── validatorMaxStepsFor ───────────────────────────────────────────────────
+// The cap must scale with the source size (a fixed 40 ran out on the 521KB
+// volume-01 source: the validator hit the cap before writing its report).
+assert.strictEqual(validatorMaxStepsFor(0), 40);
+assert.strictEqual(validatorMaxStepsFor(1000), 40);
+assert.strictEqual(validatorMaxStepsFor(521 * 1024), 58); // ceil(17 chunks) * 2 + 24
+assert.strictEqual(validatorMaxStepsFor(1024 * 1024), 88); // ceil(32 chunks) * 2 + 24
+
+// ─── agent-mode prompt builders: jump-in-wiki ───────────────────────────────
+// Regression: the classic marker file names must never leak into the prompts
+// the agent-mode model actually receives (observed live: the author agent
+// wrote jump-in-wiki-01.md / jump-in-wiki-shared.md because its prompt still
+// carried the classic names).
+const wikiCtx = {
+  values: { INSTALLMENT_NUMBER: "01", SOURCE_NAME: "test", SOURCE_LANGUAGE: "Japanese" },
+  folderName: "story_name(1)",
+  isFirst: true,
+  previousFolderName: null,
+  userPrompt:
+    "Materials: previous-jump-in-wiki.md and jump-in-wiki-shared.md.\n\n" +
+    "## Output\n\nProduce `jump-in-wiki-01.md` and `jump-in-wiki-shared.md`.\n\n" +
+    "## Output Format\n---- jump-in-wiki-01.md ----\n\nbody\n\n" +
+    "---- jump-in-wiki-shared.md ----\n\nbody\n\n---- end ----\n\n" +
+    "## Constraints\n\n- no hallucination",
+  validatorUserPrompt:
+    "Audit `jump-in-wiki-01.md` and `jump-in-wiki-shared.md` against the source " +
+    "and save the report in `jump-in-wiki-validation-01.md`.",
+  feedbackUserPrompt:
+    "Correct `jump-in-wiki-01.md` and `jump-in-wiki-shared.md`; the previous state " +
+    "is in `jump-in-wiki-(NN-1).md` and `jump-in-wiki-shared.old.md`.\n\n" +
+    "## Output Format\n---- jump-in-wiki-01.md ----\n\nbody\n\n---- end ----",
+};
+
+const wikiAuthorTurn = buildWikiAuthorTurnPrompt(wikiCtx);
+assert.ok(wikiAuthorTurn.includes('"wiki.md"'), "wiki author turn names wiki.md");
+assert.ok(wikiAuthorTurn.includes('"shared-wiki.md"'), "wiki author turn names shared-wiki.md");
+assert.ok(!wikiAuthorTurn.includes("jump-in-wiki-01.md"), "wiki author turn: no classic volume name");
+assert.ok(!wikiAuthorTurn.includes("jump-in-wiki-shared.md"), "wiki author turn: no classic shared name");
+assert.ok(!/----\s+jump-in-wiki/.test(wikiAuthorTurn), "wiki author turn: marker format stripped");
+assert.ok(wikiAuthorTurn.includes('"story_name(1).md"'), "wiki author turn points at the same-folder source");
+assert.ok(!wikiAuthorTurn.includes("../story_name"), "wiki author turn (first volume): no previous-volume paths");
+
+// The system prompts also get rewritten: they describe the classic file
+// layout (including the full-width-minus "N−1" form) and would otherwise
+// contradict the turn prompts (observed in the live prompt dumps).
+wikiCtx.systemPrompt =
+  "Layout: `jump-in-wiki-NN.md`, `jump-in-wiki-01.md` through " +
+  "`jump-in-wiki-(N−1).md`, and `jump-in-wiki-shared.md`.";
+wikiCtx.validatorSystemPrompt = "Audits the classic wiki files: jump-in-wiki-NN.md and jump-in-wiki-shared.md.";
+const wikiAuthorSystem = buildWikiAuthorSystemPrompt(wikiCtx);
+assert.ok(!wikiAuthorSystem.includes("jump-in-wiki-"), "wiki author system prompt: all classic names rewritten");
+assert.ok(wikiAuthorSystem.includes("shared-wiki.md"), "wiki author system prompt names shared-wiki.md");
+assert.ok(wikiAuthorSystem.includes("../(previous volume folder)/wiki.md"), "wiki author system prompt rewrites the N−1 form");
+const wikiValidatorSystem = buildWikiValidatorSystemPrompt(wikiCtx);
+assert.ok(!wikiValidatorSystem.includes("jump-in-wiki-NN.md"), "wiki validator system prompt: classic names rewritten");
+assert.ok(!wikiValidatorSystem.includes("jump-in-wiki-shared.md"), "wiki validator system prompt: shared name rewritten");
+
+const wikiValidatorTurn = buildWikiValidatorTurnPrompt(wikiCtx);
+assert.ok(wikiValidatorTurn.includes('"wiki.md"'), "wiki validator turn names wiki.md");
+assert.ok(wikiValidatorTurn.includes('"shared-wiki.md"'), "wiki validator turn names shared-wiki.md");
+assert.ok(wikiValidatorTurn.includes("jump-in-wiki-validation-01.md"), "wiki validator turn keeps the real report name");
+assert.ok(!wikiValidatorTurn.includes("jump-in-wiki-01.md"), "wiki validator turn: no classic volume name");
+assert.ok(!wikiValidatorTurn.includes("jump-in-wiki-shared.md"), "wiki validator turn: no classic shared name");
+
+const wikiFeedbackTurn = buildWikiFeedbackTurnPrompt(wikiCtx);
+assert.ok(!wikiFeedbackTurn.includes("jump-in-wiki-01.md"), "wiki feedback turn: no classic volume name");
+assert.ok(!wikiFeedbackTurn.includes("jump-in-wiki-shared.md"), "wiki feedback turn: no classic shared name");
+assert.ok(wikiFeedbackTurn.includes('"wiki.md"') && wikiFeedbackTurn.includes('"shared-wiki.md"'), "wiki feedback turn names the real files");
+assert.ok(!/----\s+jump-in-wiki/.test(wikiFeedbackTurn), "wiki feedback turn: marker format stripped");
+
+// A non-first volume points the agents at the previous volume's files.
+const wikiCtx2 = { ...wikiCtx, isFirst: false, previousFolderName: "story_name(1)" };
+assert.ok(buildWikiAuthorTurnPrompt(wikiCtx2).includes("../story_name(1)/wiki.md"), "volume-2 author turn lists the previous wiki");
+assert.ok(buildWikiValidatorTurnPrompt(wikiCtx2).includes("../story_name(1)/shared-wiki.md"), "volume-2 validator turn lists the previous shared wiki");
+assert.ok(buildWikiFeedbackTurnPrompt(wikiCtx2).includes("../story_name(1)/shared-wiki.md"), "volume-2 feedback turn lists the previous shared wiki");
+
+// ─── agent-mode prompt builders: glossary ───────────────────────────────────
+const glossaryCtx = {
+  values: {
+    INSTALLMENT_NUMBER: "01",
+    SOURCE_NAME: "test",
+    SOURCE_LANGUAGE: "Japanese",
+    TARGET_LANGUAGE: "English",
+  },
+  folderName: "story_name(1)",
+  isFirst: true,
+  previousFolderName: null,
+  glossaryTemplate:
+    "Amend the glossary for {{SOURCE_NAME}}, volume {{INSTALLMENT_NUMBER}} " +
+    "({{SOURCE_LANGUAGE}} -> {{TARGET_LANGUAGE}}).\nNew terms:\n{{TERMS_LIST}}\n" +
+    "Research notes:\n{{RESEARCH_NOTES}}",
+  validatorPrompt: "Audit `glossary.md` against the source and write `glossary-validation.md`.",
+  feedbackPrompt: "Apply the findings from `glossary-validation.md` to `glossary.md`.",
+};
+const terms = [{ term: "ソラ", type: "character", query: "ソラ" }];
+
+const gAuthorTurn = buildGlossaryAuthorTurnPrompt(glossaryCtx, terms, false);
+assert.ok(gAuthorTurn.includes('"glossary.md"'), "glossary author turn names glossary.md");
+assert.ok(gAuthorTurn.includes("ソラ"), "glossary author turn carries the term list");
+assert.ok(gAuthorTurn.includes('"story_name(1).md"'), "glossary author turn points at the same-folder source");
+assert.ok(!gAuthorTurn.includes("glossary-01.md"), "glossary author turn: no per-volume classic name");
+assert.ok(gAuthorTurn.includes("(absent — this is the first volume)"), "glossary author turn (first volume): no previous glossary");
+
+const gValidatorTurn = buildGlossaryValidatorTurnPrompt(glossaryCtx);
+assert.ok(gValidatorTurn.includes('"glossary-validation.md"'), "glossary validator turn names the report file");
+assert.ok(gValidatorTurn.includes('"glossary.md"'), "glossary validator turn names the glossary");
+assert.ok(gValidatorTurn.includes('"story_name(1).md"'), "glossary validator turn points at the same-folder source");
+
+const gFeedbackTurn = buildGlossaryFeedbackTurnPrompt(glossaryCtx);
+assert.ok(gFeedbackTurn.includes('"glossary.md"'), "glossary feedback turn names the glossary");
+assert.ok(gFeedbackTurn.includes("glossary-validation.md"), "glossary feedback turn names the report");
+
+const gResearcherTurn = buildGlossaryResearcherTurnPrompt(glossaryCtx, terms);
+assert.ok(gResearcherTurn.includes("glossary-research.md"), "glossary researcher turn names the notes file");
+assert.ok(gResearcherTurn.includes("ソラ"), "glossary researcher turn carries the term list");
+assert.ok(gResearcherTurn.includes("- (pending)"), "glossary researcher turn mentions the placeholder");
+
+const glossaryCtx2 = { ...glossaryCtx, isFirst: false, previousFolderName: "story_name(1)" };
+assert.ok(buildGlossaryAuthorTurnPrompt(glossaryCtx2, terms, false).includes("../story_name(1)/glossary.md"), "volume-2: previous glossary path");
+assert.ok(buildGlossaryValidatorTurnPrompt(glossaryCtx2).includes("../story_name(1)/glossary.md"), "volume-2 validator: previous glossary path");
+assert.ok(buildGlossaryFeedbackTurnPrompt(glossaryCtx2).includes("../story_name(1)/glossary.md"), "volume-2 feedback: previous glossary path");
+
+// ─── adoptStrayOutput (filesystem) ──────────────────────────────────────────
+const pathExists = async (p) => {
+  try {
+    await fsp.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+(async () => {
+  // A stray with the classic volume name is adopted as wiki.md.
+  let dir = await fsp.mkdtemp(path.join(os.tmpdir(), "adopt-wiki-"));
+  await fsp.writeFile(path.join(dir, "story_name(1).md"), "source");
+  await fsp.writeFile(path.join(dir, "jump-in-wiki-01.md"), "# volume wiki");
+  const known = new Set([
+    "story_name(1).md",
+    "glossary.md",
+    "glossary-validation.md",
+    "jump-in-wiki-validation-01.md",
+  ]);
+  assert.strictEqual(await adoptStrayOutput(dir, "wiki.md", known), true, "stray wiki is adopted");
+  assert.ok(await pathExists(path.join(dir, "wiki.md")), "wiki.md now exists");
+  assert.ok(!(await pathExists(path.join(dir, "jump-in-wiki-01.md"))), "the stray was renamed, not copied");
+
+  // A stray with the classic shared name is adopted as shared-wiki.md.
+  await fsp.writeFile(path.join(dir, "jump-in-wiki-shared.md"), "# shared wiki");
+  assert.strictEqual(await adoptStrayOutput(dir, "shared-wiki.md", known), true, "stray shared wiki is adopted");
+  assert.ok(await pathExists(path.join(dir, "shared-wiki.md")), "shared-wiki.md now exists");
+
+  // An existing expected file short-circuits (no adoption).
+  assert.strictEqual(await adoptStrayOutput(dir, "wiki.md", known), false, "existing wiki.md is not re-adopted");
+  await fsp.rm(dir, { recursive: true, force: true });
+
+  // Protected (known) files and validation reports are never adopted.
+  dir = await fsp.mkdtemp(path.join(os.tmpdir(), "adopt-protect-"));
+  await fsp.writeFile(path.join(dir, "glossary.md"), "# glossary");
+  await fsp.writeFile(path.join(dir, "glossary-validation.md"), "# report");
+  assert.strictEqual(await adoptStrayOutput(dir, "wiki.md", known), false, "known files are protected");
+  assert.strictEqual(await adoptStrayOutput(dir, "shared-wiki.md", known), false, "no stray means no adoption");
+  assert.ok(await pathExists(path.join(dir, "glossary.md")), "glossary.md is untouched");
+  assert.ok(await pathExists(path.join(dir, "glossary-validation.md")), "the validation report is untouched");
+  await fsp.rm(dir, { recursive: true, force: true });
+
+  // Empty candidates are skipped.
+  dir = await fsp.mkdtemp(path.join(os.tmpdir(), "adopt-empty-"));
+  await fsp.writeFile(path.join(dir, "jump-in-wiki-01.md"), "");
+  assert.strictEqual(await adoptStrayOutput(dir, "wiki.md", known), false, "empty strays are not adopted");
+  await fsp.rm(dir, { recursive: true, force: true });
+
+  console.log("All tests passed.");
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

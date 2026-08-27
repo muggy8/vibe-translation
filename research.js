@@ -292,4 +292,14 @@ function formatResearchNotes(notes) {
   return lines.join("\n").trim();
 }
 
-module.exports = { researchTerms, researchWiki, formatResearchNotes };
+module.exports = {
+  researchTerms,
+  researchWiki,
+  formatResearchNotes,
+  // Fine-grained primitives used by the agent-mode wiki tools (harness.js).
+  wikiSearch,
+  wikiExtract,
+  wikiLangs,
+  maxResults,
+  maxExtractChars,
+};

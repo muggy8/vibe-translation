@@ -1,11 +1,12 @@
 {
   "name": "ai-client",
-  "version": "1.0.0",
-  "description": "Call an OpenAI-compatible endpoint with a system prompt + user input",
-  "main": "call-ai.js",
+  "version": "2.0.0",
+  "description": "Agentic AI client (OpenHarness) for the glossary and jump-in-wiki workflows",
+  "main": "harness.js",
   "scripts": {
-    "start": "node call-ai.js",
-    "test": "node test-glossary-load.js"
+    "start": "node harness.js",
+    "test": "node test-glossary-load.js",
+    "smoke": "node harness-smoke.js"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -15,13 +16,17 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.104",
+    "@openharness/core": "^0.7.0",
+    "ai": "^6.0.270",
     "dotenv": "^17.4.2",
     "file-type": "^22.0.1",
     "natural-orderby": "^5.0.0",
-    "openai": "^7.4.0",
-    "undici": "^8.10.0"
+    "undici": "^8.10.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "gulp": "^5.0.1"
   }
 }
+
