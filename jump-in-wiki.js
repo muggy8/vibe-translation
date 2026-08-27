@@ -33,6 +33,7 @@
  * Usage:
  *   npx gulp jump-in-wiki             # run the full task
  *   npx gulp jump-in-wiki --dry-run   # transform the prompt only, no API call
+ *   npx gulp jump-in-wiki --force     # regenerate even if already processed
  */
 
 require("dotenv").config();
@@ -104,6 +105,29 @@ function transformUserPrompt(template, values) {
 }
 
 /**
+ * Decide whether an acceptance-check response is a passing verdict.
+ *
+ * The acceptance prompts ask the model to answer exactly "PASS" or "FAIL",
+ * but model output is non-deterministic, so a plain `.includes("PASS")`
+ * check would false-positive on prose such as "does not pass". We accept
+ * only an unambiguous pass: the word PASS must appear, and the response
+ * must contain neither an explicit FAIL nor a negated verdict.
+ *
+ * @param {string} output - The raw acceptance-check response.
+ * @returns {boolean} True only for an unambiguous passing verdict.
+ */
+function isPassingVerdict(output) {
+  if (typeof output !== "string") return false;
+  const text = output.trim().toUpperCase();
+  if (text === "PASS") return true;
+  if (text === "FAIL") return false;
+  const hasPass = /\bPASS\b/.test(text);
+  const hasFail = /\bFAIL(?:ED|URES?)?\b/.test(text);
+  const negated = /\bNOT\s+PASS\b/.test(text);
+  return hasPass && !hasFail && !negated;
+}
+
+/**
  * the output of the AI should be in the following format: 
  * 
  * `---- jump-in-wiki-{{INSTALLMENT_NUMBER}}.md ----
@@ -155,10 +179,14 @@ function splitJumpInWikiGenerationOutput (outputFromAi) {
   const sharedStart = sharedMarkerIdx !== -1 ? sharedMarkerIdx + 1 : lines.length;
   // Shared content ends at the end marker or at the end of the file
   const sharedEnd   = endIdx !== -1 ? endIdx : lines.length;
+  // Wiki content ends where the shared section begins (or where the shared
+  // section would end if its marker is missing, so nothing is dropped).
+  const wikiEnd     = sharedMarkerIdx !== -1 ? sharedMarkerIdx : sharedEnd;
 
-  // Extract raw sections
-  const wikiRaw   = wikiMarkerIdx   !== -1 ? lines.slice(wikiStart,   sharedMarkerIdx).join("\n") : "";
-  const sharedRaw = sharedMarkerIdx !== -1 ? lines.slice(sharedStart, sharedEnd).join("\n")       : "";
+  // Extract raw sections (a missing marker degrades leniently instead of
+  // silently discarding content)
+  const wikiRaw   = lines.slice(wikiStart, wikiEnd).join("\n");
+  const sharedRaw = lines.slice(sharedStart, sharedEnd).join("\n");
 
   // Trim leading/trailing blank lines from each section
   const trimBlank = (s) => s.replace(/^\n+|\n+$/g, "");
@@ -170,14 +198,26 @@ function splitJumpInWikiGenerationOutput (outputFromAi) {
 
 async function jumpInWiki() {
   const dryRun = process.argv.includes("--dry-run");
+  const force = process.argv.includes("--force");
+
+  if (!seriesDir) {
+    throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
+  }
+  if (!process.env.SERIES_NAME_SOURCE) {
+    throw new Error("SERIES_NAME_SOURCE is not set. Please set it in .env.");
+  }
   
-  const seriesLocationContents = await fs.readdir(process.env.SERIES_LOCATION,  { withFileTypes: true });
+  const seriesLocationContents = await fs.readdir(seriesDir, { withFileTypes: true });
   const folderWithSourceMaterial = seriesLocationContents
     .filter(entry => entry.isDirectory())
     .map(entry => entry.name)
-    .filter(path => path.includes(process.env.SERIES_NAME_SOURCE));
+    .filter(name => name.includes(process.env.SERIES_NAME_SOURCE));
 
   const sortedFolderWithSourceMaterial = orderBy(folderWithSourceMaterial);
+
+  if (sortedFolderWithSourceMaterial.length === 0) {
+    throw new Error(`No volume folders found in ${seriesDir}.`);
+  }
 
   const systemPrompt = await fs.readFile(systemPromptFile, "utf-8");
   const template = await fs.readFile(userPromptTemplateFile, "utf-8");
@@ -262,22 +302,22 @@ async function jumpInWiki() {
     /**
      * Logic to make sure we don't redo any work that has already been done.
      */
-    let currentVolumeHasAlreadyBeenProcessed = true;
-    try {
-      await fs.access(validationOutputFile)
-
-      console.log("checking if the current version is already deemed acceptable in a previous run.");
-
-      const acceptanceOutput = await callAi(
-        acceptanceSystemPrompt,
-        [
-          { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
-          { text: acceptanceUserPrompt },
-        ],
-      );
-      const accepted = acceptanceOutput.toUpperCase().includes("PASS");
-    } catch (err) {
-      currentVolumeHasAlreadyBeenProcessed = false;
+    let currentVolumeHasAlreadyBeenProcessed = false;
+    if (!force) {
+      try {
+        await fs.access(validationOutputFile);
+        console.log("checking if the current version is already deemed acceptable in a previous run.");
+        const acceptanceOutput = await callAi(
+          acceptanceSystemPrompt,
+          [
+            { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
+            { text: acceptanceUserPrompt },
+          ],
+        );
+        currentVolumeHasAlreadyBeenProcessed = isPassingVerdict(acceptanceOutput);
+      } catch (err) {
+        currentVolumeHasAlreadyBeenProcessed = false;
+      }
     }
     
     if (currentVolumeHasAlreadyBeenProcessed) {
@@ -290,12 +330,14 @@ async function jumpInWiki() {
      * generated and if so, we can skip the initial generation step.
      */
 
-    let wikiAndSharedWikiExists = true;
-    try {
-      await fs.access(wikiOutputFile);
-      await fs.access(sharedWikiOutputFile);
-    } catch (err) {
-      wikiAndSharedWikiExists = false;
+    let wikiAndSharedWikiExists = !force;
+    if (!force) {
+      try {
+        await fs.access(wikiOutputFile);
+        await fs.access(sharedWikiOutputFile);
+      } catch (err) {
+        wikiAndSharedWikiExists = false;
+      }
     }
 
     /**
@@ -391,11 +433,19 @@ async function jumpInWiki() {
           { text: acceptanceUserPrompt },
         ],
       );
-      const accepted = acceptanceOutput.toUpperCase().includes("PASS");
+      const accepted = isPassingVerdict(acceptanceOutput);
       console.log(`Acceptance check: ${accepted ? "PASS" : "FAIL"}`);
 
+      if (accepted) {
+        console.log(
+          `Volume ${values.INSTALLMENT_NUMBER}: accepted on iteration ${iteration}. ` +
+            `Skipping the feedback pass so the passing wiki is left untouched.`
+        );
+        break;
+      }
+
       /**
-       * the logic for applying the validation feedback to the generated wiki
+       * the logic for applying the validation feedback to the failing wiki
        */
       console.log("Calling the AI to apply the validation feedback...");
 
@@ -424,16 +474,12 @@ async function jumpInWiki() {
       await fs.writeFile(wikiOutputFile, correctedWiki, "utf-8");
       await fs.writeFile(sharedWikiOutputFile, correctedSharedWiki, "utf-8");
 
-      // prevent next loop after adding in feedback.
-      if (accepted) {
-        break;
-      }
-
       if (iteration === maxValidationIterations) {
         limitReachedCount++;
         console.log(
           `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
-          `(${maxValidationIterations}) without a passing grade. Leaving the wiki as-is.`
+            `(${maxValidationIterations}) without a passing grade. The last feedback pass is ` +
+            `unvalidated; re-run the task to validate it.`
         );
         break;
       }
@@ -456,4 +502,5 @@ module.exports = {
   installmentNumberFromDir,
   transformUserPrompt,
   splitJumpInWikiGenerationOutput,
+  isPassingVerdict,
 };

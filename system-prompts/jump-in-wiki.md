@@ -163,7 +163,7 @@ Unresolved storylines, mysteries, and cliffhangers that future volumes need to r
 10. **The volume wiki covers only volume N.** Do not summarize, preview, or speculate about any volume beyond N.
 11. **The shared wiki reflects the state through volume N.** Do not include speculative future state.
 12. **Never contradict** an earlier volume wiki or the shared wiki unless a later reveal forces the correction (and mark it).
-14. **Output in Markdown**, ready for direct use on any wiki platform (Fandom, Wiki.gg, Miraheze, etc.).
+13. **Output in Markdown**, ready for direct use on any wiki platform (Fandom, Wiki.gg, Miraheze, etc.).
 
 ## Quality Checklist
 

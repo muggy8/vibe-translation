@@ -5,7 +5,10 @@
   "main": "call-ai.js",
   "scripts": {
     "start": "node call-ai.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test-glossary-load.js"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   },
   "keywords": [],
   "author": "",

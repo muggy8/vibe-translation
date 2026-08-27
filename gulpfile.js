@@ -7,6 +7,7 @@
  * Usage:
  *   npx gulp jump-in-wiki             # run the full task
  *   npx gulp jump-in-wiki --dry-run   # transform the prompt only, no API call
+ *   npx gulp jump-in-wiki --force     # regenerate even if already processed
  *   npx gulp glossary                 # build the canonical glossary
  *   npx gulp glossary --dry-run       # transform the prompts only, no API/research
  *   npx gulp glossary --force         # regenerate even if the glossary exists

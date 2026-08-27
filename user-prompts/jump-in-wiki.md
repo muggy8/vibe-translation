@@ -50,7 +50,7 @@ Produce exactly these files:
 All content in both files written in **{{SOURCE_LANGUAGE}}** — the same language as the source material, including headings and labels.
 
 ## Output Format
-your output will be saved directly to the new jumpin wiki as well as the shared wiki, hence, your output will be in the following format. Do **NOT** include additional text that is not in the follow the format.
+your output will be saved directly to the new jumpin wiki as well as the shared wiki, hence, your output will be in the following format. Do **NOT** include any additional text outside the format.
 ```markdown
 ---- jump-in-wiki-{{INSTALLMENT_NUMBER}}.md ----
 

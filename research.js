@@ -56,6 +56,33 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Per-request timeout for research HTTP requests, in ms (default: 30000). */
+function requestTimeoutMs() {
+  return Math.max(1000, parseInt(process.env.RESEARCH_TIMEOUT_MS, 10) || 30000);
+}
+
+/**
+ * fetch with a timeout, so a hung endpoint cannot stall the run forever.
+ *
+ * @param {string} url - The URL to request.
+ * @param {Object} [options] - The fetch options (any `signal` is replaced).
+ * @returns {Promise<Response>} The fetch response.
+ */
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), requestTimeoutMs());
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new Error(`Request timed out after ${requestTimeoutMs()} ms: ${url}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ─── Wikipedia ──────────────────────────────────────────────────────────────
 
 /**
@@ -69,7 +96,7 @@ async function wikiSearch(lang, query) {
   const url =
     `https://${lang}.wikipedia.org/w/api.php?action=query&list=search` +
     `&srsearch=${encodeURIComponent(query)}&srlimit=${maxResults()}&format=json`;
-  const response = await fetch(url, { headers: { "User-Agent": userAgent() } });
+  const response = await fetchWithTimeout(url, { headers: { "User-Agent": userAgent() } });
   if (!response.ok) {
     throw new Error(`Wikipedia search (${lang}) failed with status ${response.status}`);
   }
@@ -88,7 +115,7 @@ async function wikiExtract(lang, title) {
   const url =
     `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts` +
     `&exintro=1&explaintext=1&titles=${encodeURIComponent(title)}&format=json`;
-  const response = await fetch(url, { headers: { "User-Agent": userAgent() } });
+  const response = await fetchWithTimeout(url, { headers: { "User-Agent": userAgent() } });
   if (!response.ok) {
     throw new Error(`Wikipedia extract (${lang}) failed with status ${response.status}`);
   }
@@ -154,7 +181,7 @@ async function researchSearchApi(query) {
       const url =
         `https://api.search.brave.com/res/v1/web/search` +
         `?q=${encodeURIComponent(query)}&count=${maxResults()}`;
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(url, {
         headers: {
           Accept: "application/json",
           "X-Subscription-Token": key,
@@ -172,7 +199,7 @@ async function researchSearchApi(query) {
     }
 
     if (api === "tavily") {
-      const response = await fetch("https://api.tavily.com/search", {
+      const response = await fetchWithTimeout("https://api.tavily.com/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ api_key: key, query, max_results: maxResults() }),
@@ -188,7 +215,7 @@ async function researchSearchApi(query) {
     }
 
     if (api === "serper") {
-      const response = await fetch("https://google.serper.dev/search", {
+      const response = await fetchWithTimeout("https://google.serper.dev/search", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-KEY": key },
         body: JSON.stringify({ q: query }),

@@ -189,6 +189,11 @@ function getLogStream() {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     logFilePath = path.join(logsDir, `call-ai-${stamp}.log`);
     logStream = fs.createWriteStream(logFilePath, { flags: "a" });
+    // An unhandled "error" event on the stream (e.g. disk full) would crash
+    // the process; swallow it so logging can never break the actual AI call.
+    logStream.on("error", (err) => {
+      console.error(`[call-ai] log file error: ${err.message}`);
+    });
     // Header is written directly (not via logLine) to avoid recursion.
     logStream.write(`=== call-ai run log started: ${new Date().toISOString()} ===\n`);
     logStream.write(
@@ -221,19 +226,24 @@ function logLine(message) {
  * @param {string} systemPrompt - The system prompt.
  * @param {IMessage[]} messages - The messages to send, in order.
  * @param {Object} [configs] - the configs for this call.
- * @param {number} [configs.retry] - the number of times to retry if the AI API fails to respond for some reason (default 0).
+ * @param {number} [configs.retry] - the number of times to retry if the AI API fails to respond for some reason (default: 0, or AI_RETRY from .env when set).
  * @param {boolean} [configs.thinking] - weather the model should think or not. (default: true)
  * @param {string} [configs.thinkingLevel] - how much the AI model should think (no default)
  * @returns {Promise<string>} Resolves to the entire output of the AI's API response.
+ * @throws {Error} If the model returns no content after all attempts.
  */
 async function callAi(systemPrompt, messages, configs = {}) {
   const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
   const apiKey = process.env.OPENAI_API_KEY;
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
   const maxTokens = parseInt(process.env.MAX_TOKENS, 10) || 1024;
-  const temperature = parseFloat(process.env.TEMPERATURE) || 0.7;
+  const parsedTemperature = parseFloat(process.env.TEMPERATURE);
+  const temperature = Number.isNaN(parsedTemperature) ? 0.7 : parsedTemperature;
 
-  const { retry = 0, thinking = true, thinkingLevel } = configs;
+  // Default the retry count from AI_RETRY (.env) so a transient failure of a
+  // local server does not abort a long gulp run; an explicit configs.retry wins.
+  const envRetry = parseInt(process.env.AI_RETRY, 10);
+  const { retry = Number.isInteger(envRetry) && envRetry >= 0 ? envRetry : 0, thinking = true, thinkingLevel } = configs;
 
   if (!apiKey) {
     throw new Error(
@@ -271,8 +281,9 @@ async function callAi(systemPrompt, messages, configs = {}) {
   // `thinkingLevel` sets how much it should think via the OpenAI-standard
   // `reasoning_effort` parameter (also supported by llama.cpp and Ollama).
   if (thinking === false) {
-    params.extra_body = params.extra_body || {};
-    params.extra_body.chat_template_kwargs = params.chat_template_kwargs = { thinking: false, enable_thinking: false };
+    // llama.cpp / Ollama honor a top-level `chat_template_kwargs` to disable
+    // Qwen3-style thinking; unknown keys pass through to the server as-is.
+    params.chat_template_kwargs = { thinking: false, enable_thinking: false };
   }
   if (thinkingLevel) {
     // for qwen 3.8 27b, the options are "xhigh", "medium", and "low" with the default being "xhigh"
@@ -428,11 +439,23 @@ async function performAiCall(client, params, configs) {
         (content.length === 0 ? "  <-- NO CONTENT (empty response)" : "")
     );
 
-    if (!content && configs.retry > 0) {
-      return performAiCall(client, params, { ...configs, retry: configs.retry - 1 });
+    if (!content) {
+      if (configs.retry > 0) {
+        return performAiCall(client, params, { ...configs, retry: configs.retry - 1 });
+      }
+      // Never hand the "(no content)" placeholder back to callers: the gulp
+      // tasks persist the returned string verbatim, so an empty model response
+      // must fail the run instead of corrupting the generated artifacts.
+      throw new Error(
+        `The model returned no content (finish_reason=${finishReason ?? "n/a"}). ` +
+          (reasoningContent
+            ? "The token budget appears to have been spent on reasoning; try increasing MAX_TOKENS or the model's context limit. "
+            : "") +
+          `Check the run log: ${logFilePath}`
+      );
     }
 
-    return content || "(no content in response)";
+    return content;
   } catch (err) {
     if (configs.retry > 0) {
       logLine(

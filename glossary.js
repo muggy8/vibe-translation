@@ -42,7 +42,7 @@ const fs = require("fs").promises;
 const path = require("path");
 const { callAi } = require("./call-ai");
 const { researchTerms, formatResearchNotes } = require("./research");
-const { transformUserPrompt, installmentNumberFromDir } = require("./jump-in-wiki");
+const { transformUserPrompt, installmentNumberFromDir, isPassingVerdict } = require("./jump-in-wiki");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -131,6 +131,9 @@ async function glossary() {
   if (!seriesDir) {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
   }
+  if (!process.env.SERIES_NAME_SOURCE) {
+    throw new Error("SERIES_NAME_SOURCE is not set. Please set it in .env.");
+  }
 
   // Load the system prompts.
   const termsSystemPrompt = await fs.readFile(termsSystemPromptFile, "utf-8");
@@ -182,14 +185,15 @@ async function glossary() {
       TARGET_LANGUAGE: process.env.TARGET_LANGUAGE || "English",
     };
 
-    console.log("\n--dry-run: skipping the AI calls and research. Transformed prompts (volume 1) follow.");
-    console.log("\n--- new-term extraction user prompt ---\n" + transformUserPrompt(termsTemplate, values));
-    console.log("\n--- validator user prompt ---\n" + transformUserPrompt(validatorTemplate, values));
-    console.log("\n--- feedback user prompt ---\n" + transformUserPrompt(feedbackTemplate, values));
-    console.log("\n--- acceptance user prompt ---\n" + transformUserPrompt(acceptanceTemplate, values));
-    console.log("\n--- amend user prompt (template; {{TERMS_LIST}} and {{RESEARCH_NOTES}} are filled at runtime) ---\n" + glossaryTemplate);
-
     if (dryRun) {
+      if (i === 0) {
+        console.log("\n--dry-run: skipping the AI calls and research. Transformed prompts (volume 1) follow.");
+        console.log("\n--- new-term extraction user prompt ---\n" + transformUserPrompt(termsTemplate, values));
+        console.log("\n--- validator user prompt ---\n" + transformUserPrompt(validatorTemplate, values));
+        console.log("\n--- feedback user prompt ---\n" + transformUserPrompt(feedbackTemplate, values));
+        console.log("\n--- acceptance user prompt ---\n" + transformUserPrompt(acceptanceTemplate, values));
+        console.log("\n--- amend user prompt (template; {{TERMS_LIST}} and {{RESEARCH_NOTES}} are filled at runtime) ---\n" + glossaryTemplate);
+      }
       continue;
     }
 
@@ -224,7 +228,7 @@ async function glossary() {
             { text: acceptancePrompt },
           ],
         );
-        skip = acceptanceOutput.toUpperCase().includes("PASS");
+        skip = isPassingVerdict(acceptanceOutput);
       } catch {
         skip = false;
       }
@@ -299,10 +303,18 @@ async function glossary() {
           { text: acceptancePrompt },
         ],
       );
-      const accepted = acceptanceOutput.toUpperCase().includes("PASS");
+      const accepted = isPassingVerdict(acceptanceOutput);
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: ${accepted ? "PASS" : "FAIL"}`);
 
-      // Apply the feedback.
+      if (accepted) {
+        console.log(
+          `Volume ${values.INSTALLMENT_NUMBER}: accepted on iteration ${iteration}. ` +
+            `Skipping the feedback pass so the passing glossary is left untouched.`
+        );
+        break;
+      }
+
+      // Apply the feedback to the failing glossary.
       const feedbackOutput = await callAi(
         feedbackSystemPrompt,
         [
@@ -314,12 +326,11 @@ async function glossary() {
       );
       await fs.writeFile(glossaryOutputFile, feedbackOutput.trim(), "utf-8");
       
-      if (accepted) {
-        break;
-      }
-
       if (iteration === maxValidationIterations) {
-        console.log(`Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit. Leaving the glossary as-is.`);
+        console.log(
+          `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit without a ` +
+            `passing grade. The last feedback pass is unvalidated; re-run to validate it.`
+        );
         break;
       }
     }
