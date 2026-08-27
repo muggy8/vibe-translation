@@ -39,13 +39,13 @@ yarn-error.log*
 .dry-run/
 
 # Test fixture series: the generated outputs (the story sources stay tracked)
-_test/**/wiki.md
-_test/**/shared-wiki.md
-_test/**/glossary.md
-_test/**/glossary-research.md
-_test/**/glossary-validation.md
-_test/**/jump-in-wiki-validation-*.md
-_test/glossary.md
+test-series/**/wiki.md
+test-series/**/shared-wiki.md
+test-series/**/glossary.md
+test-series/**/glossary-research.md
+test-series/**/glossary-validation.md
+test-series/**/jump-in-wiki-validation-*.md
+test-series/glossary.md
 
 # Testing coverage
 coverage/

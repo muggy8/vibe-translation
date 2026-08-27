@@ -5,8 +5,8 @@
   "main": "harness.js",
   "scripts": {
     "start": "node harness.js",
-    "test": "node test-glossary-load.js",
-    "smoke": "node harness-smoke.js"
+    "test": "node test/test-glossary-load.js",
+    "smoke": "node test/harness-smoke.js"
   },
   "engines": {
     "node": ">=22.19.0"

@@ -14,7 +14,7 @@ const {
   buildGlossaryAuthorTurnPrompt,
   buildGlossaryValidatorTurnPrompt,
   buildGlossaryFeedbackTurnPrompt,
-} = require("./glossary");
+} = require("../glossary");
 const {
   transformUserPrompt,
   splitJumpInWikiGenerationOutput,
@@ -28,7 +28,7 @@ const {
   buildWikiAuthorTurnPrompt,
   buildWikiValidatorTurnPrompt,
   buildWikiFeedbackTurnPrompt,
-} = require("./jump-in-wiki");
+} = require("../jump-in-wiki");
 
 // ─── parseTerms ─────────────────────────────────────────────────────────────
 assert.deepStrictEqual(parseTerms(""), []);

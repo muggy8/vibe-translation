@@ -2,14 +2,14 @@
  * harness-smoke.js — Phase 1 smoke test for harness.js against the
  * configured endpoint (.env).
  *
- * Run: node harness-smoke.js            (all three checks)
- *      node harness-smoke.js one-shot   (just check 1)
- *      node harness-smoke.js research   (just check 2)
- *      node harness-smoke.js fs         (just check 3)
+ * Run: node test/harness-smoke.js            (all three checks)
+ *      node test/harness-smoke.js one-shot   (just check 1)
+ *      node test/harness-smoke.js research   (just check 2)
+ *      node test/harness-smoke.js fs         (just check 3)
  */
 const fs = require("fs");
 const path = require("path");
-const harness = require("./harness");
+const harness = require("../harness");
 
 /** [1/3] runOneShot: the streaming one-shot path (old callAi replacement). */
 async function testOneShot() {
@@ -48,7 +48,7 @@ async function testResearchAgent() {
 /** [3/3] createGatedFsTools: the write-gate logic + a live writing agent. */
 async function testFsGate() {
   console.log("--- [3/3] gated fs agent ---");
-  const base = path.resolve(__dirname, ".harness-smoke");
+  const base = path.resolve(__dirname, "..", ".harness-smoke");
   const allowedDir = path.join(base, "volume");
   fs.rmSync(base, { recursive: true, force: true });
   fs.mkdirSync(allowedDir, { recursive: true });
