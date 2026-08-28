@@ -61,7 +61,7 @@ const {
   writePromptDump,
 } = require("./utils/fs");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE } = require("./shared");
+const { AGENT_TOOLS_NOTE } = require("./configs/shared");
 const { fileExists, assertWrote } = require("./utils/fs");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────

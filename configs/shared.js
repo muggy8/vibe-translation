@@ -1,5 +1,6 @@
 /**
- * shared.js — Shared constants and helpers used across the ai-client modules.
+ * configs/shared.js — Shared configuration constants used across the ai-client
+ * modules.
  *
  * This file exists to break circular dependencies and eliminate duplication.
  * Both `glossary.js` and `jump-in-wiki.js` import `AGENT_TOOLS_NOTE` from

@@ -28,7 +28,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 
 | Path | Role |
 |---|---|
-| `shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`). Both `glossary.js` and `jump-in-wiki.js` import from here. |
+| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`). Both `glossary.js` and `jump-in-wiki.js` import from here. |
 | `utils/fs.js` | Generalized utilities: `fileExists`, `assertWrote`, `extractJsonObject`, `installmentNumberFromDir`, `transformUserPrompt`, `isPassingVerdict`, `validatorMaxStepsFor`, `writePromptDump`, `splitJumpInWikiGenerationOutput`. |
 | `harness.js` | The AI layer: one-shot calls, agent handles, wiki tools, gated fs tools, provider plumbing, run logging. Never bypass it to talk to the model. |
 | `research.js` | Client-side web research (Wikipedia Action API + optional Brave/Tavily/Serper). No LLM involved. |

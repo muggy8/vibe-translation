@@ -47,7 +47,7 @@ const fs = require("fs").promises;
 const path = require("path");
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE } = require("./shared");
+const { AGENT_TOOLS_NOTE } = require("./configs/shared");
 const {
   fileExists,
   installmentNumberFromDir,
