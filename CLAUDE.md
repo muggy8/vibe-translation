@@ -1,0 +1,1 @@
+Read [AGENTS.md](AGENTS.md) first — it is this project's entry point for AI agents (architecture, both workflows, environment reference, and hard-won gotchas).
