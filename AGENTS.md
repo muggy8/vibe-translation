@@ -1,6 +1,6 @@
 # AGENTS.md — ai-client
 
-**Read this first.** This is the entry point for AI agents working in this project. The codebase is small (~3.5k lines across 4 core files) and the JSDoc in each file is excellent — this doc is the map plus the hard-won gotchas; open the referenced file when you need depth.
+**Read this first.** This is the entry point for AI agents working in this project. The codebase is small (~4k lines across 5 core files) and the JSDoc in each file is excellent — this doc is the map plus the hard-won gotchas; open the referenced file when you need depth.
 
 ## 1. What this is
 
@@ -32,6 +32,8 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `research.js` | Client-side web research (Wikipedia Action API + optional Brave/Tavily/Serper). No LLM involved. |
 | `glossary.js` | Glossary task logic. |
 | `jump-in-wiki.js` | Wiki task logic **plus the shared helpers** (`transformUserPrompt`, `isPassingVerdict`, `installmentNumberFromDir`, `validatorMaxStepsFor`, `writePromptDump`) — the glossary task reuses these from here. |
+| `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. Both tasks read this manifest instead of guessing folder names. |
+| `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. Both `glossary.js` and `jump-in-wiki.js` consume it. |
 | `gulpfile.js` | Task wiring only (no logic). |
 | `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. |
 | `test/test-glossary-load.js` | Pure tests (`npm test`). |
@@ -60,7 +62,7 @@ Prompt files are **mode-agnostic**: agent mode appends a static `AGENT_TOOLS_NOT
 
 ### Shared workflow shape (both tasks)
 
-1. Discover volume folders under `SERIES_LOCATION` whose names contain `SERIES_NAME_SOURCE`; sort with `natural-orderby`; the volume number is the trailing `(N)` in the folder name. The volume's source is `<folder>/<folder>.md`.
+1. Discover volume folders and source files via the translation-target manifest (`getTranslationTarget()`). An AI agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes the result to `<SERIES_LOCATION>/translation-target.json`. With `--dry-run` a deterministic fallback (the legacy convention) builds the manifest instead, so prompt previews stay fully offline.
 2. Fill `{{PLACEHOLDER}}`s in the user-prompt templates (`transformUserPrompt` — **strict**: throws on a missing value or any leftover placeholder).
 3. **QA loop** per volume, up to `MAX_VALIDATION_ITERATIONS`: validate (independent validator) → **acceptance check (always a tool-less one-shot answering PASS/FAIL, parsed by `isPassingVerdict`)** → on FAIL, feedback applied by the *author's own session* → repeat. A passing output is never touched by a feedback pass.
 4. **Idempotency**: a volume whose outputs already exist and pass acceptance is skipped (unless `--force`). Note the skip-check itself is a *live one-shot API call*; a failed skip-check degrades to "not skipped" (fail-open, by design).
@@ -138,6 +140,7 @@ Per volume:
 8. **The fs write gate confines writes to the volume folder**; reads are allowed anywhere (agents need the previous volume). `deleteFile` is always denied — the *workflow* deletes stale strays, never the agent.
 9. **Logging goes through `harness.logLine`** so run logs stay greppable (prefix `[call-ai]`, file `.logs/call-ai-*.log`). The ad-hoc `harness.js` CLI prints model output to stdout — keep stdout clean for that.
 10. This directory is **not a git repository**; `.gitignore` exists for when it becomes one (and documents the ignored outputs: `.logs/`, `.dry-run/`, generated `test-series` files).
+11. **The discovery agent's manifest is cached and auto-stale:** `getTranslationTarget()` reuses an existing `translation-target.json` unless `--force` is passed or a listed source file has been deleted (stale → auto-regenerate). With `--dry-run` the AI is never called and the legacy convention is used instead.
 
 ## 8. Conventions
 
