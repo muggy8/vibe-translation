@@ -124,13 +124,14 @@ Per volume:
 | `RESEARCH_DELAY_MS` / `RESEARCH_TIMEOUT_MS` | `300` / `30000` | Politeness delay / per-request timeout |
 | `WIKI_USER_AGENT` | built-in | Descriptive UA (Wikipedia requires one) |
 | `SEARCH_API` / `SEARCH_API_KEY` | off | Optional brave / tavily / serper backend |
-| `THINKING` | off | Qwen3 thinking phase — **leave off, see §7** |
+| `THINKING` | on | Qwen3 thinking phase — **enabled by default**. See §7. |
+| `THINKING_LEVEL` | xhigh | reasoning_effort: "low" / "medium" / "xhigh" (model-dependent). |
 
-**Current local setup** (the committed `.env`): local Qwen at `http://localhost:9200/v1`, `MAX_TOKENS=262144`, `TEMPERATURE=0.2`, `AI_RETRY=1`, `MAX_VALIDATION_ITERATIONS=5`, series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
+**Current local setup** (the committed `.env`): local Qwen at `http://localhost:9200/v1`, `MAX_TOKENS=262144`, `TEMPERATURE=0.6`, `AI_RETRY=2`, `MAX_VALIDATION_ITERATIONS=5`, THINKING=on, THINKING_LEVEL=xhigh, series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
 
 ## 7. Gotchas (hard-won — read before changing behavior)
 
-1. **`THINKING` must stay off** for real work. Observed live on this Qwen setup: thinking ON burned 3.5 hours and 235k characters of reasoning on the volume-01 extraction with *zero content*, and agent runs took 17 minutes instead of ~30 seconds. Only enable it for short prompts (e.g. the acceptance check) and expect `MAX_TOKENS` to cover the reasoning spend.
+1. **`THINKING_LEVEL` tuning is per-series.** Reasoning token burn varies dramatically across series — a series with heavy technical jargon may need "xhigh" while a simpler narrative may run fine on "medium". Start with "xhigh" (the default), monitor `.logs/call-ai-*.log` for reasoning content sizes, and tune down to "medium" or "low" if the reasoning spend is excessive relative to content output. Set `THINKING=false` to disable entirely.
 2. **Never let a stage persist empty output.** `runOneShot` throws on empty by design; agent stages are guarded by `assertWrote` (missing/empty file → hard error pointing at `.logs/`). If you add a stage, add both guarantees.
 3. **Do not touch the agent-mode prompt safety nets** (`agentOutputNames`, `adoptStrayOutput`, the stray-file cleanups): each was added after a live failure (wrong file names, stale strays being audited, marker-format conflicts). The pure tests pin their behavior — run `npm test` after touching any prompt or file name.
 4. **Validator step caps scale with source size** (`validatorMaxStepsFor`): a fixed cap of 40 ran out on the 521KB volume-01 source before the validator wrote its report.

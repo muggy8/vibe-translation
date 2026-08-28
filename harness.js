@@ -306,8 +306,9 @@ function thinkingExtraBody({ thinking = true, thinkingLevel } = {}) {
     // Qwen3-style thinking; unknown keys pass through to the server as-is.
     extra.chat_template_kwargs = { thinking: false, enable_thinking: false };
   }
-  if (thinkingLevel) {
-    extra.reasoning_effort = thinkingLevel;
+  if (thinking !== false) {
+    // When thinking is on and no explicit level, use the env default.
+    extra.reasoning_effort = thinkingLevel ?? envThinkingLevel();
   }
   return Object.keys(extra).length > 0 ? extra : null;
 }
@@ -321,17 +322,29 @@ function envRetry() {
 }
 
 /**
- * Thinking mode (THINKING env, default OFF).
- *
- * Observed live on this Qwen setup: with thinking ON, a tool-using agent
- * fell into a 45k-token / 17-minute reasoning loop (OFF: ~30s), and a
- * one-shot call with a 500KB inlined source produced 235,000 characters of
- * reasoning and no content at all before the stream died. Set THINKING=true
- * only when you deliberately want a thinking phase (short prompts, e.g. the
- * acceptance check).
+ * Thinking mode (THINKING env, default ON).
  */
 function envThinking() {
+  let performThinking = true;
+
+  if (typeof process.env.THINKING === 'undefined' || process.env.THINKING === "") {
+    return performThinking;
+  }
+
   return process.env.THINKING === "true" || process.env.THINKING === "1";
+}
+
+/**
+ * Thinking effort level (THINKING_LEVEL env, default "xhigh").
+ * Sets the `reasoning_effort` parameter on the request body.
+ * Valid values: "low", "medium", "xhigh" (model-dependent).
+ */
+function envThinkingLevel() {
+  const level = process.env.THINKING_LEVEL;
+  if (typeof level === "string" && level.trim() !== "") {
+    return level.trim();
+  }
+  return "xhigh";
 }
 
 /** Maximum output tokens per call (MAX_TOKENS env, default 1024). */
@@ -735,8 +748,8 @@ function logResultLine(r, label) {
  * @param {string} cfg.systemPrompt - The system prompt.
  * @param {Array<IMessage>} cfg.messages - IMessages ({ text } | { file, name }).
  * @param {number} [cfg.retry] - Extra attempts on empty/error (default: AI_RETRY).
- * @param {boolean} [cfg.thinking] - Thinking mode (default: THINKING env, off).
- * @param {string} [cfg.thinkingLevel] - reasoning_effort level (optional).
+ * @param {boolean} [cfg.thinking] - Thinking mode (default: THINKING env, on).
+ * @param {string} [cfg.thinkingLevel] - reasoning_effort level (default: THINKING_LEVEL env / "xhigh").
  * @param {string} [cfg.label] - Log label (default: "one-shot").
  * @returns {Promise<string>} The model's content.
  */
@@ -872,11 +885,10 @@ async function runOneShot({
  * @param {string} [cfg.cwd] - Base dir for fs tools (default: process.cwd()).
  * @param {number} [cfg.maxSteps] - Step cap (default: AGENT_MAX_STEPS env / 20).
  * @param {number} [cfg.retry] - Error retries (default: AI_RETRY env).
- * @param {boolean} [cfg.thinking] - Thinking mode (default: THINKING env, off —
- *   tool agents run non-thinking for speed and reliable tool calls; thinking
- *   models can otherwise spend thousands of tokens "thinking" before a
- *   simple tool call. Pass true to opt in.)
- * @param {string} [cfg.thinkingLevel] - reasoning_effort level (optional).
+ * @param {boolean} [cfg.thinking] - Thinking mode (default: THINKING env, on —
+ *   agents use full thinking for higher-quality output; tune THINKING_LEVEL
+ *   to control reasoning spend).
+ * @param {string} [cfg.thinkingLevel] - reasoning_effort level (default: THINKING_LEVEL env / "xhigh").
  * @param {number} [cfg.contextWindow] - Compaction window (default: CONTEXT_WINDOW env).
  * @returns {Promise<Object>} { name, session, sendTurn, close }
  */
@@ -965,6 +977,7 @@ module.exports = {
   envMaxTokens,
   envTemperature,
   envContextWindow,
+  envThinkingLevel,
   agentMaxSteps,
   // Run logging (workflows log alongside the harness run log).
   logLine,
