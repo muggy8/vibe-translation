@@ -43,10 +43,10 @@
  */
 
 require("dotenv").config();
-const { orderBy } = require("natural-orderby");
 const fs = require("fs").promises;
 const path = require("path");
 const harness = require("./harness");
+const { getTranslationTarget } = require("./get-translation-target");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -518,13 +518,12 @@ async function jumpInWiki() {
     throw new Error("SERIES_NAME_SOURCE is not set. Please set it in .env.");
   }
 
-  const seriesLocationContents = await fs.readdir(seriesDir, { withFileTypes: true });
-  const folderWithSourceMaterial = seriesLocationContents
-    .filter(entry => entry.isDirectory())
-    .map(entry => entry.name)
-    .filter(name => name.includes(process.env.SERIES_NAME_SOURCE));
-
-  const sortedFolderWithSourceMaterial = orderBy(folderWithSourceMaterial);
+  // Discover the volumes with the AI-driven translation-target manifest (see
+  // get-translation-target.js). It yields, in reading order, each volume's
+  // folder and its exact source file, so nothing below has to guess names.
+  const manifest = await getTranslationTarget({ force, dryRun });
+  const sortedFolderWithSourceMaterial = manifest.volumes.map((v) => v.folder);
+  const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
 
   if (sortedFolderWithSourceMaterial.length === 0) {
     throw new Error(`No volume folders found in ${seriesDir}.`);
@@ -570,8 +569,9 @@ async function jumpInWiki() {
 
   for (const folderName of volumes) {
     const i = sortedFolderWithSourceMaterial.indexOf(folderName);
+    const volume = volumeByFolder.get(folderName);
     const volumeDir = path.join(seriesDir, folderName);
-    const sourceFile = path.join(volumeDir, `${folderName}.md`);
+    const sourceFile = path.resolve(seriesDir, volume.sourceFile);
     const wikiOutputFile = path.join(volumeDir, "wiki.md");
     const sharedWikiOutputFile = path.join(volumeDir, "shared-wiki.md");
 
@@ -580,7 +580,7 @@ async function jumpInWiki() {
     }
 
     const values = {
-      INSTALLMENT_NUMBER: installmentNumberFromDir(volumeDir),
+      INSTALLMENT_NUMBER: volume.installmentNumber,
       SOURCE_NAME: process.env.SERIES_NAME_SOURCE,
       SOURCE_LANGUAGE: process.env.SOURCE_LANGUAGE || "Japanese",
     };

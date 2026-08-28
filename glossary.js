@@ -50,18 +50,17 @@
  */
 
 require("dotenv").config();
-const { orderBy } = require("natural-orderby");
 const fs = require("fs").promises;
 const path = require("path");
 const harness = require("./harness");
 const { researchTerms, formatResearchNotes } = require("./research");
 const {
   transformUserPrompt,
-  installmentNumberFromDir,
   isPassingVerdict,
   validatorMaxStepsFor,
   writePromptDump,
 } = require("./jump-in-wiki");
+const { getTranslationTarget } = require("./get-translation-target");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -348,13 +347,12 @@ async function glossary() {
   const acceptanceTemplate = await fs.readFile(acceptanceUserPromptTemplateFile, "utf-8");
   const feedbackTemplate = await fs.readFile(feedbackUserPromptTemplateFile, "utf-8");
 
-  // Find all volume folders (sorted in natural order).
-  const entries = await fs.readdir(seriesDir, { withFileTypes: true });
-  const folderNames = entries
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .filter((name) => name.includes(process.env.SERIES_NAME_SOURCE));
-  const sorted = orderBy(folderNames);
+  // Discover the volumes with the AI-driven translation-target manifest (see
+  // get-translation-target.js). It yields, in reading order, each volume's
+  // folder and its exact source file, so nothing below has to guess names.
+  const manifest = await getTranslationTarget({ force, dryRun });
+  const sorted = manifest.volumes.map((v) => v.folder);
+  const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
 
   if (sorted.length === 0) {
     throw new Error(`No volume folders found in ${seriesDir}.`);
@@ -394,8 +392,9 @@ async function glossary() {
 
   for (const folderName of volumes) {
     const i = sorted.indexOf(folderName);
+    const volume = volumeByFolder.get(folderName);
     const volumeDir = path.join(seriesDir, folderName);
-    const sourceFile = path.join(volumeDir, `${folderName}.md`);
+    const sourceFile = path.resolve(seriesDir, volume.sourceFile);
     const glossaryOutputFile = path.join(volumeDir, "glossary.md");
     const validationOutputFile = path.join(volumeDir, "glossary-validation.md");
     const researchNotesFile = path.join(volumeDir, "glossary-research.md");
@@ -405,7 +404,7 @@ async function glossary() {
     }
 
     const values = {
-      INSTALLMENT_NUMBER: installmentNumberFromDir(volumeDir),
+      INSTALLMENT_NUMBER: volume.installmentNumber,
       SOURCE_NAME: process.env.SERIES_NAME_SOURCE,
       SOURCE_LANGUAGE: process.env.SOURCE_LANGUAGE || "Japanese",
       TARGET_LANGUAGE: process.env.TARGET_LANGUAGE || "English",

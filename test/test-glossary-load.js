@@ -29,6 +29,10 @@ const {
   buildWikiValidatorTurnPrompt,
   buildWikiFeedbackTurnPrompt,
 } = require("../jump-in-wiki");
+const {
+  extractJsonObject,
+  validateManifest,
+} = require("../get-translation-target");
 
 // ─── parseTerms ─────────────────────────────────────────────────────────────
 assert.deepStrictEqual(parseTerms(""), []);
@@ -97,6 +101,46 @@ assert.strictEqual(isPassingVerdict(undefined), false);
 assert.strictEqual(installmentNumberFromDir("Series(1)"), "01");
 assert.strictEqual(installmentNumberFromDir("Series(12)"), "12");
 assert.throws(() => installmentNumberFromDir("Series"), /Cannot derive/);
+
+// ─── extractJsonObject ──────────────────────────────────────────────────────
+assert.deepStrictEqual(extractJsonObject('{"a":1}'), { a: 1 });
+assert.deepStrictEqual(extractJsonObject('```json\n{"a":1}\n```'), { a: 1 });
+assert.deepStrictEqual(
+  extractJsonObject('Here you go:\n{"a":{"b":2}}\nDone.'),
+  { a: { b: 2 } }
+);
+assert.throws(() => extractJsonObject("no json object here"), /No JSON object/);
+assert.throws(() => extractJsonObject(""), /No text/);
+
+// ─── validateManifest ───────────────────────────────────────────────────────
+const goodManifest = {
+  seriesLocation: "/x",
+  seriesName: "s",
+  volumes: [
+    { installmentNumber: "01", folder: "s(1)", sourceFile: "s(1)/s(1).md" },
+    { installmentNumber: "02", folder: "s(2)", sourceFile: "s(2)/s(2).md" },
+  ],
+};
+assert.strictEqual(validateManifest(goodManifest), goodManifest);
+assert.throws(() => validateManifest({}), /no volumes/i);
+assert.throws(() => validateManifest({ volumes: [] }), /no volumes/i);
+assert.throws(
+  () =>
+    validateManifest({
+      volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "" }],
+    }),
+  /sourceFile/
+);
+assert.throws(
+  () =>
+    validateManifest({
+      volumes: [
+        { installmentNumber: "01", folder: "s(1)", sourceFile: "a" },
+        { installmentNumber: "01", folder: "s(2)", sourceFile: "b" },
+      ],
+    }),
+  /duplicates installment/
+);
 
 // ─── agentOutputNames ───────────────────────────────────────────────────────
 // Maps every classic marker file name onto the real agent-mode file names.
