@@ -47,6 +47,16 @@ const fs = require("fs").promises;
 const path = require("path");
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
+const { AGENT_TOOLS_NOTE } = require("./shared");
+const {
+  fileExists,
+  installmentNumberFromDir,
+  transformUserPrompt,
+  isPassingVerdict,
+  validatorMaxStepsFor,
+  writePromptDump,
+  splitJumpInWikiGenerationOutput,
+} = require("./utils/fs");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -73,97 +83,7 @@ const maxValidationIterations = Math.max(
 // original single-shot pipeline (same prompts, same outputs, no tools).
 const agentMode = (process.env.RESEARCH_MODE || "agent").toLowerCase() !== "classic";
 
-// Appended to the system prompts of agent-mode stages so the mode-agnostic
-// prompt files keep working in both modes.
-const AGENT_TOOLS_NOTE = `
-
-## File Tools (agent mode)
-
-You have file tools: readFile, listFiles, grep, writeFile, and editFile.
-- Your working folder is the volume folder; use paths relative to it (e.g. "wiki.md").
-- Read every material listed in the request with readFile before doing anything. Large files may need several reads (use offset/limit to page through).
-- Write your output files with writeFile (complete contents) or editFile (targeted fixes).
-- Never paste file contents into your chat reply. When you are done, reply with a short summary: what you read, what you wrote, and any problems you hit.
-`;
-
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-/**
- * Derive the zero-padded installment number from the volume folder name.
- * e.g. "俺を好きなのはお前だけかよ(1)" -> "01"
- *
- * @param {string} dir - The volume folder path.
- * @returns {string} The zero-padded installment number.
- */
-function installmentNumberFromDir(dir) {
-  const match = path.basename(dir).match(/\((\d+)\)\s*$/);
-  if (!match) {
-    throw new Error(
-      `Cannot derive the installment number from folder name: ${path.basename(dir)}`
-    );
-  }
-  return match[1].padStart(2, "0");
-}
-
-/**
- * Fill in the {{PLACEHOLDER}} values in the user prompt template.
- *
- * @param {string} template - The raw template text.
- * @param {Record<string, string>} values - The placeholder values.
- * @returns {string} The transformed prompt.
- */
-function transformUserPrompt(template, values) {
-  let result = template;
-  for (const [key, value] of Object.entries(values)) {
-    if (typeof value !== "string" || !value) {
-      throw new Error(`Missing value for placeholder: {{${key}}}`);
-    }
-    result = result.split(`{{${key}}}`).join(value);
-  }
-  const leftover = result.match(/\{\{[A-Z0-9_]+\}\}/);
-  if (leftover) {
-    throw new Error(`Unfilled placeholder left in user prompt: ${leftover[0]}`);
-  }
-  return result;
-}
-
-/**
- * Decide whether an acceptance-check response is a passing verdict.
- *
- * The acceptance prompts ask the model to answer exactly "PASS" or "FAIL",
- * but model output is non-deterministic, so a plain `.includes("PASS")`
- * check would false-positive on prose such as "does not pass". We accept
- * only an unambiguous pass: the word PASS must appear, and the response
- * must contain neither an explicit FAIL nor a negated verdict.
- *
- * @param {string} output - The raw acceptance-check response.
- * @returns {boolean} True only for an unambiguous passing verdict.
- */
-function isPassingVerdict(output) {
-  if (typeof output !== "string") return false;
-  const text = output.trim().toUpperCase();
-  if (text === "PASS") return true;
-  if (text === "FAIL") return false;
-  const hasPass = /\bPASS\b/.test(text);
-  const hasFail = /\bFAIL(?:ED|URES?)?\b/.test(text);
-  const negated = /\bNOT\s+PASS\b/.test(text);
-  return hasPass && !hasFail && !negated;
-}
-
-/**
- * Check whether a file exists.
- *
- * @param {string} filePath - The path to check.
- * @returns {Promise<boolean>}
- */
-async function fileExists(filePath) {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Remove the marker-based "## Output Format" section from a transformed
@@ -272,44 +192,6 @@ function knownVolumeFileNames(ctx) {
 // The exact prompts the agent-mode stages send are built here (not inline in
 // the run loops) so --dry-run can dump them and the tests can assert on them
 // without any AI call.
-
-/**
- * Step cap for validator agents, scaled to the volume source size: every
- * ~32KB of source costs at least one read step, and validators also spend
- * steps on grep passes and the report write. The fixed cap of 40 ran out on
- * the 521KB volume-01 source (observed live: the validator hit the cap
- * before writing its report).
- *
- * @param {number} sourceSizeBytes - The volume source file size in bytes.
- * @returns {number} The validator agent's maxSteps (at least 40).
- */
-function validatorMaxStepsFor(sourceSizeBytes) {
-  const chunks = Math.max(1, Math.ceil((sourceSizeBytes || 0) / 32768));
-  return Math.max(40, chunks * 2 + 24);
-}
-
-/**
- * --dry-run support: write the prompts a task would send for a volume to a
- * .dry-run/ file so they can be inspected without any AI call (terminal
- * output is unreliable while long jobs hold the shell; the file is not).
- *
- * @param {string} task - The task name ("glossary" | "jump-in-wiki").
- * @param {string} installmentNumber - The zero-padded volume number.
- * @param {string} mode - The workflow mode ("agent" | "classic").
- * @param {Array<{title: string, prompt: string}>} sections - The prompts.
- * @returns {Promise<string>} The dump file path.
- */
-async function writePromptDump(task, installmentNumber, mode, sections) {
-  const dir = path.join(clientDir, ".dry-run");
-  await fs.mkdir(dir, { recursive: true });
-  const file = path.join(dir, `${task}-${installmentNumber}.md`);
-  const body =
-    `# ${task} — volume ${installmentNumber} prompt dump (--dry-run)\n\n` +
-    `Mode: ${mode}\n\n` +
-    sections.map((s) => `## ${s.title}\n\n${s.prompt}\n`).join("\n");
-  await fs.writeFile(file, body, "utf-8");
-  return file;
-}
 
 /**
  * The author agent's system prompt (agent mode): classic file names
@@ -459,51 +341,14 @@ async function assertWrote(filePaths, who) {
  * @param {String} outputFromAi - the string that's outputted form the ai.
  * @returns {[String, String]} - the 2 sections of the output to be saved.
  */
-function splitJumpInWikiGenerationOutput (outputFromAi) {
-  // Normalise line endings and split into lines
-  const lines = outputFromAi.replace(/\r\n/g, "\n").split("\n");
-
-  // Find the two content sections by their marker lines.
-  // Markers look like: "---- jump-in-wiki-NN.md ----" or "---- jump-in-wiki-shared.md ----"
-  const wikiMarkerRe   = /^----\s+jump-in-wiki-?\d*\.md\s+----$/;
-  const sharedMarkerRe = /^----\s+jump-in-wiki-shared\.md\s+----$/;
-  const endMarkerRe    = /^----\s+end\s+----$/;
-
-  let wikiMarkerIdx   = -1;
-  let sharedMarkerIdx = -1;
-  let endIdx          = -1;
-
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (wikiMarkerIdx === -1 && wikiMarkerRe.test(trimmed)) {
-      wikiMarkerIdx = i;
-    } else if (sharedMarkerIdx === -1 && sharedMarkerRe.test(trimmed)) {
-      sharedMarkerIdx = i;
-    }
-    if (endMarkerRe.test(trimmed)) {
-      endIdx = i;
-    }
-  }
-
-  // Content starts one line after each marker
-  const wikiStart   = wikiMarkerIdx   !== -1 ? wikiMarkerIdx   + 1 : 0;
-  const sharedStart = sharedMarkerIdx !== -1 ? sharedMarkerIdx + 1 : lines.length;
-  // Shared content ends at the end marker or at the end of the file
-  const sharedEnd   = endIdx !== -1 ? endIdx : lines.length;
-  // Wiki content ends where the shared section begins (or where the shared
-  // section would end if its marker is missing, so nothing is dropped).
-  const wikiEnd     = sharedMarkerIdx !== -1 ? sharedMarkerIdx : sharedEnd;
-
-  // Extract raw sections (a missing marker degrades leniently instead of
-  // silently discarding content)
-  const wikiRaw   = lines.slice(wikiStart, wikiEnd).join("\n");
-  const sharedRaw = lines.slice(sharedStart, sharedEnd).join("\n");
-
-  // Trim leading/trailing blank lines from each section
-  const trimBlank = (s) => s.replace(/^\n+|\n+$/g, "");
-
-  return [trimBlank(wikiRaw), trimBlank(sharedRaw)];
-}
+// Re-export shared utilities from utils/fs.js for backwards compatibility
+// (tests and glossary.js import these from here).
+module.exports.splitJumpInWikiGenerationOutput = require("./utils/fs").splitJumpInWikiGenerationOutput;
+module.exports.transformUserPrompt = require("./utils/fs").transformUserPrompt;
+module.exports.isPassingVerdict = require("./utils/fs").isPassingVerdict;
+module.exports.validatorMaxStepsFor = require("./utils/fs").validatorMaxStepsFor;
+module.exports.writePromptDump = require("./utils/fs").writePromptDump;
+module.exports.installmentNumberFromDir = require("./utils/fs").installmentNumberFromDir;
 
 // ─── Task ───────────────────────────────────────────────────────────────────
 
@@ -970,9 +815,7 @@ async function runVolumeAgent(ctx) {
     maxSteps: 40,
   });
   try {
-    /**
-     * the logic for generating the wiki
-     */
+    // the logic for generating the wiki
     if (wikiAndSharedWikiExists) {
       console.log("Wiki for the current volume exists. skipping initial generation and proceeding to validation");
     } else {
@@ -1063,10 +906,8 @@ async function runQaLoopAgent(ctx, author) {
     }
     await assertWrote(validationOutputFile, "the validator agent");
 
-    /**
-     * the logic for checking whether the validated wiki is acceptable
-     * (always one-shot, tool-less)
-     */
+    // the logic for checking whether the validated wiki is acceptable
+    // (always one-shot, tool-less)
     console.log("Calling the AI for the acceptance check...");
 
     const acceptanceOutput = await harness.runOneShot({
@@ -1088,9 +929,7 @@ async function runQaLoopAgent(ctx, author) {
       break;
     }
 
-    /**
-     * the logic for applying the validation feedback (same author session)
-     */
+    // the logic for applying the validation feedback (same author session)
     console.log("Calling the AI to apply the validation feedback (author agent)...");
 
     await author.sendTurn(

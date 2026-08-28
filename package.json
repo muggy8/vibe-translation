@@ -11,9 +11,17 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "ai",
+    "glossary",
+    "wiki",
+    "translation",
+    "openai",
+    "openharness",
+    "light-novel"
+  ],
+  "author": "ai-client contributors",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "@ai-sdk/openai": "^3.0.104",

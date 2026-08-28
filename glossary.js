@@ -59,8 +59,10 @@ const {
   isPassingVerdict,
   validatorMaxStepsFor,
   writePromptDump,
-} = require("./jump-in-wiki");
+} = require("./utils/fs");
 const { getTranslationTarget } = require("./get-translation-target");
+const { AGENT_TOOLS_NOTE } = require("./shared");
+const { fileExists, assertWrote } = require("./utils/fs");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -92,19 +94,6 @@ const researchEnabled = process.env.RESEARCH_ENABLED !== "false";
 // stages with OpenHarness tool-calling agents (harness.js); "classic" uses the
 // original single-shot pipeline (same prompts, same outputs, no tools).
 const agentMode = (process.env.RESEARCH_MODE || "agent").toLowerCase() !== "classic";
-
-// Appended to the system prompts of agent-mode stages so the mode-agnostic
-// prompt files keep working in both modes.
-const AGENT_TOOLS_NOTE = `
-
-## File Tools (agent mode)
-
-You have file tools: readFile, listFiles, grep, writeFile, and editFile.
-- Your working folder is the volume folder; use paths relative to it (e.g. "glossary.md").
-- Read every material listed in the request with readFile before doing anything. Large files may need several reads (use offset/limit to page through).
-- Write your output files with writeFile (complete contents) or editFile (targeted fixes).
-- Never paste file contents into your chat reply. When you are done, reply with a short summary: what you read, what you wrote, and any problems you hit.
-`;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -140,37 +129,6 @@ function parseTerms(output) {
       type: typeof entry.type === "string" && entry.type.trim() !== "" ? entry.type.trim() : "concept",
       query: typeof entry.query === "string" && entry.query.trim() !== "" ? entry.query.trim() : entry.term.trim(),
     }));
-}
-
-/**
- * Check whether a file exists.
- *
- * @param {string} filePath - The path to check.
- * @returns {Promise<boolean>}
- */
-async function fileExists(filePath) {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Fail loudly if an agent-mode stage left its output file missing or empty
- * (agent runs can finish without having written the file).
- *
- * @param {string} filePath - The expected output file.
- * @param {string} who - Who was supposed to write it (for the error message).
- */
-async function assertWrote(filePath, who) {
-  const content = await fs.readFile(filePath, "utf-8").catch(() => null);
-  if (!content || !content.trim()) {
-    throw new Error(
-      `${who} did not produce ${filePath}. Check the run log in .logs/ for the agent transcript.`
-    );
-  }
 }
 
 // ─── Agent-mode prompt builders ─────────────────────────────────────────────

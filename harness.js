@@ -38,7 +38,6 @@ const fs = require("fs");
 const path = require("path");
 const { fileTypeFromBuffer } = require("file-type");
 const { Agent: UndiciAgent } = require("undici");
-const { z } = require("zod");
 const { tool, generateText } = require("ai");
 
 // Local LLM servers (e.g. llama.cpp) can take many minutes to prefill a huge

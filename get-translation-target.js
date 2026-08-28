@@ -52,6 +52,7 @@ const fs = require("fs").promises;
 const path = require("path");
 const { orderBy } = require("natural-orderby");
 const harness = require("./harness");
+const { extractJsonObject, installmentNumberFromDir, fileExists } = require("./utils/fs");
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -99,38 +100,7 @@ const DISCOVERY_SYSTEM_PROMPT = [
 ].join("\n");
 
 // ─── Pure helpers ───────────────────────────────────────────────────────────
-
-/**
- * Extract a JSON object from a string that may wrap it in markdown code fences
- * or surrounding prose. This is the salvage path used when the agent returns
- * the manifest in its chat reply instead of (or in addition to) writing it to
- * disk.
- *
- * @param {string} text - The raw text to extract from.
- * @returns {Object} The parsed outermost JSON object.
- * @throws {Error} When no parseable JSON object can be found.
- */
-function extractJsonObject(text) {
-  if (typeof text !== "string" || text.trim() === "") {
-    throw new Error("No text to extract a JSON object from.");
-  }
-  let t = text.trim();
-  // Strip a markdown code fence if the model wrapped the JSON in one.
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) t = fence[1].trim();
-  // Take the span from the first '{' to the last '}'.
-  const start = t.indexOf("{");
-  const end = t.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error("No JSON object found in the text.");
-  }
-  const candidate = t.slice(start, end + 1);
-  try {
-    return JSON.parse(candidate);
-  } catch (err) {
-    throw new Error(`Could not parse a JSON object from the text: ${err.message}`);
-  }
-}
+// The JSON extraction and installment-number helpers are in utils/fs.js.
 
 /**
  * Validate the shape of a translation-target manifest. This is a pure check
@@ -178,36 +148,7 @@ function validateManifest(manifest) {
 }
 
 // ─── Discovery backends ─────────────────────────────────────────────────────
-
-/**
- * Derive a zero-padded installment number from the trailing "(N)" of a folder
- * name. A local copy of the helper in jump-in-wiki.js (kept here so this module
- * has no require dependency on the task modules, which would be circular).
- *
- * @param {string} dir - A folder path (only its base name is used).
- * @returns {string} The zero-padded installment number.
- * @throws {Error} When the folder name has no trailing "(N)".
- */
-function installmentNumberFromDir(dir) {
-  const match = path.basename(dir).match(/\((\d+)\)\s*$/);
-  if (!match) {
-    throw new Error(`Cannot derive the installment number from folder name: ${dir}`);
-  }
-  return match[1].padStart(2, "0");
-}
-
-/**
- * @param {string} p - A file path.
- * @returns {Promise<boolean>} True when the path exists and is accessible.
- */
-async function fileExists(p) {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// The installment-number and file-exists helpers are in utils/fs.js.
 
 /**
  * Build a manifest with the legacy hard-coded convention (no AI call). This is
@@ -519,7 +460,8 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
 module.exports = {
   getTranslationTarget,
   buildDeterministicManifest,
-  extractJsonObject,
+  // Re-exported from utils/fs.js for backwards compatibility.
+  extractJsonObject: require("./utils/fs").extractJsonObject,
   validateManifest,
   manifestSourcesExist,
   buildDiscoveryTurnPrompt,
