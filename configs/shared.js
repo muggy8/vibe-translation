@@ -9,7 +9,7 @@
 
 /**
  * Appended to the system prompts of agent-mode stages so the mode-agnostic
- * prompt files keep working in both modes.
+ * prompt files keep working.
  *
  * @type {string}
  */

@@ -12,24 +12,19 @@
  *        (system-prompts/glossary-terms.md and user-prompts/glossary-terms.md).
  *        (A single-shot call in both modes: exhaustive one-pass JSON.)
  *     3. Research those new terms:
- *        - RESEARCH_MODE=agent (default): a researcher agent (harness.js) with
+ *        - agent: a researcher agent (harness.js) with
  *          Wikipedia tools decides per term what to search and extract, and
  *          writes the notes to <volume folder>/glossary-research.md.
- *        - RESEARCH_MODE=classic: the fixed client-side batch (research.js).
  *     4. Amend the glossary — carry forward every existing term and add the
  *        new ones — using the amend prompts (system-prompts/glossary.md and
  *        user-prompts/glossary.md):
- *        - agent mode: an author agent (per-volume session) reads the
+ *        - agent: an author agent (per-volume session) reads the
  *          materials with file tools and writes glossary.md directly.
- *        - classic mode: a single-shot call whose output is saved to
- *          glossary.md.
  *     5. Save a per-volume snapshot to <volume folder>/glossary.md.
  *     6. Run the QA loop until the glossary passes the acceptance check or the
  *        iteration cap (MAX_VALIDATION_ITERATIONS, default 3) is reached:
  *          a. Validate the glossary against the source (glossary-validator.md)
- *             — agent mode: an independent validator agent writes the report;
- *             classic: the single-shot output is saved to
- *             <volume folder>/glossary-validation.md.
+ *             — an independent validator agent writes the report.
  *          b. Acceptance check (glossary-acceptance.md): PASS or FAIL
  *             (always a tool-less single-shot call).
  *          c. On PASS, stop. Otherwise, apply the feedback
@@ -54,7 +49,6 @@ const fs = require("fs").promises;
 const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
-const { researchTerms, formatResearchNotes } = require("./research");
 const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE } = require("./configs/shared");
@@ -85,11 +79,6 @@ const maxValidationIterations = Math.max(
 
 // Whether to run web research for the new terms (default: enabled).
 const researchEnabled = process.env.RESEARCH_ENABLED !== "false";
-
-// The workflow mode: "agent" (default) drives the research/amend/validate
-// stages with OpenHarness tool-calling agents (harness.js); "classic" uses the
-// original single-shot pipeline (same prompts, same outputs, no tools).
-const agentMode = (process.env.RESEARCH_MODE || "agent").toLowerCase() !== "classic";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -423,53 +412,33 @@ async function glossary() {
       const illustrativeTerms = [
         { term: "（例の用語）", type: "character", query: "（例の用語）" },
       ];
-      const sections = agentMode
-        ? [
-            { title: "One-shot — terms extraction system prompt (both modes)", prompt: termsSystemPrompt },
-            { title: "One-shot — terms extraction user prompt (both modes)", prompt: termsPrompt },
-            { title: "AGENT — researcher system prompt", prompt: RESEARCHER_SYSTEM_PROMPT },
-            {
-              title: "AGENT — researcher turn (illustrative term list)",
-              prompt: buildGlossaryResearcherTurnPrompt(ctx, illustrativeTerms),
-            },
-            { title: "AGENT — author system prompt", prompt: glossarySystemPrompt + AGENT_TOOLS_NOTE },
-            {
-              title: "AGENT — author turn (illustrative term list)",
-              prompt: buildGlossaryAuthorTurnPrompt(ctx, illustrativeTerms, false),
-            },
-            { title: "AGENT — validator system prompt", prompt: validatorSystemPrompt + AGENT_TOOLS_NOTE },
-            { title: "AGENT — validator turn", prompt: buildGlossaryValidatorTurnPrompt(ctx) },
-            { title: "AGENT — feedback turn (applied by the author session)", prompt: buildGlossaryFeedbackTurnPrompt(ctx) },
-            { title: "One-shot — acceptance user prompt (always tool-less)", prompt: acceptancePrompt },
-          ]
-        : [
-            { title: "CLASSIC — terms extraction system prompt", prompt: termsSystemPrompt },
-            { title: "CLASSIC — terms extraction user prompt", prompt: termsPrompt },
-            { title: "CLASSIC — amend system prompt", prompt: glossarySystemPrompt },
-            {
-              title: "CLASSIC — amend user prompt (empty term list; the real list comes from the extraction call)",
-              prompt: transformUserPrompt(glossaryTemplate, {
-                ...values,
-                TERMS_LIST: "(no new terms found in this volume)",
-                RESEARCH_NOTES: "(research disabled or no new terms to research)",
-              }),
-            },
-            { title: "CLASSIC — validator system prompt", prompt: validatorSystemPrompt },
-            { title: "CLASSIC — validator user prompt", prompt: validatorPrompt },
-            { title: "CLASSIC — feedback system prompt", prompt: feedbackSystemPrompt },
-            { title: "CLASSIC — feedback user prompt", prompt: feedbackPrompt },
-            { title: "CLASSIC — acceptance system prompt", prompt: acceptanceSystemPrompt },
-            { title: "CLASSIC — acceptance user prompt", prompt: acceptancePrompt },
-          ];
+      const sections = [
+        { title: "One-shot — terms extraction system prompt", prompt: termsSystemPrompt },
+        { title: "One-shot — terms extraction user prompt", prompt: termsPrompt },
+        { title: "AGENT — researcher system prompt", prompt: RESEARCHER_SYSTEM_PROMPT },
+        {
+          title: "AGENT — researcher turn (illustrative term list)",
+          prompt: buildGlossaryResearcherTurnPrompt(ctx, illustrativeTerms),
+        },
+        { title: "AGENT — author system prompt", prompt: glossarySystemPrompt + AGENT_TOOLS_NOTE },
+        {
+          title: "AGENT — author turn (illustrative term list)",
+          prompt: buildGlossaryAuthorTurnPrompt(ctx, illustrativeTerms, false),
+        },
+        { title: "AGENT — validator system prompt", prompt: validatorSystemPrompt + AGENT_TOOLS_NOTE },
+        { title: "AGENT — validator turn", prompt: buildGlossaryValidatorTurnPrompt(ctx) },
+        { title: "AGENT — feedback turn (applied by the author session)", prompt: buildGlossaryFeedbackTurnPrompt(ctx) },
+        { title: "One-shot — acceptance user prompt (always tool-less)", prompt: acceptancePrompt },
+      ];
       const dumpFile = await writePromptDump(
         "glossary",
         values.INSTALLMENT_NUMBER,
-        agentMode ? "agent" : "classic",
+        "agent",
         sections
       );
       console.log(
         `Volume ${values.INSTALLMENT_NUMBER}: --dry-run: no AI calls. ` +
-          `The exact prompts (${agentMode ? "agent-mode turns + tool-less stages" : "classic one-shot pipeline"}) ` +
+          `The exact prompts (agent-mode turns + tool-less stages) ` +
           `are written to ${dumpFile}`
       );
       continue;
@@ -503,11 +472,7 @@ async function glossary() {
     // A volume is being (re)generated; later volumes depend on it.
     regeneratedAny = true;
 
-    if (agentMode) {
-      await runVolumeAgent(ctx);
-    } else {
-      await runVolumeClassic(ctx);
-    }
+    await runVolumeAgent(ctx);
   }
 
   // Copy the last volume's glossary to the series root for easy access
@@ -535,7 +500,7 @@ async function glossary() {
 }
 
 /**
- * Shared acceptance check (both modes): always a tool-less single-shot call.
+ * Shared acceptance check: always a tool-less single-shot call.
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
  * @param {number} iteration - The current QA iteration (for the log label).
@@ -565,139 +530,9 @@ async function acceptanceCheck(ctx, iteration) {
 }
 
 /**
- * Classic mode: the original single-shot pipeline (inlined materials,
- * model output saved to the output files).
- *
- * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
- */
-async function runVolumeClassic(ctx) {
-  const {
-    values,
-    sourceFile,
-    glossaryOutputFile,
-    validationOutputFile,
-    isFirst,
-    previousGlossaryFile,
-    termsPrompt,
-    validatorPrompt,
-    feedbackPrompt,
-    glossaryTemplate,
-    termsSystemPrompt,
-    glossarySystemPrompt,
-    validatorSystemPrompt,
-    feedbackSystemPrompt,
-  } = ctx;
-
-  // The base messages: the source text + the previous glossary (if any).
-  const baseMessages = [{ file: sourceFile, name: path.basename(sourceFile) }];
-  if (!isFirst) {
-    baseMessages.push({ file: previousGlossaryFile, name: "glossary-previous.md" });
-  }
-
-  // Pass 1: extract the new terms from this volume's source.
-  console.log(`Volume ${values.INSTALLMENT_NUMBER}: extracting new terms...`);
-  const termsOutput = await harness.runOneShot({
-    systemPrompt: termsSystemPrompt,
-    messages: [...baseMessages, { text: termsPrompt }],
-    label: `glossary-terms-${values.INSTALLMENT_NUMBER}`,
-  });
-  let terms = [];
-  try {
-    terms = parseTerms(termsOutput);
-  } catch (err) {
-    console.warn(
-      `Volume ${values.INSTALLMENT_NUMBER}: could not parse the term list ` +
-        `(${err.message}). Continuing without research.`
-    );
-  }
-  console.log(
-    `Volume ${values.INSTALLMENT_NUMBER}: extracted ${terms.length} new term(s).`
-  );
-
-  // Research the new terms (fixed client-side batch).
-  let researchNotesText = "(research disabled or no new terms to research)";
-  if (researchEnabled && terms.length > 0) {
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: researching ${terms.length} new term(s)...`
-    );
-    const notes = await researchTerms(terms);
-    researchNotesText = formatResearchNotes(notes);
-  }
-
-  // Pass 2: amend the glossary (carry forward + add new terms).
-  console.log(`Volume ${values.INSTALLMENT_NUMBER}: amending the glossary...`);
-  const termsListText =
-    terms.length > 0
-      ? terms.map((t) => `- ${t.term} (${t.type})`).join("\n")
-      : "(no new terms found in this volume)";
-  const amendPrompt = transformUserPrompt(glossaryTemplate, {
-    ...values,
-    TERMS_LIST: termsListText,
-    RESEARCH_NOTES: researchNotesText,
-  });
-  const amendOutput = await harness.runOneShot({
-    systemPrompt: glossarySystemPrompt,
-    messages: [...baseMessages, { text: amendPrompt }],
-    label: `glossary-amend-${values.INSTALLMENT_NUMBER}`,
-  });
-  await fs.writeFile(glossaryOutputFile, amendOutput.trim(), "utf-8");
-  console.log(
-    `Volume ${values.INSTALLMENT_NUMBER}: saved the glossary to ${glossaryOutputFile}`
-  );
-
-  // QA loop: validate -> acceptance -> feedback.
-  for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: validation iteration ` +
-        `${iteration}/${maxValidationIterations}...`
-    );
-
-    // Validate the amended glossary against the source.
-    const validationReport = await harness.runOneShot({
-      systemPrompt: validatorSystemPrompt,
-      messages: [
-        ...baseMessages,
-        { file: glossaryOutputFile, name: "glossary.md" },
-        { text: validatorPrompt },
-      ],
-      label: `glossary-validate-${values.INSTALLMENT_NUMBER}-${iteration}`,
-    });
-    await fs.writeFile(validationOutputFile, validationReport, "utf-8");
-
-    // Acceptance check.
-    if (await acceptanceCheck(ctx, iteration)) {
-      break;
-    }
-
-    // Apply the feedback to the failing glossary.
-    const feedbackOutput = await harness.runOneShot({
-      systemPrompt: feedbackSystemPrompt,
-      messages: [
-        ...baseMessages,
-        { file: validationOutputFile, name: "glossary-validation.md" },
-        { file: glossaryOutputFile, name: "glossary.md" },
-        { text: feedbackPrompt },
-      ],
-      label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}`,
-    });
-    await fs.writeFile(glossaryOutputFile, feedbackOutput.trim(), "utf-8");
-
-    if (iteration === maxValidationIterations) {
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
-          `without a passing grade. The last feedback pass is unvalidated; ` +
-          `re-run to validate it.`
-      );
-      break;
-    }
-  }
-}
-
-/**
- * Agent mode: research (researcher agent with wiki tools) -> amend (author
- * agent, per-volume session, writes glossary.md with file tools) -> QA loop
- * (independent validator agent + one-shot acceptance + same author session
- * for feedback).
+ * Process a single volume: extract terms -> research (researcher agent) ->
+ * amend the glossary (author agent) -> QA loop (validator agent + acceptance
+ * + feedback).
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
  */
@@ -836,21 +671,21 @@ async function runVolumeAgent(ctx) {
       `Volume ${values.INSTALLMENT_NUMBER}: saved the glossary to ${glossaryOutputFile}`
     );
 
-    await runQaLoopAgent(ctx, author);
+    await runQaLoop(ctx, author);
   } finally {
     await author.close();
   }
 }
 
 /**
- * Agent-mode QA loop: independent validator agent (fresh per iteration) ->
+ * QA loop: independent validator agent (fresh per iteration) ->
  * one-shot acceptance -> feedback applied by the same author session that
  * wrote the glossary.
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (must include ctx.fsGate).
  * @param {AgentHandle} author - The author agent handle (keeps its session).
  */
-async function runQaLoopAgent(ctx, author) {
+async function runQaLoop(ctx, author) {
   const {
     values,
     volumeDir,

@@ -47,27 +47,4 @@ async function writePromptDump(task, installmentNumber, mode, sections) {
   return file;
 }
 
-function splitJumpInWikiGenerationOutput(output) {
-  if (!output) return ["", ""];
-  const lines = output.replace(/\r\n/g, "\n").split("\n");
-  const wikiMarkerRe = /^----\s+jump-in-wiki-?\d*\.md\s+----$/;
-  const sharedMarkerRe = /^----\s+jump-in-wiki-shared\.md\s+----$/;
-  const endMarkerRe = /^----\s+end\s+----$/;
-  let wikiMarkerIdx = -1, sharedMarkerIdx = -1, endIdx = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (wikiMarkerIdx === -1 && wikiMarkerRe.test(trimmed)) wikiMarkerIdx = i;
-    else if (sharedMarkerIdx === -1 && sharedMarkerRe.test(trimmed)) sharedMarkerIdx = i;
-    if (endMarkerRe.test(trimmed)) endIdx = i;
-  }
-  const wikiStart = wikiMarkerIdx !== -1 ? wikiMarkerIdx + 1 : 0;
-  const sharedStart = sharedMarkerIdx !== -1 ? sharedMarkerIdx + 1 : lines.length;
-  const sharedEnd = endIdx !== -1 ? endIdx : lines.length;
-  const wikiEnd = sharedMarkerIdx !== -1 ? sharedMarkerIdx : sharedEnd;
-  const wikiRaw = lines.slice(wikiStart, wikiEnd).join("\n");
-  const sharedRaw = lines.slice(sharedStart, sharedEnd).join("\n");
-  const trimBlank = (s) => s.replace(/^\n+|\n+$/g, "");
-  return [trimBlank(wikiRaw), trimBlank(sharedRaw)];
-}
-
-module.exports = { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump, splitJumpInWikiGenerationOutput };
+module.exports = { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump };

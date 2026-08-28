@@ -9,7 +9,7 @@ An agentic AI client (v2.0.0, CommonJS, Node ≥ 22.19) that processes a light-n
 - `glossary` task → a canonical target-language glossary (per-volume snapshots + a final copy at the series root)
 - `jump-in-wiki` task → a per-volume `wiki.md` plus a "living" `shared-wiki.md`
 
-It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@openharness/core`. Two workflow modes: **agent** (default — tool-calling agents read the sources and write the outputs themselves through sandboxed file tools) and **classic** (single-shot calls; the code parses and saves the model output).
+It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@openharness/core`. Tool-calling agents read the sources and write the outputs themselves through sandboxed file tools.
 
 ### Quickstart
 
@@ -30,7 +30,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 |---|---|
 | `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`). Both `glossary.js` and `jump-in-wiki.js` import from here. |
 | `utils/fs.js` | Filesystem helpers: `fileExists`, `assertWrote`. |
-| `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict`, `validatorMaxStepsFor`, `writePromptDump`, `splitJumpInWikiGenerationOutput`. |
+| `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict`, `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
 | `harness.js` | The AI layer: one-shot calls, agent handles, wiki tools, gated fs tools, provider plumbing, run logging. Never bypass it to talk to the model. |
 | `research.js` | Client-side web research (Wikipedia Action API + optional Brave/Tavily/Serper). No LLM involved. |
@@ -48,7 +48,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `.logs/` | One run log per process: `call-ai-<timestamp>.log`. |
 | `.dry-run/` | Prompt dumps from `--dry-run`. |
 
-Prompt files are **mode-agnostic**: agent mode appends a static `AGENT_TOOLS_NOTE` and rewrites file names in code (see §5), it does not fork the prompt files.
+Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOTE` to instruct the agent about file tools.
 
 ## 3. Architecture
 
@@ -78,11 +78,9 @@ Per volume, in order — each volume's glossary is built on the previous one's:
 
 1. **Extract new terms** — one-shot in both modes: source + previous `glossary.md` → JSON array of `{ term, type, query }`; parsed by `parseTerms` (tolerates markdown fences and surrounding prose).
 2. **Research** the new terms:
-   - *agent*: a researcher agent (wiki tools + gated fs). **Skeleton-first**: the code pre-writes `glossary-research.md` with a `- (pending)` line under every term, and the agent must replace each via `editFile` immediately — a crashed run still leaves a usable file. `maxSteps = max(30, 5·terms + 10)`.
-   - *classic*: the fixed `researchTerms` batch → `formatResearchNotes` inlined into the prompt.
+   - a researcher agent (wiki tools + gated fs). **Skeleton-first**: the code pre-writes `glossary-research.md` with a `- (pending)` line under every term, and the agent must replace each via `editFile` immediately — a crashed run still leaves a usable file. `maxSteps = max(30, 5·terms + 10)`.
 3. **Amend** the glossary (carry forward every existing term, add the new ones, reconcile conflicts):
-   - *agent*: an **author agent** (per-volume session, `maxSteps 40`) reads the materials with `readFile` and writes `glossary.md` with `writeFile`/`editFile`. The same session later applies the feedback passes.
-   - *classic*: one-shot, output saved to `glossary.md`.
+   - an **author agent** (per-volume session, `maxSteps 40`) reads the materials with `readFile` and writes `glossary.md` with `writeFile`/`editFile`. The same session later applies the feedback passes.
 4. **QA loop**: a fresh validator agent per iteration (step cap **scaled to source size**: `max(40, 2·ceil(bytes/32KB) + 24)` — `validatorMaxStepsFor`) writes `glossary-validation.md` → acceptance one-shot → on FAIL the author session applies the feedback.
 5. After all volumes: the **last** volume's `glossary.md` is copied to `GLOSSARY_OUTPUT_FILE` (default `<SERIES_LOCATION>/glossary.md`). Skipped for `--volume` runs (a single volume's snapshot would be stale).
 
@@ -95,12 +93,10 @@ Artifacts per volume folder: `glossary.md` (snapshot), `glossary-research.md`, `
 Per volume:
 
 1. **Generate** `wiki.md` + `shared-wiki.md` (context: the previous volume's `wiki.md` + `shared-wiki.md`):
-   - *agent*: an author agent (per-volume session, `maxSteps 40`). Stubs are pre-created for both files (a stronger name anchor than "create a new file", and a crashed run leaves identifiable stubs). Safety nets, each added after a live failure:
+   - an author agent (per-volume session, `maxSteps 40`). Stubs are pre-created for both files (a stronger name anchor than "create a new file", and a crashed run leaves identifiable stubs). Safety nets, each added after a live failure:
      - `agentOutputNames()` — rewrites the classic marker file names inside the prompts to `wiki.md`/`shared-wiki.md` (the prompts were originally written for classic mode; the model used to write files under the wrong names);
-     - `stripMarkerOutputFormat()` — removes the `## Output Format` marker section in agent mode (it conflicts with file tools);
      - `adoptStrayOutput()` — if the expected file is missing, renames the best stray non-empty `.md` (protecting known files, scoring by "wiki"/digits/mtime).
      Stale classic-named files (`jump-in-wiki-NN.md`, `jump-in-wiki-shared.md`) are deleted up front so agents can't audit garbage.
-   - *classic*: one-shot with the marker format (`---- jump-in-wiki-NN.md ----` … `---- jump-in-wiki-shared.md ----` … `---- end ----`), split by `splitJumpInWikiGenerationOutput` (degrades leniently when markers are missing).
 2. **QA loop**: a validator agent writes `jump-in-wiki-validation-NN.md` (size-scaled step cap) → acceptance one-shot → on FAIL the same author session applies the feedback (stray adoption re-checked afterwards).
 3. **Two-tier idempotency**: if `wiki.md` + `shared-wiki.md` exist → skip generation, go straight to validation; if a validation report exists and passes acceptance → skip the whole volume.
 4. End-of-run summary counts the volumes that hit the iteration limit.
@@ -119,7 +115,6 @@ Per volume:
 | `SERIES_LOCATION` | — (required) | Folder containing the volume folders |
 | `SOURCE_LANGUAGE` / `TARGET_LANGUAGE` | Japanese / English | Filled into the prompts |
 | `MAX_VALIDATION_ITERATIONS` | `3` | QA-loop cap per volume |
-| `RESEARCH_MODE` | `agent` | `agent` (tool-calling agents) or `classic` (single-shot) |
 | `CONTEXT_WINDOW` | `128000` | Tokens at which agent sessions auto-compact |
 | `AGENT_MAX_STEPS` | `20` | Default step cap for tool agents (workflows pass higher caps where needed) |
 | `GLOSSARY_OUTPUT_FILE` | `<SERIES_LOCATION>/glossary.md` | Final glossary location |
@@ -137,7 +132,7 @@ Per volume:
 
 1. **`THINKING` must stay off** for real work. Observed live on this Qwen setup: thinking ON burned 3.5 hours and 235k characters of reasoning on the volume-01 extraction with *zero content*, and agent runs took 17 minutes instead of ~30 seconds. Only enable it for short prompts (e.g. the acceptance check) and expect `MAX_TOKENS` to cover the reasoning spend.
 2. **Never let a stage persist empty output.** `runOneShot` throws on empty by design; agent stages are guarded by `assertWrote` (missing/empty file → hard error pointing at `.logs/`). If you add a stage, add both guarantees.
-3. **Do not touch the agent-mode prompt safety nets** (`agentOutputNames`, `stripMarkerOutputFormat`, `adoptStrayOutput`, the stray-file cleanups): each was added after a live failure (wrong file names, stale strays being audited, marker-format conflicts). The pure tests pin their behavior — run `npm test` after touching any prompt or file name.
+3. **Do not touch the agent-mode prompt safety nets** (`agentOutputNames`, `adoptStrayOutput`, the stray-file cleanups): each was added after a live failure (wrong file names, stale strays being audited, marker-format conflicts). The pure tests pin their behavior — run `npm test` after touching any prompt or file name.
 4. **Validator step caps scale with source size** (`validatorMaxStepsFor`): a fixed cap of 40 ran out on the 521KB volume-01 source before the validator wrote its report.
 5. **The glossary is cumulative** — see the §4 invariant (`regeneratedAny`).
 6. **Skip-checks cost a live model call** even when the volume is skipped.

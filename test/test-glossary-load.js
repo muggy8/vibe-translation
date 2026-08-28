@@ -17,12 +17,12 @@ const {
 } = require("../glossary");
 const {
   transformUserPrompt,
-  splitJumpInWikiGenerationOutput,
   isPassingVerdict,
   installmentNumberFromDir,
   agentOutputNames,
-  validatorMaxStepsFor,
   adoptStrayOutput,
+  validatorMaxStepsFor,
+  writePromptDump,
   buildWikiAuthorSystemPrompt,
   buildWikiValidatorSystemPrompt,
   buildWikiAuthorTurnPrompt,
@@ -63,28 +63,6 @@ assert.strictEqual(
 );
 assert.throws(() => transformUserPrompt("{{A}}", { A: "" }), /Missing value/);
 assert.throws(() => transformUserPrompt("{{A}} {{B}}", { A: "1" }), /Unfilled placeholder/);
-
-// ─── splitJumpInWikiGenerationOutput ────────────────────────────────────────
-const full = [
-  "---- jump-in-wiki-01.md ----",
-  "",
-  "Wiki content",
-  "",
-  "---- jump-in-wiki-shared.md ----",
-  "",
-  "Shared content",
-  "",
-  "---- end ----",
-].join("\n");
-assert.deepStrictEqual(splitJumpInWikiGenerationOutput(full), ["Wiki content", "Shared content"]);
-
-// Tolerates a missing "---- end ----" marker.
-const noEnd = full.replace("---- end ----\n", "");
-assert.deepStrictEqual(splitJumpInWikiGenerationOutput(noEnd), ["Wiki content", "Shared content"]);
-
-// A missing shared marker must not drop the wiki's last lines.
-const noSharedMarker = "---- jump-in-wiki-01.md ----\n\nOnly wiki\n---- end ----\n";
-assert.deepStrictEqual(splitJumpInWikiGenerationOutput(noSharedMarker), ["Only wiki", ""]);
 
 // ─── isPassingVerdict ───────────────────────────────────────────────────────
 assert.strictEqual(isPassingVerdict("PASS"), true);
@@ -198,39 +176,31 @@ const wikiCtx = {
 const wikiAuthorTurn = buildWikiAuthorTurnPrompt(wikiCtx);
 assert.ok(wikiAuthorTurn.includes('"wiki.md"'), "wiki author turn names wiki.md");
 assert.ok(wikiAuthorTurn.includes('"shared-wiki.md"'), "wiki author turn names shared-wiki.md");
-assert.ok(!wikiAuthorTurn.includes("jump-in-wiki-01.md"), "wiki author turn: no classic volume name");
-assert.ok(!wikiAuthorTurn.includes("jump-in-wiki-shared.md"), "wiki author turn: no classic shared name");
-assert.ok(!/----\s+jump-in-wiki/.test(wikiAuthorTurn), "wiki author turn: marker format stripped");
 assert.ok(wikiAuthorTurn.includes('"story_name(1).md"'), "wiki author turn points at the same-folder source");
 assert.ok(!wikiAuthorTurn.includes("../story_name"), "wiki author turn (first volume): no previous-volume paths");
 
-// The system prompts also get rewritten: they describe the classic file
-// layout (including the full-width-minus "N−1" form) and would otherwise
-// contradict the turn prompts (observed in the live prompt dumps).
+// ─── agentOutputNames / system prompts (agent mode: prompts use new file names) ──
+
+// In agent-only mode the prompt files use the new file names directly
+// (wiki.md / shared-wiki.md). The buildWikiAuthorSystemPrompt and
+// buildWikiValidatorSystemPrompt simply append AGENT_TOOLS_NOTE.
 wikiCtx.systemPrompt =
-  "Layout: `jump-in-wiki-NN.md`, `jump-in-wiki-01.md` through " +
-  "`jump-in-wiki-(N−1).md`, and `jump-in-wiki-shared.md`.";
-wikiCtx.validatorSystemPrompt = "Audits the classic wiki files: jump-in-wiki-NN.md and jump-in-wiki-shared.md.";
+  "Layout: `wiki.md` and `shared-wiki.md`.";
+wikiCtx.validatorSystemPrompt = "Audits wiki.md and shared-wiki.md.";
 const wikiAuthorSystem = buildWikiAuthorSystemPrompt(wikiCtx);
-assert.ok(!wikiAuthorSystem.includes("jump-in-wiki-"), "wiki author system prompt: all classic names rewritten");
+assert.ok(wikiAuthorSystem.includes("wiki.md"), "wiki author system prompt names wiki.md");
 assert.ok(wikiAuthorSystem.includes("shared-wiki.md"), "wiki author system prompt names shared-wiki.md");
-assert.ok(wikiAuthorSystem.includes("../(previous volume folder)/wiki.md"), "wiki author system prompt rewrites the N−1 form");
 const wikiValidatorSystem = buildWikiValidatorSystemPrompt(wikiCtx);
-assert.ok(!wikiValidatorSystem.includes("jump-in-wiki-NN.md"), "wiki validator system prompt: classic names rewritten");
-assert.ok(!wikiValidatorSystem.includes("jump-in-wiki-shared.md"), "wiki validator system prompt: shared name rewritten");
+assert.ok(wikiValidatorSystem.includes("wiki.md"), "wiki validator system prompt names wiki.md");
+assert.ok(wikiValidatorSystem.includes("shared-wiki.md"), "wiki validator system prompt names shared-wiki.md");
 
 const wikiValidatorTurn = buildWikiValidatorTurnPrompt(wikiCtx);
 assert.ok(wikiValidatorTurn.includes('"wiki.md"'), "wiki validator turn names wiki.md");
 assert.ok(wikiValidatorTurn.includes('"shared-wiki.md"'), "wiki validator turn names shared-wiki.md");
 assert.ok(wikiValidatorTurn.includes("jump-in-wiki-validation-01.md"), "wiki validator turn keeps the real report name");
-assert.ok(!wikiValidatorTurn.includes("jump-in-wiki-01.md"), "wiki validator turn: no classic volume name");
-assert.ok(!wikiValidatorTurn.includes("jump-in-wiki-shared.md"), "wiki validator turn: no classic shared name");
 
 const wikiFeedbackTurn = buildWikiFeedbackTurnPrompt(wikiCtx);
-assert.ok(!wikiFeedbackTurn.includes("jump-in-wiki-01.md"), "wiki feedback turn: no classic volume name");
-assert.ok(!wikiFeedbackTurn.includes("jump-in-wiki-shared.md"), "wiki feedback turn: no classic shared name");
 assert.ok(wikiFeedbackTurn.includes('"wiki.md"') && wikiFeedbackTurn.includes('"shared-wiki.md"'), "wiki feedback turn names the real files");
-assert.ok(!/----\s+jump-in-wiki/.test(wikiFeedbackTurn), "wiki feedback turn: marker format stripped");
 
 // A non-first volume points the agents at the previous volume's files.
 const wikiCtx2 = { ...wikiCtx, isFirst: false, previousFolderName: "story_name(1)" };

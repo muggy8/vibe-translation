@@ -9,18 +9,16 @@
  *        - <volume folder>/shared-wiki.md (the updated "living" shared wiki)
  *        using the generation prompts (system-prompts/jump-in-wiki.md and
  *        user-prompts/jump-in-wiki.md):
- *        - RESEARCH_MODE=agent (default): an author agent (per-volume session)
- *          reads the source and previous wikis with file tools and writes both
- *          files directly (no marker-based output parsing).
- *        - RESEARCH_MODE=classic: a single-shot call whose marker-formatted
- *          output is split and saved (splitJumpInWikiGenerationOutput).
+ *        - agent: an author agent (per-volume session) reads the source and
+ *          previous wikis with file tools and writes both files directly
+ *          (no marker-based output parsing).
  *     2. Repeats the following until the wiki passes the acceptance check or
  *        the iteration cap (MAX_VALIDATION_ITERATIONS, default 3) is reached:
  *        a. Validates the wiki with the validator prompts
  *           (system-prompts/jump-in-wiki-validator.md and
  *           user-prompts/jump-in-wiki-validator.md), saving the report to
- *           <volume folder>/jump-in-wiki-validation-NN.md (agent mode: a
- *           validator agent writes the report; classic: single-shot output).
+ *           <volume folder>/jump-in-wiki-validation-NN.md (a validator agent
+ *           writes the report).
  *        b. Asks the acceptance prompts (system-prompts/jump-in-wiki-acceptance.md
  *           and user-prompts/jump-in-wiki-acceptance.md) whether the wiki is a
  *           passing grade (PASS) or not (FAIL). Always a tool-less single-shot
@@ -28,8 +26,7 @@
  *        c. On PASS, stops. Otherwise, applies the feedback prompts
  *           (system-prompts/jump-in-wiki-feedback.md and
  *           user-prompts/jump-in-wiki-feedback.md) to correct the wiki
- *           (agent mode: the same author session; classic: single-shot +
- *           marker split), then repeats from (a).
+ *           (the same author session), then repeats from (a).
  *
  * Idempotent: a volume whose wiki + shared wiki already exist and pass the
  * acceptance check (from a previous run's validation report) is skipped
@@ -50,7 +47,7 @@ const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
-const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump, splitJumpInWikiGenerationOutput } = require("./utils/prompt");
+const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
@@ -73,45 +70,14 @@ const maxValidationIterations = Math.max(
   parseInt(process.env.MAX_VALIDATION_ITERATIONS, 10) || 3
 );
 
-// The workflow mode: "agent" (default) drives generation/validation/feedback
-// with OpenHarness tool-calling agents (harness.js); "classic" uses the
-// original single-shot pipeline (same prompts, same outputs, no tools).
-const agentMode = (process.env.RESEARCH_MODE || "agent").toLowerCase() !== "classic";
-
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-/**
- * Remove the marker-based "## Output Format" section from a transformed
- * prompt (agent mode only: the agent writes the files with its file tools,
- * so the marker format is not needed and would conflict with it).
- *
- * @param {string} prompt - The transformed prompt.
- * @returns {string} The prompt without the "## Output Format" section.
- */
-function stripMarkerOutputFormat(prompt) {
-  const lines = prompt.split("\n");
-  const start = lines.findIndex((l) =>
-    l.trim().toLowerCase().startsWith("## output format")
-  );
-  if (start === -1) return prompt;
-  let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
-    if (lines[i].trim().startsWith("## ")) {
-      end = i;
-      break;
-    }
-  }
-  return [...lines.slice(0, start), ...lines.slice(end)].join("\n").replace(/\n{3,}/g, "\n\n");
-}
 
 /**
  * Agent mode: rewrite the classic output file names inside a transformed
  * prompt ("jump-in-wiki-NN.md" / "jump-in-wiki-shared.md") to the real
  * workflow file names ("wiki.md" / "shared-wiki.md"). The prompts' "## Output"
  * section still lists the classic names, and a model following it writes the
- * files under the wrong names (observed live). Classic mode is unaffected —
- * it saves the parsed markers itself and never passes its prompts through
- * this helper.
+ * files under the wrong names (observed live).
  *
  * @param {string} prompt - The transformed (variables filled) prompt.
  * @returns {string} The prompt with the agent-mode file names.
@@ -189,26 +155,25 @@ function knownVolumeFileNames(ctx) {
 // without any AI call.
 
 /**
- * The author agent's system prompt (agent mode): classic file names
- * rewritten to the agent-mode names (the system prompt still describes the
- * classic file layout), plus the file-tools note.
+ * The author agent's system prompt: the mode-agnostic generation prompt with
+ * the file tools note appended.
  *
  * @param {WikiVolumeCtx} ctx - The volume context.
  * @returns {string}
  */
 function buildWikiAuthorSystemPrompt(ctx) {
-  return agentOutputNames(ctx.systemPrompt) + AGENT_TOOLS_NOTE;
+  return ctx.systemPrompt + AGENT_TOOLS_NOTE;
 }
 
 /**
- * The validator agent's system prompt (agent mode): classic file names
- * rewritten to the agent-mode names, plus the file-tools note.
+ * The validator agent's system prompt: the mode-agnostic validator prompt
+ * with the file tools note appended.
  *
  * @param {WikiVolumeCtx} ctx - The volume context.
  * @returns {string}
  */
 function buildWikiValidatorSystemPrompt(ctx) {
-  return agentOutputNames(ctx.validatorSystemPrompt) + AGENT_TOOLS_NOTE;
+  return ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE;
 }
 
 /**
@@ -223,7 +188,6 @@ function buildWikiAuthorTurnPrompt(ctx) {
     ? `- The previous volume wiki and shared wiki: (absent — this is the first volume)`
     : `- The previous volume wiki: "../${previousFolderName}/wiki.md"\n` +
       `- The previous shared wiki: "../${previousFolderName}/shared-wiki.md"`;
-  const generatePrompt = agentOutputNames(stripMarkerOutputFormat(ctx.userPrompt));
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `Materials (read with readFile before writing anything):\n` +
@@ -234,7 +198,7 @@ function buildWikiAuthorTurnPrompt(ctx) {
     `- "wiki.md" — the volume wiki (complete contents, writeFile)\n` +
     `- "shared-wiki.md" — the updated shared wiki (complete contents, writeFile)\n` +
     `Use EXACTLY these two file names — do not invent other names.\n\n` +
-    generatePrompt +
+    ctx.userPrompt +
     `\n\nRemember: the complete results go to exactly "wiki.md" and ` +
     `"shared-wiki.md" in your working folder (writeFile, complete contents).`
   );
@@ -263,7 +227,7 @@ function buildWikiValidatorTurnPrompt(ctx) {
     `\n` +
     `Write the complete validation report to the file "${validationFileName}" in ` +
     `your working folder (writeFile, exact format from the system prompt).\n\n` +
-    agentOutputNames(ctx.validatorUserPrompt)
+    ctx.validatorUserPrompt
   );
 }
 
@@ -279,7 +243,7 @@ function buildWikiFeedbackTurnPrompt(ctx) {
   const previousSharedLine = isFirst
     ? ""
     : `- The previous shared wiki: "../${previousFolderName}/shared-wiki.md"\n`;
-  const feedbackPrompt = agentOutputNames(stripMarkerOutputFormat(ctx.feedbackUserPrompt));
+  const feedbackPrompt = ctx.feedbackUserPrompt;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `The validation report "${validationFileName}" in your working folder is your ` +
@@ -298,7 +262,7 @@ function buildWikiFeedbackTurnPrompt(ctx) {
 }
 
 /**
- * Fail loudly if an agent-mode stage left its output files missing or empty
+ * Fail loudly if an agent stage left its output files missing or empty
  * (agent runs can finish without having written the files).
  *
  * @param {string[]} filePaths - The expected output files.
@@ -315,30 +279,8 @@ async function assertWrote(filePaths, who) {
   }
 }
 
-/**
- * the output of the AI should be in the following format:
- *
- * `---- jump-in-wiki-{{INSTALLMENT_NUMBER}}.md ----
- *
- * Contents of the jump in wiki
- *
- * ---- jump-in-wiki-shared.md ----
- *
- * Updated contents of the shared jump in wiki.
- *
- * ---- end ----`
- *
- * the goal of this function is to split this string up up and return
- * ['Contents of the jump in wiki', 'Updated contents of the shared jump in wiki.'].
- * sometimes the text `---- end ----` isn't included as the output comes from an AI
- * and is non deterministic. this function basically handles all those pesky edge cases
- * trimming the empty spaces and returns 2 clean strings to be saved into a file.
- * @param {String} outputFromAi - the string that's outputted form the ai.
- * @returns {[String, String]} - the 2 sections of the output to be saved.
- */
-// Re-export shared utilities from utils/fs.js, utils/prompt.js, and utils/manifest.js
+// Re-export shared utilities from utils/prompt.js and utils/manifest.js
 // for backwards compatibility (tests and glossary.js import these from here).
-module.exports.splitJumpInWikiGenerationOutput = require("./utils/manifest").splitJumpInWikiGenerationOutput;
 module.exports.transformUserPrompt = require("./utils/prompt").transformUserPrompt;
 module.exports.isPassingVerdict = require("./utils/prompt").isPassingVerdict;
 module.exports.validatorMaxStepsFor = require("./utils/prompt").validatorMaxStepsFor;
@@ -398,12 +340,6 @@ async function jumpInWiki() {
   const feedbackTemplate = await fs.readFile(feedbackUserPromptTemplateFile, "utf-8");
   const acceptanceSystemPrompt = await fs.readFile(acceptanceSystemPromptFile, "utf-8");
   const acceptanceTemplate = await fs.readFile(acceptanceUserPromptTemplateFile, "utf-8");
-
-  console.log(
-    `Workflow mode: ${agentMode
-      ? "agent (OpenHarness tool-calling agents)"
-      : "classic (single-shot pipeline)"}`
-  );
 
   let limitReachedCount = 0;
 
@@ -510,34 +446,23 @@ async function jumpInWiki() {
     };
 
     if (dryRun) {
-      const sections = agentMode
-        ? [
-            { title: "AGENT — author system prompt", prompt: buildWikiAuthorSystemPrompt(ctx) },
-            { title: "AGENT — author turn (generation)", prompt: buildWikiAuthorTurnPrompt(ctx) },
-            { title: "AGENT — validator system prompt", prompt: buildWikiValidatorSystemPrompt(ctx) },
-            { title: "AGENT — validator turn", prompt: buildWikiValidatorTurnPrompt(ctx) },
-            { title: "AGENT — feedback turn (applied by the author session)", prompt: buildWikiFeedbackTurnPrompt(ctx) },
-            { title: "One-shot — acceptance user prompt (always tool-less)", prompt: acceptanceUserPrompt },
-          ]
-        : [
-            { title: "CLASSIC — generation system prompt", prompt: systemPrompt },
-            { title: "CLASSIC — generation user prompt", prompt: userPrompt },
-            { title: "CLASSIC — validator system prompt", prompt: validatorSystemPrompt },
-            { title: "CLASSIC — validator user prompt", prompt: validatorUserPrompt },
-            { title: "CLASSIC — feedback system prompt", prompt: feedbackSystemPrompt },
-            { title: "CLASSIC — feedback user prompt", prompt: feedbackUserPrompt },
-            { title: "CLASSIC — acceptance system prompt", prompt: acceptanceSystemPrompt },
-            { title: "CLASSIC — acceptance user prompt", prompt: acceptanceUserPrompt },
-          ];
+      const sections = [
+        { title: "AGENT — author system prompt", prompt: buildWikiAuthorSystemPrompt(ctx) },
+        { title: "AGENT — author turn (generation)", prompt: buildWikiAuthorTurnPrompt(ctx) },
+        { title: "AGENT — validator system prompt", prompt: buildWikiValidatorSystemPrompt(ctx) },
+        { title: "AGENT — validator turn", prompt: buildWikiValidatorTurnPrompt(ctx) },
+        { title: "AGENT — feedback turn (applied by the author session)", prompt: buildWikiFeedbackTurnPrompt(ctx) },
+        { title: "One-shot — acceptance user prompt (always tool-less)", prompt: acceptanceUserPrompt },
+      ];
       const dumpFile = await writePromptDump(
         "jump-in-wiki",
         values.INSTALLMENT_NUMBER,
-        agentMode ? "agent" : "classic",
+        "agent",
         sections
       );
       console.log(
         `Volume ${values.INSTALLMENT_NUMBER}: --dry-run: no AI calls. ` +
-          `The exact prompts (${agentMode ? "agent-mode turns + tool-less acceptance" : "classic one-shot pipeline"}) ` +
+          `The exact prompts (agent-mode turns + tool-less acceptance) ` +
           `are written to ${dumpFile}`
       );
       continue;
@@ -570,11 +495,7 @@ async function jumpInWiki() {
       continue;
     }
 
-    if (agentMode) {
-      await runVolumeAgent(ctx);
-    } else {
-      await runVolumeClassic(ctx);
-    }
+    await runVolumeAgent(ctx);
 
     if (ctx.limitReached) {
       limitReachedCount++;
@@ -591,179 +512,9 @@ async function jumpInWiki() {
 }
 
 /**
- * Classic mode: the original single-shot pipeline (inlined materials,
- * marker-formatted model output split into the two output files).
- *
- * @param {WikiVolumeCtx} ctx - The volume context (see jumpInWiki()).
- */
-async function runVolumeClassic(ctx) {
-  const {
-    values,
-    sourceFile,
-    wikiOutputFile,
-    sharedWikiOutputFile,
-    validationOutputFile,
-    isFirst,
-    previousWikiOutputFile,
-    previousSharedWikiOutputFile,
-    userPrompt,
-    validatorUserPrompt,
-    acceptanceUserPrompt,
-    systemPrompt,
-    validatorSystemPrompt,
-    acceptanceSystemPrompt,
-    wikiAndSharedWikiExists,
-  } = ctx;
-
-  /**
-   * the logic for generating the wiki
-   */
-  if (wikiAndSharedWikiExists) {
-    console.log("Wiki for the current volume exists. skipping initial generation and proceeding to validation");
-  } else {
-    console.log("Calling the AI for initial wiki generation...");
-    let output;
-    if (isFirst) {
-      output = await harness.runOneShot({
-        systemPrompt,
-        messages: [
-          { file: sourceFile, name: path.basename(sourceFile) },
-          { text: userPrompt },
-        ],
-        label: `jump-in-wiki-generate-${values.INSTALLMENT_NUMBER}`,
-      });
-    } else {
-      output = await harness.runOneShot({
-        systemPrompt,
-        messages: [
-          { file: sourceFile, name: path.basename(sourceFile) },
-          { file: previousWikiOutputFile, name: "previous-jump-in-wiki.md" },
-          { file: previousSharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
-          { text: userPrompt },
-        ],
-        label: `jump-in-wiki-generate-${values.INSTALLMENT_NUMBER}`,
-      });
-    }
-
-    const [wiki, sharedWiki] = splitJumpInWikiGenerationOutput(output);
-
-    await fs.writeFile(wikiOutputFile, wiki, "utf-8");
-    await fs.writeFile(sharedWikiOutputFile, sharedWiki, "utf-8");
-  }
-
-  /**
-   * the logic for validating the generated wiki, checking acceptance, and
-   * applying the validation feedback — repeated until the wiki passes the
-   * acceptance check or the iteration cap is reached.
-   */
-  for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
-    console.log(`Validation iteration ${iteration}/${maxValidationIterations}...`);
-
-    /**
-     * the logic for validating the generated wiki
-     */
-    console.log("Calling the AI for validation...");
-
-    const validationMessages = [
-      { file: sourceFile, name: path.basename(sourceFile) },
-      { file: wikiOutputFile, name: `jump-in-wiki-${values.INSTALLMENT_NUMBER}.md` },
-      { file: sharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
-    ];
-    if (!isFirst) {
-      validationMessages.push({
-        file: previousSharedWikiOutputFile,
-        name: "jump-in-wiki-shared.old.md",
-      });
-    }
-    validationMessages.push({ text: validatorUserPrompt });
-
-    const validationReport = await harness.runOneShot({
-      systemPrompt: validatorSystemPrompt,
-      messages: validationMessages,
-      label: `jump-in-wiki-validate-${values.INSTALLMENT_NUMBER}-${iteration}`,
-    });
-
-    await fs.writeFile(validationOutputFile, validationReport, "utf-8");
-
-    /**
-     * the logic for checking whether the validated wiki is acceptable
-     */
-    console.log("Calling the AI for the acceptance check...");
-
-    const acceptanceOutput = await harness.runOneShot({
-      systemPrompt: acceptanceSystemPrompt,
-      messages: [
-        { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
-        { text: acceptanceUserPrompt },
-      ],
-      label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
-    });
-    const accepted = isPassingVerdict(acceptanceOutput);
-    console.log(`Acceptance check: ${accepted ? "PASS" : "FAIL"}`);
-
-    if (accepted) {
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: accepted on iteration ${iteration}. ` +
-        `Skipping the feedback pass so the passing wiki is left untouched.`
-      );
-      break;
-    }
-
-    /**
-     * the logic for applying the validation feedback to the failing wiki
-     */
-    console.log("Calling the AI to apply the validation feedback...");
-
-    const previousInstallment = String(
-      parseInt(values.INSTALLMENT_NUMBER, 10) - 1
-    ).padStart(2, "0");
-
-    const feedbackMessages = [
-      { file: sourceFile, name: path.basename(sourceFile) },
-      { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
-      { file: wikiOutputFile, name: `jump-in-wiki-${values.INSTALLMENT_NUMBER}.md` },
-      { file: sharedWikiOutputFile, name: "jump-in-wiki-shared.md" },
-    ];
-    if (!isFirst) {
-      feedbackMessages.push({
-        file: previousWikiOutputFile,
-        name: `jump-in-wiki-${previousInstallment}.md`,
-      });
-      feedbackMessages.push({
-        file: previousSharedWikiOutputFile,
-        name: "jump-in-wiki-shared.old.md",
-      });
-    }
-    feedbackMessages.push({ text: ctx.feedbackUserPrompt });
-
-    const feedbackOutput = await harness.runOneShot({
-      systemPrompt: ctx.feedbackSystemPrompt,
-      messages: feedbackMessages,
-      label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}`,
-    });
-
-    const [correctedWiki, correctedSharedWiki] = splitJumpInWikiGenerationOutput(feedbackOutput);
-
-    await fs.writeFile(wikiOutputFile, correctedWiki, "utf-8");
-    await fs.writeFile(sharedWikiOutputFile, correctedSharedWiki, "utf-8");
-
-    if (iteration === maxValidationIterations) {
-      ctx.limitReached = true;
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
-        `(${maxValidationIterations}) without a passing grade. The last feedback pass is ` +
-        `unvalidated; re-run the task to validate it.`
-      );
-      break;
-    }
-  }
-}
-
-/**
- * Agent mode: an author agent (per-volume session, file tools) writes
- * wiki.md and shared-wiki.md directly; an independent validator agent (fresh
- * per iteration) writes the validation report; the acceptance check is a
- * tool-less single-shot call; feedback is applied by the same author session.
+ * Process a single volume: generate the wiki (author agent) -> QA loop
+ * (independent validator agent + one-shot acceptance + same author session
+ * for feedback).
  *
  * @param {WikiVolumeCtx} ctx - The volume context (see jumpInWiki()).
  */
@@ -845,21 +596,21 @@ async function runVolumeAgent(ctx) {
       );
     }
 
-    await runQaLoopAgent(ctx, author);
+    await runQaLoop(ctx, author);
   } finally {
     await author.close();
   }
 }
 
 /**
- * Agent-mode QA loop: independent validator agent (fresh per iteration) ->
+ * QA loop: independent validator agent (fresh per iteration) ->
  * one-shot acceptance -> feedback applied by the same author session that
  * generated the wiki.
  *
  * @param {WikiVolumeCtx} ctx - The volume context (must include ctx.fsGate).
  * @param {AgentHandle} author - The author agent handle (keeps its session).
  */
-async function runQaLoopAgent(ctx, author) {
+async function runQaLoop(ctx, author) {
   const {
     values,
     volumeDir,
@@ -882,8 +633,6 @@ async function runQaLoopAgent(ctx, author) {
 
     const validator = await harness.createAgentHandle({
       name: `wiki-validator-${values.INSTALLMENT_NUMBER}-${iteration}`,
-      // The validator prompts name the files with the classic marker names;
-      // buildWikiValidatorSystemPrompt maps them to the real agent-mode names.
       systemPrompt: buildWikiValidatorSystemPrompt(ctx),
       tools: fsGate.tools,
       approve: fsGate.approve,
@@ -958,9 +707,7 @@ module.exports = {
   jumpInWiki,
   installmentNumberFromDir,
   transformUserPrompt,
-  splitJumpInWikiGenerationOutput,
   isPassingVerdict,
-  stripMarkerOutputFormat,
   agentOutputNames,
   adoptStrayOutput,
   validatorMaxStepsFor,
