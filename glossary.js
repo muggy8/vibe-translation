@@ -54,12 +54,7 @@ const fs = require("fs").promises;
 const path = require("path");
 const harness = require("./harness");
 const { researchTerms, formatResearchNotes } = require("./research");
-const {
-  transformUserPrompt,
-  isPassingVerdict,
-  validatorMaxStepsFor,
-  writePromptDump,
-} = require("./utils/fs");
+const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE } = require("./configs/shared");
 const { fileExists, assertWrote } = require("./utils/fs");

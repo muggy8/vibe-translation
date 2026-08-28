@@ -48,15 +48,9 @@ const path = require("path");
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE } = require("./configs/shared");
-const {
-  fileExists,
-  installmentNumberFromDir,
-  transformUserPrompt,
-  isPassingVerdict,
-  validatorMaxStepsFor,
-  writePromptDump,
-  splitJumpInWikiGenerationOutput,
-} = require("./utils/fs");
+const { fileExists } = require("./utils/fs");
+const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump, splitJumpInWikiGenerationOutput } = require("./utils/prompt");
+const { installmentNumberFromDir } = require("./utils/manifest");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -341,14 +335,14 @@ async function assertWrote(filePaths, who) {
  * @param {String} outputFromAi - the string that's outputted form the ai.
  * @returns {[String, String]} - the 2 sections of the output to be saved.
  */
-// Re-export shared utilities from utils/fs.js for backwards compatibility
-// (tests and glossary.js import these from here).
-module.exports.splitJumpInWikiGenerationOutput = require("./utils/fs").splitJumpInWikiGenerationOutput;
-module.exports.transformUserPrompt = require("./utils/fs").transformUserPrompt;
-module.exports.isPassingVerdict = require("./utils/fs").isPassingVerdict;
-module.exports.validatorMaxStepsFor = require("./utils/fs").validatorMaxStepsFor;
-module.exports.writePromptDump = require("./utils/fs").writePromptDump;
-module.exports.installmentNumberFromDir = require("./utils/fs").installmentNumberFromDir;
+// Re-export shared utilities from utils/fs.js, utils/prompt.js, and utils/manifest.js
+// for backwards compatibility (tests and glossary.js import these from here).
+module.exports.splitJumpInWikiGenerationOutput = require("./utils/manifest").splitJumpInWikiGenerationOutput;
+module.exports.transformUserPrompt = require("./utils/prompt").transformUserPrompt;
+module.exports.isPassingVerdict = require("./utils/prompt").isPassingVerdict;
+module.exports.validatorMaxStepsFor = require("./utils/prompt").validatorMaxStepsFor;
+module.exports.writePromptDump = require("./utils/prompt").writePromptDump;
+module.exports.installmentNumberFromDir = require("./utils/manifest").installmentNumberFromDir;
 
 // ─── Task ───────────────────────────────────────────────────────────────────
 

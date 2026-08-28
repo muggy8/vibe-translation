@@ -52,7 +52,8 @@ const fs = require("fs").promises;
 const path = require("path");
 const { orderBy } = require("natural-orderby");
 const harness = require("./harness");
-const { extractJsonObject, installmentNumberFromDir, fileExists } = require("./utils/fs");
+const { extractJsonObject, installmentNumberFromDir } = require("./utils/manifest");
+const { fileExists } = require("./utils/fs");
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -460,8 +461,8 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
 module.exports = {
   getTranslationTarget,
   buildDeterministicManifest,
-  // Re-exported from utils/fs.js for backwards compatibility.
-  extractJsonObject: require("./utils/fs").extractJsonObject,
+  // Re-exported from utils/manifest.js for backwards compatibility.
+  extractJsonObject: require("./utils/manifest").extractJsonObject,
   validateManifest,
   manifestSourcesExist,
   buildDiscoveryTurnPrompt,
