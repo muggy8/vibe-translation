@@ -65,7 +65,7 @@ function requestTimeoutMs() {
  * fetch with a timeout, so a hung endpoint cannot stall the run forever.
  *
  * @param {string} url - The URL to request.
- * @param {Object} [options] - The fetch options (any `signal` is replaced).
+ * @param {RequestInit} [options] - The fetch options (any `signal` is replaced).
  * @returns {Promise<Response>} The fetch response.
  */
 async function fetchWithTimeout(url, options = {}) {

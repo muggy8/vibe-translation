@@ -1,6 +1,6 @@
 # AGENTS.md — ai-client
 
-**Read this first.** This is the entry point for AI agents working in this project. The codebase is small (~4k lines across 5 core files) and the JSDoc in each file is excellent — this doc is the map plus the hard-won gotchas; open the referenced file when you need depth.
+**Read this first.** This is the entry point for AI agents working in this project. The codebase is small (~5k lines across 6 core files + types.js) and the JSDoc in each file is excellent — this doc is the map plus the hard-won gotchas; open the referenced file when you need depth.
 
 ## 1. What this is
 
@@ -38,6 +38,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `jump-in-wiki.js` | Wiki task logic **plus the shared helpers** (`transformUserPrompt`, `isPassingVerdict`, `installmentNumberFromDir`, `validatorMaxStepsFor`, `writePromptDump`) — the glossary task reuses these from here. |
 | `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. Both tasks read this manifest instead of guessing folder names. |
 | `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. Both `glossary.js` and `jump-in-wiki.js` consume it. |
+| `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
 | `gulpfile.js` | Task wiring only (no logic). |
 | `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. |
 | `test/test-glossary-load.js` | Pure tests (`npm test`). |
@@ -148,7 +149,8 @@ Per volume:
 
 ## 8. Conventions
 
-- **JSDoc on every function** (params + returns), with provenance comments where a behavior exists because of a live incident ("observed live: …"). New code without JSDoc is a review blocker.
+- **JSDoc on every function** (params + returns), with provenance comments where a behavior exists because of a live incident ("observed live: …"). New code without JSDoc is a review blocker. Use named types from `types.js` (e.g. `{GlossaryVolumeCtx}` instead of `{Object}`) — the type annotations enable IDE cross-references across files.
+- **Update AGENTS.md after changes.** If your work adds, removes, or significantly modifies files, functions, or conventions, update this document to reflect the new state. Agents reading AGENTS.md should be able to rely on it as a current map of the codebase — not a stale one.
 - Errors **fail loudly** with actionable messages (pointing at files, `.env` keys, or `.logs/`).
 - Prompt files stay mode-agnostic; mode-specific text is appended/rewritten in code (`AGENT_TOOLS_NOTE`, `agentOutputNames`), never forked into separate prompt files.
 - Tests: pure logic in `test/test-glossary-load.js` (plain `assert`, no framework — keep it that way); live behavior in `test/harness-smoke.js`.

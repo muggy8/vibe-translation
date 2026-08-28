@@ -16,7 +16,7 @@ const path = require("path");
  * JSON in its chat reply instead of writing it to disk.
  *
  * @param {string} text - The raw text to extract from.
- * @returns {object} The parsed outermost JSON object.
+ * @returns {*} The parsed outermost JSON object.
  * @throws {Error} When no parseable JSON object can be found.
  */
 function extractJsonObject(text) {

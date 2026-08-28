@@ -50,6 +50,7 @@
 require("dotenv").config();
 const fs = require("fs").promises;
 const path = require("path");
+require("./types"); // JSDoc type definitions
 const { orderBy } = require("natural-orderby");
 const harness = require("./harness");
 const { extractJsonObject, installmentNumberFromDir } = require("./utils/manifest");
@@ -108,8 +109,8 @@ const DISCOVERY_SYSTEM_PROMPT = [
  * (it does not touch the filesystem); existence of the listed source files is
  * checked separately by the caller, which needs async fs access.
  *
- * @param {Object} manifest - The parsed manifest.
- * @returns {Object} The same manifest, when valid.
+ * @param {TranslationTargetManifest} manifest - The parsed manifest.
+ * @returns {TranslationTargetManifest} The same manifest, when valid.
  * @throws {Error} When the manifest is missing required fields or is
  *   internally inconsistent (duplicate folders or installment numbers).
  */
@@ -335,7 +336,7 @@ async function runDiscoveryAgent(
 
 /**
  * @param {string} seriesDir - The SERIES_LOCATION path.
- * @param {Object} manifest - A parsed manifest.
+ * @param {TranslationTargetManifest} manifest - A parsed manifest.
  * @returns {Promise<boolean>} True when every listed source file exists on disk.
  */
 async function manifestSourcesExist(seriesDir, manifest) {

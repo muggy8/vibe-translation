@@ -45,6 +45,7 @@
 require("dotenv").config();
 const fs = require("fs").promises;
 const path = require("path");
+require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE } = require("./configs/shared");
@@ -169,7 +170,7 @@ async function adoptStrayOutput(volumeDir, expectedBase, knownFiles) {
  * The file names that may legitimately live in a volume folder and must
  * never be mistaken for (or renamed into) the wiki outputs.
  *
- * @param {Object} ctx - The volume context.
+ * @param {WikiVolumeCtx} ctx - The volume context.
  * @returns {Set<string>} The protected file names.
  */
 function knownVolumeFileNames(ctx) {
@@ -192,7 +193,7 @@ function knownVolumeFileNames(ctx) {
  * rewritten to the agent-mode names (the system prompt still describes the
  * classic file layout), plus the file-tools note.
  *
- * @param {Object} ctx - The volume context.
+ * @param {WikiVolumeCtx} ctx - The volume context.
  * @returns {string}
  */
 function buildWikiAuthorSystemPrompt(ctx) {
@@ -203,7 +204,7 @@ function buildWikiAuthorSystemPrompt(ctx) {
  * The validator agent's system prompt (agent mode): classic file names
  * rewritten to the agent-mode names, plus the file-tools note.
  *
- * @param {Object} ctx - The volume context.
+ * @param {WikiVolumeCtx} ctx - The volume context.
  * @returns {string}
  */
 function buildWikiValidatorSystemPrompt(ctx) {
@@ -213,7 +214,7 @@ function buildWikiValidatorSystemPrompt(ctx) {
 /**
  * The author agent's generation turn prompt (agent mode).
  *
- * @param {Object} ctx - The volume context (must include userPrompt).
+ * @param {WikiVolumeCtx} ctx - The volume context (must include userPrompt).
  * @returns {string}
  */
 function buildWikiAuthorTurnPrompt(ctx) {
@@ -243,7 +244,7 @@ function buildWikiAuthorTurnPrompt(ctx) {
  * The validator agent's turn prompt (agent mode, one fresh agent per QA
  * iteration).
  *
- * @param {Object} ctx - The volume context (must include validatorUserPrompt).
+ * @param {WikiVolumeCtx} ctx - The volume context (must include validatorUserPrompt).
  * @returns {string}
  */
 function buildWikiValidatorTurnPrompt(ctx) {
@@ -269,7 +270,7 @@ function buildWikiValidatorTurnPrompt(ctx) {
 /**
  * The author agent's feedback turn prompt (agent mode).
  *
- * @param {Object} ctx - The volume context (must include feedbackUserPrompt).
+ * @param {WikiVolumeCtx} ctx - The volume context (must include feedbackUserPrompt).
  * @returns {string}
  */
 function buildWikiFeedbackTurnPrompt(ctx) {
@@ -593,7 +594,7 @@ async function jumpInWiki() {
  * Classic mode: the original single-shot pipeline (inlined materials,
  * marker-formatted model output split into the two output files).
  *
- * @param {Object} ctx - The volume context (see jumpInWiki()).
+ * @param {WikiVolumeCtx} ctx - The volume context (see jumpInWiki()).
  */
 async function runVolumeClassic(ctx) {
   const {
@@ -764,7 +765,7 @@ async function runVolumeClassic(ctx) {
  * per iteration) writes the validation report; the acceptance check is a
  * tool-less single-shot call; feedback is applied by the same author session.
  *
- * @param {Object} ctx - The volume context (see jumpInWiki()).
+ * @param {WikiVolumeCtx} ctx - The volume context (see jumpInWiki()).
  */
 async function runVolumeAgent(ctx) {
   const {
@@ -855,8 +856,8 @@ async function runVolumeAgent(ctx) {
  * one-shot acceptance -> feedback applied by the same author session that
  * generated the wiki.
  *
- * @param {Object} ctx - The volume context (must include ctx.fsGate).
- * @param {Object} author - The author agent handle (keeps its session).
+ * @param {WikiVolumeCtx} ctx - The volume context (must include ctx.fsGate).
+ * @param {AgentHandle} author - The author agent handle (keeps its session).
  */
 async function runQaLoopAgent(ctx, author) {
   const {

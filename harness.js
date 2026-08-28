@@ -36,6 +36,7 @@
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
+require("./types"); // JSDoc type definitions
 const { fileTypeFromBuffer } = require("file-type");
 const { Agent: UndiciAgent } = require("undici");
 const { tool, generateText } = require("ai");
@@ -154,7 +155,7 @@ function createTaps() {
  * for the first non-empty token (TTFT diagnostics).
  *
  * @param {ReadableStream} body - The SSE body stream.
- * @param {Object} taps - The taps object to record into.
+ * @param {Taps} taps - The taps object to record into.
  * @returns {ReadableStream} The pass-through stream.
  */
 function tapSseStream(body, taps) {
@@ -372,7 +373,7 @@ function agentMaxSteps() {
  * type cannot be determined (plain text, e.g. the .md sources) are read and
  * embedded in the message exactly as the old call-ai.js did.
  *
- * @param {Object} message - The message ({ text } or { file, name }).
+ * @param {IMessage} message - The message ({ text } or { file, name }).
  * @returns {Promise<{role: string, content: Array<Object>}>}
  */
 async function toModelMessage(message) {
@@ -441,7 +442,7 @@ async function toModelMessage(message) {
 /**
  * Convert an array of IMessages to AI SDK ModelMessages, in order.
  *
- * @param {Array<Object>} messages - The messages.
+ * @param {Array<IMessage>} messages - The messages.
  * @returns {Promise<Array<Object>>} The ModelMessages.
  */
 async function toModelMessages(messages) {
@@ -462,7 +463,7 @@ async function toModelMessages(messages) {
  * Result sizes honor the same RESEARCH_MAX_RESULTS / RESEARCH_EXTRACT_CHARS
  * environment settings as the classic research pass.
  *
- * @returns {Object} Tool set: { wiki_search, wiki_extract }.
+ * @returns {WikiTools} Tool set: { wiki_search, wiki_extract }.
  */
 function createWikiTools() {
   const {
@@ -689,7 +690,7 @@ async function consumeEvents(events, { label, tapsRef }) {
  * call-ai.js: finish_reason, content/reasoning sizes, token usage, and
  * first-token/prefill/generation rates when measurable).
  *
- * @param {Object} r - The accumulated result (see consumeEvents).
+ * @param {FetchResult} r - The accumulated result (see consumeEvents).
  * @param {string} label - The agent/stage label.
  */
 function logResultLine(r, label) {
@@ -730,9 +731,9 @@ function logResultLine(r, label) {
  * path fails, retries empty responses up to `retry` times, and throws (never
  * returning empty) so callers never persist an empty result.
  *
- * @param {Object} cfg
+ * @param {RunOneShotCfg} cfg
  * @param {string} cfg.systemPrompt - The system prompt.
- * @param {Array<Object>} cfg.messages - IMessages ({ text } | { file, name }).
+ * @param {Array<IMessage>} cfg.messages - IMessages ({ text } | { file, name }).
  * @param {number} [cfg.retry] - Extra attempts on empty/error (default: AI_RETRY).
  * @param {boolean} [cfg.thinking] - Thinking mode (default: THINKING env, off).
  * @param {string} [cfg.thinkingLevel] - reasoning_effort level (optional).
@@ -863,7 +864,7 @@ async function runOneShot({
  * text is a *success* (the output went to disk), so — unlike runOneShot —
  * no empty-content retry is applied here.
  *
- * @param {Object} cfg
+ * @param {CreateAgentHandleCfg} cfg
  * @param {string} cfg.name - Agent name (used in logs).
  * @param {string} cfg.systemPrompt - The system prompt.
  * @param {Object} [cfg.tools] - Tool set (omitted/empty = no tools).

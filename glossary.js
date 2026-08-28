@@ -52,6 +52,7 @@
 require("dotenv").config();
 const fs = require("fs").promises;
 const path = require("path");
+require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { researchTerms, formatResearchNotes } = require("./research");
 const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
@@ -145,7 +146,7 @@ const RESEARCHER_SYSTEM_PROMPT =
 /**
  * The researcher agent's turn prompt (agent mode).
  *
- * @param {Object} ctx - The volume context.
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
  * @param {Array<{term: string, type: string, query: string}>} terms - The new terms.
  * @returns {string}
  */
@@ -186,7 +187,7 @@ function buildGlossaryResearcherTurnPrompt(ctx, terms) {
  * The author agent's turn prompt (agent mode): the amended-glossary request
  * with the term list and research-notes references filled in.
  *
- * @param {Object} ctx - The volume context (must include glossaryTemplate).
+ * @param {GlossaryVolumeCtx} ctx - The volume context (must include glossaryTemplate).
  * @param {Array<{term: string, type: string, query: string}>} terms - The new terms.
  * @param {boolean} researchNotesAvailable - Whether glossary-research.md exists.
  * @returns {string}
@@ -224,7 +225,7 @@ function buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable) {
  * The validator agent's turn prompt (agent mode, one fresh agent per QA
  * iteration).
  *
- * @param {Object} ctx - The volume context (must include validatorPrompt).
+ * @param {GlossaryVolumeCtx} ctx - The volume context (must include validatorPrompt).
  * @returns {string}
  */
 function buildGlossaryValidatorTurnPrompt(ctx) {
@@ -248,7 +249,7 @@ function buildGlossaryValidatorTurnPrompt(ctx) {
 /**
  * The author agent's feedback turn prompt (agent mode).
  *
- * @param {Object} ctx - The volume context (must include feedbackPrompt).
+ * @param {GlossaryVolumeCtx} ctx - The volume context (must include feedbackPrompt).
  * @returns {string}
  */
 function buildGlossaryFeedbackTurnPrompt(ctx) {
@@ -536,7 +537,7 @@ async function glossary() {
 /**
  * Shared acceptance check (both modes): always a tool-less single-shot call.
  *
- * @param {Object} ctx - The volume context (see glossary()).
+ * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
  * @param {number} iteration - The current QA iteration (for the log label).
  * @returns {Promise<boolean>} True for a passing verdict.
  */
@@ -567,7 +568,7 @@ async function acceptanceCheck(ctx, iteration) {
  * Classic mode: the original single-shot pipeline (inlined materials,
  * model output saved to the output files).
  *
- * @param {Object} ctx - The volume context (see glossary()).
+ * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
  */
 async function runVolumeClassic(ctx) {
   const {
@@ -698,7 +699,7 @@ async function runVolumeClassic(ctx) {
  * (independent validator agent + one-shot acceptance + same author session
  * for feedback).
  *
- * @param {Object} ctx - The volume context (see glossary()).
+ * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
  */
 async function runVolumeAgent(ctx) {
   const {
@@ -846,8 +847,8 @@ async function runVolumeAgent(ctx) {
  * one-shot acceptance -> feedback applied by the same author session that
  * wrote the glossary.
  *
- * @param {Object} ctx - The volume context (must include ctx.fsGate).
- * @param {Object} author - The author agent handle (keeps its session).
+ * @param {GlossaryVolumeCtx} ctx - The volume context (must include ctx.fsGate).
+ * @param {AgentHandle} author - The author agent handle (keeps its session).
  */
 async function runQaLoopAgent(ctx, author) {
   const {
