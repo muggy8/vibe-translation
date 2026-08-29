@@ -16,7 +16,9 @@
 const { series } = require("gulp");
 const { jumpInWiki } = require("./jump-in-wiki");
 const { glossary } = require("./glossary");
+const { characterVoice } = require("./character-voice");
 
 exports["jump-in-wiki"] = jumpInWiki;
 exports.glossary = glossary;
-exports.default = series(glossary, jumpInWiki);
+exports["character-voice"] = characterVoice;
+exports.default = series(glossary, characterVoice, jumpInWiki);

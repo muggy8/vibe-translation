@@ -84,7 +84,31 @@
  * @property {string} [previousWiki]
  * @property {string} [previousSharedWiki]
  * @property {boolean} [limitReached]
-* @property {boolean} [limitReached]
+ */
+
+/**
+ * @typedef {Object} CharacterVoiceVolumeCtx
+ * The volume context passed to character-voice task functions.
+ * @property {{INSTALLMENT_NUMBER: string}} values
+ * @property {string} volumeDir
+ * @property {string} sourceFile
+ * @property {string} voiceOutputFile
+ * @property {string} povOutputFile
+ * @property {string} validationOutputFile
+ * @property {string} validationFileName
+ * @property {string} extractSystemPrompt
+ * @property {string} extractUserPrompt
+ * @property {string} authorSystemPrompt
+ * @property {string} authorUserPrompt
+ * @property {string} validatorSystemPrompt
+ * @property {string} validatorUserPrompt
+ * @property {string} feedbackUserPrompt
+ * @property {string} acceptanceSystemPrompt
+ * @property {string} acceptanceUserPrompt
+ * @property {Object} fsGate — Gated filesystem tools (from createGatedFsTools).
+ * @property {string} [seriesDir]
+ * @property {string} [previousVoiceRef]
+ * @property {boolean} [limitReached]
  */
 
 // ─── Harness primitives ──────────────────────────────────────────────────────
@@ -180,6 +204,7 @@ module.exports = {
   ResearchConcurrency: true,
   GlossaryVolumeCtx: true,
   WikiVolumeCtx: true,
+  CharacterVoiceVolumeCtx: true,
   IMessage: true,
   RunOneShotCfg: true,
   CreateAgentHandleCfg: true,

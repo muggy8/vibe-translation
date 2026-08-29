@@ -7,6 +7,7 @@
 An agentic AI client (v2.0.0, CommonJS, Node ≥ 22.19) that processes a light-novel series **volume by volume** and produces translation-support artifacts:
 
 - `glossary` task → a canonical target-language glossary (per-volume snapshots + a final copy at the series root)
+- `character-voice` task → a cumulative character voice reference (speech quirks, POV markers, narration types) and per-volume POV maps
 - `jump-in-wiki` task → a per-volume `wiki.md` plus a "living" `shared-wiki.md`
 
 It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@openharness/core`. Tool-calling agents read the sources and write the outputs themselves through sandboxed file tools.
@@ -16,6 +17,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | Command | What it does |
 |---|---|
 | `npx gulp glossary` | Run the glossary task (all volumes) |
+| `npx gulp character-voice` | Run the character voice reference task (all volumes) |
 | `npx gulp jump-in-wiki` | Run the wiki task (also the default gulp task) |
 | `... --dry-run` | No AI calls; dump the exact prompts to `.dry-run/<task>-NN.md` |
 | `... --force` | Regenerate even if outputs already exist |
@@ -35,12 +37,13 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `harness.js` | The AI layer: one-shot calls, agent handles, wiki tools, gated fs tools, provider plumbing, run logging. Never bypass it to talk to the model. |
 | `research.js` | Client-side web research (Wikipedia Action API + optional Brave/Tavily/Serper). No LLM involved. |
 | `glossary.js` | Glossary task logic. |
-| `jump-in-wiki.js` | Wiki task logic **plus the shared helpers** (`transformUserPrompt`, `isPassingVerdict`, `installmentNumberFromDir`, `validatorMaxStepsFor`, `writePromptDump`) — the glossary task reuses these from here. |
+| `character-voice.js` | Character voice reference task logic — extracts speech quirks, POV markers, narration types, and produces a cumulative character voice reference and per-volume POV maps. |
+| `jump-in-wiki.js` | Wiki task logic **plus the shared helpers** |
 | `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. Both tasks read this manifest instead of guessing folder names. |
 | `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. Both `glossary.js` and `jump-in-wiki.js` consume it. |
-| `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
+| `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `CharacterVoiceVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
 | `gulpfile.js` | Task wiring only (no logic). |
-| `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. |
+| `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. |
 | `test/test-glossary-load.js` | Pure tests (`npm test`). |
 | `test/harness-smoke.js` | Live smoke test (`npm run smoke`). |
 | `test-series/` | Fixture series (`test_story(1)`, `test_story(2)`); generated outputs are gitignored. |
@@ -110,6 +113,23 @@ Per volume:
 3. **Two-tier idempotency**: if `wiki.md` + `shared-wiki.md` exist → skip generation, go straight to validation; if a validation report exists and passes acceptance → skip the whole volume.
 4. End-of-run summary counts the volumes that hit the iteration limit.
 
+## 5. Pipeline C: character-voice (`character-voice.js`)
+
+Per volume, in order — each volume's reference builds on the previous one's:
+
+1. **Extract** — one-shot call: source text → JSON array of `{ type, character, quirkType, description, examples, ... }` entries for both voice quirks and POV analysis. Parsed by `parseVoiceQuirks` (tolerates markdown fences and prose).
+2. **Compile** — an author agent (per-volume session, `maxSteps 30`) reads the source, previous reference, and extraction results, then writes two files:
+   - `character-voice.md` — the cumulative character voice reference (carries forward all previous entries, adds new characters/quirks)
+   - `pov-map.md` — the per-volume POV map (marker identification, narration type classification, POV assignments, free indirect discourse detection)
+3. **QA loop**: a fresh validator agent per iteration writes `character-voice-validation.md` → acceptance one-shot → on FAIL a fresh author agent applies feedback (`character-voice-feedback.md`). Same rolling-average acceptance criterion as other pipelines.
+4. After all volumes: the last volume's `character-voice.md` is copied to `VOICE_OUTPUT_FILE` (default `<SERIES_LOCATION>/character-voice.md`). Skipped for `--volume` runs.
+
+Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-map.md` (per-volume), `character-voice-validation.md` (validation report).
+
+**Cumulative invariant:** same as glossary — regenerating any volume sets `regeneratedAny` → all later volumes are regenerated too.
+
+**Key differences from glossary:** no research stage (quirks are text-intrinsic); produces two files instead of one; extraction and compilation are separate stages.
+
 ## 6. Environment reference (`.env`)
 
 | Var | Default | Meaning |
@@ -130,6 +150,7 @@ Per volume:
 | `CONTEXT_WINDOW` | `128000` | Tokens at which agent sessions auto-compact |
 | `AGENT_MAX_STEPS` | `20` | Default step cap for tool agents (workflows pass higher caps where needed) |
 | `GLOSSARY_OUTPUT_FILE` | `<SERIES_LOCATION>/glossary.md` | Final glossary location |
+| `VOICE_OUTPUT_FILE` | `<SERIES_LOCATION>/character-voice.md` | Final character voice reference location |
 | `RESEARCH_ENABLED` | `true` | Research new glossary terms |
 | `RESEARCH_CONCURRENCY` | `3` | Number of parallel research agents (one per term, batched). Set to `1` for sequential processing. |
 | `WIKI_LANGS` | `ja,en` | Wikipedia languages to query |
@@ -158,6 +179,8 @@ Per volume:
 12. **Research concurrency (`RESEARCH_CONCURRENCY`):** default 3 parallel agents. Set to 1 to restore the old sequential behavior. Each agent has a fixed `maxSteps=15` — the old global cap (`max(30, 5·terms + 10)`) was replaced by per-agent caps. The skeleton-first approach ensures crash safety: failed terms leave `- (pending)` in place.
 13. **Fresh agents per QA feedback iteration:** the author session is no longer persistent across the QA loop. Each feedback pass creates a new agent with a self-contained prompt (validation report + current glossary). This prevents context window bloat but increases per-iteration token cost.
 14. **Glossary truncation:** if the previous glossary exceeds 64KB, it is truncated to the last 200 entries before being passed to the author/validator agents. Earlier entries are carried forward unchanged (only conflicts with new terms need checking).
+15. **Character voice reference is cumulative:** same `regeneratedAny` invariant as the glossary — if any volume is regenerated, all later volumes are regenerated too. The `character-voice.md` carries forward all previous character entries unchanged.
+16. **POV marker conventions:** Japanese LNs use `※`, `☆`, `◇`, `◆`, `【】`, `（）` as POV markers. The extract prompt recognizes these and classifies narration types (first-person-internal, free-indirect, third-person-omniscient, dialogue-only). Free indirect discourse — 3rd-person narration that adopts a character's voice — is the hardest pattern to detect reliably and is the most common validation finding.
 
 ## 8. Conventions
 

@@ -249,4 +249,78 @@ assert.ok(perTermPrompt.includes("glossary-research.md"), "per-term prompt names
 assert.ok(perTermPrompt.includes("- (pending)"), "per-term prompt mentions the placeholder");
 assert.ok(perTermPrompt.includes("editFile"), "per-term prompt instructs editFile");
 
+// ─── character-voice: parseVoiceQuirks ──────────────────────────────────────
+const { parseVoiceQuirks, truncateVoiceRef, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt } = require("../character-voice");
+
+// Empty/null input
+assert.deepStrictEqual(parseVoiceQuirks(""), []);
+assert.deepStrictEqual(parseVoiceQuirks(null), []);
+assert.deepStrictEqual(parseVoiceQuirks(undefined), []);
+
+// With markdown fences
+assert.deepStrictEqual(
+  parseVoiceQuirks('```json\n[{"type":"voice","character":"ソラ","quirkType":"sentenceEnding","description":"formal","examples":["〜である"],"formalityLevel":"plain","notes":"test"}]\n```'),
+  [{ type: "voice", character: "ソラ", quirkType: "sentenceEnding", description: "formal", examples: ["〜である"], formalityLevel: "plain", notes: "test" }]
+);
+
+// With surrounding prose
+const proseOutput = 'Here are the quirks:\n[{"type":"voice","character":"黒鋼","quirkType":"pronoun","description":"casual","examples":["俺"],"formalityLevel":"plain","notes":""}]';
+const parsed = parseVoiceQuirks(proseOutput);
+assert.strictEqual(parsed.length, 1);
+assert.strictEqual(parsed[0].character, "黒鋼");
+assert.strictEqual(parsed[0].quirkType, "pronoun");
+
+// POV entries
+const povOutput = '[{"type":"pov","povCategory":"marker","marker":"※","description":"POV shift","narrationType":"first-person-internal","sectionDescription":"opening","examples":["※ソラの視点"],"notes":""}]';
+const povParsed = parseVoiceQuirks(povOutput);
+assert.strictEqual(povParsed.length, 1);
+assert.strictEqual(povParsed[0].type, "pov");
+assert.strictEqual(povParsed[0].povCategory, "marker");
+assert.strictEqual(povParsed[0].marker, "※");
+
+// No JSON array
+assert.throws(() => parseVoiceQuirks("no json here"), /No JSON array/);
+assert.throws(() => parseVoiceQuirks('{"type":"voice"}'), /No JSON array/);
+
+// ─── character-voice: truncateVoiceRef ──────────────────────────────────────
+const shortVoiceRef = "### ソラ\n- sentence endings: 〜である\n### 黒鋼\n- sentence endings: 〜だぜ";
+assert.strictEqual(truncateVoiceRef(shortVoiceRef), shortVoiceRef, "truncateVoiceRef: short content unchanged");
+
+// Over threshold: need > 64KB of character sections
+const longVoiceRef = "Header\n\n" + Array.from({ length: 2000 }, (_, i) => `### Character${i}\n- sentence endings: quirk ${i} quirk ${i} quirk ${i} quirk ${i} quirk ${i} quirk ${i}`).join("\n\n");
+const truncatedVoice = truncateVoiceRef(longVoiceRef);
+assert.ok(truncatedVoice.includes("[TRUNCATED:"), "truncateVoiceRef: truncated content has header note");
+assert.ok(!truncatedVoice.includes("Character0"), "truncateVoiceRef: first entries removed");
+assert.ok(truncatedVoice.includes("Character"), "truncateVoiceRef: some entries kept");
+
+// ─── character-voice: prompt builders ───────────────────────────────────────
+const voiceCtx = {
+  values: { INSTALLMENT_NUMBER: "01", SOURCE_NAME: "Test", SOURCE_LANGUAGE: "Japanese", TARGET_LANGUAGE: "English" },
+  extractUserPrompt: "# Extraction — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
+  authorUserPrompt: "# Compilation — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}\n\n{{EXTRACTION_RESULTS}}",
+  validatorUserPrompt: "# Validation — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
+  feedbackUserPrompt: "# Feedback — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
+  voiceOutputFile: "character-voice.md",
+  povOutputFile: "pov-map.md",
+};
+
+const extractPrompt = buildExtractTurnPrompt(voiceCtx);
+assert.ok(extractPrompt.includes("Test"), "extract prompt carries series name");
+assert.ok(extractPrompt.includes("01"), "extract prompt carries installment");
+
+const authorPrompt = buildAuthorTurnPrompt(voiceCtx, '[{"type":"voice","character":"ソラ"}]');
+assert.ok(authorPrompt.includes("Test"), "author prompt carries series name");
+assert.ok(authorPrompt.includes('{"type":"voice","character":"ソラ"}'), "author prompt carries extraction results");
+
+const authorPromptFirst = buildAuthorTurnPrompt({ ...voiceCtx, values: { ...voiceCtx.values, INSTALLMENT_NUMBER: "01" } }, "");
+assert.ok(authorPromptFirst.includes("this is the first volume"), "author prompt (empty results): mentions first volume");
+
+const validatorPrompt = buildValidatorTurnPrompt(voiceCtx);
+assert.ok(validatorPrompt.includes("Test"), "validator prompt carries series name");
+assert.ok(validatorPrompt.includes("01"), "validator prompt carries installment");
+
+const feedbackPrompt = buildFeedbackTurnPrompt(voiceCtx);
+assert.ok(feedbackPrompt.includes("Test"), "feedback prompt carries series name");
+assert.ok(feedbackPrompt.includes("01"), "feedback prompt carries installment");
+
 console.log("All tests passed.");
