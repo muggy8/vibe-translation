@@ -54,7 +54,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage, saveRollingState } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage, saveRollingState } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
@@ -82,6 +82,25 @@ const maxValidationIterations = Math.max(
 
 // Whether to run web research for the new terms (default: enabled).
 const researchEnabled = process.env.RESEARCH_ENABLED !== "false";
+
+// ── Context window protection ────────────────────────────────────────────────
+
+/**
+ * When the previous glossary exceeds this size (bytes), truncate it to the
+ * most recent entries so the author/validator agents don't overflow the
+ * context window. The glossary is cumulative, so earlier entries are
+ * carried forward unchanged — only conflicts with new terms need checking.
+ *
+ * @type {number}
+ */
+const GLOSSARY_TRUNCATION_THRESHOLD = 64 * 1024; // 64KB
+
+/**
+ * Maximum number of glossary entries to include when truncating.
+ *
+ * @type {number}
+ */
+const GLOSSARY_TRUNCATION_MAX_ENTRIES = 200;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -117,6 +136,136 @@ function parseTerms(output) {
       type: typeof entry.type === "string" && entry.type.trim() !== "" ? entry.type.trim() : "concept",
       query: typeof entry.query === "string" && entry.query.trim() !== "" ? entry.query.trim() : entry.term.trim(),
     }));
+}
+
+// ─── Context truncation helpers ──────────────────────────────────────────────
+
+/**
+ * Truncate a glossary file to the most recent entries if it exceeds the
+ * configured threshold. Returns the full content when under the threshold,
+ * or the truncated content (with a header note) when over it.
+ *
+ * @param {string} content - The full glossary file content.
+ * @returns {string} The (possibly truncated) content.
+ */
+function truncateGlossary(content) {
+  if (!content || content.length <= GLOSSARY_TRUNCATION_THRESHOLD) {
+    return content;
+  }
+  // Split by term entries: each term starts with "- " followed by the term name
+  // and a colon or parenthesis (e.g. "- TermName: " or "- TermName (")).
+  const entries = content.split(/^(- .+?[:\(])/m);
+  // entries is: [header, term1Marker, term1Body, term2Marker, term2Body, ...]
+  // Collect the header and term blocks.
+  const header = entries[0];
+  const termBlocks = [];
+  for (let i = 1; i < entries.length - 1; i += 2) {
+    termBlocks.push(entries[i] + entries[i + 1]);
+  }
+  if (termBlocks.length <= GLOSSARY_TRUNCATION_MAX_ENTRIES) {
+    return content;
+  }
+  // Keep the last N entries.
+  const keep = termBlocks.splice(-GLOSSARY_TRUNCATION_MAX_ENTRIES);
+  const truncated = [
+    header,
+    `[TRUNCATED: previous glossary has ${termBlocks.length + keep.length} entries. ` +
+      `Showing last ${keep.length} entries. Earlier entries are carried forward unchanged.]`,
+    keep.join("\n"),
+  ].join("\n\n");
+  return truncated;
+}
+
+// ─── Parallel research helpers ──────────────────────────────────────────────
+
+/**
+ * Build a per-term research prompt that targets exactly one line in
+ * glossary-research.md. Each call receives a unique term index so the
+ * agent knows which "- (pending)" line to replace.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @param {{term: string, type: string, query: string}} term - The term to research.
+ * @param {number} index - Zero-based index of the term (used for approximate line counting).
+ * @returns {string}
+ */
+function buildPerTermResearchPrompt(ctx, term, index) {
+  const { values, folderName } = ctx;
+  // Approximate line number: each term in the skeleton gets ~3 lines
+  const approxLine = 4 + index * 3;
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    `Context you may consult (optional): the volume source "${folderName}.md" (same folder) — ` +
+    `read it selectively with readFile/grep if you need disambiguation; you do ` +
+    `not need to read it all.\n\n` +
+    `Your task: research the following term and write your notes to the file ` +
+    `"glossary-research.md" in your working folder:\n\n` +
+    `Term: ${term.term} (${term.type}) — suggested query: ${term.query}\n\n` +
+    `The file "glossary-research.md" already exists. It contains a "- (pending)" ` +
+    `placeholder line for this term (approximately line ${approxLine}). ` +
+    `Use editFile to replace ONLY that "- (pending)" line with your final ` +
+    `research notes. Do not modify any other term's notes.\n\n` +
+    `Per-term budget: at most 2 wiki_search calls and 1 wiki_extract call. Start ` +
+    `from the suggested query; search in the source language first, then English ` +
+    `if useful.\n\n` +
+    `Final notes format (replacing the "- (pending)" line):\n` +
+    `- <page title> (<lang>) — <URL>\n` +
+    `  <1-3 sentence summary: what the term is and any established ` +
+    `${values.TARGET_LANGUAGE} name>\n\n` +
+    `Rules:\n` +
+    `- Report only what the tools actually say — no speculation, no invented references.\n` +
+    `- Never paste file contents into your chat reply.\n` +
+    `- When done, reply with a short summary.\n` +
+    `- If the term is not found on Wikipedia, write: "- (not found) — no relevant results.\n  The term may be specific to this series; check the source text for context."`
+  );
+}
+
+/**
+ * Research a single term using a dedicated agent. The agent targets exactly
+ * one unique line in glossary-research.md via editFile, so multiple agents
+ * can run in parallel without conflicts.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @param {{term: string, type: string, query: string}} term - The term to research.
+ * @param {number} index - Zero-based index of the term.
+ * @returns {Promise<void>}
+ */
+async function researchOneTerm(ctx, term, index) {
+  const agent = await harness.createAgentHandle({
+    name: `researcher-${term.term.replace(/\s+/g, "-")}`,
+    systemPrompt: RESEARCHER_SYSTEM_PROMPT,
+    tools: { wiki_search: ctx.wikiTools?.wiki_search, wiki_extract: ctx.wikiTools?.wiki_extract, ...ctx.fsGate.tools },
+    approve: ctx.fsGate.approve,
+    cwd: ctx.volumeDir,
+    maxSteps: 15, // 2 wiki_search + 1 wiki_extract + 1 editFile + overhead
+  });
+  try {
+    await agent.sendTurn(
+      buildPerTermResearchPrompt(ctx, term, index),
+      { label: `glossary-research-term-${ctx.values.INSTALLMENT_NUMBER}-${term.term.slice(0, 20)}` }
+    );
+  } finally {
+    await agent.close();
+  }
+}
+
+/**
+ * Research a batch of terms concurrently (Promise.allSettled).
+ * Failed terms leave their "- (pending)" placeholder in place.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @param {Array<{term: string, type: string, query: string, _idx: number}>} batch - Terms to research in this batch (each with a _idx property for the original index).
+ * @returns {Promise<void>}
+ */
+async function researchBatch(ctx, batch) {
+  const results = await Promise.allSettled(
+    batch.map((term) => researchOneTerm(ctx, term, term._idx))
+  );
+  const failed = results.filter((r) => r.status === "rejected");
+  if (failed.length > 0) {
+    console.warn(
+      `Volume ${ctx.values.INSTALLMENT_NUMBER}: ${failed.length}/${batch.length} term(s) failed research`
+    );
+  }
 }
 
 // ─── Agent-mode prompt builders ─────────────────────────────────────────────
@@ -415,8 +564,8 @@ async function glossary() {
         { title: "One-shot — terms extraction user prompt", prompt: termsPrompt },
         { title: "AGENT — researcher system prompt", prompt: RESEARCHER_SYSTEM_PROMPT },
         {
-          title: "AGENT — researcher turn (illustrative term list)",
-          prompt: buildGlossaryResearcherTurnPrompt(ctx, illustrativeTerms),
+          title: "AGENT — per-term researcher turn (illustrative term list, concurrency=" + RESEARCH_CONCURRENCY + ")",
+          prompt: buildPerTermResearchPrompt(ctx, illustrativeTerms[0], 0),
         },
         { title: "AGENT — author system prompt", prompt: glossarySystemPrompt + AGENT_TOOLS_NOTE },
         {
@@ -597,40 +746,39 @@ async function runVolumeAgent(ctx) {
     );
   }
 
-  // Pass 2: research the new terms with the researcher agent.
+  // Pass 2: research the new terms with parallel agents (one per term, batched).
   const researchNotesAvailable = researchEnabled && terms.length > 0;
   if (researchNotesAvailable) {
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: researching ${terms.length} new term(s) ` +
-        `(researcher agent)...`
+        `in parallel (concurrency=${RESEARCH_CONCURRENCY})...`
     );
     // Skeleton-first: the workflow creates the notes file with a "- (pending)"
-    // placeholder under every term; the researcher then replaces the
-    // placeholders with real notes via editFile. Even a half-finished
-    // research pass (step cap, dropped connection, ...) leaves a usable file
-    // instead of nothing.
-    const skeleton =
-      `# Research Notes — Volume ${values.INSTALLMENT_NUMBER}\n\n` +
-      terms.map((t) => `### ${t.term}\n- (pending)`).join("\n\n") +
-      "\n";
-    await fs.writeFile(researchNotesFile, skeleton, "utf8");
-    const researcher = await harness.createAgentHandle({
-      name: `researcher-${values.INSTALLMENT_NUMBER}`,
-      systemPrompt: RESEARCHER_SYSTEM_PROMPT,
-      tools: { ...harness.createWikiTools(), ...fsGate.tools },
-      approve: fsGate.approve,
-      cwd: volumeDir,
-      // per term: up to 2 searches + 1 extract + 1 editFile, plus margin
-      maxSteps: Math.max(30, terms.length * 5 + 10),
-    });
-    try {
-      await researcher.sendTurn(
-        buildGlossaryResearcherTurnPrompt(ctx, terms),
-        { label: `glossary-research-${values.INSTALLMENT_NUMBER}` }
-      );
-    } finally {
-      await researcher.close();
+    // placeholder under every term; each parallel agent replaces its own
+    // placeholder via editFile. Even a crashed run leaves a usable skeleton.
+    const skeletonLines = ["# Research Notes — Volume " + values.INSTALLMENT_NUMBER, ""];
+    for (let ti = 0; ti < terms.length; ti++) {
+      skeletonLines.push(`### ${terms[ti].term}`);
+      skeletonLines.push("- (pending)");
     }
+    skeletonLines.push("");
+    await fs.writeFile(researchNotesFile, skeletonLines.join("\n"), "utf8");
+
+    // Tag each term with its original index so the batch function can
+    // pass the correct line number to the per-term prompt.
+    const termsWithIndices = terms.map((term, idx) => ({ ...term, _idx: idx }));
+
+    // Process terms in batches.
+    for (let i = 0; i < termsWithIndices.length; i += RESEARCH_CONCURRENCY) {
+      const batch = termsWithIndices.slice(i, i + RESEARCH_CONCURRENCY);
+      await researchBatch(ctx, batch);
+      // Politeness delay between batches (not within a batch, which runs in parallel).
+      if (i + RESEARCH_CONCURRENCY < termsWithIndices.length) {
+        const delayMs = parseInt(process.env.RESEARCH_DELAY_MS, 10) || 300;
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+
     if (!(await fileExists(researchNotesFile))) {
       console.warn(
         `Volume ${values.INSTALLMENT_NUMBER}: the research notes file is missing ` +
@@ -649,17 +797,35 @@ async function runVolumeAgent(ctx) {
     }
   }
 
-  // Pass 3: amend the glossary with the author agent (per-volume session; the
-  // same session later applies the feedback passes).
+  // Pass 3: amend the glossary with the author agent (standalone — creates and
+  // closes its own session; no persistent context across QA iterations).
   console.log(
     `Volume ${values.INSTALLMENT_NUMBER}: amending the glossary (author agent)...`
   );
 
+  await generateGlossary(ctx, terms, researchNotesAvailable);
+
+  // QA loop: fresh validator per iteration + fresh author for feedback.
+  await runQaLoop(ctx);
+}
+
+/**
+ * Generate (or regenerate) the glossary using a standalone author agent.
+ * The agent is created and closed within this function — no persistent session.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @param {Array<{term: string, type: string, query: string}>} terms - The new terms.
+ * @param {boolean} researchNotesAvailable - Whether research notes exist.
+ * @returns {Promise<void>}
+ */
+async function generateGlossary(ctx, terms, researchNotesAvailable) {
+  const { values, volumeDir, glossaryOutputFile, sourceFile } = ctx;
+
   const author = await harness.createAgentHandle({
     name: `author-${values.INSTALLMENT_NUMBER}`,
     systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
-    tools: fsGate.tools,
-    approve: fsGate.approve,
+    tools: ctx.fsGate.tools,
+    approve: ctx.fsGate.approve,
     cwd: volumeDir,
     maxSteps: 40,
   });
@@ -704,8 +870,6 @@ async function runVolumeAgent(ctx) {
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: saved the glossary to ${glossaryOutputFile}`
     );
-
-    await runQaLoop(ctx, author);
   } finally {
     await author.close();
   }
@@ -713,13 +877,13 @@ async function runVolumeAgent(ctx) {
 
 /**
  * QA loop: independent validator agent (fresh per iteration) ->
- * rolling-average acceptance check -> feedback applied by the same author
- * session that wrote the glossary.
+ * rolling-average acceptance check -> feedback applied by a fresh author
+ * agent (no persistent session — each feedback pass starts with a clean
+ * context that includes the validation report and current glossary).
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (must include ctx.fsGate).
- * @param {AgentHandle} author - The author agent handle (keeps its session).
  */
-async function runQaLoop(ctx, author) {
+async function runQaLoop(ctx) {
   const {
     values,
     volumeDir,
@@ -811,36 +975,52 @@ async function runQaLoop(ctx, author) {
       }
     }
 
-    // Apply the feedback with the same author session that wrote the glossary.
-    const feedbackResult = await author.sendTurn(
-      buildGlossaryFeedbackTurnPrompt(ctx),
-      { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
-    );
-    const feedbackFallbackUsed = await assertWroteWithFallback(
-      glossaryOutputFile,
-      "the author agent (feedback pass)",
-      feedbackResult?.text
-    );
+    // Apply the feedback with a fresh author agent (no persistent session).
+    // The feedback prompt is self-contained: it includes the validation report
+    // and the current glossary so the agent has all context it needs.
+    console.log(`Volume ${values.INSTALLMENT_NUMBER}: applying validation feedback (fresh author agent)...`);
 
-    // Recovery turn for feedback pass: if the model produced no output,
-    // re-send the full feedback task.
-    if (feedbackFallbackUsed && process.env.RECOVERY_ENABLED !== "false") {
-      const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-      const recoveryPrompt = hasContent
-        ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
-          `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
-          `Please rewrite the complete glossary to "glossary.md" using writeFile now. Use the exact same content you generated in your previous message.`
-        : `You were asked to write the complete glossary to "glossary.md" using writeFile, but you produced no output.\n\n` +
-          `Please read the source materials and the validation report and write the corrected glossary to "glossary.md" using writeFile now.`;
-      const feedbackRecoveryResult = await author.sendTurn(
-        recoveryPrompt,
-        { label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
+    const feedbackAuthor = await harness.createAgentHandle({
+      name: `feedback-author-${values.INSTALLMENT_NUMBER}-${iteration}`,
+      systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
+      tools: ctx.fsGate.tools,
+      approve: ctx.fsGate.approve,
+      cwd: volumeDir,
+      maxSteps: 40,
+    });
+    try {
+      const feedbackResult = await feedbackAuthor.sendTurn(
+        buildGlossaryFeedbackTurnPrompt(ctx),
+        { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
-      await assertWroteWithFallback(
+      const feedbackFallbackUsed = await assertWroteWithFallback(
         glossaryOutputFile,
-        "the author agent (feedback recovery)",
-        feedbackRecoveryResult?.text
+        "the author agent (feedback pass)",
+        feedbackResult?.text
       );
+
+      // Recovery turn for feedback pass: if the model produced no output,
+      // re-send the full feedback task.
+      if (feedbackFallbackUsed && process.env.RECOVERY_ENABLED !== "false") {
+        const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
+        const recoveryPrompt = hasContent
+          ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+            `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
+            `Please rewrite the complete glossary to "glossary.md" using writeFile now. Use the exact same content you generated in your previous message.`
+          : `You were asked to write the complete glossary to "glossary.md" using writeFile, but you produced no output.\n\n` +
+            `Please read the source materials and the validation report and write the corrected glossary to "glossary.md" using writeFile now.`;
+        const feedbackRecoveryResult = await feedbackAuthor.sendTurn(
+          recoveryPrompt,
+          { label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
+        );
+        await assertWroteWithFallback(
+          glossaryOutputFile,
+          "the author agent (feedback recovery)",
+          feedbackRecoveryResult?.text
+        );
+      }
+    } finally {
+      await feedbackAuthor.close();
     }
 
     if (iteration === maxValidationIterations) {
@@ -859,6 +1039,10 @@ async function runQaLoop(ctx, author) {
 module.exports = {
   glossary,
   parseTerms,
+  truncateGlossary,
+  buildPerTermResearchPrompt,
+  researchOneTerm,
+  researchBatch,
   RESEARCHER_SYSTEM_PROMPT,
   buildGlossaryResearcherTurnPrompt,
   buildGlossaryAuthorTurnPrompt,

@@ -27,6 +27,20 @@ You have file tools: readFile, listFiles, grep, writeFile, and editFile.
 - When you are done writing files, reply with a short summary: what you read, what you wrote, and any problems you hit.
 `;
 
+// ── Research concurrency ─────────────────────────────────────────────────────
+
+/**
+ * Number of parallel research agents to run simultaneously (one per term).
+ * Set to 1 for sequential processing (old behavior). Useful to tune to your
+ * local server's capacity. Read from .env, defaulting to 3.
+ *
+ * @type {number}
+ */
+const RESEARCH_CONCURRENCY = Math.max(
+  1,
+  parseInt(process.env.RESEARCH_CONCURRENCY, 10) || 3
+);
+
 // ── Rolling average validation config ────────────────────────────────────────
 
 /**
@@ -121,6 +135,7 @@ async function loadRollingState(filePath) {
 
 module.exports = {
   AGENT_TOOLS_NOTE,
+  RESEARCH_CONCURRENCY,
   ROLLING_WINDOW_SIZE,
   ROLLING_MIN_SAMPLES,
   ROLLING_ACCEPTANCE_THRESHOLD,

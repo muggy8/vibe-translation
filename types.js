@@ -36,6 +36,12 @@
 // ─── Workflow volume contexts ────────────────────────────────────────────────
 
 /**
+ * @typedef {Object} ResearchConcurrency
+ * Configuration for parallel research agent execution.
+ * @property {number} value - Number of parallel research agents (1 = sequential).
+ */
+
+/**
  * @typedef {Object} GlossaryVolumeCtx
  * The volume context passed to glossary task functions.
  * @property {{INSTALLMENT_NUMBER: string}} values
@@ -171,6 +177,7 @@
 module.exports = {
   TranslationTargetManifest: true,
   TranslationTargetVolume: true,
+  ResearchConcurrency: true,
   GlossaryVolumeCtx: true,
   WikiVolumeCtx: true,
   IMessage: true,

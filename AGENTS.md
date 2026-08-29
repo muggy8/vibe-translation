@@ -28,7 +28,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 
 | Path | Role |
 |---|---|
-| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and rolling-average validation config (`ROLLING_WINDOW_SIZE`, `ROLLING_ACCEPTANCE_THRESHOLD`, `ROLLING_MIN_SAMPLES`, `computeRollingAverage`). Both `glossary.js` and `jump-in-wiki.js` import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window to disk (see §3). |
+| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and rolling-average validation config (`ROLLING_WINDOW_SIZE`, `ROLLING_ACCEPTANCE_THRESHOLD`, `ROLLING_MIN_SAMPLES`, `computeRollingAverage`). Both `glossary.js` and `jump-in-wiki.js` import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window to disk (see §3). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). |
 | `utils/fs.js` | Filesystem helpers: `fileExists`, `assertWrote`. |
 | `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict`, `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
@@ -75,7 +75,9 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
    threshold (`ROLLING_ACCEPTANCE_THRESHOLD`, default 0.60) and we have at
    least `ROLLING_MIN_SAMPLES` checks (default 3), the output is accepted.
    Otherwise, feedback is applied and the loop continues. A passing output
-   is never touched by a feedback pass.
+   is never touched by a feedback pass. **Fresh agent per feedback iteration**
+   (no persistent session — each feedback turn starts with a clean context
+   that includes the validation report and current glossary).
 4. **Idempotency**: a volume whose outputs already exist and pass acceptance is skipped (unless `--force`). The skip-check reads a persisted rolling-window state file (`*-rolling-state.json`) written alongside the validation report during the last run, recomputing the acceptance decision deterministically — no AI call needed. If the state file is missing or corrupt, the check falls back to regenerating (fail-open). A failed skip-check degrades to "not skipped" (fail-open, by design).
 
 ## 4. Pipeline A: glossary (`glossary.js`)
@@ -84,10 +86,13 @@ Per volume, in order — each volume's glossary is built on the previous one's:
 
 1. **Extract new terms** — one-shot in both modes: source + previous `glossary.md` → JSON array of `{ term, type, query }`; parsed by `parseTerms` (tolerates markdown fences and surrounding prose).
 2. **Research** the new terms:
-   - a researcher agent (wiki tools + gated fs). **Skeleton-first**: the code pre-writes `glossary-research.md` with a `- (pending)` line under every term, and the agent must replace each via `editFile` immediately — a crashed run still leaves a usable file. `maxSteps = max(30, 5·terms + 10)`.
+   - **Parallel agents**: one agent per term, batched to `RESEARCH_CONCURRENCY` (env var, default 3). Each agent targets exactly one unique line in `glossary-research.md` via `editFile`, so there are no conflicts.
+   - Skeleton-first: the workflow pre-writes `glossary-research.md` with a `- (pending)` line under every term; each agent replaces its own placeholder. A crashed run still leaves a usable skeleton.
+   - `maxSteps = 15` per agent (2 wiki_search + 1 wiki_extract + 1 editFile + overhead).
+   - `RESEARCH_CONCURRENCY=1` restores the old sequential behavior.
 3. **Amend** the glossary (carry forward every existing term, add the new ones, reconcile conflicts):
-   - an **author agent** (per-volume session, `maxSteps 40`) reads the materials with `readFile` and writes `glossary.md` with `writeFile`/`editFile`. The same session later applies the feedback passes.
-4. **QA loop**: a fresh validator agent per iteration (step cap **scaled to source size**: `max(40, 2·ceil(bytes/32KB) + 24)` — `validatorMaxStepsFor`) writes `glossary-validation.md` → acceptance one-shot → on FAIL the author session applies the feedback.
+   - an **author agent** (standalone — creates and closes its own session) reads the materials with `readFile` and writes `glossary.md` with `writeFile`/`editFile`.
+4. **QA loop**: a fresh validator agent per iteration (step cap **scaled to source size**: `max(40, 2·ceil(bytes/32KB) + 24)` — `validatorMaxStepsFor`) writes `glossary-validation.md` → acceptance one-shot → on FAIL a **fresh author agent** per iteration applies the feedback (no persistent session).
 5. After all volumes: the **last** volume's `glossary.md` is copied to `GLOSSARY_OUTPUT_FILE` (default `<SERIES_LOCATION>/glossary.md`). Skipped for `--volume` runs (a single volume's snapshot would be stale).
 
 Artifacts per volume folder: `glossary.md` (snapshot), `glossary-research.md`, `glossary-validation.md`.
@@ -126,6 +131,7 @@ Per volume:
 | `AGENT_MAX_STEPS` | `20` | Default step cap for tool agents (workflows pass higher caps where needed) |
 | `GLOSSARY_OUTPUT_FILE` | `<SERIES_LOCATION>/glossary.md` | Final glossary location |
 | `RESEARCH_ENABLED` | `true` | Research new glossary terms |
+| `RESEARCH_CONCURRENCY` | `3` | Number of parallel research agents (one per term, batched). Set to `1` for sequential processing. |
 | `WIKI_LANGS` | `ja,en` | Wikipedia languages to query |
 | `RESEARCH_MAX_RESULTS` / `RESEARCH_EXTRACT_CHARS` | `3` / `800` | Research result size |
 | `RESEARCH_DELAY_MS` / `RESEARCH_TIMEOUT_MS` | `300` / `30000` | Politeness delay / per-request timeout |
@@ -149,6 +155,9 @@ Per volume:
 9. **Logging goes through `harness.logLine`** so run logs stay greppable (prefix `[call-ai]`, file `.logs/call-ai-*.log`). The ad-hoc `harness.js` CLI prints model output to stdout — keep stdout clean for that.
 10. This directory is **not a git repository**; `.gitignore` exists for when it becomes one (and documents the ignored outputs: `.logs/`, `.dry-run/`, generated `test-series` files).
 11. **The discovery agent's manifest is cached and auto-stale:** `getTranslationTarget()` reuses an existing `translation-target.json` unless `--force` is passed or a listed source file has been deleted (stale → auto-regenerate). With `--dry-run` the AI is never called and the legacy convention is used instead.
+12. **Research concurrency (`RESEARCH_CONCURRENCY`):** default 3 parallel agents. Set to 1 to restore the old sequential behavior. Each agent has a fixed `maxSteps=15` — the old global cap (`max(30, 5·terms + 10)`) was replaced by per-agent caps. The skeleton-first approach ensures crash safety: failed terms leave `- (pending)` in place.
+13. **Fresh agents per QA feedback iteration:** the author session is no longer persistent across the QA loop. Each feedback pass creates a new agent with a self-contained prompt (validation report + current glossary). This prevents context window bloat but increases per-iteration token cost.
+14. **Glossary truncation:** if the previous glossary exceeds 64KB, it is truncated to the last 200 entries before being passed to the author/validator agents. Earlier entries are carried forward unchanged (only conflicts with new terms need checking).
 
 ## 8. Conventions
 

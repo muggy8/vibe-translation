@@ -11,6 +11,8 @@ const {
   buildGlossaryAuthorTurnPrompt,
   buildGlossaryValidatorTurnPrompt,
   buildGlossaryFeedbackTurnPrompt,
+  truncateGlossary,
+  buildPerTermResearchPrompt,
 } = require("../glossary");
 const {
   transformUserPrompt,
@@ -226,5 +228,25 @@ const glossaryCtx2 = { ...glossaryCtx, isFirst: false, previousFolderName: "stor
 assert.ok(buildGlossaryAuthorTurnPrompt(glossaryCtx2, terms, false).includes("../story_name(1)/glossary.md"), "volume-2: previous glossary path");
 assert.ok(buildGlossaryValidatorTurnPrompt(glossaryCtx2).includes("../story_name(1)/glossary.md"), "volume-2 validator: previous glossary path");
 assert.ok(buildGlossaryFeedbackTurnPrompt(glossaryCtx2).includes("../story_name(1)/glossary.md"), "volume-2 feedback: previous glossary path");
+
+// ─── truncateGlossary ────────────────────────────────────────────────────────
+// Under the threshold: returns content unchanged.
+const shortGlossary = "- TermA (character): A character\n- TermB (place): A place";
+assert.strictEqual(truncateGlossary(shortGlossary), shortGlossary, "truncateGlossary: short content unchanged");
+
+// Over the threshold (64KB): returns truncated content with header note.
+// Each entry is ~60 bytes; need ~1100+ entries to exceed 64KB.
+const longGlossary = Array.from({ length: 1200 }, (_, i) => `- Term${i} (character): This is a description for term ${i} that is quite long`).join("\n");
+const truncated = truncateGlossary(longGlossary);
+assert.ok(truncated.includes("[TRUNCATED:"), "truncateGlossary: truncated content has header note");
+assert.ok(!truncated.includes("Term0"), "truncateGlossary: first entries removed");
+assert.ok(truncated.includes("Term1199"), "truncateGlossary: last entries kept");
+
+// ─── buildPerTermResearchPrompt ──────────────────────────────────────────────
+const perTermPrompt = buildPerTermResearchPrompt(glossaryCtx, { term: "ソラ", type: "character", query: "ソラ" }, 0);
+assert.ok(perTermPrompt.includes("ソラ"), "per-term prompt carries the term");
+assert.ok(perTermPrompt.includes("glossary-research.md"), "per-term prompt names the notes file");
+assert.ok(perTermPrompt.includes("- (pending)"), "per-term prompt mentions the placeholder");
+assert.ok(perTermPrompt.includes("editFile"), "per-term prompt instructs editFile");
 
 console.log("All tests passed.");
