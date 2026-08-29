@@ -27,4 +27,4 @@ Following the system prompt (revision mode), apply the validation report's feedb
 
 ## Output
 
-Produce the **complete corrected glossary** in Markdown (the whole file, not just the diff), in the same section/table format as the input. Output **only** the glossary Markdown — no preamble, no commentary.
+Write the complete corrected glossary to `glossary.md` using `writeFile` (complete contents, overwrite), in the same section/table format as the input. Write only the glossary Markdown to the file — no preamble, no commentary, no code fences around the whole thing.

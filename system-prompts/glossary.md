@@ -61,4 +61,4 @@ _Canonical [target language] renderings for translating [series title] ([source 
 |---|---|---|
 ```
 
-Keep the tables clean and scannable. Output **only** the glossary Markdown — no preamble, no commentary, no code fences around the whole thing.
+Keep the tables clean and scannable. Write the complete glossary to `glossary.md` using `writeFile` (complete contents, overwrite). Write only the glossary Markdown to the file — no preamble, no commentary, no code fences around the whole thing.

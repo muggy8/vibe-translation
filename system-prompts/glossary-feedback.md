@@ -22,4 +22,4 @@ You are **not** regenerating the glossary from scratch. You are making **targete
 
 ## Output
 
-Follow the existing glossary and produce the **complete corrected glossary** in Markdown (the whole file, not just the diff), in the same section/table format as the input. Output **only** the glossary Markdown — no preamble, no commentary.
+Follow the existing glossary and produce the **complete corrected glossary** in Markdown (the whole file, not just the diff), in the same section/table format as the input. Write the complete corrected glossary to `glossary.md` using `writeFile` (complete contents, overwrite). Write only the glossary Markdown to the file — no preamble, no commentary, no code fences around the whole thing.

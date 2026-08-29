@@ -33,4 +33,4 @@ Following the system prompt, produce the **amended glossary** for {{SOURCE_NAME}
 
 ## Output
 
-Produce the **complete amended glossary** in Markdown (the whole file, not just the additions), in the exact section/table format from the system prompt (using the actual language names as the table headers). No preamble, no commentary.
+Write the complete amended glossary to `glossary.md` using `writeFile` (complete contents, overwrite), in the exact section/table format from the system prompt (using the actual language names as the table headers). Write only the glossary Markdown to the file — no preamble, no commentary, no code fences around the whole thing.
