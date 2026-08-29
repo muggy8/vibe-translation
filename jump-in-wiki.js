@@ -12,8 +12,9 @@
  *        - agent: an author agent (per-volume session) reads the source and
  *          previous wikis with file tools and writes both files directly
  *          (no marker-based output parsing).
- *     2. Repeats the following until the wiki passes the acceptance check or
- *        the iteration cap (MAX_VALIDATION_ITERATIONS, default 3) is reached:
+ *     2. Repeats the following until the rolling-average acceptance criterion
+ *        is met or the iteration cap (MAX_VALIDATION_ITERATIONS, default 10)
+ *        is reached:
  *        a. Validates the wiki with the validator prompts
  *           (system-prompts/jump-in-wiki-validator.md and
  *           user-prompts/jump-in-wiki-validator.md), saving the report to
@@ -22,11 +23,14 @@
  *        b. Asks the acceptance prompts (system-prompts/jump-in-wiki-acceptance.md
  *           and user-prompts/jump-in-wiki-acceptance.md) whether the wiki is a
  *           passing grade (PASS) or not (FAIL). Always a tool-less single-shot
- *           call.
- *        c. On PASS, stops. Otherwise, applies the feedback prompts
+ *           call. Each result is tracked in a rolling window (default: last 5
+ *           checks). When the rolling pass rate meets the threshold (default:
+ *           0.60 = 3 of 5) and we have at least MIN_SAMPLES (default: 3)
+ *           checks, accept and stop.
+ *        c. Otherwise, apply the feedback prompts
  *           (system-prompts/jump-in-wiki-feedback.md and
  *           user-prompts/jump-in-wiki-feedback.md) to correct the wiki
- *           (the same author session), then repeats from (a).
+ *           (the same author session), then repeat from (a).
  *
  * Idempotent: a volume whose wiki + shared wiki already exist and pass the
  * acceptance check (from a previous run's validation report) is skipped
@@ -45,7 +49,7 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
@@ -590,8 +594,8 @@ async function runVolumeAgent(ctx) {
 
 /**
  * QA loop: independent validator agent (fresh per iteration) ->
- * one-shot acceptance -> feedback applied by the same author session that
- * generated the wiki.
+ * rolling-average acceptance check -> feedback applied by the same author
+ * session that generated the wiki.
  *
  * @param {WikiVolumeCtx} ctx - The volume context (must include ctx.fsGate).
  * @param {AgentHandle} author - The author agent handle (keeps its session).
@@ -608,6 +612,8 @@ async function runQaLoop(ctx, author) {
   const fsGate = ctx.fsGate;
 
   const validationFileName = `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md`;
+  // Rolling window of recent acceptance results (true = pass, false = fail).
+  const recentRollingResults = [];
 
   for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
     console.log(`Validation iteration ${iteration}/${maxValidationIterations}...`);
@@ -651,12 +657,25 @@ async function runQaLoop(ctx, author) {
     const accepted = isPassingVerdict(acceptanceOutput);
     console.log(`Acceptance check: ${accepted ? "PASS" : "FAIL"}`);
 
-    if (accepted) {
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: accepted on iteration ${iteration}. ` +
-        `Skipping the feedback pass so the passing wiki is left untouched.`
-      );
-      break;
+    // Record result in rolling window.
+    recentRollingResults.push(accepted);
+    if (recentRollingResults.length > ROLLING_WINDOW_SIZE) {
+      recentRollingResults.shift();
+    }
+
+    // Check rolling average: if we have enough samples and the pass rate
+    // meets the threshold, accept and stop (skip feedback).
+    if (recentRollingResults.length >= ROLLING_MIN_SAMPLES) {
+      const avg = computeRollingAverage(recentRollingResults);
+      if (avg >= ROLLING_ACCEPTANCE_THRESHOLD) {
+        const passCount = recentRollingResults.filter(Boolean).length;
+        console.log(
+          `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(2)} ` +
+            `(${passCount}/${recentRollingResults.length} passes) meets threshold ` +
+            `${ROLLING_ACCEPTANCE_THRESHOLD}. Accepted.`
+        );
+        break;
+      }
     }
 
     // the logic for applying the validation feedback (same author session)

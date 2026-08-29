@@ -26,6 +26,60 @@ You have file tools: readFile, listFiles, grep, writeFile, and editFile.
 - Never paste file contents into your chat reply. When you are done, reply with a short summary: what you read, what you wrote, and any problems you hit.
 `;
 
+// ── Rolling average validation config ────────────────────────────────────────
+
+/**
+ * Number of recent acceptance checks to keep in the rolling window.
+ * Read from .env, defaulting to 5.
+ *
+ * @type {number}
+ */
+const ROLLING_WINDOW_SIZE = Math.max(
+  2,
+  parseInt(process.env.ROLLING_WINDOW_SIZE, 10) || 5
+);
+
+/**
+ * Minimum number of acceptance checks before the rolling average can
+ * trigger acceptance. Must be less than ROLLING_WINDOW_SIZE.
+ * Read from .env, defaulting to 3.
+ *
+ * @type {number}
+ */
+const ROLLING_MIN_SAMPLES = Math.max(
+  1,
+  parseInt(process.env.ROLLING_MIN_SAMPLES, 10) || 3
+);
+
+/**
+ * Pass rate threshold (0–1) for the rolling average.
+ * When the rolling average of recent acceptance results meets or exceeds
+ * this value, the output is accepted.
+ * Read from .env, defaulting to 0.60 (i.e. 3 of 5 must pass).
+ *
+ * @type {number}
+ */
+const ROLLING_ACCEPTANCE_THRESHOLD = Math.min(
+  1,
+  Math.max(0, parseFloat(process.env.ROLLING_ACCEPTANCE_THRESHOLD) || 0.6)
+);
+
+/**
+ * Compute the rolling average (pass rate) from an array of boolean results.
+ * Returns 0 if the array is empty.
+ *
+ * @param {boolean[]} results - Array of acceptance results (true = pass).
+ * @returns {number} The pass rate (0–1).
+ */
+function computeRollingAverage(results) {
+  if (!results || results.length === 0) return 0;
+  return results.reduce((sum, v) => sum + (v ? 1 : 0), 0) / results.length;
+}
+
 module.exports = {
   AGENT_TOOLS_NOTE,
+  ROLLING_WINDOW_SIZE,
+  ROLLING_MIN_SAMPLES,
+  ROLLING_ACCEPTANCE_THRESHOLD,
+  computeRollingAverage,
 };

@@ -21,15 +21,18 @@
  *        - agent: an author agent (per-volume session) reads the
  *          materials with file tools and writes glossary.md directly.
  *     5. Save a per-volume snapshot to <volume folder>/glossary.md.
- *     6. Run the QA loop until the glossary passes the acceptance check or the
- *        iteration cap (MAX_VALIDATION_ITERATIONS, default 3) is reached:
+ *     6. Run the QA loop with a rolling-average acceptance criterion:
  *          a. Validate the glossary against the source (glossary-validator.md)
  *             — an independent validator agent writes the report.
  *          b. Acceptance check (glossary-acceptance.md): PASS or FAIL
  *             (always a tool-less single-shot call).
- *          c. On PASS, stop. Otherwise, apply the feedback
- *             (glossary-feedback.md) and repeat from (a). In agent mode the
- *             same author session that wrote the glossary applies it.
+ *          c. Track each acceptance result in a rolling window (default:
+ *             last 5 checks). When the rolling pass rate meets the
+ *             threshold (default: 0.60 = 3 of 5) and we have at least
+ *             MIN_SAMPLES (default: 3) checks, accept and stop.
+ *          d. Otherwise, apply the feedback (glossary-feedback.md) and
+ *             repeat from (a). In agent mode the same author session
+ *             that wrote the glossary applies it.
  *   After all volumes, the last volume's glossary.md is copied to the series
  *   root (GLOSSARY_OUTPUT_FILE, default <SERIES_LOCATION>/glossary.md).
  *
@@ -51,7 +54,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage } = require("./configs/shared");
 const { fileExists, assertWrote } = require("./utils/fs");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
@@ -520,12 +523,6 @@ async function acceptanceCheck(ctx, iteration) {
   console.log(
     `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: ${accepted ? "PASS" : "FAIL"}`
   );
-  if (accepted) {
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: accepted on iteration ${iteration}. ` +
-        `Skipping the feedback pass so the passing glossary is left untouched.`
-    );
-  }
   return accepted;
 }
 
@@ -679,8 +676,8 @@ async function runVolumeAgent(ctx) {
 
 /**
  * QA loop: independent validator agent (fresh per iteration) ->
- * one-shot acceptance -> feedback applied by the same author session that
- * wrote the glossary.
+ * rolling-average acceptance check -> feedback applied by the same author
+ * session that wrote the glossary.
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (must include ctx.fsGate).
  * @param {AgentHandle} author - The author agent handle (keeps its session).
@@ -694,6 +691,8 @@ async function runQaLoop(ctx, author) {
     validationOutputFile,
   } = ctx;
   const fsGate = ctx.fsGate;
+  // Rolling window of recent acceptance results (true = pass, false = fail).
+  const recentRollingResults = [];
 
   for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
     console.log(
@@ -722,8 +721,27 @@ async function runQaLoop(ctx, author) {
     await assertWrote(validationOutputFile, "the validator agent");
 
     // Acceptance check (always one-shot, tool-less).
-    if (await acceptanceCheck(ctx, iteration)) {
-      break;
+    const accepted = await acceptanceCheck(ctx, iteration);
+
+    // Record result in rolling window.
+    recentRollingResults.push(accepted);
+    if (recentRollingResults.length > ROLLING_WINDOW_SIZE) {
+      recentRollingResults.shift();
+    }
+
+    // Check rolling average: if we have enough samples and the pass rate
+    // meets the threshold, accept and stop (skip feedback).
+    if (recentRollingResults.length >= ROLLING_MIN_SAMPLES) {
+      const avg = computeRollingAverage(recentRollingResults);
+      if (avg >= ROLLING_ACCEPTANCE_THRESHOLD) {
+        const passCount = recentRollingResults.filter(Boolean).length;
+        console.log(
+          `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(2)} ` +
+            `(${passCount}/${recentRollingResults.length} passes) meets threshold ` +
+            `${ROLLING_ACCEPTANCE_THRESHOLD}. Accepted.`
+        );
+        break;
+      }
     }
 
     // Apply the feedback with the same author session that wrote the glossary.

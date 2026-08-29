@@ -28,7 +28,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 
 | Path | Role |
 |---|---|
-| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`). Both `glossary.js` and `jump-in-wiki.js` import from here. |
+| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and rolling-average validation config (`ROLLING_WINDOW_SIZE`, `ROLLING_ACCEPTANCE_THRESHOLD`, `ROLLING_MIN_SAMPLES`, `computeRollingAverage`). Both `glossary.js` and `jump-in-wiki.js` import from here. |
 | `utils/fs.js` | Filesystem helpers: `fileExists`, `assertWrote`. |
 | `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict`, `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
@@ -69,7 +69,13 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
 
 1. Discover volume folders and source files via the translation-target manifest (`getTranslationTarget()`). An AI agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes the result to `<SERIES_LOCATION>/translation-target.json`. With `--dry-run` a deterministic fallback (the legacy convention) builds the manifest instead, so prompt previews stay fully offline.
 2. Fill `{{PLACEHOLDER}}`s in the user-prompt templates (`transformUserPrompt` — **strict**: throws on a missing value or any leftover placeholder).
-3. **QA loop** per volume, up to `MAX_VALIDATION_ITERATIONS`: validate (independent validator) → **acceptance check (always a tool-less one-shot answering PASS/FAIL, parsed by `isPassingVerdict`)** → on FAIL, feedback applied by the *author's own session* → repeat. A passing output is never touched by a feedback pass.
+3. **QA loop** per volume, up to `MAX_VALIDATION_ITERATIONS`: rolling-average
+   acceptance — each acceptance result is tracked in a rolling window
+   (`ROLLING_WINDOW_SIZE`, default 5). When the rolling pass rate meets the
+   threshold (`ROLLING_ACCEPTANCE_THRESHOLD`, default 0.60) and we have at
+   least `ROLLING_MIN_SAMPLES` checks (default 3), the output is accepted.
+   Otherwise, feedback is applied and the loop continues. A passing output
+   is never touched by a feedback pass.
 4. **Idempotency**: a volume whose outputs already exist and pass acceptance is skipped (unless `--force`). Note the skip-check itself is a *live one-shot API call*; a failed skip-check degrades to "not skipped" (fail-open, by design).
 
 ## 4. Pipeline A: glossary (`glossary.js`)
@@ -112,7 +118,10 @@ Per volume:
 | `SERIES_NAME_SOURCE` | — (required) | Series name; volume folders must contain it |
 | `SERIES_LOCATION` | — (required) | Folder containing the volume folders |
 | `SOURCE_LANGUAGE` / `TARGET_LANGUAGE` | Japanese / English | Filled into the prompts |
-| `MAX_VALIDATION_ITERATIONS` | `3` | QA-loop cap per volume |
+| `MAX_VALIDATION_ITERATIONS` | `10` | QA-loop cap per volume (increased to allow rolling average to converge) |
+| `ROLLING_WINDOW_SIZE` | `5` | Number of recent acceptance checks in the rolling window |
+| `ROLLING_MIN_SAMPLES` | `3` | Minimum checks before rolling average can trigger acceptance |
+| `ROLLING_ACCEPTANCE_THRESHOLD` | `0.60` | Pass rate (0–1) needed to accept via rolling average |
 | `CONTEXT_WINDOW` | `128000` | Tokens at which agent sessions auto-compact |
 | `AGENT_MAX_STEPS` | `20` | Default step cap for tool agents (workflows pass higher caps where needed) |
 | `GLOSSARY_OUTPUT_FILE` | `<SERIES_LOCATION>/glossary.md` | Final glossary location |
@@ -125,7 +134,7 @@ Per volume:
 | `THINKING` | on | Qwen3 thinking phase — **enabled by default**. See §7. |
 | `THINKING_LEVEL` | xhigh | reasoning_effort: "low" / "medium" / "xhigh" (model-dependent). |
 
-**Current local setup** (the committed `.env`): local Qwen at `http://localhost:9200/v1`, `MAX_TOKENS=262144`, `TEMPERATURE=0.6`, `AI_RETRY=2`, `MAX_VALIDATION_ITERATIONS=5`, THINKING=on, THINKING_LEVEL=xhigh, series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
+**Current local setup** (the committed `.env`): local Qwen at `http://localhost:9200/v1`, `MAX_TOKENS=262144`, `TEMPERATURE=0.6`, `AI_RETRY=2`, `MAX_VALIDATION_ITERATIONS=10`, `ROLLING_WINDOW_SIZE=5`, `ROLLING_MIN_SAMPLES=3`, `ROLLING_ACCEPTANCE_THRESHOLD=0.60`, THINKING=on, THINKING_LEVEL=xhigh, series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
 
 ## 7. Gotchas (hard-won — read before changing behavior)
 
