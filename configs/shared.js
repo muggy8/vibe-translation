@@ -23,7 +23,8 @@ You have file tools: readFile, listFiles, grep, writeFile, and editFile.
 - Write your output files with writeFile (complete contents) or editFile (targeted fixes).
 - When writing a complete output file (not a targeted fix), always use writeFile to **overwrite** the file entirely. Never append to an existing file.
 - For the wiki task: write to wiki.md and shared-wiki.md. For the glossary task: write to glossary.md.
-- Never paste file contents into your chat reply. When you are done, reply with a short summary: what you read, what you wrote, and any problems you hit.
+- **CRITICAL: You MUST write your output using writeFile or editFile. Do NOT output the file contents in your chat reply — the chat reply is NOT saved to disk. If you output the full content in your chat message instead of calling writeFile, the file will not exist and the run will fail.**
+- When you are done writing files, reply with a short summary: what you read, what you wrote, and any problems you hit.
 `;
 
 // ── Rolling average validation config ────────────────────────────────────────

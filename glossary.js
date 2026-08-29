@@ -55,7 +55,7 @@ const harness = require("./harness");
 const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage, saveRollingState } = require("./configs/shared");
-const { fileExists, assertWrote } = require("./utils/fs");
+const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -664,11 +664,38 @@ async function runVolumeAgent(ctx) {
     maxSteps: 40,
   });
   try {
-    await author.sendTurn(
+    const amendResult = await author.sendTurn(
       buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable),
       { label: `glossary-amend-${values.INSTALLMENT_NUMBER}` }
     );
-    await assertWrote(glossaryOutputFile, "the author agent");
+    const fallbackUsed = await assertWroteWithFallback(
+      glossaryOutputFile,
+      "the author agent",
+      amendResult?.text
+    );
+
+    // Recovery turn: if the model replied in chat instead of writeFile,
+    // send a second turn asking it to write the file using the content
+    // it already generated (the model's session still has that context).
+    if (fallbackUsed && process.env.RECOVERY_ENABLED !== "false") {
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: sending recovery turn ` +
+          `(model replied in chat instead of writeFile)...`
+      );
+      const recoveryResult = await author.sendTurn(
+        `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+        `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
+        `Please rewrite the complete glossary to "glossary.md" using writeFile now. Use the exact same content you generated in your previous message.`,
+        { label: `glossary-recovery-${values.INSTALLMENT_NUMBER}` }
+      );
+      // Overwrite with the recovery output (may be the same content, now via writeFile).
+      await assertWroteWithFallback(
+        glossaryOutputFile,
+        "the author agent (recovery)",
+        recoveryResult?.text
+      );
+    }
+
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: saved the glossary to ${glossaryOutputFile}`
     );
@@ -755,11 +782,15 @@ async function runQaLoop(ctx, author) {
     }
 
     // Apply the feedback with the same author session that wrote the glossary.
-    await author.sendTurn(
+    const feedbackResult = await author.sendTurn(
       buildGlossaryFeedbackTurnPrompt(ctx),
       { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
     );
-    await assertWrote(glossaryOutputFile, "the author agent (feedback pass)");
+    await assertWroteWithFallback(
+      glossaryOutputFile,
+      "the author agent (feedback pass)",
+      feedbackResult?.text
+    );
 
     if (iteration === maxValidationIterations) {
       console.log(

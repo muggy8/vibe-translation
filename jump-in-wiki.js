@@ -50,7 +50,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage, saveRollingState } = require("./configs/shared");
-const { fileExists } = require("./utils/fs");
+const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
 
@@ -248,25 +248,6 @@ function buildWikiFeedbackTurnPrompt(ctx) {
     `targeted fixes. Make the smallest changes that resolve each valid finding.\n\n` +
     feedbackPrompt
   );
-}
-
-/**
- * Fail loudly if an agent stage left its output files missing or empty
- * (agent runs can finish without having written the files).
- *
- * @param {string[]} filePaths - The expected output files.
- * @param {string} who - Who was supposed to write them (for the error message).
- */
-async function assertWrote(filePaths, who) {
-  const paths = Array.isArray(filePaths) ? filePaths : [filePaths];
-  for (const filePath of paths) {
-    const content = await fs.readFile(filePath, "utf-8").catch(() => null);
-    if (!content || !content.trim()) {
-      throw new Error(
-        `${who} did not produce ${filePath}. Check the run log in .logs/ for the agent transcript.`
-      );
-    }
-  }
 }
 
 // Re-export shared utilities from utils/prompt.js and utils/manifest.js
@@ -580,17 +561,41 @@ async function runVolumeAgent(ctx) {
           "utf8"
         );
       }
-      await author.sendTurn(buildWikiAuthorTurnPrompt(ctx), {
+      const wikiGenResult = await author.sendTurn(buildWikiAuthorTurnPrompt(ctx), {
         label: `jump-in-wiki-generate-${values.INSTALLMENT_NUMBER}`,
       });
       // Safety net: adopt the output if the agent picked different names.
       const knownFiles = knownVolumeFileNames(ctx);
       await adoptStrayOutput(volumeDir, "wiki.md", knownFiles);
       await adoptStrayOutput(volumeDir, "shared-wiki.md", knownFiles);
-      await assertWrote(
+      const wikiFallbackUsed = await assertWroteWithFallback(
         [wikiOutputFile, sharedWikiOutputFile],
-        "the author agent"
+        "the author agent",
+        wikiGenResult?.text
       );
+
+      // Recovery turn: if the model replied in chat instead of writeFile,
+      // send a second turn asking it to write both files using the content
+      // it already generated (the model's session still has that context).
+      if (wikiFallbackUsed && process.env.RECOVERY_ENABLED !== "false") {
+        console.log(
+          `Volume ${values.INSTALLMENT_NUMBER}: sending recovery turn ` +
+            `(model replied in chat instead of writeFile)...`
+        );
+        const wikiRecoveryResult = await author.sendTurn(
+          `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+          `Both files have been temporarily written from your chat reply, but they must be written properly using writeFile. ` +
+          `Please rewrite both files using writeFile now. Use the exact same content you generated in your previous message: ` +
+          `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`,
+          { label: `jump-in-wiki-recovery-${values.INSTALLMENT_NUMBER}` }
+        );
+        // Overwrite with the recovery output (may be the same content, now via writeFile).
+        await assertWroteWithFallback(
+          [wikiOutputFile, sharedWikiOutputFile],
+          "the author agent (recovery)",
+          wikiRecoveryResult?.text
+        );
+      }
     }
 
     await runQaLoop(ctx, author);
@@ -693,13 +698,14 @@ async function runQaLoop(ctx, author) {
     // the logic for applying the validation feedback (same author session)
     console.log("Calling the AI to apply the validation feedback (author agent)...");
 
-    await author.sendTurn(
+    const wikiFeedbackResult = await author.sendTurn(
       buildWikiFeedbackTurnPrompt(ctx),
       { label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
     );
-    await assertWrote(
+    await assertWroteWithFallback(
       [wikiOutputFile, sharedWikiOutputFile],
-      "the author agent (feedback pass)"
+      "the author agent (feedback pass)",
+      wikiFeedbackResult?.text
     );
 
     if (iteration === maxValidationIterations) {
