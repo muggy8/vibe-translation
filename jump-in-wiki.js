@@ -651,14 +651,39 @@ async function runQaLoop(ctx, author) {
       maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size),
     });
     try {
-      await validator.sendTurn(
+      const validateResult = await validator.sendTurn(
         buildWikiValidatorTurnPrompt(ctx),
         { label: `jump-in-wiki-validate-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
+      await assertWroteWithFallback(
+        validationOutputFile,
+        "the validator agent",
+        validateResult?.text
+      );
+
+      // Recovery turn: if the validator replied in chat instead of writeFile,
+      // send a second turn asking it to write the report using writeFile.
+      if (process.env.RECOVERY_ENABLED !== "false") {
+        const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
+        const recoveryPrompt = hasContent
+          ? `You were asked to write the validation report to "jump-in-wiki-validation-NN.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+            `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
+            `Please rewrite the complete validation report using writeFile now. Use the exact same content you generated in your previous message.`
+          : `You were asked to write the validation report using writeFile, but you produced no output.\n\n` +
+            `Please read the source materials and write the complete validation report using writeFile now.`;
+        const validateRecoveryResult = await validator.sendTurn(
+          recoveryPrompt,
+          { label: `jump-in-wiki-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
+        );
+        await assertWroteWithFallback(
+          validationOutputFile,
+          "the validator agent (recovery)",
+          validateRecoveryResult?.text
+        );
+      }
     } finally {
       await validator.close();
     }
-    await assertWrote(validationOutputFile, "the validator agent");
 
     // the logic for checking whether the validated wiki is acceptable
     // (always one-shot, tool-less)
