@@ -326,11 +326,6 @@ async function glossary() {
   }
 
   console.log(`Found ${sorted.length} volume folder(s). Processing in order...`);
-  console.log(
-    `Workflow mode: ${agentMode
-      ? "agent (OpenHarness tool-calling agents)"
-      : "classic (single-shot pipeline)"}`
-  );
 
   // Once any volume is regenerated, all later volumes must be regenerated too
   // (each volume's glossary is built on the previous one's).
