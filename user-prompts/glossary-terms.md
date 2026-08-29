@@ -14,7 +14,7 @@ Read the following materials **in full** before extracting anything:
 
 ## Task
 
-Following the system prompt, find every term that appears in volume {{INSTALLMENT_NUMBER}}'s source text but is **not already in the previous glossary**. Cover characters (full names), places, items/artifacts, factions/organizations, and key terms/concepts.
+Following the system prompt, find every term that appears in volume {{INSTALLMENT_NUMBER}}'s source text but is **not already in the previous glossary**. Cover characters (full names), places, items/artifacts, factions/organizations, key terms/concepts, trademark parodies (real brands with slight character modifications), and parody real-person names (public figures/celebrities whose names have been altered).
 
 For each new term, provide the source-language `term`, a `type`, and a suggested `query` for online research.
 

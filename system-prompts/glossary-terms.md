@@ -9,6 +9,18 @@ Read the volume's source text in full and identify every term a translator will 
 - **Items & artifacts** — named objects, weapons, devices, and unique items.
 - **Factions & organizations** — named groups, clubs, companies, and institutions.
 - **Terms & concepts** — proper nouns and established in-world concepts with specific meaning (techniques, titles, phenomena, named events).
+- **Trademark parodies** — real-world brand names that have been slightly altered
+  (one character substituted, a small modification) to create a legally distinct
+  parody. Common in works set in modern-day Japan where authors reference McDonald's,
+  Nintendo, Konami, Coca-Cola, etc. with minor character changes. These are important
+  for translators to track because the parody only works if the reader recognizes the
+  original brand. Include the **original real-world brand** in the `query` field so
+  research tools can identify the connection.
+- **Parody real-person names** — real, recognizable person names (public figures,
+  celebrities, historical figures) that have been slightly altered (one or more
+  characters changed, a small modification) to create a legally distinct stand-in.
+  Include the **original real person's name** in the `query` field so the connection
+  can be identified.
 
 Then **compare against the previous glossary** and keep only the terms that are **new** (not already listed there).
 
