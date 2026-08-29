@@ -40,6 +40,7 @@ require("./types"); // JSDoc type definitions
 const { fileTypeFromBuffer } = require("file-type");
 const { Agent: UndiciAgent } = require("undici");
 const { tool, generateText } = require("ai");
+const { z } = require("zod");
 
 // Local LLM servers (e.g. llama.cpp) can take many minutes to prefill a huge
 // prompt and to generate a long answer. undici's default fetch timeouts
