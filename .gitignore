@@ -50,6 +50,9 @@ test-series/**/glossary-validation.md
 test-series/**/jump-in-wiki-validation-*.md
 test-series/glossary.md
 
+# Rolling-window acceptance state (persisted by QA loop, read by skip-check)
+*-rolling-state.json
+
 # Testing coverage
 coverage/
 .nyc_output/

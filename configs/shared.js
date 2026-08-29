@@ -76,10 +76,54 @@ function computeRollingAverage(results) {
   return results.reduce((sum, v) => sum + (v ? 1 : 0), 0) / results.length;
 }
 
+/**
+ * Persist the current rolling window of acceptance results to disk.
+ * The file is a small JSON document that survives process restarts,
+ * enabling the skip-check to recover the exact acceptance state
+ * without re-calling the AI.
+ *
+ * Format:
+ *   { "results": [true, false, true, ...], "lastCheckedAt": "2026-08-28T..." }
+ *
+ * @param {string} filePath - Absolute path to write the state file to.
+ * @param {boolean[]} results - The current rolling window results.
+ */
+async function saveRollingState(filePath, results) {
+  const fs = require("fs").promises;
+  const data = {
+    results,
+    lastCheckedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
+}
+
+/**
+ * Load the persisted rolling window state from disk.
+ * Returns `null` if the file does not exist, is empty, or is corrupt.
+ *
+ * @param {string} filePath - Absolute path to read the state file from.
+ * @returns {{ results: boolean[] } | null} The loaded state, or `null` on any error.
+ */
+async function loadRollingState(filePath) {
+  const fs = require("fs").promises;
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    if (!raw.trim()) return null;
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data.results)) return null;
+    return { results: data.results };
+  } catch {
+    // File missing, unreadable, or JSON parse error — degrade safely.
+    return null;
+  }
+}
+
 module.exports = {
   AGENT_TOOLS_NOTE,
   ROLLING_WINDOW_SIZE,
   ROLLING_MIN_SAMPLES,
   ROLLING_ACCEPTANCE_THRESHOLD,
   computeRollingAverage,
+  saveRollingState,
+  loadRollingState,
 };

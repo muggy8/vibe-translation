@@ -28,7 +28,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 
 | Path | Role |
 |---|---|
-| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and rolling-average validation config (`ROLLING_WINDOW_SIZE`, `ROLLING_ACCEPTANCE_THRESHOLD`, `ROLLING_MIN_SAMPLES`, `computeRollingAverage`). Both `glossary.js` and `jump-in-wiki.js` import from here. |
+| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and rolling-average validation config (`ROLLING_WINDOW_SIZE`, `ROLLING_ACCEPTANCE_THRESHOLD`, `ROLLING_MIN_SAMPLES`, `computeRollingAverage`). Both `glossary.js` and `jump-in-wiki.js` import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window to disk (see §3). |
 | `utils/fs.js` | Filesystem helpers: `fileExists`, `assertWrote`. |
 | `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict`, `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
@@ -76,7 +76,7 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
    least `ROLLING_MIN_SAMPLES` checks (default 3), the output is accepted.
    Otherwise, feedback is applied and the loop continues. A passing output
    is never touched by a feedback pass.
-4. **Idempotency**: a volume whose outputs already exist and pass acceptance is skipped (unless `--force`). Note the skip-check itself is a *live one-shot API call*; a failed skip-check degrades to "not skipped" (fail-open, by design).
+4. **Idempotency**: a volume whose outputs already exist and pass acceptance is skipped (unless `--force`). The skip-check reads a persisted rolling-window state file (`*-rolling-state.json`) written alongside the validation report during the last run, recomputing the acceptance decision deterministically — no AI call needed. If the state file is missing or corrupt, the check falls back to regenerating (fail-open). A failed skip-check degrades to "not skipped" (fail-open, by design).
 
 ## 4. Pipeline A: glossary (`glossary.js`)
 
@@ -143,7 +143,7 @@ Per volume:
 3. **Do not touch the agent-mode prompt safety nets** (the stray-file cleanups): each was added after a live failure (wrong file names, stale strays being audited, marker-format conflicts). The pure tests pin their behavior — run `npm test` after touching any prompt or file name.
 4. **Validator step caps scale with source size** (`validatorMaxStepsFor`): a fixed cap of 40 ran out on the 521KB volume-01 source before the validator wrote its report.
 5. **The glossary is cumulative** — see the §4 invariant (`regeneratedAny`).
-6. **Skip-checks cost a live model call** even when the volume is skipped.
+6. **Skip-checks are deterministic** (reads a persisted `*-rolling-state.json` file). If the state file is missing (e.g. a run from before this change), the check falls back to regenerating the volume — so pre-existing runs are safe to re-run.
 7. **`isPassingVerdict` is intentionally strict**: any mention of FAIL/FAILED/FAILURES or "NOT PASS" fails the verdict. Do not loosen it to "contains PASS".
 8. **The fs write gate confines writes to the volume folder**; reads are allowed anywhere (agents need the previous volume). `deleteFile` is always denied — the *workflow* deletes stale strays, never the agent.
 9. **Logging goes through `harness.logLine`** so run logs stay greppable (prefix `[call-ai]`, file `.logs/call-ai-*.log`). The ad-hoc `harness.js` CLI prints model output to stdout — keep stdout clean for that.

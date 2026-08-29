@@ -54,7 +54,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage, saveRollingState } = require("./configs/shared");
 const { fileExists, assertWrote } = require("./utils/fs");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
@@ -447,23 +447,33 @@ async function glossary() {
       continue;
     }
 
-    // Idempotency: skip a volume whose glossary already exists and passes,
-    // unless a previous volume was regenerated (which would make it stale).
+    // Idempotency: skip a volume whose glossary already exists and passed
+    // the rolling-average acceptance criterion, unless a previous volume was
+    // regenerated (which would make it stale).
+    //
+    // Instead of re-calling the AI, we read the persisted rolling window
+    // state file (glossary-validation-rolling-state.json) and recompute the
+    // acceptance decision deterministically.  If the state file is missing
+    // or corrupt we fall back to regenerating (fail-open).
     let skip = false;
     if (!force && !regeneratedAny && (await fileExists(glossaryOutputFile))) {
-      try {
-        const acceptanceOutput = await harness.runOneShot({
-          systemPrompt: acceptanceSystemPrompt,
-          messages: [
-            { file: validationOutputFile, name: "glossary-validation.md" },
-            { text: acceptancePrompt },
-          ],
-          label: `glossary-acceptance-${values.INSTALLMENT_NUMBER}-skip-check`,
-        });
-        skip = isPassingVerdict(acceptanceOutput);
-      } catch {
-        skip = false;
+      const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
+      const { loadRollingState } = require("./configs/shared");
+      const state = await loadRollingState(stateFilePath);
+      if (state) {
+        const avg = computeRollingAverage(state.results);
+        skip =
+          state.results.length >= ROLLING_MIN_SAMPLES &&
+          avg >= ROLLING_ACCEPTANCE_THRESHOLD;
+        if (skip) {
+          console.log(
+            `Volume ${values.INSTALLMENT_NUMBER}: rolling-state ` +
+              `(${state.results.length} checks, avg ${avg.toFixed(2)}) ` +
+              `meets threshold. Skipping.`
+          );
+        }
       }
+      // state === null → skip stays false (fail-open)
     }
     if (skip) {
       console.log(
@@ -728,6 +738,11 @@ async function runQaLoop(ctx, author) {
     if (recentRollingResults.length > ROLLING_WINDOW_SIZE) {
       recentRollingResults.shift();
     }
+
+    // Persist the rolling window to disk so that a re-run can recover the
+    // exact acceptance state without re-calling the AI.
+    const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
+    await saveRollingState(stateFilePath, recentRollingResults);
 
     // Check rolling average: if we have enough samples and the pass rate
     // meets the threshold, accept and stop (skip feedback).

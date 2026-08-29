@@ -49,7 +49,7 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage, saveRollingState } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
@@ -460,24 +460,31 @@ async function jumpInWiki() {
 
     /**
      * the logic for checking whether the current volume has already been
-     * processed: the validation report from a previous run must exist and the
-     * acceptance check (one-shot, tool-less) must pass.
+     * processed: read the persisted rolling-window state and recompute the
+     * acceptance decision deterministically (no AI call).
+     *
+     * If the state file is missing or corrupt we fall back to regenerating
+     * (fail-open).
      */
     let currentVolumeHasAlreadyBeenProcessed = false;
     if (!force && (await fileExists(validationOutputFile))) {
-      try {
-        const acceptanceOutput = await harness.runOneShot({
-          systemPrompt: acceptanceSystemPrompt,
-          messages: [
-            { file: validationOutputFile, name: `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md` },
-            { text: acceptanceUserPrompt },
-          ],
-          label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-skip-check`,
-        });
-        currentVolumeHasAlreadyBeenProcessed = isPassingVerdict(acceptanceOutput);
-      } catch (err) {
-        currentVolumeHasAlreadyBeenProcessed = false;
+      const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
+      const { loadRollingState } = require("./configs/shared");
+      const state = await loadRollingState(stateFilePath);
+      if (state) {
+        const avg = computeRollingAverage(state.results);
+        currentVolumeHasAlreadyBeenProcessed =
+          state.results.length >= ROLLING_MIN_SAMPLES &&
+          avg >= ROLLING_ACCEPTANCE_THRESHOLD;
+        if (currentVolumeHasAlreadyBeenProcessed) {
+          console.log(
+            `volume ${values.INSTALLMENT_NUMBER}: rolling-state ` +
+            `(${state.results.length} checks, avg ${avg.toFixed(2)}) ` +
+            `meets threshold. skipping.`
+          );
+        }
       }
+      // state === null → skip stays false (fail-open)
     }
 
     if (currentVolumeHasAlreadyBeenProcessed) {
@@ -662,6 +669,11 @@ async function runQaLoop(ctx, author) {
     if (recentRollingResults.length > ROLLING_WINDOW_SIZE) {
       recentRollingResults.shift();
     }
+
+    // Persist the rolling window to disk so that a re-run can recover the
+    // exact acceptance state without re-calling the AI.
+    const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
+    await saveRollingState(stateFilePath, recentRollingResults);
 
     // Check rolling average: if we have enough samples and the pass rate
     // meets the threshold, accept and stop (skip feedback).
