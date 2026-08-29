@@ -13,9 +13,10 @@
  *   npx gulp glossary --force         # regenerate even if the glossary exists
  */
 
+const { series } = require("gulp");
 const { jumpInWiki } = require("./jump-in-wiki");
 const { glossary } = require("./glossary");
 
 exports["jump-in-wiki"] = jumpInWiki;
-exports["glossary"] = glossary;
-exports.default = jumpInWiki;
+exports.glossary = glossary;
+exports.default = series(glossary, jumpInWiki);
