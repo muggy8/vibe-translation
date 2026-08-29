@@ -248,7 +248,7 @@ async function runCompile(ctx, extractionOutput) {
     extractionResults = extractionOutput;
   }
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV compilation...`);
-  const author = await harness.createAgentHandle({ name: `author-voice-${values.INSTALLMENT_NUMBER}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: {}, approve: () => true, cwd: ctx.volumeDir, maxSteps: 30 });
+  const author = await harness.createAgentHandle({ name: `author-voice-${values.INSTALLMENT_NUMBER}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: 30 });
   try {
     const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults), { label: `character-voice-compile-${values.INSTALLMENT_NUMBER}` });
     await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (compile)", compileResult?.text);
@@ -271,7 +271,7 @@ async function runQaLoop(ctx) {
   const recentRollingResults = [];
   for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: validation iteration ${iteration}/${maxValidationIterations}...`);
-    const validator = await harness.createAgentHandle({ name: `validator-voice-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: buildValidatorSystemPrompt(ctx.validatorSystemPrompt) + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size) });
+    const validator = await harness.createAgentHandle({ name: `validator-voice-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size) });
     try {
       const validateResult = await validator.sendTurn(buildValidatorTurnPrompt(ctx), { label: `character-voice-validate-${values.INSTALLMENT_NUMBER}-${iteration}` });
       await assertWroteWithFallback(validationOutputFile, "the validator agent", validateResult?.text);
@@ -350,9 +350,10 @@ async function runVolume(ctx) {
   const { values } = ctx;
   let extractionOutput = "";
   try { extractionOutput = await runExtract(ctx); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: extraction failed: ${err.message}. Check .logs/ for details.`); throw err; }
-  try { await runCompile(ctx, extractionOutput); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed: ${err.message}. Check .logs/ for details.`); throw err; }
+  // Create fsGate BEFORE runCompile so the author agent has file tools.
   const fsGate = harness.createGatedFsTools({ cwd: ctx.volumeDir, allowedDirs: [ctx.volumeDir] });
   ctx.fsGate = fsGate;
+  try { await runCompile(ctx, extractionOutput); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed: ${err.message}. Check .logs/ for details.`); throw err; }
   await runQaLoop(ctx);
 }
 
