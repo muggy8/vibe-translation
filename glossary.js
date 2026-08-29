@@ -256,8 +256,8 @@ function buildGlossaryFeedbackTurnPrompt(ctx) {
     previousGlossaryLine +
     `\n` +
     `Apply the report's findings and write the complete corrected glossary back to ` +
-    `"glossary.md" (writeFile or editFile; smallest changes that resolve each valid ` +
-    `finding).\n\n` +
+    `"glossary.md" using writeFile (complete contents, overwrite). Use editFile only for ` +
+    `targeted fixes. Make the smallest changes that resolve each valid finding.\n\n` +
     ctx.feedbackPrompt
   );
 }

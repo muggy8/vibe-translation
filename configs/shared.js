@@ -21,6 +21,8 @@ You have file tools: readFile, listFiles, grep, writeFile, and editFile.
 - Your working folder is the volume folder; use paths relative to it (e.g. "wiki.md").
 - Read every material listed in the request with readFile before doing anything. Large files may need several reads (use offset/limit to page through).
 - Write your output files with writeFile (complete contents) or editFile (targeted fixes).
+- When writing a complete output file (not a targeted fix), always use writeFile to **overwrite** the file entirely. Never append to an existing file.
+- For the wiki task: write to wiki.md and shared-wiki.md. For the glossary task: write to glossary.md.
 - Never paste file contents into your chat reply. When you are done, reply with a short summary: what you read, what you wrote, and any problems you hit.
 `;
 

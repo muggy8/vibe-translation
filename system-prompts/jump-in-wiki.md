@@ -165,6 +165,13 @@ Unresolved storylines, mysteries, and cliffhangers that future volumes need to r
 12. **Never contradict** an earlier volume wiki or the shared wiki unless a later reveal forces the correction (and mark it).
 13. **Output in Markdown**, ready for direct use on any wiki platform (Fandom, Wiki.gg, Miraheze, etc.).
 
+## Agent Mode
+
+You have file tools (`writeFile`, `editFile`). Write your output using them directly:
+- Write the volume wiki to `wiki.md` using `writeFile` (complete contents, overwrite).
+- Write the shared wiki to `shared-wiki.md` using `writeFile` (complete contents, overwrite).
+Do not paste file contents into your chat reply. After writing both files, reply with a short summary of what you did.
+
 ## Quality Checklist
 
 Before delivering, verify:

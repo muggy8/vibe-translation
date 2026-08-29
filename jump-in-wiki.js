@@ -73,37 +73,21 @@ const maxValidationIterations = Math.max(
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /**
- * Agent mode: rewrite the classic output file names inside a transformed
- * prompt ("jump-in-wiki-NN.md" / "jump-in-wiki-shared.md") to the real
- * workflow file names ("wiki.md" / "shared-wiki.md"). The prompts' "## Output"
- * section still lists the classic names, and a model following it writes the
- * files under the wrong names (observed live).
- *
- * @param {string} prompt - The transformed (variables filled) prompt.
- * @returns {string} The prompt with the agent-mode file names.
- */
-function agentOutputNames(prompt) {
-  return prompt
-    .replace(/jump-in-wiki-\{\{INSTALLMENT_NUMBER\}\}\.md/g, "wiki.md")
-    .replace(/previous-jump-in-wiki\.md/g, "../(previous volume folder)/wiki.md")
-    .replace(/jump-in-wiki-\(NN-1\)\.md/g, "../(previous volume folder)/wiki.md")
-    .replace(/jump-in-wiki-\(N[−-]1\)\.md/g, "../(previous volume folder)/wiki.md")
-    .replace(/jump-in-wiki-shared\.old\.md/g, "the previous shared wiki (path in the materials list)")
-    .replace(/jump-in-wiki-NN\.md/g, "wiki.md")
-    .replace(/jump-in-wiki-\d+\.md/g, "wiki.md")
-    .replace(/jump-in-wiki-shared\.md/g, "shared-wiki.md");
-}
-
-/**
  * Safety net for agent runs: if the expected output file is missing but the
  * agent wrote a different .md file in the volume folder (e.g. a classic
  * marker name), rename the best candidate to the expected name.
+ *
+ * REMOVED: This function was removed after the prompts were updated to use
+ * agent-mode file names directly. The agent now consistently writes to the
+ * correct file names, making this safety net unnecessary. Kept here as a
+ * reference in case it needs to be re-enabled for a future model regression.
  *
  * @param {string} volumeDir - The volume folder the expected file belongs to.
  * @param {string} expectedBase - The expected file name (e.g. "wiki.md").
  * @param {Set<string>} knownFiles - File names that must never be adopted.
  * @returns {Promise<boolean>} True when a stray file was adopted.
  */
+/*
 async function adoptStrayOutput(volumeDir, expectedBase, knownFiles) {
   const expectedPath = path.join(volumeDir, expectedBase);
   if (await fileExists(expectedPath)) return false;
@@ -131,6 +115,7 @@ async function adoptStrayOutput(volumeDir, expectedBase, knownFiles) {
   );
   return true;
 }
+*/
 
 /**
  * The file names that may legitimately live in a volume folder and must
@@ -255,8 +240,8 @@ function buildWikiFeedbackTurnPrompt(ctx) {
     previousSharedLine +
     `\n` +
     `Apply the report's findings and write the corrected files back: "wiki.md" and ` +
-    `"shared-wiki.md" (writeFile or editFile; smallest changes that resolve each ` +
-    `valid finding).\n\n` +
+    `"shared-wiki.md" using writeFile (complete contents, overwrite). Use editFile only for ` +
+    `targeted fixes. Make the smallest changes that resolve each valid finding.\n\n` +
     feedbackPrompt
   );
 }
@@ -681,10 +666,6 @@ async function runQaLoop(ctx, author) {
       buildWikiFeedbackTurnPrompt(ctx),
       { label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
     );
-    // Safety net: adopt the output if the agent picked different names.
-    const feedbackKnownFiles = knownVolumeFileNames(ctx);
-    await adoptStrayOutput(volumeDir, "wiki.md", feedbackKnownFiles);
-    await adoptStrayOutput(volumeDir, "shared-wiki.md", feedbackKnownFiles);
     await assertWrote(
       [wikiOutputFile, sharedWikiOutputFile],
       "the author agent (feedback pass)"
@@ -709,8 +690,6 @@ module.exports = {
   installmentNumberFromDir,
   transformUserPrompt,
   isPassingVerdict,
-  agentOutputNames,
-  adoptStrayOutput,
   validatorMaxStepsFor,
   writePromptDump,
   buildWikiAuthorSystemPrompt,

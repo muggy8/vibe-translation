@@ -9,8 +9,8 @@
 Read the following materials **in full** before writing anything:
 
 1. **The source text of volume {{INSTALLMENT_NUMBER}}** of {{SOURCE_NAME}} — the only volume source you will receive. This is the **single source of truth** for what happens in volume {{INSTALLMENT_NUMBER}}.
-2. **The Wiki Of The Previous Volume** (`previous-jump-in-wiki.md`) - the wiki of the previous volume.
-3. **The shared wiki** (`jump-in-wiki-shared.md`) — the "living section" holding the series-general current state, as it stands before volume {{INSTALLMENT_NUMBER}} is processed.
+2. **The previous volume wiki** (`../(previous volume folder)/wiki.md`) - the wiki of the previous volume.
+3. **The shared wiki** (`shared-wiki.md`) — the "living section" holding the series-general current state, as it stands before volume {{INSTALLMENT_NUMBER}} is processed.
 
 *(If this is the first volume, only material 1 is provided. Materials 2 and 3 are absent.)*
 
@@ -44,24 +44,16 @@ If volume {{INSTALLMENT_NUMBER}}'s source reveals that an earlier volume wiki or
 ## Output
 
 Produce exactly these files:
-1. `jump-in-wiki-{{INSTALLMENT_NUMBER}}.md` — the volume wiki for volume {{INSTALLMENT_NUMBER}}
-2. `jump-in-wiki-shared.md` — the updated shared wiki (the complete file, not just the diff)
+1. `wiki.md` — the volume wiki for volume {{INSTALLMENT_NUMBER}}
+2. `shared-wiki.md` — the updated shared wiki (the complete file, not just the diff)
 
 All content in both files written in **{{SOURCE_LANGUAGE}}** — the same language as the source material, including headings and labels.
 
-## Output Format
-your output will be saved directly to the new jumpin wiki as well as the shared wiki, hence, your output will be in the following format. Do **NOT** include any additional text outside the format.
-```markdown
----- jump-in-wiki-{{INSTALLMENT_NUMBER}}.md ----
+## Output
 
-Contents of the jump in wiki
-
----- jump-in-wiki-shared.md ----
-
-Updated contents of the shared jump in wiki.
-
----- end ----
-```
+Write the volume wiki to `wiki.md` using `writeFile` (complete contents, overwrite).
+Write the shared wiki to `shared-wiki.md` using `writeFile` (complete contents, overwrite).
+After writing both files, reply with a short summary.
 
 ## Constraints
 

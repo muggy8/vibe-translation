@@ -9,9 +9,9 @@
 Read the following materials **in full** before writing anything:
 
 1. **The source text of volume {{INSTALLMENT_NUMBER}}** of {{SOURCE_NAME}} — the **single source of truth** for what happens in volume {{INSTALLMENT_NUMBER}}.
-2. **The volume wiki for volume {{INSTALLMENT_NUMBER}}** (`jump-in-wiki-{{INSTALLMENT_NUMBER}}.md`) — the article generated from the source. **This is the primary document under audit.**
-3. **The shared wiki (current)** (`jump-in-wiki-shared.md`) — the "living section" as regenerated after processing volume.{{INSTALLMENT_NUMBER}}. **Also under audit.**
-4. **The shared wiki (previous state)** (`jump-in-wiki-shared.old.md`) — the previous state of the "living section" before it had been regenerated after processing volume.
+2. **The volume wiki for volume {{INSTALLMENT_NUMBER}}** (`wiki.md`) — the article generated from the source. **This is the primary document under audit.**
+3. **The shared wiki (current)** (`shared-wiki.md`) — the "living section" as regenerated after processing volume {{INSTALLMENT_NUMBER}}. **Also under audit.**
+4. **The shared wiki (previous state)** (`shared-wiki.md` previous version, path in the materials list) — the previous state of the "living section" before it had been regenerated after processing volume.
 
 *(If validating the first volume, materials 4 is absent and the earlier-volume consistency checks do not apply.)*
 
@@ -41,7 +41,9 @@ Following the system prompt (Series Continuity Auditor, adversarial mode), do **
 
 ## Output
 
-Your output will be saved directly in `jump-in-wiki-validation-{{INSTALLMENT_NUMBER}}.md`. Ensure that you are following the format described in the system prompt. The entire report is written in **{{SOURCE_LANGUAGE}}** — the same language as the source material, including headings, labels, and suggested fix text (which must be usable directly as article content)
+Write the validation report to `jump-in-wiki-validation-{{INSTALLMENT_NUMBER}}.md` using `writeFile` (complete contents, overwrite).
+Ensure that you are following the format described in the system prompt. The entire report is written in **{{SOURCE_LANGUAGE}}** — the same language as the source material, including headings, labels, and suggested fix text (which must be usable directly as article content).
+After writing the report, reply with a short summary of your findings.
 
 ## Constraints
 

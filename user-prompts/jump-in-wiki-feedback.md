@@ -10,10 +10,10 @@ Read the following materials **in full** before changing anything:
 
 1. **The source text of volume {{INSTALLMENT_NUMBER}}** of {{SOURCE_NAME}} - the **single source of truth** for what happens in volume {{INSTALLMENT_NUMBER}}. Use it to verify every fix before applying it.
 2. **The validation report** (`jump-in-wiki-validation-{{INSTALLMENT_NUMBER}}.md`) - the audit of the current wiki. This is your work order.
-3. **The current volume wiki** (`jump-in-wiki-{{INSTALLMENT_NUMBER}}.md`) - the article to be corrected.
-4. **The current shared wiki** (`jump-in-wiki-shared.md`) - the living section to be corrected.
-5 **The previous volume (N - 1) wiki** (`jump-in-wiki-(NN-1).md`) - the previous version of the jump in wiki.
-6 **The previous shared wiki** (`jump-in-wiki-shared.old.md`) - the living section prior to any changes made to incorporate any of the current volume's information.
+3. **The current volume wiki** (`wiki.md`) - the article to be corrected.
+4. **The current shared wiki** (`shared-wiki.md`) - the living section to be corrected.
+5. **The previous volume (N - 1) wiki** (`wiki.md` from the previous volume folder) - the previous version of the jump in wiki.
+6. **The previous shared wiki** (`shared-wiki.md` previous version, path in the materials list) - the living section prior to any changes made to incorporate any of the current volume's information.
 
 *(If working on the first volume, materials 5 and 6 is absent and the earlier-volume consistency checks do not apply.)*
 
@@ -30,25 +30,16 @@ Following the system prompt (Series Continuity Archivist, revision mode), apply 
 ## Output
 
 Produce exactly these two corrected files (the **complete** files, not just the diff):
-1. `jump-in-wiki-{{INSTALLMENT_NUMBER}}.md` - the corrected volume wiki
-2. `jump-in-wiki-shared.md` - the corrected shared wiki
+1. `wiki.md` - the corrected volume wiki
+2. `shared-wiki.md` - the corrected shared wiki
 
 All content in both files written in **{{SOURCE_LANGUAGE}}** - the same language as the source material, including headings and labels.
 
-## Output Format
+## Output
 
-Your output will be saved directly back over the volume wiki and the shared wiki, hence, your output will be in the following format. Do **NOT** include additional text that is not in the format.
-```markdown
----- jump-in-wiki-{{INSTALLMENT_NUMBER}}.md ----
-
-Corrected contents of the volume wiki
-
----- jump-in-wiki-shared.md ----
-
-Corrected contents of the shared wiki
-
----- end ----
-```
+Write the corrected volume wiki to `wiki.md` using `writeFile` (complete contents, overwrite).
+Write the corrected shared wiki to `shared-wiki.md` using `writeFile` (complete contents, overwrite).
+After writing both files, reply with a short summary.
 
 ## Constraints
 

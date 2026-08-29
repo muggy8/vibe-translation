@@ -4,9 +4,6 @@
  * jump-in-wiki.js. Run with `npm test`.
  */
 const assert = require("assert");
-const os = require("os");
-const path = require("path");
-const fsp = require("fs").promises;
 
 const {
   parseTerms,
@@ -19,8 +16,6 @@ const {
   transformUserPrompt,
   isPassingVerdict,
   installmentNumberFromDir,
-  agentOutputNames,
-  adoptStrayOutput,
   validatorMaxStepsFor,
   writePromptDump,
   buildWikiAuthorSystemPrompt,
@@ -120,26 +115,6 @@ assert.throws(
   /duplicates installment/
 );
 
-// ─── agentOutputNames ───────────────────────────────────────────────────────
-// Maps every classic marker file name onto the real agent-mode file names.
-assert.strictEqual(agentOutputNames("save it to jump-in-wiki-01.md"), "save it to wiki.md");
-assert.strictEqual(agentOutputNames("the shared part is jump-in-wiki-shared.md"), "the shared part is shared-wiki.md");
-assert.strictEqual(agentOutputNames("generic volume article jump-in-wiki-NN.md"), "generic volume article wiki.md");
-assert.strictEqual(agentOutputNames("previous was jump-in-wiki-(NN-1).md"), "previous was ../(previous volume folder)/wiki.md");
-assert.strictEqual(
-  agentOutputNames("old state jump-in-wiki-shared.old.md"),
-  "old state the previous shared wiki (path in the materials list)"
-);
-// The template placeholder form (pre-transformation) is also rewritten.
-assert.strictEqual(agentOutputNames("jump-in-wiki-{{INSTALLMENT_NUMBER}}.md"), "wiki.md");
-// Names that are not wiki outputs are left alone.
-assert.strictEqual(agentOutputNames("keep jump-in-wiki-validation-01.md"), "keep jump-in-wiki-validation-01.md");
-// The classic inlined-message name for the previous volume's wiki is rewritten too.
-assert.strictEqual(
-  agentOutputNames("materials: previous-jump-in-wiki.md"),
-  "materials: ../(previous volume folder)/wiki.md"
-);
-
 // ─── validatorMaxStepsFor ───────────────────────────────────────────────────
 // The cap must scale with the source size (a fixed 40 ran out on the 521KB
 // volume-01 source: the validator hit the cap before writing its report).
@@ -149,28 +124,26 @@ assert.strictEqual(validatorMaxStepsFor(521 * 1024), 58); // ceil(17 chunks) * 2
 assert.strictEqual(validatorMaxStepsFor(1024 * 1024), 88); // ceil(32 chunks) * 2 + 24
 
 // ─── agent-mode prompt builders: jump-in-wiki ───────────────────────────────
-// Regression: the classic marker file names must never leak into the prompts
-// the agent-mode model actually receives (observed live: the author agent
-// wrote jump-in-wiki-01.md / jump-in-wiki-shared.md because its prompt still
-// carried the classic names).
+// In agent-only mode the prompt files use the new file names directly
+// (wiki.md / shared-wiki.md). The buildWikiAuthorSystemPrompt and
+// buildWikiValidatorSystemPrompt simply append AGENT_TOOLS_NOTE.
 const wikiCtx = {
   values: { INSTALLMENT_NUMBER: "01", SOURCE_NAME: "test", SOURCE_LANGUAGE: "Japanese" },
   folderName: "story_name(1)",
   isFirst: true,
   previousFolderName: null,
   userPrompt:
-    "Materials: previous-jump-in-wiki.md and jump-in-wiki-shared.md.\n\n" +
-    "## Output\n\nProduce `jump-in-wiki-01.md` and `jump-in-wiki-shared.md`.\n\n" +
-    "## Output Format\n---- jump-in-wiki-01.md ----\n\nbody\n\n" +
-    "---- jump-in-wiki-shared.md ----\n\nbody\n\n---- end ----\n\n" +
+    "Materials: `../(previous volume folder)/wiki.md` and `shared-wiki.md`.\n\n" +
+    "## Output\n\nWrite wiki.md and shared-wiki.md using writeFile.\n\n" +
     "## Constraints\n\n- no hallucination",
   validatorUserPrompt:
-    "Audit `jump-in-wiki-01.md` and `jump-in-wiki-shared.md` against the source " +
+    "Audit `wiki.md` and `shared-wiki.md` against the source " +
     "and save the report in `jump-in-wiki-validation-01.md`.",
   feedbackUserPrompt:
-    "Correct `jump-in-wiki-01.md` and `jump-in-wiki-shared.md`; the previous state " +
-    "is in `jump-in-wiki-(NN-1).md` and `jump-in-wiki-shared.old.md`.\n\n" +
-    "## Output Format\n---- jump-in-wiki-01.md ----\n\nbody\n\n---- end ----",
+    "Correct `wiki.md` and `shared-wiki.md`; the previous state " +
+    "is in `wiki.md` from the previous volume folder and " +
+    "`shared-wiki.md` previous version, path in the materials list.\n\n" +
+    "## Output\nWrite wiki.md and shared-wiki.md using writeFile.",
 };
 
 const wikiAuthorTurn = buildWikiAuthorTurnPrompt(wikiCtx);
@@ -254,58 +227,4 @@ assert.ok(buildGlossaryAuthorTurnPrompt(glossaryCtx2, terms, false).includes("..
 assert.ok(buildGlossaryValidatorTurnPrompt(glossaryCtx2).includes("../story_name(1)/glossary.md"), "volume-2 validator: previous glossary path");
 assert.ok(buildGlossaryFeedbackTurnPrompt(glossaryCtx2).includes("../story_name(1)/glossary.md"), "volume-2 feedback: previous glossary path");
 
-// ─── adoptStrayOutput (filesystem) ──────────────────────────────────────────
-const pathExists = async (p) => {
-  try {
-    await fsp.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-(async () => {
-  // A stray with the classic volume name is adopted as wiki.md.
-  let dir = await fsp.mkdtemp(path.join(os.tmpdir(), "adopt-wiki-"));
-  await fsp.writeFile(path.join(dir, "story_name(1).md"), "source");
-  await fsp.writeFile(path.join(dir, "jump-in-wiki-01.md"), "# volume wiki");
-  const known = new Set([
-    "story_name(1).md",
-    "glossary.md",
-    "glossary-validation.md",
-    "jump-in-wiki-validation-01.md",
-  ]);
-  assert.strictEqual(await adoptStrayOutput(dir, "wiki.md", known), true, "stray wiki is adopted");
-  assert.ok(await pathExists(path.join(dir, "wiki.md")), "wiki.md now exists");
-  assert.ok(!(await pathExists(path.join(dir, "jump-in-wiki-01.md"))), "the stray was renamed, not copied");
-
-  // A stray with the classic shared name is adopted as shared-wiki.md.
-  await fsp.writeFile(path.join(dir, "jump-in-wiki-shared.md"), "# shared wiki");
-  assert.strictEqual(await adoptStrayOutput(dir, "shared-wiki.md", known), true, "stray shared wiki is adopted");
-  assert.ok(await pathExists(path.join(dir, "shared-wiki.md")), "shared-wiki.md now exists");
-
-  // An existing expected file short-circuits (no adoption).
-  assert.strictEqual(await adoptStrayOutput(dir, "wiki.md", known), false, "existing wiki.md is not re-adopted");
-  await fsp.rm(dir, { recursive: true, force: true });
-
-  // Protected (known) files and validation reports are never adopted.
-  dir = await fsp.mkdtemp(path.join(os.tmpdir(), "adopt-protect-"));
-  await fsp.writeFile(path.join(dir, "glossary.md"), "# glossary");
-  await fsp.writeFile(path.join(dir, "glossary-validation.md"), "# report");
-  assert.strictEqual(await adoptStrayOutput(dir, "wiki.md", known), false, "known files are protected");
-  assert.strictEqual(await adoptStrayOutput(dir, "shared-wiki.md", known), false, "no stray means no adoption");
-  assert.ok(await pathExists(path.join(dir, "glossary.md")), "glossary.md is untouched");
-  assert.ok(await pathExists(path.join(dir, "glossary-validation.md")), "the validation report is untouched");
-  await fsp.rm(dir, { recursive: true, force: true });
-
-  // Empty candidates are skipped.
-  dir = await fsp.mkdtemp(path.join(os.tmpdir(), "adopt-empty-"));
-  await fsp.writeFile(path.join(dir, "jump-in-wiki-01.md"), "");
-  assert.strictEqual(await adoptStrayOutput(dir, "wiki.md", known), false, "empty strays are not adopted");
-  await fsp.rm(dir, { recursive: true, force: true });
-
-  console.log("All tests passed.");
-})().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+console.log("All tests passed.");

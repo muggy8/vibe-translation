@@ -6,8 +6,8 @@ You are **not** regenerating the wiki from scratch. You are making **targeted, s
 
 The wiki is split into two kinds of files:
 
-1. **Volume wiki articles** - one per volume: `jump-in-wiki-NN.md` (installment number zero-padded). Each is a **static, frozen** article describing what happens in that one volume.
-2. **The shared wiki** - `jump-in-wiki-shared.md`. The **"living section"**: the series-general, always-current state of the world and cast.
+1. **Volume wiki articles** - one per volume: `wiki.md`. Each is a **static, frozen** article describing what happens in that one volume.
+2. **The shared wiki** - `shared-wiki.md`. The **"living section"**: the series-general, always-current state of the world and cast.
 
 A newcomer joining before volume N+1 reads: **the shared wiki + the volume wiki for volume N**. That is the whole catch-up.
 
@@ -17,22 +17,22 @@ In each run you receive exactly:
 
 1. **The source text of volume N** - the **single source of truth** for what happens in volume N. You use it to **verify** each suggested fix before applying it.
 2. **The validation report** (`jump-in-wiki-validation-NN.md`) - the audit of the current wiki. It lists errors, missing content, shared-wiki issues, placement issues, and other findings, each with a severity and a suggested fix.
-3. **The current volume N wiki** (`jump-in-wiki-NN.md`) - the article to be corrected.
-4. **The current shared wiki** (`jump-in-wiki-shared.md`) - the living section to be corrected.
-5 **The previous volume (N - 1) wiki** (`jump-in-wiki-(NN-1).md`) - the previous version of the jump in wiki.
-6 **The previous shared wiki** (`jump-in-wiki-shared.old.md`) - the living section prior to any changes made to incorporate any of the current volume's information.
+3. **The current volume N wiki** (`wiki.md`) - the article to be corrected.
+4. **The current shared wiki** (`shared-wiki.md`) - the living section to be corrected.
+5. **The previous volume (N - 1) wiki** (`wiki.md` from the previous volume folder) - the previous version of the jump in wiki.
+6. **The previous shared wiki** (`shared-wiki.md` previous version, path in the materials list) - the living section prior to any changes made to incorporate any of the current volume's information.
 
 Your output is **two corrected files**:
-- `jump-in-wiki-NN.md` - the volume wiki with the audit's valid fixes applied.
-- `jump-in-wiki-shared.md` - the shared wiki with the audit's valid fixes applied.
+- `wiki.md` - the volume wiki with the audit's valid fixes applied.
+- `shared-wiki.md` - the shared wiki with the audit's valid fixes applied.
 
 ## What Belongs Where
 
 This is the core placement judgment, and the audit will flag placement problems.
 
-**Go into the volume wiki (`jump-in-wiki-NN.md`):** everything specific to what happens *in that volume* - plot beats, POV cast, setting, tone, inciting incident, climax, cliffhanger. In short: "what happened in volume N."
+**Go into the volume wiki (`wiki.md`):** everything specific to what happens *in that volume* - plot beats, POV cast, setting, tone, inciting incident, climax, cliffhanger. In short: "what happened in volume N."
 
-**Go into the shared wiki (`jump-in-wiki-shared.md`):** the **current, series-general state** a newcomer needs regardless of entry point - Series Overview, Character Roster, Timeline of Key Events, World State & Rules, Glossary, Open Threads.
+**Go into the shared wiki (`shared-wiki.md`):** the **current, series-general state** a newcomer needs regardless of entry point - Series Overview, Character Roster, Timeline of Key Events, World State & Rules, Glossary, Open Threads.
 
 **Duplication is allowed, contradiction is not.** A fact may appear in both files. If the two disagree, that is a bug - fix it so they agree.
 
@@ -79,3 +79,10 @@ Before delivering, verify:
 - [ ] The corrected files use the same templates, headings, and style as before
 - [ ] No contradiction between the corrected volume wiki and the corrected shared wiki
 - [ ] The change set is minimal and traceable to the validation report
+
+## Agent Mode
+
+You have file tools (`writeFile`, `editFile`). Write your output using them directly:
+- Write the corrected volume wiki to `wiki.md` using `writeFile` (complete contents, overwrite).
+- Write the corrected shared wiki to `shared-wiki.md` using `writeFile` (complete contents, overwrite).
+Do not paste file contents into your chat reply. After writing both files, reply with a short summary of what you did.

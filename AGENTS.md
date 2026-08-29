@@ -93,11 +93,9 @@ Artifacts per volume folder: `glossary.md` (snapshot), `glossary-research.md`, `
 Per volume:
 
 1. **Generate** `wiki.md` + `shared-wiki.md` (context: the previous volume's `wiki.md` + `shared-wiki.md`):
-   - an author agent (per-volume session, `maxSteps 40`). Stubs are pre-created for both files (a stronger name anchor than "create a new file", and a crashed run leaves identifiable stubs). Safety nets, each added after a live failure:
-     - `agentOutputNames()` — rewrites the classic marker file names inside the prompts to `wiki.md`/`shared-wiki.md` (the prompts were originally written for classic mode; the model used to write files under the wrong names);
-     - `adoptStrayOutput()` — if the expected file is missing, renames the best stray non-empty `.md` (protecting known files, scoring by "wiki"/digits/mtime).
-     Stale classic-named files (`jump-in-wiki-NN.md`, `jump-in-wiki-shared.md`) are deleted up front so agents can't audit garbage.
-2. **QA loop**: a validator agent writes `jump-in-wiki-validation-NN.md` (size-scaled step cap) → acceptance one-shot → on FAIL the same author session applies the feedback (stray adoption re-checked afterwards).
+    - an author agent (per-volume session, `maxSteps 40`). Stubs are pre-created for both files (a stronger name anchor than "create a new file", and a crashed run leaves identifiable stubs).
+      Stale classic-named files (`jump-in-wiki-NN.md`, `jump-in-wiki-shared.md`) are deleted up front so agents can't audit garbage.
+2. **QA loop**: a validator agent writes `jump-in-wiki-validation-NN.md` (size-scaled step cap) → acceptance one-shot -> on FAIL the same author session applies the feedback.
 3. **Two-tier idempotency**: if `wiki.md` + `shared-wiki.md` exist → skip generation, go straight to validation; if a validation report exists and passes acceptance → skip the whole volume.
 4. End-of-run summary counts the volumes that hit the iteration limit.
 
@@ -133,7 +131,7 @@ Per volume:
 
 1. **`THINKING_LEVEL` tuning is per-series.** Reasoning token burn varies dramatically across series — a series with heavy technical jargon may need "xhigh" while a simpler narrative may run fine on "medium". Start with "xhigh" (the default), monitor `.logs/call-ai-*.log` for reasoning content sizes, and tune down to "medium" or "low" if the reasoning spend is excessive relative to content output. Set `THINKING=false` to disable entirely.
 2. **Never let a stage persist empty output.** `runOneShot` throws on empty by design; agent stages are guarded by `assertWrote` (missing/empty file → hard error pointing at `.logs/`). If you add a stage, add both guarantees.
-3. **Do not touch the agent-mode prompt safety nets** (`agentOutputNames`, `adoptStrayOutput`, the stray-file cleanups): each was added after a live failure (wrong file names, stale strays being audited, marker-format conflicts). The pure tests pin their behavior — run `npm test` after touching any prompt or file name.
+3. **Do not touch the agent-mode prompt safety nets** (the stray-file cleanups): each was added after a live failure (wrong file names, stale strays being audited, marker-format conflicts). The pure tests pin their behavior — run `npm test` after touching any prompt or file name.
 4. **Validator step caps scale with source size** (`validatorMaxStepsFor`): a fixed cap of 40 ran out on the 521KB volume-01 source before the validator wrote its report.
 5. **The glossary is cumulative** — see the §4 invariant (`regeneratedAny`).
 6. **Skip-checks cost a live model call** even when the volume is skipped.
@@ -148,6 +146,6 @@ Per volume:
 - **JSDoc on every function** (params + returns), with provenance comments where a behavior exists because of a live incident ("observed live: …"). New code without JSDoc is a review blocker. Use named types from `types.js` (e.g. `{GlossaryVolumeCtx}` instead of `{Object}`) — the type annotations enable IDE cross-references across files.
 - **Update AGENTS.md after changes.** If your work adds, removes, or significantly modifies files, functions, or conventions, update this document to reflect the new state. Agents reading AGENTS.md should be able to rely on it as a current map of the codebase — not a stale one.
 - Errors **fail loudly** with actionable messages (pointing at files, `.env` keys, or `.logs/`).
-- Prompt files stay mode-agnostic; mode-specific text is appended/rewritten in code (`AGENT_TOOLS_NOTE`, `agentOutputNames`), never forked into separate prompt files.
+- Prompt files stay mode-agnostic; mode-specific text is appended in code (`AGENT_TOOLS_NOTE`), never forked into separate prompt files.
 - Tests: pure logic in `test/test-glossary-load.js` (plain `assert`, no framework — keep it that way); live behavior in `test/harness-smoke.js`.
 - Dependencies: AI SDK v6 + `@openharness/core` v0.7; keep CommonJS, no new frameworks.
