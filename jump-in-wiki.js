@@ -269,7 +269,8 @@ function buildWikiFeedbackTurnPrompt(ctx) {
  * @param {string} who - Who was supposed to write them (for the error message).
  */
 async function assertWrote(filePaths, who) {
-  for (const filePath of filePaths) {
+  const paths = Array.isArray(filePaths) ? filePaths : [filePaths];
+  for (const filePath of paths) {
     const content = await fs.readFile(filePath, "utf-8").catch(() => null);
     if (!content || !content.trim()) {
       throw new Error(
