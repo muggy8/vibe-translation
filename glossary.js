@@ -682,10 +682,15 @@ async function runVolumeAgent(ctx) {
         `Volume ${values.INSTALLMENT_NUMBER}: sending recovery turn ` +
           `(model replied in chat instead of writeFile)...`
       );
+      const hasContent = amendResult?.text && amendResult.text.trim().length > 0;
+      const recoveryPrompt = hasContent
+        ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+          `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
+          `Please rewrite the complete glossary to "glossary.md" using writeFile now. Use the exact same content you generated in your previous message.`
+        : `You were asked to write the complete glossary to "glossary.md" using writeFile, but you produced no output.\n\n` +
+          `Please read the source materials and write the complete glossary to "glossary.md" using writeFile now.`;
       const recoveryResult = await author.sendTurn(
-        `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
-        `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
-        `Please rewrite the complete glossary to "glossary.md" using writeFile now. Use the exact same content you generated in your previous message.`,
+        recoveryPrompt,
         { label: `glossary-recovery-${values.INSTALLMENT_NUMBER}` }
       );
       // Overwrite with the recovery output (may be the same content, now via writeFile).
@@ -786,11 +791,32 @@ async function runQaLoop(ctx, author) {
       buildGlossaryFeedbackTurnPrompt(ctx),
       { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
     );
-    await assertWroteWithFallback(
+    const feedbackFallbackUsed = await assertWroteWithFallback(
       glossaryOutputFile,
       "the author agent (feedback pass)",
       feedbackResult?.text
     );
+
+    // Recovery turn for feedback pass: if the model produced no output,
+    // re-send the full feedback task.
+    if (feedbackFallbackUsed && process.env.RECOVERY_ENABLED !== "false") {
+      const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
+      const recoveryPrompt = hasContent
+        ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+          `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
+          `Please rewrite the complete glossary to "glossary.md" using writeFile now. Use the exact same content you generated in your previous message.`
+        : `You were asked to write the complete glossary to "glossary.md" using writeFile, but you produced no output.\n\n` +
+          `Please read the source materials and the validation report and write the corrected glossary to "glossary.md" using writeFile now.`;
+      const feedbackRecoveryResult = await author.sendTurn(
+        recoveryPrompt,
+        { label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
+      );
+      await assertWroteWithFallback(
+        glossaryOutputFile,
+        "the author agent (feedback recovery)",
+        feedbackRecoveryResult?.text
+      );
+    }
 
     if (iteration === maxValidationIterations) {
       console.log(

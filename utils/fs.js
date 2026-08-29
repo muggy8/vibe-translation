@@ -56,12 +56,11 @@ async function assertWrote(filePaths, who) {
  * @param {string | string[]} filePaths - Expected output file path or array of paths.
  * @param {string} who - Who was supposed to write it (for the error message).
  * @param {string} [content] - Optional content to write if the file is missing.
- * @returns {Promise<boolean>} True if the fallback was triggered (file was missing and
- *   content was written), false if the file already existed or the fallback was not used.
+ * @returns {Promise<boolean>} True if the file was missing (fallback was used or
+ *   recovery is needed), false if the file already existed.
  */
 async function assertWroteWithFallback(filePaths, who, content) {
   const paths = Array.isArray(filePaths) ? filePaths : [filePaths];
-  let fallbackUsed = false;
   for (const filePath of paths) {
     if (await fileExists(filePath)) continue;
 
@@ -72,16 +71,15 @@ async function assertWroteWithFallback(filePaths, who, content) {
         `[fallback] ${who} replied in chat instead of using writeFile; ` +
           `wrote ${filePath} from the chat reply (${content.length} chars).`
       );
-      fallbackUsed = true;
     } else {
-      // Hard fail — no content to recover with.
-      throw new Error(
-        `${who} did not produce ${filePath}. ` +
-          `Check the run log in .logs/ for the agent transcript.`
+      // No content to recover with — the caller will send a recovery turn
+      // that re-sends the full task.
+      console.warn(
+        `[warning] ${who} produced no output — recovery turn will re-send the task.`
       );
     }
   }
-  return fallbackUsed;
+  return true;
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────────

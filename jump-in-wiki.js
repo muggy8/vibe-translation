@@ -582,11 +582,17 @@ async function runVolumeAgent(ctx) {
           `Volume ${values.INSTALLMENT_NUMBER}: sending recovery turn ` +
             `(model replied in chat instead of writeFile)...`
         );
+        const wikiHasContent = wikiGenResult?.text && wikiGenResult.text.trim().length > 0;
+        const wikiRecoveryPrompt = wikiHasContent
+          ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+            `Both files have been temporarily written from your chat reply, but they must be written properly using writeFile. ` +
+            `Please rewrite both files using writeFile now. Use the exact same content you generated in your previous message: ` +
+            `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`
+          : `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you produced no output.\n\n` +
+            `Please read the source materials and write both files using writeFile now: ` +
+            `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`;
         const wikiRecoveryResult = await author.sendTurn(
-          `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
-          `Both files have been temporarily written from your chat reply, but they must be written properly using writeFile. ` +
-          `Please rewrite both files using writeFile now. Use the exact same content you generated in your previous message: ` +
-          `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`,
+          wikiRecoveryPrompt,
           { label: `jump-in-wiki-recovery-${values.INSTALLMENT_NUMBER}` }
         );
         // Overwrite with the recovery output (may be the same content, now via writeFile).
@@ -702,11 +708,34 @@ async function runQaLoop(ctx, author) {
       buildWikiFeedbackTurnPrompt(ctx),
       { label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
     );
-    await assertWroteWithFallback(
+    const wikiFeedbackFallbackUsed = await assertWroteWithFallback(
       [wikiOutputFile, sharedWikiOutputFile],
       "the author agent (feedback pass)",
       wikiFeedbackResult?.text
     );
+
+    // Recovery turn for feedback pass: if the model produced no output,
+    // re-send the full feedback task.
+    if (wikiFeedbackFallbackUsed && process.env.RECOVERY_ENABLED !== "false") {
+      const wikiFeedbackHasContent = wikiFeedbackResult?.text && wikiFeedbackResult.text.trim().length > 0;
+      const wikiFeedbackRecoveryPrompt = wikiFeedbackHasContent
+        ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+          `Both files have been temporarily written from your chat reply, but they must be written properly using writeFile. ` +
+          `Please rewrite both files using writeFile now. Use the exact same content you generated in your previous message: ` +
+          `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`
+        : `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you produced no output.\n\n` +
+          `Please read the source materials and the validation report and write both files using writeFile now: ` +
+          `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`;
+      const wikiFeedbackRecoveryResult = await author.sendTurn(
+        wikiFeedbackRecoveryPrompt,
+        { label: `jump-in-wiki-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
+      );
+      await assertWroteWithFallback(
+        [wikiOutputFile, sharedWikiOutputFile],
+        "the author agent (feedback recovery)",
+        wikiFeedbackRecoveryResult?.text
+      );
+    }
 
     if (iteration === maxValidationIterations) {
       ctx.limitReached = true;
