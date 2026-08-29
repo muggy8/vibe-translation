@@ -564,10 +564,6 @@ async function runVolumeAgent(ctx) {
       const wikiGenResult = await author.sendTurn(buildWikiAuthorTurnPrompt(ctx), {
         label: `jump-in-wiki-generate-${values.INSTALLMENT_NUMBER}`,
       });
-      // Safety net: adopt the output if the agent picked different names.
-      const knownFiles = knownVolumeFileNames(ctx);
-      await adoptStrayOutput(volumeDir, "wiki.md", knownFiles);
-      await adoptStrayOutput(volumeDir, "shared-wiki.md", knownFiles);
       const wikiFallbackUsed = await assertWroteWithFallback(
         [wikiOutputFile, sharedWikiOutputFile],
         "the author agent",
