@@ -534,6 +534,22 @@ function agentMaxSteps() {
   return Number.isInteger(n) && n >= 1 ? n : 20;
 }
 
+/**
+ * Runaway-generation guard threshold (AGENT_TEXT_GUARD_CHARS env, default 30000).
+ * When an agent produces more than this many characters of text with fewer
+ * than 3 tool calls, the stream is aborted. This catches models that emit
+ * malformed tool-call text (e.g. Qwen-native <tool_call> tags in the content field)
+ * instead of using the API-level tool_calls protocol.
+ *
+ * Provenance: observed live — a local Qwen3 model generated 962 KB of
+ * repeated `listFiles(path='.'); readFile(...)` text without a single valid
+ * tool call, burning tokens for over an hour before the run log was checked.
+ */
+function agentTextGuardChars() {
+  const n = parseInt(process.env.AGENT_TEXT_GUARD_CHARS, 10);
+  return Number.isInteger(n) && n >= 1000 ? n : 30000;
+}
+
 // ─── Message conversion (one-shot calls) ────────────────────────────────────
 // A "message" is either { text } or { file, name } (the same IMessage shape
 // the old call-ai.js accepted).
@@ -778,14 +794,17 @@ function summarizeInput(input) {
  * (periodic character counts, retry notices, one RESULT line at the end).
  *
  * @param {AsyncIterable<Object>} events - The event stream.
- * @param {{label: string, tapsRef: {current: Object}}} opts - The log label
- *   (agent/stage name) and the taps ref (the per-attempt taps object).
+ * @param {{label: string, tapsRef: {current: Object}, logContext?: Object, signal?: AbortSignal}} opts - The log label
+ *   (agent/stage name), the taps ref (the per-attempt taps object), optional
+ *   log context for streaming logs, and an optional AbortSignal used by the
+ *   runaway-generation guard to cancel the underlying fetch.
  * @returns {Promise<Object>} The accumulated result:
  *   { text, reasoning, finishReason, usage, result, error, messages,
  *     startTime, firstTokenTime }. Throws the run's error when the stream
- *   ends with result "error".
+ *     ends with result "error", or a descriptive error when the runaway
+ *     generation guard trips.
  */
-async function consumeEvents(events, { label, tapsRef, logContext }) {
+async function consumeEvents(events, { label, tapsRef, logContext, signal }) {
   const result = {
     text: "",
     reasoning: "",
@@ -850,76 +869,92 @@ async function consumeEvents(events, { label, tapsRef, logContext }) {
     }
   }
 
-  for await (const event of events) {
-    switch (event.type) {
-      case "text.delta":
-        result.text += event.text;
-        if (result.firstTokenTime === null) result.firstTokenTime = Date.now();
-        // Stream partial text to log as it arrives.
-        streamWrite(event.text);
-        if (result.text.length - lastReported >= 1000) {
-          lastReported = result.text.length;
-          logLine(`  …generated ${lastReported} chars so far`);
-        }
-        break;
-      case "reasoning.delta":
-        result.reasoning += event.text;
-        if (result.firstTokenTime === null) result.firstTokenTime = Date.now();
-        // Stream partial reasoning to log as it arrives.
-        streamWrite(event.text);
-        break;
-      case "step.done":
-        result.finishReason = event.finishReason;
-        result.usage = mergeUsage(result.usage, event.usage);
-        break;
-      case "tool.start":
-        // Per-step visibility for tool-using agents: what is being called.
-        logLine(
-          `  …[agent] ${event.toolName} ${summarizeInput(event.input)}`
-        );
-        // Collect tool call for chat log.
-        result.toolCalls.push({
-          name: event.toolName,
-          input: event.input,
-          output: null,
-          error: null,
-        });
-        break;
-      case "tool.error":
-        logLine(
-          `  …[agent] ${event.toolName} errored: ${String(event.error).slice(0, 160)}`
-        );
-        // Mark the last unfinished tool call with the error.
-        const lastTool = result.toolCalls[result.toolCalls.length - 1];
-        if (lastTool && lastTool.output === null && lastTool.error === null) {
-          lastTool.error = String(event.error).slice(0, 500);
-        }
-        break;
-      case "retry":
-        logLine(
-          `  [call-ai] attempt failed (${event.error.message}); ` +
-            `retrying in ${event.delayMs} ms ` +
-            `(${event.maxRetries - event.attempt - 1} left)...`
-        );
-        break;
-      case "error":
-        result.error = event.error;
-        break;
-      case "done":
-        result.result = event.result;
-        result.messages = event.messages;
-        result.usage = mergeUsage(result.usage, event.totalUsage);
-        break;
-      default:
-        // turn.* / compaction.* lifecycle events: nothing to accumulate.
-        break;
+  let guardTripped = false;
+  try {
+    for await (const event of events) {
+      if (guardTripped) break;
+      switch (event.type) {
+        case "text.delta":
+          result.text += event.text;
+          if (result.firstTokenTime === null) result.firstTokenTime = Date.now();
+          // Stream partial text to log as it arrives.
+          streamWrite(event.text);
+          if (result.text.length - lastReported >= 1000) {
+            lastReported = result.text.length;
+            logLine(`  …generated ${lastReported} chars so far`);
+          }
+          // Runaway-generation guard: abort if the model is producing a
+          // large amount of text without making any tool calls. This
+          // catches models that emit malformed tool-call text (e.g.
+          // Qwen-native <tool_call> tags in the content field) instead of
+          // using the API-level tool_calls protocol.
+          if (signal && result.text.length > agentTextGuardChars() && result.toolCalls.length < 3) {
+            guardTripped = true;
+            logLine(
+              `  [call-ai] WARNING: ${label} generated ${result.text.length} chars ` +
+              `with only ${result.toolCalls.length} tool call(s); aborting runaway generation.`
+            );
+            try { signal.abort(); } catch {}
+          }
+          break;
+        case "reasoning.delta":
+          result.reasoning += event.text;
+          if (result.firstTokenTime === null) result.firstTokenTime = Date.now();
+          // Stream partial reasoning to log as it arrives.
+          streamWrite(event.text);
+          break;
+        case "step.done":
+          result.finishReason = event.finishReason;
+          result.usage = mergeUsage(result.usage, event.usage);
+          break;
+        case "tool.start":
+          // Per-step visibility for tool-using agents: what is being called.
+          logLine(
+            `  …[agent] ${event.toolName} ${summarizeInput(event.input)}`
+          );
+          // Collect tool call for chat log.
+          result.toolCalls.push({
+            name: event.toolName,
+            input: event.input,
+            output: null,
+            error: null,
+          });
+          break;
+        case "tool.error":
+          logLine(
+            `  …[agent] ${event.toolName} errored: ${String(event.error).slice(0, 160)}`
+          );
+          // Mark the last unfinished tool call with the error.
+          const lastTool = result.toolCalls[result.toolCalls.length - 1];
+          if (lastTool && lastTool.output === null && lastTool.error === null) {
+            lastTool.error = String(event.error).slice(0, 500);
+          }
+          break;
+        case "retry":
+          logLine(
+            `  [call-ai] attempt failed (${event.error.message}); ` +
+              `retrying in ${event.delayMs} ms ` +
+              `(${event.maxRetries - event.attempt - 1} left)...`
+          );
+          break;
+        case "error":
+          result.error = event.error;
+          break;
+        case "done":
+          result.result = event.result;
+          result.messages = event.messages;
+          result.usage = mergeUsage(result.usage, event.totalUsage);
+          break;
+        default:
+          // turn.* / compaction.* lifecycle events: nothing to accumulate.
+          break;
+      }
     }
+  } catch (err) {
+    // A guard-triggered abort surfaces as an AbortError from the stream;
+    // swallow it and fall through to the descriptive guard error below.
+    if (!guardTripped) throw err;
   }
-  // Merge the HTTP-layer-tapped reasoning (llama.cpp-style
-  // `reasoning_content`): it is the same thinking the provider-native
-  // reasoning events would carry, captured at the fetch layer instead.
-  const tapped = (tapsRef.current?.reasoning ?? []).join("");
-  if (tapped && !result.reasoning) result.reasoning = tapped;
 
   // Flush any remaining buffered log content and close the file descriptor.
   flushLogBuffer();
@@ -927,6 +962,22 @@ async function consumeEvents(events, { label, tapsRef, logContext }) {
     try { fs.closeSync(logFd); } catch {}
     logFd = null;
   }
+
+  if (guardTripped) {
+    throw new Error(
+      `${label}: runaway generation aborted — the model produced ` +
+      `${result.text.length} chars of text with only ${result.toolCalls.length} tool call(s). ` +
+      `This usually means the model is emitting malformed tool-call text ` +
+      `instead of using the tool-calling API. Check the model's tool-calling ` +
+      `support or try a different model. Run log: ${logFilePath}`
+    );
+  }
+
+  // Merge the HTTP-layer-tapped reasoning (llama.cpp-style
+  // `reasoning_content`): it is the same thinking the provider-native
+  // reasoning events would carry, captured at the fetch layer instead.
+  const tapped = (tapsRef.current?.reasoning ?? []).join("");
+  if (tapped && !result.reasoning) result.reasoning = tapped;
 
   if (result.result === "error") {
     throw result.error ?? new Error(`The ${label} run ended in an error.`);
@@ -1186,7 +1237,14 @@ async function createAgentHandle({
       logLine(`[call-ai] CALL system="${systemPreview}" agent=${label} (turn)`);
       // Build logContext for streaming logs.
       const logContext = { type: "agent", agentName: name, turnNumber, label };
-      const result = await consumeEvents(session.send(input), { label, tapsRef, logContext });
+      // AbortController for the runaway-generation guard: consumeEvents
+      // calls signal.abort() when the model produces excessive text without
+      // tool calls, which cancels the underlying fetch via session.send.
+      const abortCtrl = new AbortController();
+      const result = await consumeEvents(
+        session.send(input, { signal: abortCtrl.signal }),
+        { label, tapsRef, logContext, signal: abortCtrl.signal }
+      );
       logResultLine(result, label);
       if (result.result === "max_steps") {
         logLine(
