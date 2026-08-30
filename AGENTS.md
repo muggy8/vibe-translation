@@ -173,11 +173,14 @@ Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-ma
 6. **Skip-checks are deterministic** (reads a persisted `*-rolling-state.json` file). If the state file is missing (e.g. a run from before this change), the check falls back to regenerating the volume — so pre-existing runs are safe to re-run.
 7. **`isPassingVerdict` is intentionally strict**: any mention of FAIL/FAILED/FAILURES or "NOT PASS" fails the verdict. Do not loosen it to "contains PASS".
 8. **The fs write gate confines writes to the volume folder**; reads are allowed anywhere (agents need the previous volume). `deleteFile` is always denied — the *workflow* deletes stale strays, never the agent.
-9. **Logging is per-run with full chat histories:** Each process run creates a directory under `.logs/<ISO-timestamp>/` containing:
+9. **Logging is per-run with full chat histories and real-time streaming:** Each process run creates a directory under `.logs/<ISO-timestamp>/` containing:
    - `summary.log` — greppable `CALL`/`RESULT`/`WARNING` lines (same format as before)
-   - `one-shot/<label>.md` — full system prompt, messages, and response for each `runOneShot` call
-   - `agent-<name>/turn-<N>.md` — full chat history for each agent turn (system prompt, user input, assistant response, reasoning, tool calls + results)
-   This lets you inspect exactly what each agent said at every turn when something goes wrong. Log lines still go to stderr and `summary.log`; chat files are written asynchronously after each call completes.
+   - `one-shot/<label>.md` — full system prompt, messages, and response for each `runOneShot` call (written after completion)
+   - `one-shot/<label>.stream.md` — partial output streamed in real-time as the AI generates text (written during the call)
+   - `agent-<name>/turn-<N>.md` — full chat history for each agent turn (system prompt, user input, assistant response, reasoning, tool calls + results) (written after completion)
+   - `agent-<name>/turn-<N>.stream.md` — partial output streamed in real-time as the AI generates text (written during the call)
+   
+   The `.stream.md` files are the key diagnostic tool when AI calls stall or hang — they show what was produced so far even if the call never completes. Log lines still go to stderr and `summary.log`; chat files are written asynchronously after each call completes.
 10. This directory is **not a git repository**; `.gitignore` exists for when it becomes one (and documents the ignored outputs: `.logs/`, `.dry-run/`, generated `test-series` files).
 11. **The discovery agent's manifest is cached and auto-stale:** `getTranslationTarget()` reuses an existing `translation-target.json` unless `--force` is passed or a listed source file has been deleted (stale → auto-regenerate). With `--dry-run` the AI is never called and the legacy convention is used instead.
 12. **Research concurrency (`RESEARCH_CONCURRENCY`):** default 3 parallel agents. Set to 1 to restore the old sequential behavior. Each agent has a fixed `maxSteps=15` — the old global cap (`max(30, 5·terms + 10)`) was replaced by per-agent caps. The skeleton-first approach ensures crash safety: failed terms leave `- (pending)` in place.

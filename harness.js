@@ -785,7 +785,7 @@ function summarizeInput(input) {
  *     startTime, firstTokenTime }. Throws the run's error when the stream
  *   ends with result "error".
  */
-async function consumeEvents(events, { label, tapsRef }) {
+async function consumeEvents(events, { label, tapsRef, logContext }) {
   const result = {
     text: "",
     reasoning: "",
@@ -799,11 +799,64 @@ async function consumeEvents(events, { label, tapsRef }) {
     toolCalls: [],
   };
   let lastReported = 0;
+
+  // Streaming log writer: writes partial output as it arrives.
+  let logFd = null;
+  let logFilePath = null;
+  let logBuffer = "";
+  let logFlushedBytes = 0;
+  const STREAM_LOG_FLUSH_THRESHOLD = 2048; // flush every 2KB of new content
+
+  if (logContext && runDir) {
+    try {
+      const isAgent = logContext.type === "agent";
+      const baseName = isAgent ? `agent-${logContext.agentName}` : "one-shot";
+      const logDir = isAgent ? path.join(runDir, baseName) : path.join(runDir, "one-shot");
+      const fileName = isAgent
+        ? `turn-${String(logContext.turnNumber).padStart(3, "0")}.stream.md`
+        : `${logContext.label.replace(/[^a-zA-Z0-9_-]/g, "_")}.stream.md`;
+      logFilePath = path.join(logDir, fileName);
+      fs.mkdirSync(path.dirname(logFilePath), { recursive: true });
+      logFd = fs.openSync(logFilePath, "a");
+    } catch (err) {
+      // If streaming log creation fails, fall back to no streaming (non-blocking).
+      logFd = null;
+      console.error(`[harness] failed to create streaming log: ${err.message}`);
+    }
+  }
+
+  // Flush buffered log content to disk.
+  function flushLogBuffer() {
+    if (logFd !== null && logBuffer.length > 0) {
+      try {
+        const bytesWritten = fs.writeSync(logFd, logBuffer);
+        logBuffer = "";
+        logFlushedBytes += bytesWritten;
+      } catch (err) {
+        // Never let logging break the actual AI call.
+        console.error(`[harness] failed to flush streaming log: ${err.message}`);
+      }
+    }
+  }
+
+  // Write a partial log line (to stream or console).
+  function streamWrite(chunk) {
+    if (logFd !== null) {
+      logBuffer += chunk;
+      // Flush when buffer exceeds threshold.
+      if (logBuffer.length >= STREAM_LOG_FLUSH_THRESHOLD) {
+        flushLogBuffer();
+      }
+    }
+  }
+
   for await (const event of events) {
     switch (event.type) {
       case "text.delta":
         result.text += event.text;
         if (result.firstTokenTime === null) result.firstTokenTime = Date.now();
+        // Stream partial text to log as it arrives.
+        streamWrite(event.text);
         if (result.text.length - lastReported >= 1000) {
           lastReported = result.text.length;
           logLine(`  …generated ${lastReported} chars so far`);
@@ -812,6 +865,8 @@ async function consumeEvents(events, { label, tapsRef }) {
       case "reasoning.delta":
         result.reasoning += event.text;
         if (result.firstTokenTime === null) result.firstTokenTime = Date.now();
+        // Stream partial reasoning to log as it arrives.
+        streamWrite(event.text);
         break;
       case "step.done":
         result.finishReason = event.finishReason;
@@ -865,6 +920,14 @@ async function consumeEvents(events, { label, tapsRef }) {
   // reasoning events would carry, captured at the fetch layer instead.
   const tapped = (tapsRef.current?.reasoning ?? []).join("");
   if (tapped && !result.reasoning) result.reasoning = tapped;
+
+  // Flush any remaining buffered log content and close the file descriptor.
+  flushLogBuffer();
+  if (logFd !== null) {
+    try { fs.closeSync(logFd); } catch {}
+    logFd = null;
+  }
+
   if (result.result === "error") {
     throw result.error ?? new Error(`The ${label} run ended in an error.`);
   }
@@ -973,7 +1036,9 @@ async function runOneShot({
 
     let result;
     try {
-      result = await consumeEvents(chat.send(apiMessages), { label, tapsRef });
+      // Build logContext for streaming logs.
+      const logContext = { type: "one-shot", label };
+      result = await consumeEvents(chat.send(apiMessages), { label, tapsRef, logContext });
     } catch (streamError) {
       // The streaming path failed (API error, parse error, a server that
       // does not actually stream, ...). Fall back to one non-streaming
@@ -1119,7 +1184,9 @@ async function createAgentHandle({
       tapsRef.current = createTaps();
       turnNumber += 1;
       logLine(`[call-ai] CALL system="${systemPreview}" agent=${label} (turn)`);
-      const result = await consumeEvents(session.send(input), { label, tapsRef });
+      // Build logContext for streaming logs.
+      const logContext = { type: "agent", agentName: name, turnNumber, label };
+      const result = await consumeEvents(session.send(input), { label, tapsRef, logContext });
       logResultLine(result, label);
       if (result.result === "max_steps") {
         logLine(
