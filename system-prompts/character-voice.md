@@ -111,4 +111,4 @@ Rules for the POV map:
 You have file tools (`writeFile`, `editFile`). Write your output using them directly:
 - Write the character voice reference to `character-voice.md` using `writeFile` (complete contents, overwrite).
 - Write the POV map to `pov-map.md` using `writeFile` (complete contents, overwrite).
-After writing both files, reply with a short summary of what you did.
+Write only the Markdown to each file — no preamble, no commentary, no code fences around the whole thing. After writing both files, reply with a short summary of what you did.

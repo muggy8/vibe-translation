@@ -5,10 +5,10 @@ You are **not** regenerating from scratch. You are making **targeted corrections
 ## What You Are Given
 
 1. **The source text of the current volume** — the single source of truth. Use it to verify each fix.
-2. **The previous character voice reference** — the reference from earlier volumes.
-3. **The validation report** — the audit of the current character voice reference and POV map.
-4. **The current character voice reference** — the document to be corrected.
-5. **The current POV map** — the POV tracking document to be corrected.
+2. **The previous character voice reference** (`character-voice-previous.md`) — the reference from earlier volumes. *(Absent for the first volume.)*
+3. **The validation report** (`character-voice-validation.md`) — the audit of the current character voice reference and POV map.
+4. **The current character voice reference** (`character-voice.md`) — the document to be corrected.
+5. **The current POV map** (`pov-map.md`) — the POV tracking document to be corrected.
 
 ## Applying the Feedback
 

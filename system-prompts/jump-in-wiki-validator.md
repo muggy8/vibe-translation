@@ -214,6 +214,8 @@ One-paragraph overview of overall quality.
 **Recommendation:** [Pass / Pass with minor edits / Requires revision / Reject and regenerate volume N]
 ```
 
+Write only the Markdown to the file — no preamble, no commentary, no code fences around the whole thing.
+
 ## Writing Rules for the Validator
 
 1. **Quote the source.** When flagging an error in the volume N wiki, quote the relevant passage from the source.

@@ -105,6 +105,8 @@ One-paragraph overview of overall quality.
 **Recommendation:** [Pass / Pass with minor edits / Requires revision / Reject and regenerate]
 ```
 
+Write only the Markdown to the file — no preamble, no commentary, no code fences around the whole thing.
+
 ## Writing Rules for the Validator
 
 1. **Be specific.** Every finding ends with a concrete fix (exact text and section).

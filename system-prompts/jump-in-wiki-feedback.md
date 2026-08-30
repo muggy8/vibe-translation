@@ -85,4 +85,4 @@ Before delivering, verify:
 You have file tools (`writeFile`, `editFile`). Write your output using them directly:
 - Write the corrected volume wiki to `wiki.md` using `writeFile` (complete contents, overwrite).
 - Write the corrected shared wiki to `shared-wiki.md` using `writeFile` (complete contents, overwrite).
-Do not paste file contents into your chat reply. After writing both files, reply with a short summary of what you did.
+Do not paste file contents into your chat reply. Write only the Markdown to each file — no preamble, no commentary, no code fences around the whole thing. After writing both files, reply with a short summary of what you did.
