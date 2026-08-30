@@ -71,52 +71,211 @@ async function loadEsm() {
 }
 
 // ─── Run logging ────────────────────────────────────────────────────────────
-// Every call's diagnostic output is also written to a per-run log file under
-// .logs/ (one file per process) so runs can be inspected after the fact.
+// Every call's diagnostic output is also written to a per-run log directory
+// under .logs/ (one directory per process) so runs can be inspected after
+// the fact. The directory contains:
+//   - summary.log        (CALL / RESULT / WARNING lines — greppable)
+//   - one-shot/<label>.md  (full system prompt + messages + response for
+//                          each tool-less runOneShot call)
+//   - agent-<name>/turn-<N>.md  (full chat history for each agent turn:
+//                          system prompt, user input, assistant response,
+//                          reasoning, tool calls + results)
 // The log line prefix ("[call-ai]") is kept from the previous implementation
 // so old and new run logs stay greppable side by side.
 const logsDir = path.join(__dirname, ".logs");
 let logStream = null;
 let logFilePath = null;
+let runDir = null;
 
 /**
- * Get (and lazily create) the writable stream for the current run's log file.
+ * Get (and lazily create) the writable stream for the current run's summary
+ * log.  Also creates the per-run directory structure.
  * @returns {import("fs").WriteStream} The log file stream.
  */
 function getLogStream() {
   if (!logStream) {
-    fs.mkdirSync(logsDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    logFilePath = path.join(logsDir, `call-ai-${stamp}.log`);
+    runDir = path.join(logsDir, stamp);
+    fs.mkdirSync(runDir, { recursive: true });
+    logFilePath = path.join(runDir, "summary.log");
     logStream = fs.createWriteStream(logFilePath, { flags: "a" });
-    // An unhandled "error" event on the stream (e.g. disk full) would crash
-    // the process; swallow it so logging can never break the actual AI call.
     logStream.on("error", (err) => {
       console.error(`[harness] log file error: ${err.message}`);
     });
-    // Header is written directly (not via logLine) to avoid recursion.
     logStream.write(`=== call-ai run log started: ${new Date().toISOString()} ===\n`);
     logStream.write(
       `model=${process.env.OPENAI_MODEL || "gpt-4o-mini"} ` +
         `base_url=${process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"} ` +
         `max_tokens=${process.env.MAX_TOKENS || "1024"}\n`
     );
-    // Tell the user where this run's log is (console only, to avoid recursion).
-    console.error(`[call-ai] logging to ${logFilePath}`);
+    console.error(`[call-ai] logging to ${runDir}`);
   }
   return logStream;
 }
 
 /**
- * Log a line to both stderr and the current run's log file.
+ * Log a line to both stderr and the current run's summary log file.
  * @param {string} message - The line to log.
  */
 function logLine(message) {
   console.error(message);
+  try { getLogStream().write(message + "\n"); } catch {}
+}
+
+/**
+ * Escape text for inclusion in a Markdown code block (prevents triple backticks
+ * from prematurely closing the block).
+ * @param {string} text - The text to escape.
+ * @returns {string} The escaped text.
+ */
+function escapeCodeBlock(text) {
+  if (!text) return "";
+  return text.replace(/```/g, "`-`-`-");
+}
+
+/**
+ * Escape text for inline code (prevents backtick issues).
+ * @param {string} text - The text to escape.
+ * @returns {string} The escaped text.
+ */
+function escapeInline(text) {
+  if (!text) return "";
+  return String(text).replace(/`/g, "\u200B`").slice(0, 500);
+}
+
+// Triple-backtick delimiter for Markdown code blocks (avoiding template literal syntax issues).
+const CODE_BLOCK = "\x60\x60\x60";
+
+/**
+ * Write a one-shot call log file: full system prompt, messages, and response.
+ * Called after runOneShot completes.
+ *
+ * @param {string} label - The label for this call (used in filename).
+ * @param {string} systemPrompt - The full system prompt.
+ * @param {Array} messages - The messages sent.
+ * @param {string} response - The model's response text.
+ * @param {Object} result - The consumeEvents result (usage, timing, etc.).
+ */
+function writeOneShotLog(label, systemPrompt, messages, response, result) {
   try {
-    getLogStream().write(message + "\n");
-  } catch {
-    // Never let logging break the actual AI call.
+    const oneShotDir = path.join(runDir, "one-shot");
+    fs.mkdirSync(oneShotDir, { recursive: true });
+
+    const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const logFile = path.join(oneShotDir, `${safeLabel}.md`);
+
+    const durationMs = result.startTime ? Date.now() - result.startTime : null;
+    const ttftMs = result.firstTokenTime ? result.firstTokenTime - result.startTime : null;
+
+    let content = `# One-shot call: ${label}\n`;
+    content += `# Model: ${process.env.OPENAI_MODEL || "gpt-4o-mini"}\n`;
+
+    if (result.usage) {
+      content += `# Tokens: prompt=${result.usage.inputTokens ?? "?"} completion=${result.usage.outputTokens ?? "?"} total=${result.usage.totalTokens ?? "?"}\n`;
+    }
+
+    if (ttftMs != null) content += `# TTFT: ${(ttftMs / 1000).toFixed(2)}s\n`;
+    if (durationMs != null) content += `# Duration: ${(durationMs / 1000).toFixed(2)}s\n`;
+    content += `# Finish: ${result.finishReason ?? "n/a"}\n`;
+    content += `\n`;
+
+    content += `## System Prompt\n`;
+    content += `${CODE_BLOCK}\n${escapeCodeBlock(systemPrompt)}\n${CODE_BLOCK}\n\n`;
+
+    content += `## Messages\n`;
+    for (const msg of messages) {
+      if (msg.text) {
+        content += `${CODE_BLOCK}\n${escapeCodeBlock(msg.text)}\n${CODE_BLOCK}\n\n`;
+      }
+    }
+
+    content += `## Response\n`;
+    content += `${CODE_BLOCK}\n${escapeCodeBlock(response)}\n${CODE_BLOCK}\n\n`;
+
+    fs.writeFileSync(logFile, content, "utf-8");
+  } catch (err) {
+    console.error(`[harness] failed to write one-shot log: ${err.message}`);
+  }
+}
+
+/**
+ * Write a per-agent chat log file for one turn.
+ * Called from agent.sendTurn() after each turn completes.
+ *
+ * @param {string} agentName - The agent name (used in directory name).
+ * @param {number} turnNumber - The turn number (for file naming).
+ * @param {Object} opts - Options.
+ * @param {string} opts.systemPrompt - The full system prompt.
+ * @param {string|Array} opts.input - The user input.
+ * @param {Object} opts.result - The consumeEvents result.
+ * @param {Array} opts.toolCalls - Array of {name, input, output, error}.
+ * @param {string} opts.label - The log label.
+ */
+function writeAgentTurnLog(agentName, turnNumber, opts) {
+  const { systemPrompt, input, result, toolCalls = [], label } = opts;
+  try {
+    const agentDir = path.join(runDir, `agent-${agentName}`);
+    fs.mkdirSync(agentDir, { recursive: true });
+
+    const turnFile = path.join(agentDir, `turn-${String(turnNumber).padStart(3, "0")}.md`);
+
+    const durationMs = result.startTime ? Date.now() - result.startTime : null;
+    const ttftMs = result.firstTokenTime ? result.firstTokenTime - result.startTime : null;
+
+    let content = `# Agent: ${agentName}\n`;
+    content += `# Turn: ${String(turnNumber).padStart(3, "0")}\n`;
+    content += `# Label: ${label}\n`;
+    content += `# Model: ${process.env.OPENAI_MODEL || "gpt-4o-mini"}\n`;
+
+    if (result.usage) {
+      content += `# Tokens: prompt=${result.usage.inputTokens ?? "?"} completion=${result.usage.outputTokens ?? "?"} total=${result.usage.totalTokens ?? "?"}\n`;
+    }
+
+    if (ttftMs != null) content += `# TTFT: ${(ttftMs / 1000).toFixed(2)}s\n`;
+    if (durationMs != null) content += `# Duration: ${(durationMs / 1000).toFixed(2)}s\n`;
+    content += `# Finish: ${result.finishReason ?? "n/a"}\n`;
+    content += `\n`;
+
+    content += `## System Prompt\n`;
+    content += `${CODE_BLOCK}\n${escapeCodeBlock(systemPrompt)}\n${CODE_BLOCK}\n\n`;
+
+    content += `## User Message\n`;
+    if (typeof input === "string") {
+      content += `${CODE_BLOCK}\n${escapeCodeBlock(input)}\n${CODE_BLOCK}\n\n`;
+    } else if (Array.isArray(input)) {
+      for (const msg of input) {
+        if (msg.text) {
+          content += `${CODE_BLOCK}\n${escapeCodeBlock(msg.text)}\n${CODE_BLOCK}\n\n`;
+        }
+      }
+    }
+
+    content += `## Assistant Response\n`;
+    if (result.text) {
+      content += `${CODE_BLOCK}\n${escapeCodeBlock(result.text)}\n${CODE_BLOCK}\n\n`;
+    } else {
+      content += `(no text output)\n\n`;
+    }
+
+    if (result.reasoning) {
+      content += `## Reasoning\n`;
+      content += `${CODE_BLOCK}\n${escapeCodeBlock(result.reasoning)}\n${CODE_BLOCK}\n\n`;
+    }
+
+    if (toolCalls.length > 0) {
+      content += `## Tool Calls\n`;
+      for (const tc of toolCalls) {
+        content += `- **${tc.name}**\n`;
+        content += `  - Input: \`${escapeInline(tc.input)}\`\n`;
+        if (tc.output) content += `  - Output: \`${escapeInline(tc.output)}\`\n`;
+        if (tc.error) content += `  - Error: \`${escapeInline(tc.error)}\`\n`;
+      }
+      content += `\n`;
+    }
+
+    fs.writeFileSync(turnFile, content, "utf-8");
+  } catch (err) {
+    console.error(`[harness] failed to write agent turn log: ${err.message}`);
   }
 }
 
@@ -637,6 +796,7 @@ async function consumeEvents(events, { label, tapsRef }) {
     messages: [],
     startTime: Date.now(),
     firstTokenTime: tapsRef.current?.firstToken ?? null,
+    toolCalls: [],
   };
   let lastReported = 0;
   for await (const event of events) {
@@ -662,11 +822,23 @@ async function consumeEvents(events, { label, tapsRef }) {
         logLine(
           `  …[agent] ${event.toolName} ${summarizeInput(event.input)}`
         );
+        // Collect tool call for chat log.
+        result.toolCalls.push({
+          name: event.toolName,
+          input: event.input,
+          output: null,
+          error: null,
+        });
         break;
       case "tool.error":
         logLine(
           `  …[agent] ${event.toolName} errored: ${String(event.error).slice(0, 160)}`
         );
+        // Mark the last unfinished tool call with the error.
+        const lastTool = result.toolCalls[result.toolCalls.length - 1];
+        if (lastTool && lastTool.output === null && lastTool.error === null) {
+          lastTool.error = String(event.error).slice(0, 500);
+        }
         break;
       case "retry":
         logLine(
@@ -847,6 +1019,9 @@ async function runOneShot({
 
     logResultLine(result, label);
 
+    // Log full call details (system prompt, messages, response).
+    writeOneShotLog(label, systemPrompt, messages, result.text, result);
+
     if (result.text) return result.text;
     if (remaining > 0) {
       remaining -= 1;
@@ -929,6 +1104,7 @@ async function createAgentHandle({
     retry: { maxRetries: retry ?? envRetry(), isRetryable: () => true },
   });
   const systemPreview = systemPrompt.trim().split("\n")[0].slice(0, 80);
+  let turnNumber = 0;
   return {
     name,
     session,
@@ -941,6 +1117,7 @@ async function createAgentHandle({
      */
     async sendTurn(input, { label = name } = {}) {
       tapsRef.current = createTaps();
+      turnNumber += 1;
       logLine(`[call-ai] CALL system="${systemPreview}" agent=${label} (turn)`);
       const result = await consumeEvents(session.send(input), { label, tapsRef });
       logResultLine(result, label);
@@ -951,6 +1128,14 @@ async function createAgentHandle({
             `task).`
         );
       }
+      // Write full chat log for this turn.
+      writeAgentTurnLog(name, turnNumber, {
+        systemPrompt,
+        input,
+        result,
+        toolCalls: result.toolCalls ?? [],
+        label,
+      });
       return result;
     },
     /** Release agent resources (MCP servers, background subagents). */
