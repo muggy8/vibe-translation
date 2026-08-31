@@ -296,6 +296,10 @@ assert.ok(truncatedVoice.includes("Character"), "truncateVoiceRef: some entries 
 // ─── character-voice: prompt builders ───────────────────────────────────────
 const voiceCtx = {
   values: { INSTALLMENT_NUMBER: "01", SOURCE_NAME: "Test", SOURCE_LANGUAGE: "Japanese", TARGET_LANGUAGE: "English" },
+  folderName: "test_story(1)",
+  sourceFile: "test-series/test_story(1)/test_story(1).md",
+  isFirst: true,
+  previousFolderName: null,
   extractUserPrompt: "# Extraction — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
   authorUserPrompt: "# Compilation — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}\n\n{{EXTRACTION_RESULTS}}",
   validatorUserPrompt: "# Validation — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
@@ -311,6 +315,8 @@ assert.ok(extractPrompt.includes("01"), "extract prompt carries installment");
 const authorPrompt = buildAuthorTurnPrompt(voiceCtx, '[{"type":"voice","character":"ソラ"}]');
 assert.ok(authorPrompt.includes("Test"), "author prompt carries series name");
 assert.ok(authorPrompt.includes('{"type":"voice","character":"ソラ"}'), "author prompt carries extraction results");
+assert.ok(authorPrompt.includes('"test_story(1).md" (same folder)'), "author prompt names the volume source at its real path");
+assert.ok(authorPrompt.includes("absent — this is the first volume"), "author prompt (first volume): previous reference absent");
 
 const authorPromptFirst = buildAuthorTurnPrompt({ ...voiceCtx, values: { ...voiceCtx.values, INSTALLMENT_NUMBER: "01" } }, "");
 assert.ok(authorPromptFirst.includes("this is the first volume"), "author prompt (empty results): mentions first volume");
@@ -318,9 +324,30 @@ assert.ok(authorPromptFirst.includes("this is the first volume"), "author prompt
 const validatorPrompt = buildValidatorTurnPrompt(voiceCtx);
 assert.ok(validatorPrompt.includes("Test"), "validator prompt carries series name");
 assert.ok(validatorPrompt.includes("01"), "validator prompt carries installment");
+assert.ok(validatorPrompt.includes('"character-voice.md" (same folder)'), "validator prompt names the reference under audit");
+assert.ok(validatorPrompt.includes('"pov-map.md" (same folder)'), "validator prompt names the POV map under audit");
 
 const feedbackPrompt = buildFeedbackTurnPrompt(voiceCtx);
 assert.ok(feedbackPrompt.includes("Test"), "feedback prompt carries series name");
 assert.ok(feedbackPrompt.includes("01"), "feedback prompt carries installment");
+assert.ok(feedbackPrompt.includes("character-voice-validation.md"), "feedback prompt names the validation report");
+
+// Non-first volume: the previous reference is named at its real relative path
+// (../<previous folder>/character-voice.md) — the convention from glossary.js.
+const voiceCtxVol2 = {
+  ...voiceCtx,
+  values: { ...voiceCtx.values, INSTALLMENT_NUMBER: "02" },
+  folderName: "test_story(2)",
+  sourceFile: "test-series/test_story(2)/test_story(2).md",
+  isFirst: false,
+  previousFolderName: "test_story(1)",
+};
+for (const [name, prompt] of [
+  ["author", buildAuthorTurnPrompt(voiceCtxVol2, "[]")],
+  ["validator", buildValidatorTurnPrompt(voiceCtxVol2)],
+  ["feedback", buildFeedbackTurnPrompt(voiceCtxVol2)],
+]) {
+  assert.ok(prompt.includes("../test_story(1)/character-voice.md"), `${name} prompt (volume 02) names the previous reference at its real path`);
+}
 
 console.log("All tests passed.");

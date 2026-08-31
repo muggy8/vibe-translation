@@ -98,15 +98,36 @@ function buildExtractTurnPrompt(ctx) {
 
 /**
  * Build the author (compile) turn prompt for a single volume.
+ *
+ * The preamble names every material at its real path: the previous volume's
+ * reference lives in the previous volume's folder
+ * (`../<previous folder>/character-voice.md`), not in the working folder —
+ * the same convention as glossary.js, so the agent never has to guess where
+ * to read.
+ *
  * @param {CharacterVoiceVolumeCtx} ctx
  * @param {string} extractionResults
  * @returns {string}
  */
 function buildAuthorTurnPrompt(ctx, extractionResults) {
-  return transformUserPrompt(ctx.authorUserPrompt, {
+  const { sourceFile, isFirst, previousFolderName } = ctx;
+  const amendPrompt = transformUserPrompt(ctx.authorUserPrompt, {
     ...ctx.values,
     EXTRACTION_RESULTS: extractionResults || "(none — this is the first volume)",
   });
+  const previousRefLine = isFirst
+    ? "- The previous character voice reference: (absent — this is the first volume)"
+    : `- The previous character voice reference: "../${previousFolderName}/character-voice.md"`;
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    `Materials (read with readFile before writing anything):\n` +
+    `- The volume source: "${path.basename(sourceFile)}" (same folder)\n` +
+    previousRefLine +
+    `\n\n` +
+    `Write the complete character voice reference to the file "character-voice.md" in your working folder (writeFile, complete contents).\n` +
+    `Write the per-volume POV map to the file "pov-map.md" in your working folder (writeFile, complete contents).\n\n` +
+    amendPrompt
+  );
 }
 
 /**
@@ -115,7 +136,21 @@ function buildAuthorTurnPrompt(ctx, extractionResults) {
  * @returns {string}
  */
 function buildValidatorTurnPrompt(ctx) {
-  return transformUserPrompt(ctx.validatorUserPrompt, ctx.values);
+  const { sourceFile, isFirst, previousFolderName } = ctx;
+  const previousRefLine = isFirst
+    ? ""
+    : `- The previous character voice reference: "../${previousFolderName}/character-voice.md"\n`;
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    `Materials (read with readFile before writing anything):\n` +
+    `- The volume source: "${path.basename(sourceFile)}" (same folder)\n` +
+    `- The amended character voice reference under audit: "character-voice.md" (same folder)\n` +
+    `- The POV map under audit: "pov-map.md" (same folder)\n` +
+    previousRefLine +
+    `\n` +
+    `Write the complete validation report to the file "character-voice-validation.md" in your working folder (writeFile, exact format from the system prompt).\n\n` +
+    transformUserPrompt(ctx.validatorUserPrompt, ctx.values)
+  );
 }
 
 /**
@@ -124,7 +159,22 @@ function buildValidatorTurnPrompt(ctx) {
  * @returns {string}
  */
 function buildFeedbackTurnPrompt(ctx) {
-  return transformUserPrompt(ctx.feedbackUserPrompt, ctx.values);
+  const { sourceFile, isFirst, previousFolderName } = ctx;
+  const previousRefLine = isFirst
+    ? ""
+    : `- The previous character voice reference: "../${previousFolderName}/character-voice.md"\n`;
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    `The validation report "character-voice-validation.md" in your working folder is your work order.\n` +
+    `Materials (read with readFile before changing anything):\n` +
+    `- The volume source: "${path.basename(sourceFile)}" (same folder)\n` +
+    `- The current character voice reference to correct: "character-voice.md" (same folder)\n` +
+    `- The current POV map to correct: "pov-map.md" (same folder)\n` +
+    previousRefLine +
+    `\n` +
+    `Apply the report's findings and write the complete corrected files back to "character-voice.md" and "pov-map.md" using writeFile (complete contents).\n\n` +
+    transformUserPrompt(ctx.feedbackUserPrompt, ctx.values)
+  );
 }
 
 function buildExtractSystemPrompt(base) { return base + AGENT_TOOLS_NOTE; }
@@ -145,18 +195,46 @@ async function characterVoice() {
   const sorted = manifest.volumes.map((v) => v.folder).sort((a, b) => {
     return parseInt(a.match(/\((\d+)\)/)?.[1]||"999",10) - parseInt(b.match(/\((\d+)\)/)?.[1]||"999",10);
   });
+  const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
   const volumes = volumeArg ? sorted.filter((f) => f===volumeArg) : sorted;
   if (volumes.length===0) { console.log("No volumes found. Exiting."); return; }
   let regeneratedAny = false;
-  for (let i = 0; i < volumes.length; i++) {
-    const folderName = volumes[i];
-    const values = { INSTALLMENT_NUMBER: manifest.volumes[i].installmentNumber, SOURCE_NAME: manifest.seriesName, SOURCE_LANGUAGE: process.env.SOURCE_LANGUAGE||"Japanese", TARGET_LANGUAGE: process.env.TARGET_LANGUAGE||"English" };
+  for (const folderName of volumes) {
+    // Index into the FULL sorted list (not the filtered one) so --volume runs
+    // still resolve the correct manifest entry and previous volume.
+    const i = sorted.indexOf(folderName);
+    const volume = volumeByFolder.get(folderName);
+    const values = { INSTALLMENT_NUMBER: volume.installmentNumber, SOURCE_NAME: manifest.seriesName, SOURCE_LANGUAGE: process.env.SOURCE_LANGUAGE||"Japanese", TARGET_LANGUAGE: process.env.TARGET_LANGUAGE||"English" };
     const volumeDir = path.join(seriesDir, folderName);
-    const sourceFile = path.join(seriesDir, manifest.volumes[i].sourceFile);
+    const sourceFile = path.join(seriesDir, volume.sourceFile);
     const voiceOutputFile = path.join(volumeDir, "character-voice.md");
     const povOutputFile = path.join(volumeDir, "pov-map.md");
     const validationOutputFile = path.join(volumeDir, "character-voice-validation.md");
-    const previousVoiceRefFile = i > 0 ? path.join(seriesDir, sorted[i-1], "character-voice.md") : null;
+    // The previous volume's reference (the in-progress reference). Absent for
+    // the first volume. The agent-mode turn prompts name it at its real
+    // relative path (../<previous folder>/character-voice.md) — the same
+    // convention as glossary.js.
+    const isFirst = i === 0;
+    let previousVoiceRefFile = null;
+    let previousFolderName = null;
+    if (!isFirst) {
+      previousFolderName = sorted[i - 1];
+      previousVoiceRefFile = path.join(seriesDir, previousFolderName, "character-voice.md");
+      if (!(await fileExists(previousVoiceRefFile))) {
+        if (dryRun) {
+          console.warn(
+            `Volume ${values.INSTALLMENT_NUMBER}: --dry-run: the previous character voice reference ` +
+              `(${previousVoiceRefFile}) does not exist yet — a live run would stop ` +
+              `here. Continuing the prompt preview.`
+          );
+        } else {
+          throw new Error(
+            `Previous character voice reference not found: ${previousVoiceRefFile}. ` +
+              `Process the earlier volume first (or re-run without --force).`
+          );
+        }
+      }
+    }
     const extractSystemPrompt = await fs.readFile(extractSystemPromptFile, "utf8");
     const extractTemplate = await fs.readFile(extractUserPromptTemplateFile, "utf8");
     const authorSystemPrompt = await fs.readFile(authorSystemPromptFile, "utf8");
@@ -171,7 +249,7 @@ async function characterVoice() {
     const validatorPrompt = transformUserPrompt(validatorTemplate, values);
     const feedbackPrompt = transformUserPrompt(feedbackTemplate, values);
     const acceptancePrompt = transformUserPrompt(acceptanceTemplate, values);
-    const ctx = { values, folderName, volumeDir, sourceFile, voiceOutputFile, povOutputFile, validationOutputFile, previousVoiceRefFile, extractPrompt, validatorPrompt, feedbackPrompt, acceptancePrompt, extractTemplate, authorTemplate, extractSystemPrompt, authorSystemPrompt, validatorSystemPrompt, acceptanceSystemPrompt, feedbackSystemPrompt, authorUserPrompt: authorTemplate, validatorUserPrompt: validatorTemplate, feedbackUserPrompt: feedbackTemplate };
+    const ctx = { values, folderName, volumeDir, sourceFile, voiceOutputFile, povOutputFile, validationOutputFile, isFirst, previousFolderName, previousVoiceRefFile, extractPrompt, validatorPrompt, feedbackPrompt, acceptancePrompt, extractTemplate, authorTemplate, extractSystemPrompt, authorSystemPrompt, validatorSystemPrompt, acceptanceSystemPrompt, feedbackSystemPrompt, authorUserPrompt: authorTemplate, validatorUserPrompt: validatorTemplate, feedbackUserPrompt: feedbackTemplate };
     if (dryRun) {
       const illustrative = JSON.stringify([{ type: "voice", character: "ex", quirkType: "sentenceEnding", description: "ex", examples: ["ex"], formalityLevel: "plain", notes: "ex" }]);
       const sections = [

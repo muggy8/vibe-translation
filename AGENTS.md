@@ -121,6 +121,8 @@ Per volume, in order — each volume's reference builds on the previous one's:
 2. **Compile** — an author agent (per-volume session, `maxSteps 30`) reads the source, previous reference, and extraction results, then writes two files:
    - `character-voice.md` — the cumulative character voice reference (carries forward all previous entries, adds new characters/quirks)
    - `pov-map.md` — the per-volume POV map (marker identification, narration type classification, POV assignments, free indirect discourse detection)
+   The agent-mode turn prompts (author/validator/feedback) name every material at its real path — the previous volume's reference at `../<previous folder>/character-voice.md` (same convention as glossary.js) — so agents never have to guess where to read. A missing previous reference fails loudly (dry-run: warn).
+
 3. **QA loop**: a fresh validator agent per iteration writes `character-voice-validation.md` → acceptance one-shot → on FAIL a fresh author agent applies feedback (`character-voice-feedback.md`). Same rolling-average acceptance criterion as other pipelines.
 4. After all volumes: the last volume's `character-voice.md` is copied to `VOICE_OUTPUT_FILE` (default `<SERIES_LOCATION>/character-voice.md`). Skipped for `--volume` runs.
 

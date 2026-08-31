@@ -107,7 +107,9 @@
  * @property {string} acceptanceUserPrompt
  * @property {Object} fsGate — Gated filesystem tools (from createGatedFsTools).
  * @property {string} [seriesDir]
- * @property {string} [previousVoiceRef]
+ * @property {boolean} isFirst — True for the first volume (no previous reference).
+ * @property {string|null} previousFolderName — Previous volume folder (null for the first volume).
+ * @property {string|null} previousVoiceRefFile — Path to the previous volume's character-voice.md.
  * @property {boolean} [limitReached]
  */
 
