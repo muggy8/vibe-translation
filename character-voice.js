@@ -295,6 +295,52 @@ async function characterVoice() {
 }
 
 /**
+ * Detect the "model emitted tool-call syntax as plain text" failure mode.
+ *
+ * Observed live (Qwen via an OpenAI-compatible endpoint): the model sometimes
+ * emits its tool calls as Qwen-native text — a `tool_call` wrapper around the
+ * tool name, e.g. `tool_call <function=readFile>…` or `tool_call <listFiles>…` —
+ * in the content field instead of using the API-level tool_calls protocol. The
+ * harness only executes real tool calls, so such a turn performs no work at all,
+ * yet it looks like an ordinary (short) chat reply, so the stale-file write
+ * check and the acceptance loop would silently mask it and burn every
+ * validation iteration.
+ *
+ * @param {Object|null} result - The result object returned by an agent sendTurn.
+ * @returns {boolean} True when the turn made no real tool calls and its text
+ *   contains tool-call markers (the malformed-tool-call signature).
+ */
+function emittedToolCallAsText(result) {
+  if (!result) return false;
+  if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) return false;
+  const text = typeof result.text === "string" ? result.text : "";
+  return text.includes("tool_call") || text.includes("<function=");
+}
+
+/**
+ * Fail loudly when an agent turn made no real tool calls because the model
+ * emitted tool-call syntax as plain text (see emittedToolCallAsText). Throws a
+ * diagnostic error instead of letting the stale-file write check mask the
+ * no-op turn.
+ *
+ * @param {Object|null} result - The result object returned by an agent sendTurn.
+ * @param {string} who - Who the agent was (for the error message).
+ * @param {string} volumeLabel - The volume label (for the error message).
+ * @returns {void}
+ */
+function assertRealToolCalls(result, who, volumeLabel) {
+  if (!emittedToolCallAsText(result)) return;
+  throw new Error(
+    `Volume ${volumeLabel}: ${who} emitted tool-call syntax as plain text ` +
+      `("tool_call" / <function=…>) instead of using the tool-calling API, so no ` +
+      `file tools ran — nothing was read or written. See the agent transcript in ` +
+      `.logs/ for the exact turn. This is an intermittent model/endpoint issue ` +
+      `with OpenAI tool_calls (the smoke test 'npm run smoke fs' can pass even ` +
+      `when it happens). Re-run the task; if it persists, check the endpoint.`
+  );
+}
+
+/**
  * Run the extraction stage: one-shot call to extract voice quirks and POV info.
  * @param {CharacterVoiceVolumeCtx} ctx
  * @returns {Promise<string>}
@@ -329,11 +375,13 @@ async function runCompile(ctx, extractionOutput) {
   const author = await harness.createAgentHandle({ name: `author-voice-${values.INSTALLMENT_NUMBER}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: 30 });
   try {
     const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults), { label: `character-voice-compile-${values.INSTALLMENT_NUMBER}` });
+    assertRealToolCalls(compileResult, "the author agent (compile)", values.INSTALLMENT_NUMBER);
     await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (compile)", compileResult?.text);
     if (process.env.RECOVERY_ENABLED !== "false") {
       const hasContent = compileResult?.text && compileResult.text.trim().length > 0;
       const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now with the exact same content.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
       const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `character-voice-compile-recovery-${values.INSTALLMENT_NUMBER}` });
+      assertRealToolCalls(recoveryResult, "the author agent (compile recovery)", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (compile recovery)", recoveryResult?.text);
     }
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved voice reference to ${ctx.voiceOutputFile} and POV map to ${ctx.povOutputFile}`);
@@ -352,11 +400,13 @@ async function runQaLoop(ctx) {
     const validator = await harness.createAgentHandle({ name: `validator-voice-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size) });
     try {
       const validateResult = await validator.sendTurn(buildValidatorTurnPrompt(ctx), { label: `character-voice-validate-${values.INSTALLMENT_NUMBER}-${iteration}` });
+      assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(validationOutputFile, "the validator agent", validateResult?.text);
       if (process.env.RECOVERY_ENABLED !== "false") {
         const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
         const recoveryPrompt = hasContent ? `You were asked to write "character-voice-validation.md" using writeFile, but you replied in chat. Please rewrite the report using writeFile now with the same content.` : `You produced no output. Please write the validation report to "character-voice-validation.md" using writeFile now.`;
         const recoveryResult = await validator.sendTurn(recoveryPrompt, { label: `character-voice-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` });
+        assertRealToolCalls(recoveryResult, "the validator agent (recovery)", values.INSTALLMENT_NUMBER);
         await assertWroteWithFallback(validationOutputFile, "the validator agent (recovery)", recoveryResult?.text);
       }
       console.log("Calling the AI for the acceptance check...");
@@ -396,11 +446,13 @@ async function runFeedback(ctx) {
   const author = await harness.createAgentHandle({ name: `author-voice-feedback-${values.INSTALLMENT_NUMBER}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: 30 });
   try {
     const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx), { label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}` });
+    assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
     await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)", feedbackResult?.text);
     if (process.env.RECOVERY_ENABLED !== "false") {
       const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
       const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
       const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}` });
+      assertRealToolCalls(recoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback recovery)", recoveryResult?.text);
     }
   } finally { await author.close(); }
@@ -436,4 +488,4 @@ async function runVolume(ctx) {
 }
 
 // Export
-module.exports = { characterVoice, parseVoiceQuirks, truncateVoiceRef, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runExtract, runCompile, runQaLoop, acceptanceCheck };
+module.exports = { characterVoice, parseVoiceQuirks, truncateVoiceRef, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runExtract, runCompile, runQaLoop, acceptanceCheck };

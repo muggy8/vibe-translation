@@ -250,7 +250,7 @@ assert.ok(perTermPrompt.includes("- (pending)"), "per-term prompt mentions the p
 assert.ok(perTermPrompt.includes("editFile"), "per-term prompt instructs editFile");
 
 // ─── character-voice: parseVoiceQuirks ──────────────────────────────────────
-const { parseVoiceQuirks, truncateVoiceRef, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt } = require("../character-voice");
+const { parseVoiceQuirks, truncateVoiceRef, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt } = require("../character-voice");
 
 // Empty/null input
 assert.deepStrictEqual(parseVoiceQuirks(""), []);
@@ -292,6 +292,41 @@ const truncatedVoice = truncateVoiceRef(longVoiceRef);
 assert.ok(truncatedVoice.includes("[TRUNCATED:"), "truncateVoiceRef: truncated content has header note");
 assert.ok(!truncatedVoice.includes("Character0"), "truncateVoiceRef: first entries removed");
 assert.ok(truncatedVoice.includes("Character"), "truncateVoiceRef: some entries kept");
+
+// ─── character-voice: emittedToolCallAsText ──────────────────────────────────
+// A turn that made real tool calls is never flagged, even if its text also
+// mentions tool-call syntax.
+assert.strictEqual(
+  emittedToolCallAsText({ text: "tool_call <function=readFile>", toolCalls: [{ name: "readFile" }] }),
+  false,
+  "emittedToolCallAsText: real tool calls are not flagged"
+);
+// A turn with no real tool calls but tool-call markers in the text is the
+// malformed-tool-call signature (observed live from a local Qwen endpoint).
+assert.strictEqual(
+  emittedToolCallAsText({ text: "tool_call\n<function=readFile>\n<parameter=path>\nfile.md\n</parameter>\n</function>", toolCalls: [] }),
+  true,
+  "emittedToolCallAsText: tool_call text with no real calls is flagged"
+);
+assert.strictEqual(
+  emittedToolCallAsText({ text: "tool_call <listFiles>", toolCalls: [] }),
+  true,
+  "emittedToolCallAsText: listFiles marker is flagged"
+);
+assert.strictEqual(
+  emittedToolCallAsText({ text: "Here is <function=readFile> the content", toolCalls: [] }),
+  true,
+  "emittedToolCallAsText: <function= marker is flagged"
+);
+// Ordinary chat replies (no markers) and missing/empty results are not flagged.
+assert.strictEqual(
+  emittedToolCallAsText({ text: "I wrote the file to character-voice.md.", toolCalls: [] }),
+  false,
+  "emittedToolCallAsText: ordinary reply not flagged"
+);
+assert.strictEqual(emittedToolCallAsText(null), false, "emittedToolCallAsText: null result not flagged");
+assert.strictEqual(emittedToolCallAsText({}), false, "emittedToolCallAsText: empty result not flagged");
+assert.strictEqual(emittedToolCallAsText({ text: "", toolCalls: [] }), false, "emittedToolCallAsText: empty text not flagged");
 
 // ─── character-voice: prompt builders ───────────────────────────────────────
 const voiceCtx = {
