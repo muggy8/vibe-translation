@@ -481,7 +481,11 @@ async function runVolume(ctx) {
   let extractionOutput = "";
   try { extractionOutput = await runExtract(ctx); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: extraction failed: ${err.message}. Check .logs/ for details.`); throw err; }
   // Create fsGate BEFORE runCompile so the author agent has file tools.
-  const fsGate = harness.createGatedFsTools({ cwd: ctx.volumeDir, allowedDirs: [ctx.volumeDir] });
+  // createGatedFsTools is async — it must be awaited, otherwise fsGate is a
+  // Promise and ctx.fsGate.tools/approve are undefined, so the agents are
+  // created with no tools at all (observed live: the model then emitted
+  // tool-call syntax as plain text and the run failed mid-way).
+  const fsGate = await harness.createGatedFsTools({ cwd: ctx.volumeDir, allowedDirs: [ctx.volumeDir] });
   ctx.fsGate = fsGate;
   try { await runCompile(ctx, extractionOutput); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed: ${err.message}. Check .logs/ for details.`); throw err; }
   await runQaLoop(ctx);
