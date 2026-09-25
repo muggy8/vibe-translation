@@ -1,6 +1,6 @@
 # AGENTS.md — ai-client
 
-**Read this first.** This is the entry point for AI agents working in this project. The codebase is small (~5k lines across 6 core files + types.js) and the JSDoc in each file is excellent — this doc is the map plus the hard-won gotchas; open the referenced file when you need depth.
+**Read this first.** This is the entry point for AI agents working in this project. The codebase is small (~5k lines across 7 core files + types.js) and the JSDoc in each file is excellent — this doc is the map plus the hard-won gotchas; open the referenced file when you need depth.
 
 ## 1. What this is
 
@@ -8,6 +8,7 @@ An agentic AI client (v2.0.0, CommonJS, Node ≥ 22.19) that processes a light-n
 
 - `glossary` task → a canonical target-language glossary (per-volume snapshots + a final copy at the series root)
 - `character-voice` task → a cumulative character voice reference (speech quirks, POV markers, narration types) and per-volume POV maps
+- `style-guide` task → a cumulative style guide (house-style policies for rendering source-language constructs in the target language)
 - `jump-in-wiki` task → a per-volume `wiki.md` plus a "living" `shared-wiki.md`
 
 It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@openharness/core`. Tool-calling agents read the sources and write the outputs themselves through sandboxed file tools.
@@ -18,7 +19,9 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 |---|---|
 | `npx gulp glossary` | Run the glossary task (all volumes) |
 | `npx gulp character-voice` | Run the character voice reference task (all volumes) |
-| `npx gulp jump-in-wiki` | Run the wiki task (also the default gulp task) |
+| `npx gulp style-guide` | Run the style guide task (all volumes) |
+| `npx gulp jump-in-wiki` | Run the wiki task |
+| `npx gulp` (default) | All four in order: glossary → character-voice → style-guide → jump-in-wiki |
 | `... --dry-run` | No AI calls; dump the exact prompts to `.dry-run/<task>-NN.md` |
 | `... --force` | Regenerate even if outputs already exist |
 | `... --volume NN` | Process a single volume (e.g. `--volume 01`) |
@@ -30,7 +33,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 
 | Path | Role |
 |---|---|
-| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and score-based acceptance config (`ROLLING_WINDOW_SIZE`, `ROLLING_MIN_SAMPLES`, `ACCEPTANCE_PASSING_SCORE`, `ACCEPTANCE_STRATEGY`, `BEST_OF_MIN_PASSES`, `computeRollingAverage`, `meetsAcceptanceCriteria`, `isAcceptedState`). All three task modules import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window of scores to disk (see §3). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). |
+| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and score-based acceptance config (`ROLLING_WINDOW_SIZE`, `ROLLING_MIN_SAMPLES`, `ACCEPTANCE_PASSING_SCORE`, `ACCEPTANCE_STRATEGY`, `BEST_OF_MIN_PASSES`, `computeRollingAverage`, `meetsAcceptanceCriteria`, `isAcceptedState`). All four task modules import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window of scores to disk (see §3). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). |
 | `utils/fs.js` | Filesystem helpers: `fileExists`, `assertWrote`. |
 | `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict` (legacy binary verdict — kept for compatibility, no longer used in the acceptance path), `parseAcceptanceScore` (parses the 0–100 score from the acceptance one-shot reply; `null` = unparseable = failed check), `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
@@ -38,16 +41,17 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `research.js` | Client-side web research (Wikipedia Action API + optional Brave/Tavily/Serper). No LLM involved. |
 | `glossary.js` | Glossary task logic. |
 | `character-voice.js` | Character voice reference task logic — extracts speech quirks, POV markers, narration types, and produces a cumulative character voice reference and per-volume POV maps. |
+| `style-guide.js` | Style guide task logic — extracts style-relevant constructs (honorifics, pronouns, particles, internal-monologue markers, onomatopoeia, POV/scene markers, tense, punctuation, wordplay) and produces a cumulative style guide of rendering policies for the target language. |
 | `jump-in-wiki.js` | Wiki task logic **plus the shared helpers** |
-| `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. Both tasks read this manifest instead of guessing folder names. |
-| `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All three tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
-| `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `CharacterVoiceVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
+| `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. All four tasks read this manifest instead of guessing folder names. |
+| `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All four tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
+| `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `CharacterVoiceVolumeCtx`, `StyleGuideVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
 | `gulpfile.js` | Task wiring only (no logic). |
-| `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. |
+| `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Style guide: `style-guide-extract`, `style-guide` (compile), `style-guide-validator`, `style-guide-acceptance`, `style-guide-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. |
 | `test/test-glossary-load.js` | Pure tests (`npm test`). |
 | `test/harness-smoke.js` | Live smoke test (`npm run smoke`). |
 | `test-series/` | Fixture series (`test_story(1)`, `test_story(2)`); generated outputs are gitignored. |
-| `.env` / `.env.example` | Configuration (see §6). |
+| `.env` / `.env.example` | Configuration (see §8). |
 | `.logs/` | One run log per process: `call-ai-<timestamp>.log`. |
 | `.dry-run/` | Prompt dumps from `--dry-run`. |
 
@@ -68,7 +72,7 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
 - Custom fetch built on **undici's own `fetch` + a no-timeout `Agent` from the same undici build** (all timeouts disabled — local servers can prefill for minutes); never mix the Agent with Node's *global* fetch — that crosses undici versions and throws `invalid onRequestStart method` on some Node builds (gotcha 19); merges thinking params into the request body (`chat_template_kwargs` for Qwen3-style models, `reasoning_effort` for levels); taps SSE/JSON responses for `reasoning_content` + first-token timing diagnostics.
 - Every call logs to stderr **and** `.logs/call-ai-<timestamp>.log` (CALL/RESULT lines: finish reason, content/reasoning sizes, token usage, TTFT, tok/s). Workflow logging goes through `harness.logLine`.
 
-### Shared workflow shape (both tasks)
+### Shared workflow shape (all four tasks)
 
 1. Discover volume folders and source files via the translation-target manifest (`getTranslationTarget()`). An AI agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes the result to `<SERIES_LOCATION>/translation-target.json`. With `--dry-run` a deterministic fallback (the legacy convention) builds the manifest instead, so prompt previews stay fully offline.
 2. Fill `{{PLACEHOLDER}}`s in the user-prompt templates (`transformUserPrompt` — **strict**: throws on a missing value or any leftover placeholder).
@@ -120,7 +124,7 @@ Per volume:
 3. **Two-tier idempotency**: if `wiki.md` + `shared-wiki.md` exist → skip generation, go straight to validation; if a validation report exists and passes acceptance → skip the whole volume.
 4. End-of-run summary counts the volumes that hit the iteration limit.
 
-## 5. Pipeline C: character-voice (`character-voice.js`)
+## 6. Pipeline C: character-voice (`character-voice.js`)
 
 Per volume, in order — each volume's reference builds on the previous one's:
 
@@ -139,7 +143,24 @@ Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-ma
 
 **Key differences from glossary:** no research stage (quirks are text-intrinsic); produces two files instead of one; extraction and compilation are separate stages.
 
-## 6. Environment reference (`.env`)
+## 7. Pipeline D: style-guide (`style-guide.js`)
+
+The 4th pipeline step — the "how do I write it" policy layer. The glossary says *what to call things*, character-voice says *how characters sound*, the wiki says *what is happening*; the style guide says *how source-language constructs are rendered in the target language* (honorifics, pronouns, sentence-ending particles, internal-monologue markers, onomatopoeia, interjections, POV/scene markers, tense, punctuation, wordplay, translator notes).
+
+Per volume, in order — each volume's guide builds on the previous one's:
+
+1. **Extract** — one-shot call: source text + previous `style-guide.md` → JSON array of `{ category, pattern, description, examples, frequency, notes }` entries (categories: `honorific`, `pronoun`, `particle`, `internalMonologue`, `onomatopoeia`, `interjection`, `povMarker`, `sceneBreak`, `tense`, `punctuation`, `wordplay`, `note`, `other`). Parsed by `parseStyleObservations` (tolerates markdown fences and prose).
+2. **Compile** — an author agent (per-volume session, `maxSteps 30`) reads the source, the previous guide (at `../<previous folder>/style-guide.md` — same convention as the other tasks), and the extraction results, plus optional cross-references (the same volume's `glossary.md` / `character-voice.md` snapshots, read if present), then writes the cumulative `style-guide.md`. The guide is written in the **target language** (it is instructions for writing the translation), quoting source-language patterns inline.
+3. **QA loop**: a fresh validator agent per iteration writes `style-guide-validation.md` (size-scaled step cap) → acceptance one-shot scores the guide 0–100 → unless the rolling window of scores meets the criterion, a fresh author agent applies the feedback (`style-guide-feedback.md`). Same score-based acceptance as the other pipelines (the state file is saved on every iteration, including the accepting one, so accepted volumes are skipped on re-run).
+4. After all volumes: the last volume's `style-guide.md` is copied to `STYLE_OUTPUT_FILE` (default `<SERIES_LOCATION>/style-guide.md`). Skipped for `--volume` runs.
+
+Artifacts per volume folder: `style-guide.md` (cumulative snapshot), `style-guide-validation.md` (validation report).
+
+**Cumulative invariant:** same as glossary/character-voice — regenerating any volume sets `regeneratedAny` → all later volumes are regenerated too.
+
+**Key differences:** single output file (no second per-volume file); no research stage; rules must be *actionable* (a concrete rendering decision — keep / drop / translate / adapt — with context and exceptions; vague guidance is a validation finding); undecidable constructs go to an "Open Questions" section with their context rather than being guessed.
+
+## 8. Environment reference (`.env`)
 
 | Var | Default | Meaning |
 |---|---|---|
@@ -163,6 +184,7 @@ Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-ma
 | `AGENT_TEXT_GUARD_CHARS` | `30000` | Runaway-generation guard: abort an agent turn when it produces more than this many chars of text with fewer than 3 tool calls. Catches models that emit malformed tool-call text instead of using the tool-calling API. |
 | `GLOSSARY_OUTPUT_FILE` | `<SERIES_LOCATION>/glossary.md` | Final glossary location |
 | `VOICE_OUTPUT_FILE` | `<SERIES_LOCATION>/character-voice.md` | Final character voice reference location |
+| `STYLE_OUTPUT_FILE` | `<SERIES_LOCATION>/style-guide.md` | Final style guide location |
 | `RESEARCH_ENABLED` | `true` | Research new glossary terms |
 | `RESEARCH_CONCURRENCY` | `3` | Number of parallel research agents (one per term, batched). Set to `1` for sequential processing. |
 | `WIKI_LANGS` | `ja,en` | Wikipedia languages to query |
@@ -170,12 +192,12 @@ Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-ma
 | `RESEARCH_DELAY_MS` / `RESEARCH_TIMEOUT_MS` | `300` / `30000` | Politeness delay / per-request timeout |
 | `WIKI_USER_AGENT` | built-in | Descriptive UA (Wikipedia requires one) |
 | `SEARCH_API` / `SEARCH_API_KEY` | off | Optional brave / tavily / serper backend |
-| `THINKING` | on | Qwen3 thinking phase — **enabled by default**. See §7. |
+| `THINKING` | on | Qwen3 thinking phase — **enabled by default**. See §9. |
 | `THINKING_LEVEL` | xhigh | reasoning_effort: "low" / "medium" / "xhigh" (model-dependent). |
 
 **Current local setup** (the committed `.env`): local Qwen at `http://localhost:9200/v1`, `MAX_TOKENS=262144`, `TEMPERATURE=0.6`, `AI_RETRY=2`, `MAX_VALIDATION_ITERATIONS=10`, `ROLLING_WINDOW_SIZE=5`, `ROLLING_MIN_SAMPLES=3`, `ACCEPTANCE_PASSING_SCORE=70`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, THINKING=on, THINKING_LEVEL=xhigh, series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
 
-## 7. Gotchas (hard-won — read before changing behavior)
+## 9. Gotchas (hard-won — read before changing behavior)
 
 1. **`THINKING_LEVEL` tuning is per-series.** Reasoning token burn varies dramatically across series — a series with heavy technical jargon may need "xhigh" while a simpler narrative may run fine on "medium". Start with "xhigh" (the default), monitor `.logs/call-ai-*.log` for reasoning content sizes, and tune down to "medium" or "low" if the reasoning spend is excessive relative to content output. Set `THINKING=false` to disable entirely.
 2. **Never let a stage persist empty output.** `runOneShot` throws on empty by design; agent stages are guarded by `assertWrote` (missing/empty file → hard error pointing at `.logs/`). If you add a stage, add both guarantees.
@@ -201,10 +223,10 @@ Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-ma
 15. **Character voice reference is cumulative:** same `regeneratedAny` invariant as the glossary — if any volume is regenerated, all later volumes are regenerated too. The `character-voice.md` carries forward all previous character entries unchanged.
 16. **POV marker conventions:** Japanese LNs use `※`, `☆`, `◇`, `◆`, `【】`, `（）` as POV markers. The extract prompt recognizes these and classifies narration types (first-person-internal, free-indirect, third-person-omniscient, dialogue-only). Free indirect discourse — 3rd-person narration that adopts a character's voice — is the hardest pattern to detect reliably and is the most common validation finding.
 17. **Runaway-generation guard (`AGENT_TEXT_GUARD_CHARS`):** the harness aborts an agent turn when it produces more than `AGENT_TEXT_GUARD_CHARS` (default 30,000) characters of text with fewer than 3 tool calls. This catches models that emit malformed tool-call text (e.g. Qwen-native `<tool_call>` tags in the content field) instead of using the API-level `tool_calls` protocol. Observed live: a local Qwen3 model generated 962 KB of repeated `listFiles(path='.'); readFile(...)` text without a single valid tool call, burning tokens for over an hour. The guard aborts the underlying fetch via an `AbortController` signal and throws a descriptive error. The threshold is tunable via the env var; lower it if you see false positives with large legitimate outputs, raise it if you see the guard not triggering fast enough.
-18. **Fail-loudly guard for small malformed tool calls (`assertRealToolCalls` in `character-voice.js`):** the 30K runaway guard above only fires on *large* text output. A local Qwen endpoint also intermittently emits *small* malformed tool calls — a few dozen chars of `tool_call` / `<function=…>` text with zero real `tool_calls` — so `npm run smoke fs` can pass while a workflow turn does nothing (no reads, no writes). `character-voice.js` now calls `assertRealToolCalls(result, who, volume)` after every agent `sendTurn` in the compile/validate/feedback stages: when a turn made zero real tool calls but its text contains `tool_call` / `<function=`, it throws a diagnostic error (pointing at `.logs/` and the smoke test) instead of letting `assertWroteWithFallback` pass on a stale file and the acceptance loop burn all iterations. The pure detector `emittedToolCallAsText` is exported and unit-tested. **`glossary.js` and `jump-in-wiki.js` have the same latent exposure and should get the identical guard.**
+18. **Fail-loudly guard for small malformed tool calls (`assertRealToolCalls` in `character-voice.js`):** the 30K runaway guard above only fires on *large* text output. A local Qwen endpoint also intermittently emits *small* malformed tool calls — a few dozen chars of `tool_call` / `<function=…>` text with zero real `tool_calls` — so `npm run smoke fs` can pass while a workflow turn does nothing (no reads, no writes). `character-voice.js` now calls `assertRealToolCalls(result, who, volume)` after every agent `sendTurn` in the compile/validate/feedback stages: when a turn made zero real tool calls but its text contains `tool_call` / `<function=`, it throws a diagnostic error (pointing at `.logs/` and the smoke test) instead of letting `assertWroteWithFallback` pass on a stale file and the acceptance loop burn all iterations. The pure detector `emittedToolCallAsText` is exported and unit-tested. `style-guide.js` ships the identical guard (every agent `sendTurn` in compile/validate/feedback is checked). **`glossary.js` and `jump-in-wiki.js` still have the same latent exposure and should get the identical guard.**
 19. **Never hand the npm undici Agent to Node's global fetch (`makeProviderFetch` in `harness.js`).** The project's `undici` dependency (v8) is a *different build* from Node's bundled undici (which powers the global `fetch`). Passing `noTimeoutAgent` to the global `fetch` mixes request-handler protocols: on Node builds whose bundled undici is older, the dispatch throws `InvalidArgumentError: invalid onRequestStart method` (`UND_ERR_INVALID_ARG`) before any bytes are sent. This is Node-version-dependent, so identical code + `node_modules` can work on one machine (e.g. Windows Node) and fail on another (Linux Node 22) — observed live right after a Windows→Linux migration. The fix pattern: dispatch through undici's *own* `fetch` (same build as the Agent), and normalize `Headers` instances to plain objects first (undici's webidl converter would silently convert a foreign Headers instance to an empty record, dropping auth/content-type).
 
-## 8. Conventions
+## 10. Conventions
 
 - **JSDoc on every function** (params + returns), with provenance comments where a behavior exists because of a live incident ("observed live: …"). New code without JSDoc is a review blocker. Use named types from `types.js` (e.g. `{GlossaryVolumeCtx}` instead of `{Object}`) — the type annotations enable IDE cross-references across files.
 - **Update AGENTS.md after changes.** If your work adds, removes, or significantly modifies files, functions, or conventions, update this document to reflect the new state. Agents reading AGENTS.md should be able to rely on it as a current map of the codebase — not a stale one.

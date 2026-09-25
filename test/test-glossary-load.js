@@ -482,4 +482,99 @@ for (const [name, prompt] of [
   assert.ok(prompt.includes("../test_story(1)/character-voice.md"), `${name} prompt (volume 02) names the previous reference at its real path`);
 }
 
+// ─── style-guide: parseStyleObservations ─────────────────────────────────────
+const {
+  parseStyleObservations,
+  emittedToolCallAsText: styleEmittedToolCallAsText,
+  buildExtractTurnPrompt: styleBuildExtractTurnPrompt,
+  buildAuthorTurnPrompt: styleBuildAuthorTurnPrompt,
+  buildValidatorTurnPrompt: styleBuildValidatorTurnPrompt,
+  buildFeedbackTurnPrompt: styleBuildFeedbackTurnPrompt,
+} = require("../style-guide");
+
+assert.deepStrictEqual(parseStyleObservations(""), []);
+assert.deepStrictEqual(parseStyleObservations(null), []);
+assert.deepStrictEqual(
+  parseStyleObservations('```json\n[{"category":"honorific","pattern":"〜さん","description":"ex","examples":["ex"],"frequency":"high","notes":"ex"}]```'),
+  [{ category: "honorific", pattern: "〜さん", description: "ex", examples: ["ex"], frequency: "high", notes: "ex" }]
+);
+assert.deepStrictEqual(
+  parseStyleObservations('Here are the constructs:\n[{"category":"pronoun","pattern":"俺"}]\nDone.'),
+  [{ category: "pronoun", pattern: "俺" }]
+);
+assert.deepStrictEqual(
+  parseStyleObservations('[{"pattern":"no-category"},{"category":"povMarker","pattern":"※"}]'),
+  [{ category: "povMarker", pattern: "※" }]
+);
+assert.throws(() => parseStyleObservations("no json here"), /No JSON array/);
+assert.throws(() => parseStyleObservations('{"category":"honorific"}'), /No JSON array/);
+
+// ─── style-guide: emittedToolCallAsText ──────────────────────────────────────
+assert.strictEqual(
+  styleEmittedToolCallAsText({ text: "tool_call <function=readFile>", toolCalls: [] }),
+  true,
+  "style emittedToolCallAsText: tool_call text with no real calls is flagged"
+);
+assert.strictEqual(
+  styleEmittedToolCallAsText({ text: "wrote the file", toolCalls: [{ name: "writeFile" }] }),
+  false,
+  "style emittedToolCallAsText: real tool calls are not flagged"
+);
+assert.strictEqual(styleEmittedToolCallAsText(null), false, "style emittedToolCallAsText: null result not flagged");
+
+// ─── style-guide: prompt builders ────────────────────────────────────────────
+const styleCtx = {
+  values: { INSTALLMENT_NUMBER: "01", SOURCE_NAME: "Test", SOURCE_LANGUAGE: "Japanese", TARGET_LANGUAGE: "English" },
+  folderName: "test_story(1)",
+  sourceFile: "test-series/test_story(1)/test_story(1).md",
+  isFirst: true,
+  previousFolderName: null,
+  extractUserPrompt: "# Extraction — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
+  authorUserPrompt: "# Compilation — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}\n\n{{EXTRACTION_RESULTS}}",
+  validatorUserPrompt: "# Validation — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
+  feedbackUserPrompt: "# Feedback — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
+  styleOutputFile: "style-guide.md",
+};
+
+const styleExtractPrompt = styleBuildExtractTurnPrompt(styleCtx);
+assert.ok(styleExtractPrompt.includes("Test"), "style extract prompt carries series name");
+assert.ok(styleExtractPrompt.includes("01"), "style extract prompt carries installment");
+
+const styleAuthorPrompt = styleBuildAuthorTurnPrompt(styleCtx, '[{"category":"honorific","pattern":"〜ちゃん"}]');
+assert.ok(styleAuthorPrompt.includes("Test"), "style author prompt carries series name");
+assert.ok(styleAuthorPrompt.includes('{"category":"honorific","pattern":"〜ちゃん"}'), "style author prompt carries extraction results");
+assert.ok(styleAuthorPrompt.includes('"test_story(1).md" (same folder)'), "style author prompt names the volume source at its real path");
+assert.ok(styleAuthorPrompt.includes("absent — this is the first volume"), "style author prompt (first volume): previous guide absent");
+
+const styleAuthorPromptFirst = styleBuildAuthorTurnPrompt({ ...styleCtx, values: { ...styleCtx.values, INSTALLMENT_NUMBER: "01" } }, "");
+assert.ok(styleAuthorPromptFirst.includes("this is the first volume"), "style author prompt (empty results): mentions first volume");
+
+const styleValidatorPrompt = styleBuildValidatorTurnPrompt(styleCtx);
+assert.ok(styleValidatorPrompt.includes("Test"), "style validator prompt carries series name");
+assert.ok(styleValidatorPrompt.includes("01"), "style validator prompt carries installment");
+assert.ok(styleValidatorPrompt.includes('"style-guide.md" (same folder)'), "style validator prompt names the guide under audit");
+
+const styleFeedbackPrompt = styleBuildFeedbackTurnPrompt(styleCtx);
+assert.ok(styleFeedbackPrompt.includes("Test"), "style feedback prompt carries series name");
+assert.ok(styleFeedbackPrompt.includes("01"), "style feedback prompt carries installment");
+assert.ok(styleFeedbackPrompt.includes("style-guide-validation.md"), "style feedback prompt names the validation report");
+
+// Non-first volume: the previous guide is named at its real relative path
+// (../<previous folder>/style-guide.md) — the convention from character-voice.js.
+const styleCtxVol2 = {
+  ...styleCtx,
+  values: { ...styleCtx.values, INSTALLMENT_NUMBER: "02" },
+  folderName: "test_story(2)",
+  sourceFile: "test-series/test_story(2)/test_story(2).md",
+  isFirst: false,
+  previousFolderName: "test_story(1)",
+};
+for (const [name, prompt] of [
+  ["author", styleBuildAuthorTurnPrompt(styleCtxVol2, "[]")],
+  ["validator", styleBuildValidatorTurnPrompt(styleCtxVol2)],
+  ["feedback", styleBuildFeedbackTurnPrompt(styleCtxVol2)],
+]) {
+  assert.ok(prompt.includes("../test_story(1)/style-guide.md"), `${name} prompt (volume 02) names the previous guide at its real path`);
+}
+
 console.log("All tests passed.");

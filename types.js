@@ -114,6 +114,28 @@
  * @property {boolean} [limitReached]
  */
 
+/**
+ * @typedef {Object} StyleGuideVolumeCtx
+ * The volume context passed to style-guide task functions.
+ * @property {{INSTALLMENT_NUMBER: string}} values
+ * @property {string} volumeDir
+ * @property {string} sourceFile
+ * @property {string} styleOutputFile
+ * @property {string} validationOutputFile
+ * @property {string} authorSystemPrompt
+ * @property {string} authorUserPrompt
+ * @property {string} validatorSystemPrompt
+ * @property {string} validatorUserPrompt
+ * @property {string} feedbackUserPrompt
+ * @property {string} acceptanceSystemPrompt
+ * @property {string} acceptanceUserPrompt
+ * @property {Object} fsGate — Gated filesystem tools (from createGatedFsTools).
+ * @property {boolean} isFirst — True for the first volume (no previous guide).
+ * @property {string|null} previousFolderName — Previous volume folder (null for the first volume).
+ * @property {string|null} previousStyleGuideFile — Path to the previous volume's style-guide.md.
+ * @property {boolean} [limitReached]
+ */
+
 // ─── Harness primitives ──────────────────────────────────────────────────────
 
 /**
@@ -208,6 +230,7 @@ module.exports = {
   GlossaryVolumeCtx: true,
   WikiVolumeCtx: true,
   CharacterVoiceVolumeCtx: true,
+  StyleGuideVolumeCtx: true,
   IMessage: true,
   RunOneShotCfg: true,
   CreateAgentHandleCfg: true,

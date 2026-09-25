@@ -1,28 +1,37 @@
 /**
- * character-voice.js — Logic for the "character-voice" gulp task: building the
- * canonical character voice reference and POV map for a Japanese light novel
- * series, driven from the source text, one volume at a time.
+ * style-guide.js — Logic for the "style-guide" gulp task: building the
+ * canonical style guide (house-style policies for rendering source-language
+ * constructs in the target language) for a Japanese light novel series,
+ * driven from the source text, one volume at a time.
  *
- * Task: character-voice
+ * Task: style-guide
  *   For each volume (in natural order):
- *     1. Read the volume's source text and the previous character voice reference.
- *     2. Extract new voice quirks and POV analysis using a one-shot call.
- *     3. Compile the cumulative character voice reference and per-volume POV map.
+ *     1. Read the volume's source text and the previous style guide.
+ *     2. Extract new style-relevant constructs using a one-shot call.
+ *     3. Compile the cumulative style guide.
  *     4. Save per-volume snapshots.
  *     5. Run the QA loop with score-based acceptance (the model scores each
  *        validation 0–100; the rolling average of recent scores must reach
  *        ACCEPTANCE_PASSING_SCORE, default 70 — see configs/shared.js).
- *   After all volumes: the last volume's character-voice.md is copied to
- *   VOICE_OUTPUT_FILE (default <SERIES_LOCATION>/character-voice.md).
+ *   After all volumes: the last volume's style-guide.md is copied to
+ *   STYLE_OUTPUT_FILE (default <SERIES_LOCATION>/style-guide.md).
  *
- * Idempotent: a volume whose outputs already exist and pass acceptance is
+ * Idempotent: a volume whose output already exists and passes acceptance is
  * skipped (unless --force). If any volume is regenerated, all later volumes
- * are regenerated too (each volume's reference builds on the previous one's).
+ * are regenerated too (each volume's guide builds on the previous one's).
+ *
+ * The style guide is the "how do I write it" policy layer the other three
+ * pipelines do not cover: the glossary says what to call things,
+ * character-voice says how characters sound, the wiki says what is
+ * happening — the style guide says how source-language constructs (honorifics,
+ * pronouns, sentence-ending particles, internal-monologue markers,
+ * onomatopoeia, POV/scene markers, tense, punctuation, wordplay) get rendered
+ * in the target language.
  *
  * Usage:
- *   npx gulp character-voice             # run the full task
- *   npx gulp character-voice --dry-run   # transform the prompts only, no API call
- *   npx gulp character-voice --force     # regenerate even if already processed
+ *   npx gulp style-guide             # run the full task
+ *   npx gulp style-guide --dry-run   # transform the prompts only, no API call
+ *   npx gulp style-guide --force     # regenerate even if already processed
  */
 
 require("dotenv").config();
@@ -33,32 +42,30 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
+const { fileExists, assertWroteWithFallback } = require("./utils/fs");
 
 const clientDir = __dirname;
 const seriesDir = process.env.SERIES_LOCATION;
 
-const extractSystemPromptFile = path.join(clientDir, "system-prompts", "character-voice-extract.md");
-const extractUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice-extract.md");
-const authorSystemPromptFile = path.join(clientDir, "system-prompts", "character-voice.md");
-const authorUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice.md");
-const validatorSystemPromptFile = path.join(clientDir, "system-prompts", "character-voice-validator.md");
-const validatorUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice-validator.md");
-const acceptanceSystemPromptFile = path.join(clientDir, "system-prompts", "character-voice-acceptance.md");
-const acceptanceUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice-acceptance.md");
-const feedbackSystemPromptFile = path.join(clientDir, "system-prompts", "character-voice-feedback.md");
-const feedbackUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice-feedback.md");
+const extractSystemPromptFile = path.join(clientDir, "system-prompts", "style-guide-extract.md");
+const extractUserPromptTemplateFile = path.join(clientDir, "user-prompts", "style-guide-extract.md");
+const authorSystemPromptFile = path.join(clientDir, "system-prompts", "style-guide.md");
+const authorUserPromptTemplateFile = path.join(clientDir, "user-prompts", "style-guide.md");
+const validatorSystemPromptFile = path.join(clientDir, "system-prompts", "style-guide-validator.md");
+const validatorUserPromptTemplateFile = path.join(clientDir, "user-prompts", "style-guide-validator.md");
+const acceptanceSystemPromptFile = path.join(clientDir, "system-prompts", "style-guide-acceptance.md");
+const acceptanceUserPromptTemplateFile = path.join(clientDir, "user-prompts", "style-guide-acceptance.md");
+const feedbackSystemPromptFile = path.join(clientDir, "system-prompts", "style-guide-feedback.md");
+const feedbackUserPromptTemplateFile = path.join(clientDir, "user-prompts", "style-guide-feedback.md");
 
 const maxValidationIterations = Math.max(1, parseInt(process.env.MAX_VALIDATION_ITERATIONS, 10) || 10);
-const VOICE_REF_TRUNCATION_THRESHOLD = 64 * 1024;
-const VOICE_REF_TRUNCATION_MAX_ENTRIES = 200;
 
 /**
- * Parse the AI's extraction output into an array of voice quirk / POV entries.
+ * Parse the AI's extraction output into an array of style-construct entries.
  * @param {string} output - The raw AI output.
  * @returns {Array<Object>}
  */
-function parseVoiceQuirks(output) {
+function parseStyleObservations(output) {
   if (!output || typeof output !== "string") return [];
   let text = output.trim();
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -66,32 +73,18 @@ function parseVoiceQuirks(output) {
   const firstBracket = text.indexOf("[");
   const lastBracket = text.lastIndexOf("]");
   if (firstBracket === -1 || lastBracket === -1 || lastBracket < firstBracket) {
-    throw new Error("No JSON array found in the character-voice extraction output.");
+    throw new Error("No JSON array found in the style-guide extraction output.");
   }
   const parsed = JSON.parse(text.slice(firstBracket, lastBracket + 1));
   if (!Array.isArray(parsed)) {
-    throw new Error("The character-voice extraction output was not a JSON array.");
+    throw new Error("The style-guide extraction output was not a JSON array.");
   }
-  return parsed.filter((entry) => entry && typeof entry.type === "string");
-}
-
-/**
- * Truncate a character voice reference if it exceeds the threshold.
- * @param {string} content - The full character voice reference content.
- * @returns {string}
- */
-function truncateVoiceRef(content) {
-  if (!content || content.length <= VOICE_REF_TRUNCATION_THRESHOLD) return content;
-  const allSections = content.match(/^### .+[\s\S]*?(?=^### |$)/gm);
-  if (!allSections || allSections.length <= VOICE_REF_TRUNCATION_MAX_ENTRIES) return content;
-  const header = content.split(/^### /m)[0];
-  const keep = allSections.slice(-VOICE_REF_TRUNCATION_MAX_ENTRIES);
-  return [header, `[TRUNCATED: previous reference has ${allSections.length} sections. Showing last ${keep.length}.]`, keep.join("\n\n")].join("\n\n");
+  return parsed.filter((entry) => entry && typeof entry.category === "string");
 }
 
 /**
  * Build the extraction turn prompt for a single volume.
- * @param {CharacterVoiceVolumeCtx} ctx
+ * @param {StyleGuideVolumeCtx} ctx
  * @returns {string}
  */
 function buildExtractTurnPrompt(ctx) {
@@ -102,12 +95,11 @@ function buildExtractTurnPrompt(ctx) {
  * Build the author (compile) turn prompt for a single volume.
  *
  * The preamble names every material at its real path: the previous volume's
- * reference lives in the previous volume's folder
- * (`../<previous folder>/character-voice.md`), not in the working folder —
- * the same convention as glossary.js, so the agent never has to guess where
- * to read.
+ * guide lives in the previous volume's folder
+ * (`../<previous folder>/style-guide.md`) — the same convention as
+ * character-voice.js — so the agent never has to guess where to read.
  *
- * @param {CharacterVoiceVolumeCtx} ctx
+ * @param {StyleGuideVolumeCtx} ctx
  * @param {string} extractionResults
  * @returns {string}
  */
@@ -117,64 +109,64 @@ function buildAuthorTurnPrompt(ctx, extractionResults) {
     ...ctx.values,
     EXTRACTION_RESULTS: extractionResults || "(none — this is the first volume)",
   });
-  const previousRefLine = isFirst
-    ? "- The previous character voice reference: (absent — this is the first volume)"
-    : `- The previous character voice reference: "../${previousFolderName}/character-voice.md"`;
+  const previousGuideLine = isFirst
+    ? "- The previous style guide: (absent — this is the first volume)"
+    : `- The previous style guide: "../${previousFolderName}/style-guide.md"`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `Materials (read with readFile before writing anything):\n` +
     `- The volume source: "${path.basename(sourceFile)}" (same folder)\n` +
-    previousRefLine +
-    `\n\n` +
-    `Write the complete character voice reference to the file "character-voice.md" in your working folder (writeFile, complete contents).\n` +
-    `Write the per-volume POV map to the file "pov-map.md" in your working folder (writeFile, complete contents).\n\n` +
+    previousGuideLine +
+    `\nOptional cross-reference material (read if present in your working folder):\n` +
+    `- "glossary.md" — the current glossary snapshot (canonical names)\n` +
+    `- "character-voice.md" — the current character voice reference (formality and voice data)\n` +
+    `\n` +
+    `Write the complete style guide to the file "style-guide.md" in your working folder (writeFile, complete contents).\n\n` +
     amendPrompt
   );
 }
 
 /**
  * Build the validator turn prompt for a single volume.
- * @param {CharacterVoiceVolumeCtx} ctx
+ * @param {StyleGuideVolumeCtx} ctx
  * @returns {string}
  */
 function buildValidatorTurnPrompt(ctx) {
   const { sourceFile, isFirst, previousFolderName } = ctx;
-  const previousRefLine = isFirst
+  const previousGuideLine = isFirst
     ? ""
-    : `- The previous character voice reference: "../${previousFolderName}/character-voice.md"\n`;
+    : `- The previous style guide: "../${previousFolderName}/style-guide.md"\n`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `Materials (read with readFile before writing anything):\n` +
     `- The volume source: "${path.basename(sourceFile)}" (same folder)\n` +
-    `- The amended character voice reference under audit: "character-voice.md" (same folder)\n` +
-    `- The POV map under audit: "pov-map.md" (same folder)\n` +
-    previousRefLine +
+    `- The amended style guide under audit: "style-guide.md" (same folder)\n` +
+    previousGuideLine +
     `\n` +
-    `Write the complete validation report to the file "character-voice-validation.md" in your working folder (writeFile, exact format from the system prompt).\n\n` +
+    `Write the complete validation report to the file "style-guide-validation.md" in your working folder (writeFile, exact format from the system prompt).\n\n` +
     transformUserPrompt(ctx.validatorUserPrompt, ctx.values)
   );
 }
 
 /**
  * Build the feedback turn prompt for a single volume.
- * @param {CharacterVoiceVolumeCtx} ctx
+ * @param {StyleGuideVolumeCtx} ctx
  * @returns {string}
  */
 function buildFeedbackTurnPrompt(ctx) {
   const { sourceFile, isFirst, previousFolderName } = ctx;
-  const previousRefLine = isFirst
+  const previousGuideLine = isFirst
     ? ""
-    : `- The previous character voice reference: "../${previousFolderName}/character-voice.md"\n`;
+    : `- The previous style guide: "../${previousFolderName}/style-guide.md"\n`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
-    `The validation report "character-voice-validation.md" in your working folder is your work order.\n` +
+    `The validation report "style-guide-validation.md" in your working folder is your work order.\n` +
     `Materials (read with readFile before changing anything):\n` +
     `- The volume source: "${path.basename(sourceFile)}" (same folder)\n` +
-    `- The current character voice reference to correct: "character-voice.md" (same folder)\n` +
-    `- The current POV map to correct: "pov-map.md" (same folder)\n` +
-    previousRefLine +
+    `- The current style guide to correct: "style-guide.md" (same folder)\n` +
+    previousGuideLine +
     `\n` +
-    `Apply the report's findings and write the complete corrected files back to "character-voice.md" and "pov-map.md" using writeFile (complete contents).\n\n` +
+    `Apply the report's findings and write the complete corrected guide back to "style-guide.md" using writeFile (complete contents).\n\n` +
     transformUserPrompt(ctx.feedbackUserPrompt, ctx.values)
   );
 }
@@ -183,23 +175,21 @@ function buildExtractSystemPrompt(base) { return base + AGENT_TOOLS_NOTE; }
 function buildAuthorSystemPrompt(base) { return base + AGENT_TOOLS_NOTE; }
 function buildValidatorSystemPrompt(base) { return base + AGENT_TOOLS_NOTE; }
 
+
 /**
- * The gulp task entry point for the character-voice workflow.
+ * The gulp task entry point for the style-guide workflow.
  */
-async function characterVoice() {
+async function styleGuide() {
   const dryRun = process.argv.includes("--dry-run");
   const force = process.argv.includes("--force");
   const volumeArg = process.argv.includes("--volume")
     ? process.argv[process.argv.indexOf("--volume") + 1] : null;
-  console.log("character-voice task starting...");
+  console.log("style-guide task starting...");
   const manifest = await getTranslationTarget({ force, dryRun });
   // Use the module-level seriesDir (SERIES_LOCATION) — NOT manifest.seriesLocation.
   // That field is provenance metadata from the machine that generated the
   // manifest: after a Windows→Linux migration the cached "C:\..." path is not
-  // absolute, and every file op would silently resolve relative to the CWD
-  // (observed live: ENOENT on <CWD>/C:\...\test_story(1)/...). glossary.js and
-  // jump-in-wiki.js already use the env value; getTranslationTarget() above
-  // fails loudly if SERIES_LOCATION is unset or missing.
+  // absolute, and every file op would silently resolve relative to the CWD.
   const sorted = manifest.volumes.map((v) => v.folder).sort((a, b) => {
     return parseInt(a.match(/\((\d+)\)/)?.[1]||"999",10) - parseInt(b.match(/\((\d+)\)/)?.[1]||"999",10);
   });
@@ -215,29 +205,28 @@ async function characterVoice() {
     const values = { INSTALLMENT_NUMBER: volume.installmentNumber, SOURCE_NAME: manifest.seriesName, SOURCE_LANGUAGE: process.env.SOURCE_LANGUAGE||"Japanese", TARGET_LANGUAGE: process.env.TARGET_LANGUAGE||"English" };
     const volumeDir = path.join(seriesDir, folderName);
     const sourceFile = path.join(seriesDir, volume.sourceFile);
-    const voiceOutputFile = path.join(volumeDir, "character-voice.md");
-    const povOutputFile = path.join(volumeDir, "pov-map.md");
-    const validationOutputFile = path.join(volumeDir, "character-voice-validation.md");
-    // The previous volume's reference (the in-progress reference). Absent for
-    // the first volume. The agent-mode turn prompts name it at its real
-    // relative path (../<previous folder>/character-voice.md) — the same
-    // convention as glossary.js.
+    const styleOutputFile = path.join(volumeDir, "style-guide.md");
+    const validationOutputFile = path.join(volumeDir, "style-guide-validation.md");
+    // The previous volume's guide (the in-progress guide). Absent for the
+    // first volume. The agent-mode turn prompts name it at its real relative
+    // path (../<previous folder>/style-guide.md) — the same convention as
+    // character-voice.js.
     const isFirst = i === 0;
-    let previousVoiceRefFile = null;
+    let previousStyleGuideFile = null;
     let previousFolderName = null;
     if (!isFirst) {
       previousFolderName = sorted[i - 1];
-      previousVoiceRefFile = path.join(seriesDir, previousFolderName, "character-voice.md");
-      if (!(await fileExists(previousVoiceRefFile))) {
+      previousStyleGuideFile = path.join(seriesDir, previousFolderName, "style-guide.md");
+      if (!(await fileExists(previousStyleGuideFile))) {
         if (dryRun) {
           console.warn(
-            `Volume ${values.INSTALLMENT_NUMBER}: --dry-run: the previous character voice reference ` +
-              `(${previousVoiceRefFile}) does not exist yet — a live run would stop ` +
+            `Volume ${values.INSTALLMENT_NUMBER}: --dry-run: the previous style guide ` +
+              `(${previousStyleGuideFile}) does not exist yet — a live run would stop ` +
               `here. Continuing the prompt preview.`
           );
         } else {
           throw new Error(
-            `Previous character voice reference not found: ${previousVoiceRefFile}. ` +
+            `Previous style guide not found: ${previousStyleGuideFile}. ` +
               `Process the earlier volume first (or re-run without --force).`
           );
         }
@@ -257,9 +246,10 @@ async function characterVoice() {
     const validatorPrompt = transformUserPrompt(validatorTemplate, values);
     const feedbackPrompt = transformUserPrompt(feedbackTemplate, values);
     const acceptancePrompt = transformUserPrompt(acceptanceTemplate, values);
-    const ctx = { values, folderName, volumeDir, sourceFile, voiceOutputFile, povOutputFile, validationOutputFile, isFirst, previousFolderName, previousVoiceRefFile, extractPrompt, validatorPrompt, feedbackPrompt, acceptancePrompt, extractTemplate, authorTemplate, extractSystemPrompt, authorSystemPrompt, validatorSystemPrompt, acceptanceSystemPrompt, feedbackSystemPrompt, authorUserPrompt: authorTemplate, validatorUserPrompt: validatorTemplate, feedbackUserPrompt: feedbackTemplate };
+    const ctx = { values, folderName, volumeDir, sourceFile, styleOutputFile, validationOutputFile, isFirst, previousFolderName, previousStyleGuideFile, extractPrompt, validatorPrompt, feedbackPrompt, acceptancePrompt, extractTemplate, authorTemplate, extractSystemPrompt, authorSystemPrompt, validatorSystemPrompt, acceptanceSystemPrompt, feedbackSystemPrompt, authorUserPrompt: authorTemplate, validatorUserPrompt: validatorTemplate, feedbackUserPrompt: feedbackTemplate };
+
     if (dryRun) {
-      const illustrative = JSON.stringify([{ type: "voice", character: "ex", quirkType: "sentenceEnding", description: "ex", examples: ["ex"], formalityLevel: "plain", notes: "ex" }]);
+      const illustrative = JSON.stringify([{ category: "honorific", pattern: "ex", description: "ex", examples: ["ex"], frequency: "high", notes: "ex" }]);
       const sections = [
         { title: "One-shot — extraction system prompt", prompt: extractSystemPrompt },
         { title: "One-shot — extraction user prompt", prompt: extractPrompt },
@@ -270,12 +260,12 @@ async function characterVoice() {
         { title: "AGENT — feedback turn", prompt: buildFeedbackTurnPrompt(ctx) },
         { title: "One-shot — acceptance user prompt", prompt: acceptancePrompt },
       ];
-      const dumpFile = await writePromptDump("character-voice", values.INSTALLMENT_NUMBER, "agent", sections);
+      const dumpFile = await writePromptDump("style-guide", values.INSTALLMENT_NUMBER, "agent", sections);
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: --dry-run: prompts dumped to ${dumpFile}`);
       continue;
     }
     let skip = false;
-    if (!force && !regeneratedAny && (await fileExists(voiceOutputFile)) && (await fileExists(povOutputFile))) {
+    if (!force && !regeneratedAny && (await fileExists(styleOutputFile))) {
       const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
       const { loadRollingState } = require("./configs/shared");
       const state = await loadRollingState(stateFilePath);
@@ -285,34 +275,35 @@ async function characterVoice() {
         if (skip) { console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling-state (${state.results.length} checks, avg ${avg.toFixed(1)}/100) meets the criterion. Skipping.`); }
       }
     }
-    if (skip) { console.log(`Volume ${values.INSTALLMENT_NUMBER}: voice reference and POV map already exist and passed. Skipping.`); continue; }
+    if (skip) { console.log(`Volume ${values.INSTALLMENT_NUMBER}: style guide already exists and passed. Skipping.`); continue; }
     regeneratedAny = true;
     await runVolume(ctx);
   }
   if (volumeArg) { console.log("\n--volume: skipping the series-root copy."); }
   else {
-    const finalVoiceFile = process.env.VOICE_OUTPUT_FILE || path.join(seriesDir, "character-voice.md");
-    let lastVoice = null;
+    const finalStyleFile = process.env.STYLE_OUTPUT_FILE || path.join(seriesDir, "style-guide.md");
+    let lastStyle = null;
     for (let i = sorted.length - 1; i >= 0; i--) {
-      const candidate = path.join(seriesDir, sorted[i], "character-voice.md");
-      if (await fileExists(candidate)) { lastVoice = candidate; break; }
+      const candidate = path.join(seriesDir, sorted[i], "style-guide.md");
+      if (await fileExists(candidate)) { lastStyle = candidate; break; }
     }
-    if (lastVoice) { await fs.copyFile(lastVoice, finalVoiceFile); console.log(`\nCopied the final character voice reference to: ${finalVoiceFile}`); }
-    else { console.log("\nNo character voice snapshots found; nothing to copy."); }
+    if (lastStyle) { await fs.copyFile(lastStyle, finalStyleFile); console.log(`\nCopied the final style guide to: ${finalStyleFile}`); }
+    else { console.log("\nNo style guide snapshots found; nothing to copy."); }
   }
 }
+
 
 /**
  * Detect the "model emitted tool-call syntax as plain text" failure mode.
  *
  * Observed live (Qwen via an OpenAI-compatible endpoint): the model sometimes
  * emits its tool calls as Qwen-native text — a `tool_call` wrapper around the
- * tool name, e.g. `tool_call <function=readFile>…` or `tool_call <listFiles>…` —
- * in the content field instead of using the API-level tool_calls protocol. The
- * harness only executes real tool calls, so such a turn performs no work at all,
- * yet it looks like an ordinary (short) chat reply, so the stale-file write
- * check and the acceptance loop would silently mask it and burn every
- * validation iteration.
+ * tool name, e.g. `tool_call <function=readFile>…` — in the content field
+ * instead of using the API-level tool_calls protocol. The harness only
+ * executes real tool calls, so such a turn performs no work at all, yet it
+ * looks like an ordinary (short) chat reply, so the stale-file write check
+ * and the acceptance loop would silently mask it and burn every validation
+ * iteration. (Same detector as character-voice.js — AGENTS.md gotcha 18.)
  *
  * @param {Object|null} result - The result object returned by an agent sendTurn.
  * @returns {boolean} True when the turn made no real tool calls and its text
@@ -349,23 +340,24 @@ function assertRealToolCalls(result, who, volumeLabel) {
 }
 
 /**
- * Run the extraction stage: one-shot call to extract voice quirks and POV info.
- * @param {CharacterVoiceVolumeCtx} ctx
+ * Run the extraction stage: one-shot call to extract style-relevant constructs.
+ * @param {StyleGuideVolumeCtx} ctx
  * @returns {Promise<string>}
  */
 async function runExtract(ctx) {
   const { values, sourceFile } = ctx;
-  console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV extraction...`);
+  console.log(`Volume ${values.INSTALLMENT_NUMBER}: running style-convention extraction...`);
   const messages = [{ file: sourceFile, name: path.basename(sourceFile) }, { text: ctx.extractPrompt }];
-  if (ctx.previousVoiceRefFile) {
-    messages.push({ file: ctx.previousVoiceRefFile, name: "character-voice-previous.md" });
+  if (ctx.previousStyleGuideFile) {
+    messages.push({ file: ctx.previousStyleGuideFile, name: "style-guide-previous.md" });
   }
-  return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `character-voice-extract-${values.INSTALLMENT_NUMBER}` });
+  return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `style-guide-extract-${values.INSTALLMENT_NUMBER}` });
 }
 
+
 /**
- * Run the compile stage: author agent writes character-voice.md and pov-map.md.
- * @param {CharacterVoiceVolumeCtx} ctx
+ * Run the compile stage: author agent writes style-guide.md.
+ * @param {StyleGuideVolumeCtx} ctx
  * @param {string} extractionOutput
  */
 async function runCompile(ctx, extractionOutput) {
@@ -373,32 +365,33 @@ async function runCompile(ctx, extractionOutput) {
   let parsed = [];
   let extractionResults = "";
   try {
-    parsed = parseVoiceQuirks(extractionOutput);
+    parsed = parseStyleObservations(extractionOutput);
     extractionResults = JSON.stringify(parsed, null, 2);
   } catch (err) {
     console.warn(`Volume ${values.INSTALLMENT_NUMBER}: extraction parse failed: ${err.message}. Using raw output.`);
     extractionResults = extractionOutput;
   }
-  console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV compilation...`);
-  const author = await harness.createAgentHandle({ name: `author-voice-${values.INSTALLMENT_NUMBER}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: 30 });
+  console.log(`Volume ${values.INSTALLMENT_NUMBER}: running style-guide compilation...`);
+  const author = await harness.createAgentHandle({ name: `author-style-${values.INSTALLMENT_NUMBER}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: 30 });
   try {
-    const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults), { label: `character-voice-compile-${values.INSTALLMENT_NUMBER}` });
+    const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults), { label: `style-guide-compile-${values.INSTALLMENT_NUMBER}` });
     assertRealToolCalls(compileResult, "the author agent (compile)", values.INSTALLMENT_NUMBER);
-    await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (compile)", compileResult?.text);
+    await assertWroteWithFallback(ctx.styleOutputFile, "the author agent (compile)", compileResult?.text);
     if (process.env.RECOVERY_ENABLED !== "false") {
       const hasContent = compileResult?.text && compileResult.text.trim().length > 0;
-      const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now with the exact same content.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
-      const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `character-voice-compile-recovery-${values.INSTALLMENT_NUMBER}` });
+      const recoveryPrompt = hasContent ? `You were asked to write "style-guide.md" using writeFile, but you replied in chat. Please rewrite the file using writeFile now with the exact same content.` : `You produced no output. Please read the materials and write "style-guide.md" using writeFile now.`;
+      const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `style-guide-compile-recovery-${values.INSTALLMENT_NUMBER}` });
       assertRealToolCalls(recoveryResult, "the author agent (compile recovery)", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (compile recovery)", recoveryResult?.text);
+      await assertWroteWithFallback(ctx.styleOutputFile, "the author agent (compile recovery)", recoveryResult?.text);
     }
-    console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved voice reference to ${ctx.voiceOutputFile} and POV map to ${ctx.povOutputFile}`);
+    console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved style guide to ${ctx.styleOutputFile}`);
   } finally { await author.close(); }
 }
 
+
 /**
  * QA loop: validator -> acceptance -> feedback.
- * @param {CharacterVoiceVolumeCtx} ctx
+ * @param {StyleGuideVolumeCtx} ctx
  */
 async function runQaLoop(ctx) {
   const { values, volumeDir, sourceFile, validationOutputFile, fsGate } = ctx;
@@ -408,15 +401,15 @@ async function runQaLoop(ctx) {
   const recentRollingScores = [];
   for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: validation iteration ${iteration}/${maxValidationIterations}...`);
-    const validator = await harness.createAgentHandle({ name: `validator-voice-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size) });
+    const validator = await harness.createAgentHandle({ name: `validator-style-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size) });
     try {
-      const validateResult = await validator.sendTurn(buildValidatorTurnPrompt(ctx), { label: `character-voice-validate-${values.INSTALLMENT_NUMBER}-${iteration}` });
+      const validateResult = await validator.sendTurn(buildValidatorTurnPrompt(ctx), { label: `style-guide-validate-${values.INSTALLMENT_NUMBER}-${iteration}` });
       assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(validationOutputFile, "the validator agent", validateResult?.text);
       if (process.env.RECOVERY_ENABLED !== "false") {
         const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
-        const recoveryPrompt = hasContent ? `You were asked to write "character-voice-validation.md" using writeFile, but you replied in chat. Please rewrite the report using writeFile now with the same content.` : `You produced no output. Please write the validation report to "character-voice-validation.md" using writeFile now.`;
-        const recoveryResult = await validator.sendTurn(recoveryPrompt, { label: `character-voice-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` });
+        const recoveryPrompt = hasContent ? `You were asked to write "style-guide-validation.md" using writeFile, but you replied in chat. Please rewrite the report using writeFile now with the same content.` : `You produced no output. Please write the validation report to "style-guide-validation.md" using writeFile now.`;
+        const recoveryResult = await validator.sendTurn(recoveryPrompt, { label: `style-guide-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` });
         assertRealToolCalls(recoveryResult, "the validator agent (recovery)", values.INSTALLMENT_NUMBER);
         await assertWroteWithFallback(validationOutputFile, "the validator agent (recovery)", recoveryResult?.text);
       }
@@ -433,8 +426,7 @@ async function runQaLoop(ctx) {
       // Persist the rolling window to disk so that a re-run can recover the
       // exact acceptance state without re-calling the AI. Saved on every
       // iteration — including the accepting one — so the idempotency
-      // skip-check sees the final state (previously it was only saved after
-      // a feedback pass, which meant accepted volumes were never skipped).
+      // skip-check sees the final state.
       const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
       await saveRollingState(stateFilePath, recentRollingScores);
       if (meetsAcceptanceCriteria(recentRollingScores)) {
@@ -452,23 +444,24 @@ async function runQaLoop(ctx) {
   }
 }
 
+
 /**
  * Run the feedback stage: fresh author agent applies validation feedback.
- * @param {CharacterVoiceVolumeCtx} ctx
+ * @param {StyleGuideVolumeCtx} ctx
  */
 async function runFeedback(ctx) {
   const { values, volumeDir, fsGate } = ctx;
-  const author = await harness.createAgentHandle({ name: `author-voice-feedback-${values.INSTALLMENT_NUMBER}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: 30 });
+  const author = await harness.createAgentHandle({ name: `author-style-feedback-${values.INSTALLMENT_NUMBER}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: 30 });
   try {
-    const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx), { label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}` });
+    const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx), { label: `style-guide-feedback-${values.INSTALLMENT_NUMBER}` });
     assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
-    await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)", feedbackResult?.text);
+    await assertWroteWithFallback(ctx.styleOutputFile, "the author agent (feedback pass)", feedbackResult?.text);
     if (process.env.RECOVERY_ENABLED !== "false") {
       const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-      const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
-      const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}` });
+      const recoveryPrompt = hasContent ? `You were asked to write "style-guide.md" using writeFile, but you replied in chat. Please rewrite the file using writeFile now.` : `You produced no output. Please read the materials and write "style-guide.md" using writeFile now.`;
+      const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `style-guide-feedback-recovery-${values.INSTALLMENT_NUMBER}` });
       assertRealToolCalls(recoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback recovery)", recoveryResult?.text);
+      await assertWroteWithFallback(ctx.styleOutputFile, "the author agent (feedback recovery)", recoveryResult?.text);
     }
   } finally { await author.close(); }
 }
@@ -477,14 +470,14 @@ async function runFeedback(ctx) {
  * Shared acceptance check: always a tool-less single-shot call.
  * The model scores the audited output 0–100 (100 = perfect, 0 = atrocious);
  * the score — not a binary verdict — is what the rolling window tracks.
- * @param {CharacterVoiceVolumeCtx} ctx
+ * @param {StyleGuideVolumeCtx} ctx
  * @param {number} iteration
  * @returns {Promise<number | null>} The parsed score (0–100), or `null`
  *   when no valid score could be extracted (treated as a failed check).
  */
 async function acceptanceCheck(ctx, iteration) {
   const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt } = ctx;
-  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: validationOutputFile, name: "character-voice-validation.md" }, { text: acceptancePrompt }], label: `character-voice-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
+  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: validationOutputFile, name: "style-guide-validation.md" }, { text: acceptancePrompt }], label: `style-guide-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
   const score = parseAcceptanceScore(acceptanceOutput);
   if (score === null) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response (got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`);
@@ -496,7 +489,7 @@ async function acceptanceCheck(ctx, iteration) {
 
 /**
  * Process a single volume: extract -> compile -> QA loop.
- * @param {CharacterVoiceVolumeCtx} ctx
+ * @param {StyleGuideVolumeCtx} ctx
  */
 async function runVolume(ctx) {
   const { values } = ctx;
@@ -505,8 +498,7 @@ async function runVolume(ctx) {
   // Create fsGate BEFORE runCompile so the author agent has file tools.
   // createGatedFsTools is async — it must be awaited, otherwise fsGate is a
   // Promise and ctx.fsGate.tools/approve are undefined, so the agents are
-  // created with no tools at all (observed live: the model then emitted
-  // tool-call syntax as plain text and the run failed mid-way).
+  // created with no tools at all.
   const fsGate = await harness.createGatedFsTools({ cwd: ctx.volumeDir, allowedDirs: [ctx.volumeDir] });
   ctx.fsGate = fsGate;
   try { await runCompile(ctx, extractionOutput); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed: ${err.message}. Check .logs/ for details.`); throw err; }
@@ -514,4 +506,5 @@ async function runVolume(ctx) {
 }
 
 // Export
-module.exports = { characterVoice, parseVoiceQuirks, truncateVoiceRef, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runExtract, runCompile, runQaLoop, acceptanceCheck };
+module.exports = { styleGuide, parseStyleObservations, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runExtract, runCompile, runQaLoop, runFeedback, acceptanceCheck };
+
