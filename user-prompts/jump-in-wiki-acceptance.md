@@ -2,6 +2,6 @@
 
 **Series:** {{SOURCE_NAME}}
 
-Read the validation report for volume {{INSTALLMENT_NUMBER}} (provided as a file) **in full**. Determine whether the wiki it audits is **acceptable** (a passing grade) or **not acceptable**, following the decision criteria in the system prompt.
+Read the validation report for volume {{INSTALLMENT_NUMBER}} (provided as a file) **in full**. Score the wiki it audits on a scale of 0 to 100, following the scoring rubric in the system prompt.
 
-Respond with exactly one word: `PASS` or `FAIL`.
+Respond with exactly one integer from 0 to 100.

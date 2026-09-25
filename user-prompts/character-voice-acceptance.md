@@ -3,4 +3,6 @@
 **Series:** {{SOURCE_NAME}}
 **Volume:** {{INSTALLMENT_NUMBER}}
 
-Check whether the validation report indicates an acceptable character voice reference and POV map.
+Read the validation report (provided as a file) **in full**. Score the character voice reference and POV map it audits on a scale of 0 to 100, following the scoring rubric in the system prompt.
+
+Respond with exactly one integer from 0 to 100.

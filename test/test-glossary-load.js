@@ -4,6 +4,16 @@
  * jump-in-wiki.js. Run with `npm test`.
  */
 const assert = require("assert");
+const path = require("path");
+const { execFileSync } = require("child_process");
+
+// Pin the acceptance-criterion config so the criterion tests below are
+// deterministic regardless of the local .env (dotenv does not override
+// values that are already set in the environment).
+process.env.ACCEPTANCE_PASSING_SCORE = "70";
+process.env.ACCEPTANCE_STRATEGY = "average";
+process.env.BEST_OF_MIN_PASSES = "3";
+process.env.ROLLING_MIN_SAMPLES = "3";
 
 const {
   parseTerms,
@@ -17,6 +27,7 @@ const {
 const {
   transformUserPrompt,
   isPassingVerdict,
+  parseAcceptanceScore,
   installmentNumberFromDir,
   validatorMaxStepsFor,
   writePromptDump,
@@ -30,6 +41,11 @@ const {
   extractJsonObject,
   validateManifest,
 } = require("../get-translation-target");
+const {
+  meetsAcceptanceCriteria,
+  isAcceptedState,
+  computeRollingAverage,
+} = require("../configs/shared");
 
 // ─── parseTerms ─────────────────────────────────────────────────────────────
 assert.deepStrictEqual(parseTerms(""), []);
@@ -71,6 +87,87 @@ assert.strictEqual(isPassingVerdict("The glossary does not pass."), false);
 assert.strictEqual(isPassingVerdict("FAIL — it does not pass the check."), false);
 assert.strictEqual(isPassingVerdict(""), false);
 assert.strictEqual(isPassingVerdict(undefined), false);
+
+// ─── parseAcceptanceScore ──────────────────────────────────────────────────
+// Exact integer replies.
+assert.strictEqual(parseAcceptanceScore("72"), 72);
+assert.strictEqual(parseAcceptanceScore("  72\n"), 72);
+assert.strictEqual(parseAcceptanceScore("0"), 0);
+assert.strictEqual(parseAcceptanceScore("100"), 100);
+// Numbers wrapped in prose / fraction forms.
+assert.strictEqual(parseAcceptanceScore("Score: 72"), 72);
+assert.strictEqual(parseAcceptanceScore("72/100"), 72);
+assert.strictEqual(parseAcceptanceScore("Score: 72/100"), 72);
+assert.strictEqual(parseAcceptanceScore("72 out of 100"), 72);
+assert.strictEqual(parseAcceptanceScore("72 of 100"), 72);
+assert.strictEqual(parseAcceptanceScore("The score is 85."), 85);
+assert.strictEqual(parseAcceptanceScore("Score: 72 (out of 100)"), 72);
+// The first number wins when extra prose follows.
+assert.strictEqual(parseAcceptanceScore("72 — the glossary covers volume 01 in full."), 72);
+// Out-of-range and non-numeric replies are unparseable (fail-closed).
+assert.strictEqual(parseAcceptanceScore("105"), null);
+assert.strictEqual(parseAcceptanceScore("150/100"), null);
+assert.strictEqual(parseAcceptanceScore("PASS"), null);
+assert.strictEqual(parseAcceptanceScore("no score here"), null);
+assert.strictEqual(parseAcceptanceScore(""), null);
+assert.strictEqual(parseAcceptanceScore(undefined), null);
+
+// ─── computeRollingAverage (scores) ────────────────────────────────────────
+assert.strictEqual(computeRollingAverage([70, 80]), 75);
+assert.strictEqual(computeRollingAverage([95, 45, 45, 45, 45]), 55);
+assert.strictEqual(computeRollingAverage([]), 0);
+assert.strictEqual(computeRollingAverage(null), 0);
+
+// ─── meetsAcceptanceCriteria (rolling-average strategy; env pinned above) ──
+// Fewer than ROLLING_MIN_SAMPLES (3) checks → never accepted.
+assert.strictEqual(meetsAcceptanceCriteria([100]), false);
+assert.strictEqual(meetsAcceptanceCriteria([100, 100]), false);
+// Average >= 70 → accepted (boundary is inclusive).
+assert.strictEqual(meetsAcceptanceCriteria([70, 70, 70]), true);
+assert.strictEqual(meetsAcceptanceCriteria([80, 75, 65]), true);
+assert.strictEqual(meetsAcceptanceCriteria([90, 60, 60]), true);
+// Average below 70 → not accepted.
+assert.strictEqual(meetsAcceptanceCriteria([60, 60, 60]), false);
+// A single spike does not carry the window.
+assert.strictEqual(meetsAcceptanceCriteria([95, 45, 45, 45, 45]), false);
+// Empty / invalid input → false.
+assert.strictEqual(meetsAcceptanceCriteria([]), false);
+assert.strictEqual(meetsAcceptanceCriteria(null), false);
+
+// ─── isAcceptedState ───────────────────────────────────────────────────────
+assert.strictEqual(isAcceptedState(null), false);
+assert.strictEqual(isAcceptedState({ results: [80, 80, 80] }), true);
+assert.strictEqual(isAcceptedState({ results: [50, 50, 50] }), false);
+assert.strictEqual(isAcceptedState({ results: [100] }), false);
+
+// ─── meetsAcceptanceCriteria (best-X-out-of-Y strategy) ────────────────────
+// The strategy is read from the environment at module load, so the best
+// strategy is exercised in a spawned process with an env override.
+const sharedConfigPath = path.resolve(__dirname, "..", "configs", "shared.js");
+function bestStrategyCheck(scores) {
+  const script =
+    `const { meetsAcceptanceCriteria } = require(${JSON.stringify(sharedConfigPath)});` +
+    `console.log(String(meetsAcceptanceCriteria(${JSON.stringify(scores)})));`;
+  const out = execFileSync(process.execPath, ["-e", script], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ACCEPTANCE_STRATEGY: "best",
+      ACCEPTANCE_PASSING_SCORE: "70",
+      BEST_OF_MIN_PASSES: "3",
+      ROLLING_MIN_SAMPLES: "3",
+    },
+  });
+  return out.trim() === "true";
+}
+// Best 3 out of 5: at least 3 scores >= 70 (fewer than 3 checks never accepted).
+assert.strictEqual(bestStrategyCheck([80, 80, 80, 60, 60]), true);
+assert.strictEqual(bestStrategyCheck([70, 70, 70]), true);
+assert.strictEqual(bestStrategyCheck([100, 100]), false);
+// Fewer than BEST_OF_MIN_PASSES qualifying scores → not accepted, even when
+// the average would pass.
+assert.strictEqual(bestStrategyCheck([95, 45, 45, 45, 45]), false);
+assert.strictEqual(bestStrategyCheck([80, 80, 60, 60, 60]), false);
 
 // ─── installmentNumberFromDir ───────────────────────────────────────────────
 assert.strictEqual(installmentNumberFromDir("Series(1)"), "01");

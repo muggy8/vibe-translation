@@ -12,7 +12,7 @@
  *        - agent: an author agent (per-volume session) reads the source and
  *          previous wikis with file tools and writes both files directly
  *          (no marker-based output parsing).
- *     2. Repeats the following until the rolling-average acceptance criterion
+ *     2. Repeats the following until the score-based acceptance criterion
  *        is met or the iteration cap (MAX_VALIDATION_ITERATIONS, default 10)
  *        is reached:
  *        a. Validates the wiki with the validator prompts
@@ -21,12 +21,13 @@
  *           <volume folder>/jump-in-wiki-validation-NN.md (a validator agent
  *           writes the report).
  *        b. Asks the acceptance prompts (system-prompts/jump-in-wiki-acceptance.md
- *           and user-prompts/jump-in-wiki-acceptance.md) whether the wiki is a
- *           passing grade (PASS) or not (FAIL). Always a tool-less single-shot
- *           call. Each result is tracked in a rolling window (default: last 5
- *           checks). When the rolling pass rate meets the threshold (default:
- *           0.60 = 3 of 5) and we have at least MIN_SAMPLES (default: 3)
- *           checks, accept and stop.
+ *           and user-prompts/jump-in-wiki-acceptance.md) to score the wiki
+ *           0–100. Always a tool-less single-shot call. Each score is
+ *           tracked in a rolling window (default: last 5 checks). When the
+ *           window meets the acceptance criterion (rolling average of scores
+ *           >= ACCEPTANCE_PASSING_SCORE, default 70 — see configs/shared.js)
+ *           and we have at least MIN_SAMPLES (default: 3) checks, accept
+ *           and stop.
  *        c. Otherwise, apply the feedback prompts
  *           (system-prompts/jump-in-wiki-feedback.md and
  *           user-prompts/jump-in-wiki-feedback.md) to correct the wiki
@@ -49,9 +50,9 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage, saveRollingState } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
-const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
+const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
@@ -254,6 +255,7 @@ function buildWikiFeedbackTurnPrompt(ctx) {
 // for backwards compatibility (tests and glossary.js import these from here).
 module.exports.transformUserPrompt = require("./utils/prompt").transformUserPrompt;
 module.exports.isPassingVerdict = require("./utils/prompt").isPassingVerdict;
+module.exports.parseAcceptanceScore = require("./utils/prompt").parseAcceptanceScore;
 module.exports.validatorMaxStepsFor = require("./utils/prompt").validatorMaxStepsFor;
 module.exports.writePromptDump = require("./utils/prompt").writePromptDump;
 module.exports.installmentNumberFromDir = require("./utils/manifest").installmentNumberFromDir;
@@ -454,14 +456,12 @@ async function jumpInWiki() {
       const state = await loadRollingState(stateFilePath);
       if (state) {
         const avg = computeRollingAverage(state.results);
-        currentVolumeHasAlreadyBeenProcessed =
-          state.results.length >= ROLLING_MIN_SAMPLES &&
-          avg >= ROLLING_ACCEPTANCE_THRESHOLD;
+        currentVolumeHasAlreadyBeenProcessed = isAcceptedState(state);
         if (currentVolumeHasAlreadyBeenProcessed) {
           console.log(
             `volume ${values.INSTALLMENT_NUMBER}: rolling-state ` +
-            `(${state.results.length} checks, avg ${avg.toFixed(2)}) ` +
-            `meets threshold. skipping.`
+            `(${state.results.length} checks, avg ${avg.toFixed(1)}) ` +
+            `meets the criterion. skipping.`
           );
         }
       }
@@ -608,8 +608,8 @@ async function runVolumeAgent(ctx) {
 
 /**
  * QA loop: independent validator agent (fresh per iteration) ->
- * rolling-average acceptance check -> feedback applied by the same author
- * session that generated the wiki.
+ * score-based acceptance check (0–100, see configs/shared.js) -> feedback
+ * applied by the same author session that generated the wiki.
  *
  * @param {WikiVolumeCtx} ctx - The volume context (must include ctx.fsGate).
  * @param {AgentHandle} author - The author agent handle (keeps its session).
@@ -626,8 +626,10 @@ async function runQaLoop(ctx, author) {
   const fsGate = ctx.fsGate;
 
   const validationFileName = `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md`;
-  // Rolling window of recent acceptance results (true = pass, false = fail).
-  const recentRollingResults = [];
+  // Rolling window of recent acceptance scores (0–100). A score of `null`
+  // (unparseable acceptance response) counts as a failed check (fail-closed)
+  // and is not stored in the window.
+  const recentRollingScores = [];
 
   for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
     console.log(`Validation iteration ${iteration}/${maxValidationIterations}...`);
@@ -693,33 +695,43 @@ async function runQaLoop(ctx, author) {
       ],
       label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
     });
-    const accepted = isPassingVerdict(acceptanceOutput);
-    console.log(`Acceptance check: ${accepted ? "PASS" : "FAIL"}`);
+    const score = parseAcceptanceScore(acceptanceOutput);
+    if (score === null) {
+      console.log(
+        `Acceptance check: no valid score in response ` +
+          `(got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). ` +
+          `Counting this check as a failure.`
+      );
+    } else {
+      console.log(
+        `Acceptance check: score ${score}/100 (passing score: ${ACCEPTANCE_PASSING_SCORE})`
+      );
+    }
 
-    // Record result in rolling window.
-    recentRollingResults.push(accepted);
-    if (recentRollingResults.length > ROLLING_WINDOW_SIZE) {
-      recentRollingResults.shift();
+    // Record the score in the rolling window (null = unparseable, already
+    // logged as a failure; not stored).
+    if (score !== null) {
+      recentRollingScores.push(score);
+      if (recentRollingScores.length > ROLLING_WINDOW_SIZE) {
+        recentRollingScores.shift();
+      }
     }
 
     // Persist the rolling window to disk so that a re-run can recover the
     // exact acceptance state without re-calling the AI.
     const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-    await saveRollingState(stateFilePath, recentRollingResults);
+    await saveRollingState(stateFilePath, recentRollingScores);
 
-    // Check rolling average: if we have enough samples and the pass rate
-    // meets the threshold, accept and stop (skip feedback).
-    if (recentRollingResults.length >= ROLLING_MIN_SAMPLES) {
-      const avg = computeRollingAverage(recentRollingResults);
-      if (avg >= ROLLING_ACCEPTANCE_THRESHOLD) {
-        const passCount = recentRollingResults.filter(Boolean).length;
-        console.log(
-          `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(2)} ` +
-            `(${passCount}/${recentRollingResults.length} passes) meets threshold ` +
-            `${ROLLING_ACCEPTANCE_THRESHOLD}. Accepted.`
-        );
-        break;
-      }
+    // Check the acceptance criterion: if we have enough samples and the
+    // window meets it, accept and stop (skip feedback).
+    if (meetsAcceptanceCriteria(recentRollingScores)) {
+      const avg = computeRollingAverage(recentRollingScores);
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 ` +
+          `(${recentRollingScores.length} checks) meets the passing score ` +
+          `${ACCEPTANCE_PASSING_SCORE}. Accepted.`
+      );
+      break;
     }
 
     // the logic for applying the validation feedback (same author session)
@@ -777,6 +789,7 @@ module.exports = {
   installmentNumberFromDir,
   transformUserPrompt,
   isPassingVerdict,
+  parseAcceptanceScore,
   validatorMaxStepsFor,
   writePromptDump,
   buildWikiAuthorSystemPrompt,

@@ -67,46 +67,121 @@ const ROLLING_MIN_SAMPLES = Math.max(
 );
 
 /**
- * Pass rate threshold (0–1) for the rolling average.
- * When the rolling average of recent acceptance results meets or exceeds
- * this value, the output is accepted.
- * Read from .env, defaulting to 0.60 (i.e. 3 of 5 must pass).
+ * Passing score (0–100) for the score-based acceptance criterion.
+ * The acceptance one-shot check returns an integer 0–100 (100 = perfect,
+ * 0 = atrocious). Under the "average" strategy the rolling average of the
+ * recent scores must be >= this value; under the "best" strategy each
+ * score is compared against it individually.
+ * Read from .env, defaulting to 70.
+ *
+ * 70 is deliberately the boundary of the acceptance rubric's bands
+ * ("Pass with minor edits" = 70–84, "Requires revision" = 40–69), so the
+ * default reproduces exactly the accept/reject set of the legacy binary
+ * PASS/FAIL prompts while still adding granularity in the gray zone.
  *
  * @type {number}
  */
-const ROLLING_ACCEPTANCE_THRESHOLD = Math.min(
-  1,
-  Math.max(0, parseFloat(process.env.ROLLING_ACCEPTANCE_THRESHOLD) || 0.6)
+const ACCEPTANCE_PASSING_SCORE = Math.min(
+  100,
+  Math.max(0, parseInt(process.env.ACCEPTANCE_PASSING_SCORE, 10) || 70)
 );
 
 /**
- * Compute the rolling average (pass rate) from an array of boolean results.
- * Returns 0 if the array is empty.
+ * Acceptance strategy: how the rolling window of scores is evaluated.
+ * - "average" (default): the mean of the recent scores must be >=
+ *   ACCEPTANCE_PASSING_SCORE.
+ * - "best": at least BEST_OF_MIN_PASSES of the last ROLLING_WINDOW_SIZE
+ *   scores must each be >= ACCEPTANCE_PASSING_SCORE (best-X-out-of-Y).
+ * Read from .env, defaulting to "average".
  *
- * @param {boolean[]} results - Array of acceptance results (true = pass).
- * @returns {number} The pass rate (0–1).
+ * @type {"average"|"best"}
  */
-function computeRollingAverage(results) {
-  if (!results || results.length === 0) return 0;
-  return results.reduce((sum, v) => sum + (v ? 1 : 0), 0) / results.length;
+const ACCEPTANCE_STRATEGY =
+  String(process.env.ACCEPTANCE_STRATEGY || "average")
+    .trim()
+    .toLowerCase() === "best"
+    ? "best"
+    : "average";
+
+/**
+ * For the "best" strategy (best-X-out-of-Y): the minimum number of recent
+ * scores that must individually meet ACCEPTANCE_PASSING_SCORE. The window
+ * size Y is ROLLING_WINDOW_SIZE.
+ * Read from .env, defaulting to 3 (i.e. "best 3 out of 5" with the default
+ * window).
+ *
+ * @type {number}
+ */
+const BEST_OF_MIN_PASSES = Math.max(
+  1,
+  parseInt(process.env.BEST_OF_MIN_PASSES, 10) || 3
+);
+
+/**
+ * Compute the rolling average score from an array of numeric acceptance
+ * scores (0–100). Returns 0 if the array is empty.
+ *
+ * @param {number[]} scores - Array of acceptance scores (0–100).
+ * @returns {number} The average score (0–100).
+ */
+function computeRollingAverage(scores) {
+  if (!scores || scores.length === 0) return 0;
+  return scores.reduce((sum, v) => sum + v, 0) / scores.length;
 }
 
 /**
- * Persist the current rolling window of acceptance results to disk.
+ * Decide whether a rolling window of acceptance scores (0–100) meets the
+ * configured acceptance criterion.
+ *
+ * - "average" strategy: the mean of `scores` is >= ACCEPTANCE_PASSING_SCORE.
+ * - "best" strategy: at least BEST_OF_MIN_PASSES of `scores` are >=
+ *   ACCEPTANCE_PASSING_SCORE.
+ *
+ * Requires at least ROLLING_MIN_SAMPLES scores; returns false for fewer
+ * (and for empty / non-array input).
+ *
+ * @param {number[]} scores - The rolling window of acceptance scores.
+ * @returns {boolean} True when the window satisfies the criterion.
+ */
+function meetsAcceptanceCriteria(scores) {
+  if (!Array.isArray(scores) || scores.length < ROLLING_MIN_SAMPLES) return false;
+  if (ACCEPTANCE_STRATEGY === "best") {
+    const passes = scores.filter((s) => s >= ACCEPTANCE_PASSING_SCORE).length;
+    return passes >= BEST_OF_MIN_PASSES;
+  }
+  return computeRollingAverage(scores) >= ACCEPTANCE_PASSING_SCORE;
+}
+
+/**
+ * Decide whether a loaded rolling state object (from loadRollingState)
+ * satisfies the acceptance criterion — the deterministic, no-AI-call
+ * decision used by the idempotency skip-checks in all task modules.
+ *
+ * @param {{ results: number[] } | null} state - The state returned by
+ *   loadRollingState.
+ * @returns {boolean} True when the persisted window satisfies the criterion.
+ */
+function isAcceptedState(state) {
+  if (!state) return false;
+  return meetsAcceptanceCriteria(state.results);
+}
+
+/**
+ * Persist the current rolling window of acceptance scores to disk.
  * The file is a small JSON document that survives process restarts,
  * enabling the skip-check to recover the exact acceptance state
  * without re-calling the AI.
  *
  * Format:
- *   { "results": [true, false, true, ...], "lastCheckedAt": "2026-08-28T..." }
+ *   { "results": [72, 85, 61, ...], "lastCheckedAt": "2026-08-28T..." }
  *
  * @param {string} filePath - Absolute path to write the state file to.
- * @param {boolean[]} results - The current rolling window results.
+ * @param {number[]} scores - The current rolling window scores (0–100).
  */
-async function saveRollingState(filePath, results) {
+async function saveRollingState(filePath, scores) {
   const fs = require("fs").promises;
   const data = {
-    results,
+    results: scores,
     lastCheckedAt: new Date().toISOString(),
   };
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
@@ -114,10 +189,13 @@ async function saveRollingState(filePath, results) {
 
 /**
  * Load the persisted rolling window state from disk.
- * Returns `null` if the file does not exist, is empty, or is corrupt.
+ * Returns `null` if the file does not exist, is empty, is corrupt, or
+ * stores the legacy binary-verdict format (booleans) — the legacy format
+ * is treated as missing so the volume is re-validated once under the
+ * score-based criterion (fail-open).
  *
  * @param {string} filePath - Absolute path to read the state file from.
- * @returns {{ results: boolean[] } | null} The loaded state, or `null` on any error.
+ * @returns {{ results: number[] } | null} The loaded state, or `null` on any error.
  */
 async function loadRollingState(filePath) {
   const fs = require("fs").promises;
@@ -126,6 +204,12 @@ async function loadRollingState(filePath) {
     if (!raw.trim()) return null;
     const data = JSON.parse(raw);
     if (!Array.isArray(data.results)) return null;
+    // Scores are numbers 0–100. Legacy files stored booleans (true = pass)
+    // — reject them so the volume is re-validated once (fail-open).
+    const valid = data.results.every(
+      (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100
+    );
+    if (!valid) return null;
     return { results: data.results };
   } catch {
     // File missing, unreadable, or JSON parse error — degrade safely.
@@ -138,8 +222,12 @@ module.exports = {
   RESEARCH_CONCURRENCY,
   ROLLING_WINDOW_SIZE,
   ROLLING_MIN_SAMPLES,
-  ROLLING_ACCEPTANCE_THRESHOLD,
+  ACCEPTANCE_PASSING_SCORE,
+  ACCEPTANCE_STRATEGY,
+  BEST_OF_MIN_PASSES,
   computeRollingAverage,
+  meetsAcceptanceCriteria,
+  isAcceptedState,
   saveRollingState,
   loadRollingState,
 };

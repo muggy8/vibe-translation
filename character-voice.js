@@ -9,7 +9,9 @@
  *     2. Extract new voice quirks and POV analysis using a one-shot call.
  *     3. Compile the cumulative character voice reference and per-volume POV map.
  *     4. Save per-volume snapshots.
- *     5. Run the QA loop with rolling-average acceptance.
+ *     5. Run the QA loop with score-based acceptance (the model scores each
+ *        validation 0–100; the rolling average of recent scores must reach
+ *        ACCEPTANCE_PASSING_SCORE, default 70 — see configs/shared.js).
  *   After all volumes: the last volume's character-voice.md is copied to
  *   VOICE_OUTPUT_FILE (default <SERIES_LOCATION>/character-voice.md).
  *
@@ -28,9 +30,9 @@ const fs = require("fs").promises;
 const path = require("path");
 require("./types");
 const harness = require("./harness");
-const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
+const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage, saveRollingState } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 
 const clientDir = __dirname;
@@ -279,8 +281,8 @@ async function characterVoice() {
       const state = await loadRollingState(stateFilePath);
       if (state) {
         const avg = computeRollingAverage(state.results);
-        skip = state.results.length >= ROLLING_MIN_SAMPLES && avg >= ROLLING_ACCEPTANCE_THRESHOLD;
-        if (skip) { console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling-state (${state.results.length} checks, avg ${avg.toFixed(2)}) meets threshold. Skipping.`); }
+        skip = isAcceptedState(state);
+        if (skip) { console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling-state (${state.results.length} checks, avg ${avg.toFixed(1)}/100) meets the criterion. Skipping.`); }
       }
     }
     if (skip) { console.log(`Volume ${values.INSTALLMENT_NUMBER}: voice reference and POV map already exist and passed. Skipping.`); continue; }
@@ -400,7 +402,10 @@ async function runCompile(ctx, extractionOutput) {
  */
 async function runQaLoop(ctx) {
   const { values, volumeDir, sourceFile, validationOutputFile, fsGate } = ctx;
-  const recentRollingResults = [];
+  // Rolling window of recent acceptance scores (0–100). A score of `null`
+  // (unparseable acceptance response) counts as a failed check (fail-closed)
+  // and is not stored in the window.
+  const recentRollingScores = [];
   for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: validation iteration ${iteration}/${maxValidationIterations}...`);
     const validator = await harness.createAgentHandle({ name: `validator-voice-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size) });
@@ -416,25 +421,29 @@ async function runQaLoop(ctx) {
         await assertWroteWithFallback(validationOutputFile, "the validator agent (recovery)", recoveryResult?.text);
       }
       console.log("Calling the AI for the acceptance check...");
-      const accepted = await acceptanceCheck(ctx, iteration);
-      recentRollingResults.push(accepted);
-      if (accepted) {
-        const passCount = recentRollingResults.filter(Boolean).length;
-        console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: PASS (${passCount}/${recentRollingResults.length} passes)`);
-        break;
-      }
-      if (recentRollingResults.length >= ROLLING_MIN_SAMPLES) {
-        const avg = computeRollingAverage(recentRollingResults);
-        if (avg >= ROLLING_ACCEPTANCE_THRESHOLD) {
-          const passCount = recentRollingResults.filter(Boolean).length;
-          console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(2)} (${passCount}/${recentRollingResults.length} passes) meets threshold. Accepted.`);
-          break;
+      const score = await acceptanceCheck(ctx, iteration);
+      // Record the score in the rolling window (null = unparseable, already
+      // logged as a failure; not stored).
+      if (score !== null) {
+        recentRollingScores.push(score);
+        if (recentRollingScores.length > ROLLING_WINDOW_SIZE) {
+          recentRollingScores.shift();
         }
+      }
+      // Persist the rolling window to disk so that a re-run can recover the
+      // exact acceptance state without re-calling the AI. Saved on every
+      // iteration — including the accepting one — so the idempotency
+      // skip-check sees the final state (previously it was only saved after
+      // a feedback pass, which meant accepted volumes were never skipped).
+      const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
+      await saveRollingState(stateFilePath, recentRollingScores);
+      if (meetsAcceptanceCriteria(recentRollingScores)) {
+        const avg = computeRollingAverage(recentRollingScores);
+        console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 (${recentRollingScores.length} checks) meets the passing score ${ACCEPTANCE_PASSING_SCORE}. Accepted.`);
+        break;
       }
       console.log("Calling the AI to apply the validation feedback (author agent)...");
       await runFeedback(ctx);
-      const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-      await saveRollingState(stateFilePath, recentRollingResults);
       if (iteration === maxValidationIterations) {
         ctx.limitReached = true;
         console.log(`Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`);
@@ -466,16 +475,23 @@ async function runFeedback(ctx) {
 
 /**
  * Shared acceptance check: always a tool-less single-shot call.
+ * The model scores the audited output 0–100 (100 = perfect, 0 = atrocious);
+ * the score — not a binary verdict — is what the rolling window tracks.
  * @param {CharacterVoiceVolumeCtx} ctx
  * @param {number} iteration
- * @returns {Promise<boolean>}
+ * @returns {Promise<number | null>} The parsed score (0–100), or `null`
+ *   when no valid score could be extracted (treated as a failed check).
  */
 async function acceptanceCheck(ctx, iteration) {
   const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt } = ctx;
   const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: validationOutputFile, name: "character-voice-validation.md" }, { text: acceptancePrompt }], label: `character-voice-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
-  const accepted = isPassingVerdict(acceptanceOutput);
-  console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: ${accepted ? "PASS" : "FAIL"}`);
-  return accepted;
+  const score = parseAcceptanceScore(acceptanceOutput);
+  if (score === null) {
+    console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response (got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`);
+  } else {
+    console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${score}/100 (passing score: ${ACCEPTANCE_PASSING_SCORE})`);
+  }
+  return score;
 }
 
 /**

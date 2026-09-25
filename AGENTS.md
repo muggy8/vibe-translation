@@ -30,9 +30,9 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 
 | Path | Role |
 |---|---|
-| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and rolling-average validation config (`ROLLING_WINDOW_SIZE`, `ROLLING_ACCEPTANCE_THRESHOLD`, `ROLLING_MIN_SAMPLES`, `computeRollingAverage`). Both `glossary.js` and `jump-in-wiki.js` import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window to disk (see §3). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). |
+| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and score-based acceptance config (`ROLLING_WINDOW_SIZE`, `ROLLING_MIN_SAMPLES`, `ACCEPTANCE_PASSING_SCORE`, `ACCEPTANCE_STRATEGY`, `BEST_OF_MIN_PASSES`, `computeRollingAverage`, `meetsAcceptanceCriteria`, `isAcceptedState`). All three task modules import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window of scores to disk (see §3). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). |
 | `utils/fs.js` | Filesystem helpers: `fileExists`, `assertWrote`. |
-| `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict`, `validatorMaxStepsFor`, `writePromptDump`. |
+| `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict` (legacy binary verdict — kept for compatibility, no longer used in the acceptance path), `parseAcceptanceScore` (parses the 0–100 score from the acceptance one-shot reply; `null` = unparseable = failed check), `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
 | `harness.js` | The AI layer: one-shot calls, agent handles, wiki tools, gated fs tools, provider plumbing, run logging, and the runaway-generation guard (aborts agent turns that produce excessive text without tool calls). Never bypass it to talk to the model. Logs every AI call to `.logs/<timestamp>/` — per-agent chat histories (system prompt, messages, assistant response, reasoning, tool calls) and one-shot call dumps — plus the summary log (greppable `CALL`/`RESULT`/`WARNING` lines). |
 | `research.js` | Client-side web research (Wikipedia Action API + optional Brave/Tavily/Serper). No LLM involved. |
@@ -72,12 +72,19 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
 
 1. Discover volume folders and source files via the translation-target manifest (`getTranslationTarget()`). An AI agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes the result to `<SERIES_LOCATION>/translation-target.json`. With `--dry-run` a deterministic fallback (the legacy convention) builds the manifest instead, so prompt previews stay fully offline.
 2. Fill `{{PLACEHOLDER}}`s in the user-prompt templates (`transformUserPrompt` — **strict**: throws on a missing value or any leftover placeholder).
-3. **QA loop** per volume, up to `MAX_VALIDATION_ITERATIONS`: rolling-average
-   acceptance — each acceptance result is tracked in a rolling window
-   (`ROLLING_WINDOW_SIZE`, default 5). When the rolling pass rate meets the
-   threshold (`ROLLING_ACCEPTANCE_THRESHOLD`, default 0.60) and we have at
-   least `ROLLING_MIN_SAMPLES` checks (default 3), the output is accepted.
-   Otherwise, feedback is applied and the loop continues. A passing output
+3. **QA loop** per volume, up to `MAX_VALIDATION_ITERATIONS`: score-based
+   acceptance — the acceptance one-shot check (tool-less) scores the audited
+   output **0–100** (100 = perfect, 0 = atrocious) using a banded rubric in
+   the `*-acceptance.md` system prompts (Pass → 85–100, Pass with minor
+   edits → 70–84, Requires revision → 40–69, Reject → 0–39). Each score is
+   tracked in a rolling window (`ROLLING_WINDOW_SIZE`, default 5). When the
+   window meets the criterion from `meetsAcceptanceCriteria()` (default
+   strategy `average`: rolling average of scores ≥ `ACCEPTANCE_PASSING_SCORE`,
+   default 70; alternative `best`: at least `BEST_OF_MIN_PASSES` of the
+   scores ≥ the passing score) and we have at least `ROLLING_MIN_SAMPLES`
+   checks (default 3), the output is accepted. An unparseable acceptance
+   reply counts as a failed check (fail-closed) and is not stored. Otherwise,
+   feedback is applied and the loop continues. A passing output
    is never touched by a feedback pass. **Fresh agent per feedback iteration**
    (no persistent session — each feedback turn starts with a clean context
    that includes the validation report and current glossary).
@@ -109,7 +116,7 @@ Per volume:
 1. **Generate** `wiki.md` + `shared-wiki.md` (context: the previous volume's `wiki.md` + `shared-wiki.md`):
     - an author agent (per-volume session, `maxSteps 40`). Stubs are pre-created for both files (a stronger name anchor than "create a new file", and a crashed run leaves identifiable stubs).
       Stale classic-named files (`jump-in-wiki-NN.md`, `jump-in-wiki-shared.md`) are deleted up front so agents can't audit garbage.
-2. **QA loop**: a validator agent writes `jump-in-wiki-validation-NN.md` (size-scaled step cap) → acceptance one-shot -> on FAIL the same author session applies the feedback.
+2. **QA loop**: a validator agent writes `jump-in-wiki-validation-NN.md` (size-scaled step cap) → acceptance one-shot scores the wiki 0–100 → unless the rolling window of scores meets the criterion, the same author session applies the feedback.
 3. **Two-tier idempotency**: if `wiki.md` + `shared-wiki.md` exist → skip generation, go straight to validation; if a validation report exists and passes acceptance → skip the whole volume.
 4. End-of-run summary counts the volumes that hit the iteration limit.
 
@@ -123,7 +130,7 @@ Per volume, in order — each volume's reference builds on the previous one's:
    - `pov-map.md` — the per-volume POV map (marker identification, narration type classification, POV assignments, free indirect discourse detection)
    The agent-mode turn prompts (author/validator/feedback) name every material at its real path — the previous volume's reference at `../<previous folder>/character-voice.md` (same convention as glossary.js) — so agents never have to guess where to read. A missing previous reference fails loudly (dry-run: warn).
 
-3. **QA loop**: a fresh validator agent per iteration writes `character-voice-validation.md` → acceptance one-shot → on FAIL a fresh author agent applies feedback (`character-voice-feedback.md`). Same rolling-average acceptance criterion as other pipelines.
+3. **QA loop**: a fresh validator agent per iteration writes `character-voice-validation.md` → acceptance one-shot scores the reference 0–100 → unless the rolling window of scores meets the criterion, a fresh author agent applies feedback (`character-voice-feedback.md`). Same score-based acceptance criterion as the other pipelines (the state file is saved on every iteration, including the accepting one, so accepted volumes are skipped on re-run).
 4. After all volumes: the last volume's `character-voice.md` is copied to `VOICE_OUTPUT_FILE` (default `<SERIES_LOCATION>/character-voice.md`). Skipped for `--volume` runs.
 
 Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-map.md` (per-volume), `character-voice-validation.md` (validation report).
@@ -147,8 +154,10 @@ Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-ma
 | `SOURCE_LANGUAGE` / `TARGET_LANGUAGE` | Japanese / English | Filled into the prompts |
 | `MAX_VALIDATION_ITERATIONS` | `10` | QA-loop cap per volume (increased to allow rolling average to converge) |
 | `ROLLING_WINDOW_SIZE` | `5` | Number of recent acceptance checks in the rolling window |
-| `ROLLING_MIN_SAMPLES` | `3` | Minimum checks before rolling average can trigger acceptance |
-| `ROLLING_ACCEPTANCE_THRESHOLD` | `0.60` | Pass rate (0–1) needed to accept via rolling average |
+| `ROLLING_MIN_SAMPLES` | `3` | Minimum checks before the criterion can trigger acceptance |
+| `ACCEPTANCE_PASSING_SCORE` | `70` | Passing score (0–100) for the score-based acceptance criterion — the rubric boundary between "Pass with minor edits" (70–84) and "Requires revision" (40–69) |
+| `ACCEPTANCE_STRATEGY` | `average` | How the window is evaluated: `average` (mean of scores ≥ passing score) or `best` (≥ `BEST_OF_MIN_PASSES` scores ≥ passing score) |
+| `BEST_OF_MIN_PASSES` | `3` | For `ACCEPTANCE_STRATEGY=best`: minimum scores ≥ passing score needed ("best 3 of 5" with the default window) |
 | `CONTEXT_WINDOW` | `128000` | Tokens at which agent sessions auto-compact |
 | `AGENT_MAX_STEPS` | `20` | Default step cap for tool agents (workflows pass higher caps where needed) |
 | `AGENT_TEXT_GUARD_CHARS` | `30000` | Runaway-generation guard: abort an agent turn when it produces more than this many chars of text with fewer than 3 tool calls. Catches models that emit malformed tool-call text instead of using the tool-calling API. |
@@ -164,7 +173,7 @@ Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-ma
 | `THINKING` | on | Qwen3 thinking phase — **enabled by default**. See §7. |
 | `THINKING_LEVEL` | xhigh | reasoning_effort: "low" / "medium" / "xhigh" (model-dependent). |
 
-**Current local setup** (the committed `.env`): local Qwen at `http://localhost:9200/v1`, `MAX_TOKENS=262144`, `TEMPERATURE=0.6`, `AI_RETRY=2`, `MAX_VALIDATION_ITERATIONS=10`, `ROLLING_WINDOW_SIZE=5`, `ROLLING_MIN_SAMPLES=3`, `ROLLING_ACCEPTANCE_THRESHOLD=0.60`, `AGENT_TEXT_GUARD_CHARS=30000`, THINKING=on, THINKING_LEVEL=xhigh, series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
+**Current local setup** (the committed `.env`): local Qwen at `http://localhost:9200/v1`, `MAX_TOKENS=262144`, `TEMPERATURE=0.6`, `AI_RETRY=2`, `MAX_VALIDATION_ITERATIONS=10`, `ROLLING_WINDOW_SIZE=5`, `ROLLING_MIN_SAMPLES=3`, `ACCEPTANCE_PASSING_SCORE=70`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, THINKING=on, THINKING_LEVEL=xhigh, series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
 
 ## 7. Gotchas (hard-won — read before changing behavior)
 
@@ -173,8 +182,8 @@ Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-ma
 3. **Do not touch the agent-mode prompt safety nets** (the stray-file cleanups): each was added after a live failure (wrong file names, stale strays being audited, marker-format conflicts). The pure tests pin their behavior — run `npm test` after touching any prompt or file name.
 4. **Validator step caps scale with source size** (`validatorMaxStepsFor`): a fixed cap of 40 ran out on the 521KB volume-01 source before the validator wrote its report.
 5. **The glossary is cumulative** — see the §4 invariant (`regeneratedAny`).
-6. **Skip-checks are deterministic** (reads a persisted `*-rolling-state.json` file). If the state file is missing (e.g. a run from before this change), the check falls back to regenerating the volume — so pre-existing runs are safe to re-run.
-7. **`isPassingVerdict` is intentionally strict**: any mention of FAIL/FAILED/FAILURES or "NOT PASS" fails the verdict. Do not loosen it to "contains PASS".
+6. **Skip-checks are deterministic** (reads a persisted `*-rolling-state.json` file storing the rolling window of scores). If the state file is missing or uses the legacy boolean format (pre-score-based era), `loadRollingState` returns `null` and the check falls back to regenerating/re-validating the volume once (fail-open) — so pre-existing runs are safe to re-run.
+7. **Acceptance parsing is intentionally strict**: `parseAcceptanceScore` only accepts a 0–100 integer (bare, `N/100`, or `N out of 100`); anything else (prose verdicts, >100, no number) is `null` and the check counts as a **failure** (fail-closed — the feedback loop gets another shot). The legacy `isPassingVerdict` is kept exported for compatibility but no longer used in the acceptance path.
 8. **The fs write gate confines writes to the volume folder**; reads are allowed anywhere (agents need the previous volume). `deleteFile` is always denied — the *workflow* deletes stale strays, never the agent.
 9. **Logging is per-run with full chat histories and real-time streaming:** Each process run creates a directory under `.logs/<ISO-timestamp>/` containing:
    - `summary.log` — greppable `CALL`/`RESULT`/`WARNING` lines (same format as before)

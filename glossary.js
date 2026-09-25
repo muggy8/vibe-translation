@@ -21,14 +21,15 @@
  *        - agent: an author agent (per-volume session) reads the
  *          materials with file tools and writes glossary.md directly.
  *     5. Save a per-volume snapshot to <volume folder>/glossary.md.
- *     6. Run the QA loop with a rolling-average acceptance criterion:
+ *     6. Run the QA loop with the score-based acceptance criterion:
  *          a. Validate the glossary against the source (glossary-validator.md)
  *             — an independent validator agent writes the report.
- *          b. Acceptance check (glossary-acceptance.md): PASS or FAIL
- *             (always a tool-less single-shot call).
- *          c. Track each acceptance result in a rolling window (default:
- *             last 5 checks). When the rolling pass rate meets the
- *             threshold (default: 0.60 = 3 of 5) and we have at least
+ *          b. Acceptance check (glossary-acceptance.md): the model scores
+ *             the glossary 0–100 (always a tool-less single-shot call).
+ *          c. Track each score in a rolling window (default: last 5
+ *             checks). When the window meets the acceptance criterion
+ *             (rolling average of scores >= ACCEPTANCE_PASSING_SCORE,
+ *             default 70 — see configs/shared.js) and we have at least
  *             MIN_SAMPLES (default: 3) checks, accept and stop.
  *          d. Otherwise, apply the feedback (glossary-feedback.md) and
  *             repeat from (a). In agent mode the same author session
@@ -52,9 +53,9 @@ const fs = require("fs").promises;
 const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
-const { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
+const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ROLLING_WINDOW_SIZE, ROLLING_ACCEPTANCE_THRESHOLD, ROLLING_MIN_SAMPLES, computeRollingAverage, saveRollingState } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ROLLING_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
@@ -603,8 +604,8 @@ async function glossary() {
       continue;
     }
 
-    // Idempotency: skip a volume whose glossary already exists and passed
-    // the rolling-average acceptance criterion, unless a previous volume was
+    // Idempotency: skip a volume whose glossary already exists and met the
+    // score-based acceptance criterion, unless a previous volume was
     // regenerated (which would make it stale).
     //
     // Instead of re-calling the AI, we read the persisted rolling window
@@ -618,14 +619,12 @@ async function glossary() {
       const state = await loadRollingState(stateFilePath);
       if (state) {
         const avg = computeRollingAverage(state.results);
-        skip =
-          state.results.length >= ROLLING_MIN_SAMPLES &&
-          avg >= ROLLING_ACCEPTANCE_THRESHOLD;
+        skip = isAcceptedState(state);
         if (skip) {
           console.log(
             `Volume ${values.INSTALLMENT_NUMBER}: rolling-state ` +
-              `(${state.results.length} checks, avg ${avg.toFixed(2)}) ` +
-              `meets threshold. Skipping.`
+              `(${state.results.length} checks, avg ${avg.toFixed(1)}) ` +
+              `meets the criterion. Skipping.`
           );
         }
       }
@@ -670,10 +669,13 @@ async function glossary() {
 
 /**
  * Shared acceptance check: always a tool-less single-shot call.
+ * The model scores the audited output 0–100 (100 = perfect, 0 = atrocious);
+ * the score — not a binary verdict — is what the rolling window tracks.
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
  * @param {number} iteration - The current QA iteration (for the log label).
- * @returns {Promise<boolean>} True for a passing verdict.
+ * @returns {Promise<number | null>} The parsed score (0–100), or `null` when
+ *   no valid score could be extracted (treated as a failed check).
  */
 async function acceptanceCheck(ctx, iteration) {
   const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt } = ctx;
@@ -685,11 +687,20 @@ async function acceptanceCheck(ctx, iteration) {
     ],
     label: `glossary-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
   });
-  const accepted = isPassingVerdict(acceptanceOutput);
-  console.log(
-    `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: ${accepted ? "PASS" : "FAIL"}`
-  );
-  return accepted;
+  const score = parseAcceptanceScore(acceptanceOutput);
+  if (score === null) {
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in ` +
+        `response (got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). ` +
+        `Counting this check as a failure.`
+    );
+  } else {
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${score}/100 ` +
+        `(passing score: ${ACCEPTANCE_PASSING_SCORE})`
+    );
+  }
+  return score;
 }
 
 /**
@@ -897,9 +908,10 @@ async function generateGlossary(ctx, terms, researchNotesAvailable) {
 
 /**
  * QA loop: independent validator agent (fresh per iteration) ->
- * rolling-average acceptance check -> feedback applied by a fresh author
- * agent (no persistent session — each feedback pass starts with a clean
- * context that includes the validation report and current glossary).
+ * score-based acceptance check (0–100, see configs/shared.js) ->
+ * feedback applied by a fresh author agent (no persistent session — each
+ * feedback pass starts with a clean context that includes the validation
+ * report and current glossary).
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (must include ctx.fsGate).
  */
@@ -912,8 +924,10 @@ async function runQaLoop(ctx) {
     validationOutputFile,
   } = ctx;
   const fsGate = ctx.fsGate;
-  // Rolling window of recent acceptance results (true = pass, false = fail).
-  const recentRollingResults = [];
+  // Rolling window of recent acceptance scores (0–100). A score of `null`
+  // (unparseable acceptance response) counts as a failed check (fail-closed)
+  // and is not stored in the window.
+  const recentRollingScores = [];
 
   for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
     console.log(
@@ -966,33 +980,34 @@ async function runQaLoop(ctx) {
       await validator.close();
     }
 
-    // Acceptance check (always one-shot, tool-less).
-    const accepted = await acceptanceCheck(ctx, iteration);
+    // Acceptance check (always one-shot, tool-less) — the model scores the
+    // glossary 0–100.
+    const score = await acceptanceCheck(ctx, iteration);
 
-    // Record result in rolling window.
-    recentRollingResults.push(accepted);
-    if (recentRollingResults.length > ROLLING_WINDOW_SIZE) {
-      recentRollingResults.shift();
+    // Record the score in the rolling window (null = unparseable, already
+    // logged as a failure; not stored).
+    if (score !== null) {
+      recentRollingScores.push(score);
+      if (recentRollingScores.length > ROLLING_WINDOW_SIZE) {
+        recentRollingScores.shift();
+      }
     }
 
     // Persist the rolling window to disk so that a re-run can recover the
     // exact acceptance state without re-calling the AI.
     const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-    await saveRollingState(stateFilePath, recentRollingResults);
+    await saveRollingState(stateFilePath, recentRollingScores);
 
-    // Check rolling average: if we have enough samples and the pass rate
-    // meets the threshold, accept and stop (skip feedback).
-    if (recentRollingResults.length >= ROLLING_MIN_SAMPLES) {
-      const avg = computeRollingAverage(recentRollingResults);
-      if (avg >= ROLLING_ACCEPTANCE_THRESHOLD) {
-        const passCount = recentRollingResults.filter(Boolean).length;
-        console.log(
-          `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(2)} ` +
-            `(${passCount}/${recentRollingResults.length} passes) meets threshold ` +
-            `${ROLLING_ACCEPTANCE_THRESHOLD}. Accepted.`
-        );
-        break;
-      }
+    // Check the acceptance criterion: if we have enough samples and the
+    // window meets it, accept and stop (skip feedback).
+    if (meetsAcceptanceCriteria(recentRollingScores)) {
+      const avg = computeRollingAverage(recentRollingScores);
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 ` +
+          `(${recentRollingScores.length} checks) meets the passing score ` +
+          `${ACCEPTANCE_PASSING_SCORE}. Accepted.`
+      );
+      break;
     }
 
     // Apply the feedback with a fresh author agent (no persistent session).

@@ -2,7 +2,7 @@
  * utils/prompt.js - Prompt and verdict utility functions.
  *
  * @example
- * const { transformUserPrompt, isPassingVerdict } = require("../utils/prompt");
+ * const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore } = require("../utils/prompt");
  */
 
 const fs = require("fs");
@@ -32,6 +32,45 @@ function isPassingVerdict(output) {
   return hasPass && !hasFail && !negated;
 }
 
+/**
+ * Parse an acceptance score (0–100) from the raw output of the acceptance
+ * one-shot check.
+ *
+ * The acceptance prompts ask the model to respond with exactly one integer
+ * from 0 to 100 (100 = perfect, 0 = atrocious). In practice models sometimes
+ * wrap the number in text ("Score: 72", "72/100", "72 out of 100"), so this
+ * extracts it with two strict patterns:
+ *
+ *   1. Explicit denominator — "72/100", "72 out of 100", "72 of 100".
+ *   2. First standalone integer — "72", "Score: 72", "The score is 72."
+ *
+ * The first number in the reply wins, so a leading "Score: 72" is found even
+ * if the model appends extra prose afterwards.
+ *
+ * @param {string} output - Raw output of the acceptance one-shot call.
+ * @returns {number | null} An integer 0–100, or `null` when no valid score
+ *   could be extracted (no number, or a number > 100). Callers treat `null`
+ *   as a failed check (fail-closed) — see the acceptance loops in the task
+ *   modules.
+ */
+function parseAcceptanceScore(output) {
+  if (typeof output !== "string") return null;
+  const text = output.trim();
+  // 1. Explicit "/100" or "out of 100" / "of 100" denominator.
+  const denom = text.match(/(\d{1,3})\s*(?:\/|out\s+of|of)\s*100\b/i);
+  if (denom) {
+    const n = parseInt(denom[1], 10);
+    return n <= 100 ? n : null;
+  }
+  // 2. First standalone integer (not immediately preceded by "/" or a digit).
+  const bare = text.match(/(^|[^/\d])(\d{1,3})(?!\d)/);
+  if (bare) {
+    const n = parseInt(bare[2], 10);
+    return n <= 100 ? n : null;
+  }
+  return null;
+}
+
 function validatorMaxStepsFor(sourceSizeBytes) {
   const chunks = Math.max(1, Math.ceil((sourceSizeBytes || 0) / 32768));
   return Math.max(40, chunks * 2 + 24);
@@ -47,4 +86,4 @@ async function writePromptDump(task, installmentNumber, mode, sections) {
   return file;
 }
 
-module.exports = { transformUserPrompt, isPassingVerdict, validatorMaxStepsFor, writePromptDump };
+module.exports = { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump };
