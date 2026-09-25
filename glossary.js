@@ -230,10 +230,22 @@ function buildPerTermResearchPrompt(ctx, term, index) {
  * @returns {Promise<void>}
  */
 async function researchOneTerm(ctx, term, index) {
+  // Fail loudly on a wiring bug instead of registering undefined tools —
+  // an undefined tool entry makes the model's first call throw the cryptic
+  // "Cannot read properties of undefined (reading 'execute')" (observed live
+  // when ctx.wikiTools was never assigned).
+  const wikiTools = ctx.wikiTools;
+  if (!wikiTools || !wikiTools.wiki_search || !wikiTools.wiki_extract) {
+    throw new Error(
+      `Volume ${ctx.values.INSTALLMENT_NUMBER}: the per-term researcher agent has no ` +
+        `wiki tools (ctx.wikiTools is missing or incomplete). Set ` +
+        `ctx.wikiTools = harness.createWikiTools() in runVolumeAgent before researchBatch runs.`
+    );
+  }
   const agent = await harness.createAgentHandle({
     name: `researcher-${term.term.replace(/\s+/g, "-")}`,
     systemPrompt: RESEARCHER_SYSTEM_PROMPT,
-    tools: { wiki_search: ctx.wikiTools?.wiki_search, wiki_extract: ctx.wikiTools?.wiki_extract, ...ctx.fsGate.tools },
+    tools: { wiki_search: wikiTools.wiki_search, wiki_extract: wikiTools.wiki_extract, ...ctx.fsGate.tools },
     approve: ctx.fsGate.approve,
     cwd: ctx.volumeDir,
     maxSteps: 15, // 2 wiki_search + 1 wiki_extract + 1 editFile + overhead
@@ -734,6 +746,14 @@ async function runVolumeAgent(ctx) {
     allowedDirs: [volumeDir],
   });
   ctx.fsGate = fsGate;
+
+  // Wikipedia research tools for the per-term researcher agents (pass 2 below).
+  // createWikiTools() is synchronous — it just wraps research.js with the
+  // current RESEARCH_* env settings. (Observed live: this assignment was
+  // missing, so the researcher agents were created with wiki_search/
+  // wiki_extract set to undefined and the model's first tool call threw
+  // "Cannot read properties of undefined (reading 'execute')".)
+  ctx.wikiTools = harness.createWikiTools();
 
   // Remove stale strays from earlier runs (agent name drift): a per-volume
   // classic-style name like "glossary-01.md" is never written by the

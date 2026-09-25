@@ -38,7 +38,7 @@ const fs = require("fs");
 const path = require("path");
 require("./types"); // JSDoc type definitions
 const { fileTypeFromBuffer } = require("file-type");
-const { Agent: UndiciAgent } = require("undici");
+const { Agent: UndiciAgent, fetch: undiciFetch } = require("undici");
 const { tool, generateText } = require("ai");
 const { z } = require("zod");
 
@@ -362,7 +362,9 @@ function tapSseStream(body, taps) {
 /**
  * Build the fetch implementation handed to the AI SDK provider.
  *
- * - disables undici's request timeouts (local LLM prefills)
+ * - dispatches through undici's own fetch with a no-timeout Agent from the
+ *   SAME undici build (global fetch + foreign Agent mixes undici versions —
+ *   see the comment at the fetch call below)
  * - merges `extraBody` (thinking parameters) into chat-completion bodies
  * - taps SSE streams for reasoning_content / first-token diagnostics, and
  *   non-streaming JSON responses for `message.reasoning_content`
@@ -388,7 +390,29 @@ function makeProviderFetch({ extraBody = null, tapsRef = null } = {}) {
         // Not a JSON body — pass through untouched.
       }
     }
-    const response = await fetch(input, { ...init, body, dispatcher: noTimeoutAgent });
+    // Dispatch through undici's OWN fetch (same build as noTimeoutAgent) —
+    // NOT the global fetch. Node's bundled undici is a different version:
+    // handing the npm v8 Agent to the global fetch mixes handler protocols
+    // and throws "invalid onRequestStart method" (UND_ERR_INVALID_ARG) on
+    // Node builds whose bundled undici is older. (Observed live after a
+    // Windows→Linux migration: identical code + node_modules worked on the
+    // Windows machine's Node but failed on Linux Node 22.)
+    // Headers are normalized to a plain object: undici's webidl converters
+    // would silently convert a foreign (global) Headers instance to an empty
+    // record, dropping auth/content-type headers.
+    let headersPlain = headers;
+    if (headers && typeof headers.forEach === "function") {
+      headersPlain = {};
+      headers.forEach((value, key) => {
+        headersPlain[key] = value;
+      });
+    }
+    const response = await undiciFetch(input, {
+      ...init,
+      body,
+      headers: headersPlain,
+      dispatcher: noTimeoutAgent,
+    });
     const taps = tapsRef?.current;
     if (!taps) return response;
     const contentType = response.headers?.get?.("content-type") ?? "";

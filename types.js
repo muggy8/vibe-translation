@@ -57,6 +57,7 @@
  * @property {string} acceptanceSystemPrompt
  * @property {string} acceptanceUserPrompt
  * @property {Object} fsGate — Gated filesystem tools (from createGatedFsTools).
+ * @property {WikiTools} wikiTools — Wikipedia research tools (from createWikiTools), set by runVolumeAgent.
  * @property {string} [seriesDir]
  * @property {string} [previousGlossary]
  * @property {boolean} [limitReached]

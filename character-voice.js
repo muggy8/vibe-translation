@@ -191,7 +191,13 @@ async function characterVoice() {
     ? process.argv[process.argv.indexOf("--volume") + 1] : null;
   console.log("character-voice task starting...");
   const manifest = await getTranslationTarget();
-  const seriesDir = manifest.seriesLocation;
+  // Use the module-level seriesDir (SERIES_LOCATION) — NOT manifest.seriesLocation.
+  // That field is provenance metadata from the machine that generated the
+  // manifest: after a Windows→Linux migration the cached "C:\..." path is not
+  // absolute, and every file op would silently resolve relative to the CWD
+  // (observed live: ENOENT on <CWD>/C:\...\test_story(1)/...). glossary.js and
+  // jump-in-wiki.js already use the env value; getTranslationTarget() above
+  // fails loudly if SERIES_LOCATION is unset or missing.
   const sorted = manifest.volumes.map((v) => v.folder).sort((a, b) => {
     return parseInt(a.match(/\((\d+)\)/)?.[1]||"999",10) - parseInt(b.match(/\((\d+)\)/)?.[1]||"999",10);
   });

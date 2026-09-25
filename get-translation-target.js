@@ -357,7 +357,8 @@ async function manifestSourcesExist(seriesDir, manifest) {
  *   - With dryRun, no AI call is made: a deterministic manifest is built from
  *     the legacy convention (keeps --dry-run fully offline).
  *   - Otherwise, an existing valid manifest is reused unless force is set. A
- *     manifest is "valid" when it parses, passes validateManifest, and every
+ *     manifest is "valid" when it parses, passes validateManifest, its
+ *     seriesLocation (when present) still matches SERIES_LOCATION, and every
  *     listed source file still exists; a stale one is regenerated.
  *   - When a manifest must be (re)generated, the discovery agent runs and the
  *     validated manifest is written to <SERIES_LOCATION>/translation-target.json.
@@ -415,13 +416,28 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
         `[get-translation-target] cached manifest is invalid (${err.message}); regenerating.`
       );
     }
-    if (cached && (await manifestSourcesExist(seriesDir, cached))) {
+    // A manifest generated for a different series location is stale even when
+    // every listed (relative) source file still exists — e.g. after migrating
+    // machines: a Windows "C:\..." seriesLocation is not absolute on Linux, so
+    // any consumer trusting it would resolve every file op relative to the CWD.
+    // (Observed live: a Windows-generated manifest was reused on Linux and the
+    // character-voice task crashed with ENOENT on <CWD>/C:\.../test_story(1).)
+    const sameLocation =
+      !cached ||
+      !cached.seriesLocation ||
+      path.resolve(cached.seriesLocation) === path.resolve(seriesDir);
+    if (cached && sameLocation && (await manifestSourcesExist(seriesDir, cached))) {
       harness.logLine(
         `[get-translation-target] reusing the existing manifest (${manifestPath}).`
       );
       return cached;
     }
-    if (cached) {
+    if (cached && !sameLocation) {
+      harness.logLine(
+        `[get-translation-target] cached manifest was generated for ${cached.seriesLocation}, ` +
+          `not ${seriesDir}; regenerating.`
+      );
+    } else if (cached) {
       harness.logLine(
         `[get-translation-target] cached manifest is stale (a listed source file is missing); regenerating.`
       );
