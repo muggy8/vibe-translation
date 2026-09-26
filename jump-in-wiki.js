@@ -54,6 +54,13 @@ const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, comp
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
+const {
+  resolveSourceBundle,
+  shouldProcessChunked,
+  sourceMaterialLine,
+  chapterSegmentNote,
+  chapterContextBlock,
+} = require("./utils/source");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -173,15 +180,18 @@ function buildWikiValidatorSystemPrompt(ctx) {
  * @returns {string}
  */
 function buildWikiAuthorTurnPrompt(ctx) {
-  const { folderName, isFirst, previousFolderName } = ctx;
+  const { isFirst, previousFolderName } = ctx;
   const previousWikiLines = isFirst
     ? `- The previous volume wiki and shared wiki: (absent — this is the first volume)`
     : `- The previous volume wiki: "../${previousFolderName}/wiki.md"\n` +
       `- The previous shared wiki: "../${previousFolderName}/shared-wiki.md"`;
+  const sourceLine = ctx.bundle
+    ? sourceMaterialLine(ctx.bundle)
+    : `- The volume source: "${ctx.folderName}.md" (same folder)`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `Materials (read with readFile before writing anything):\n` +
-    `- The volume source: "${folderName}.md" (same folder)\n` +
+    `${sourceLine}\n` +
     previousWikiLines +
     `\n\n` +
     `Write the two output files in your working folder:\n` +
@@ -202,15 +212,18 @@ function buildWikiAuthorTurnPrompt(ctx) {
  * @returns {string}
  */
 function buildWikiValidatorTurnPrompt(ctx) {
-  const { values, folderName, isFirst, previousFolderName } = ctx;
+  const { values, isFirst, previousFolderName } = ctx;
   const validationFileName = `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md`;
   const previousSharedLine = isFirst
     ? ""
     : `- The previous shared wiki: "../${previousFolderName}/shared-wiki.md"\n`;
+  const sourceLine = ctx.bundle
+    ? sourceMaterialLine(ctx.bundle)
+    : `- The volume source: "${ctx.folderName}.md" (same folder)`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `Materials (read with readFile before writing anything):\n` +
-    `- The volume source: "${folderName}.md" (same folder)\n` +
+    `${sourceLine}\n` +
     `- The volume wiki under audit: "wiki.md" (same folder)\n` +
     `- The shared wiki under audit: "shared-wiki.md" (same folder)\n` +
     previousSharedLine +
@@ -228,18 +241,21 @@ function buildWikiValidatorTurnPrompt(ctx) {
  * @returns {string}
  */
 function buildWikiFeedbackTurnPrompt(ctx) {
-  const { values, folderName, isFirst, previousFolderName } = ctx;
+  const { values, isFirst, previousFolderName } = ctx;
   const validationFileName = `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md`;
   const previousSharedLine = isFirst
     ? ""
     : `- The previous shared wiki: "../${previousFolderName}/shared-wiki.md"\n`;
+  const sourceLine = ctx.bundle
+    ? sourceMaterialLine(ctx.bundle)
+    : `- The volume source: "${ctx.folderName}.md" (same folder)`;
   const feedbackPrompt = ctx.feedbackUserPrompt;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `The validation report "${validationFileName}" in your working folder is your ` +
     `work order.\n` +
     `Materials (read with readFile before changing anything):\n` +
-    `- The volume source: "${folderName}.md" (same folder)\n` +
+    `${sourceLine}\n` +
     `- The current volume wiki to correct: "wiki.md" (same folder)\n` +
     `- The current shared wiki to correct: "shared-wiki.md" (same folder)\n` +
     previousSharedLine +
@@ -248,6 +264,175 @@ function buildWikiFeedbackTurnPrompt(ctx) {
     `"shared-wiki.md" using writeFile (complete contents, overwrite). Use editFile only for ` +
     `targeted fixes. Make the smallest changes that resolve each valid finding.\n\n` +
     feedbackPrompt
+  );
+}
+
+/**
+ * The per-chapter section author turn prompt (chunked fallback): writes the
+ * wiki section for ONE chapter to wiki-<id>.md. Sections are merged into the
+ * final wiki.md by the merge pass.
+ *
+ * @param {WikiVolumeCtx} ctx - The volume context (must include bundle).
+ * @param {SourceSegment} segment - The chapter being written.
+ * @param {number} si - Zero-based position in reading order.
+ * @returns {string}
+ */
+function buildWikiSectionTurnPrompt(ctx, segment, si) {
+  const { values, isFirst, previousFolderName } = ctx;
+  const sectionFile = `wiki-${segment.id}.md`;
+  const previousWikiLines = isFirst
+    ? `- The previous volume wiki and shared wiki: (absent — this is the first volume)`
+    : `- The previous volume wiki: "../${previousFolderName}/wiki.md"\n` +
+      `- The previous shared wiki: "../${previousFolderName}/shared-wiki.md"`;
+  const sectionList = ctx.bundle.segments.map((s) => `"wiki-${s.id}.md"`).join(", ");
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    chapterContextBlock(values, ctx.bundle, segment, si) +
+    `Materials (read with readFile before writing anything):\n` +
+    `- The chapter source: "${segment.file}" (same folder)\n` +
+    `- The current shared wiki: "shared-wiki.md" (same folder) — read-only for this pass\n` +
+    previousWikiLines +
+    (si > 0 ? `\n- The previous chapter's section: "wiki-${ctx.bundle.segments[si - 1].id}.md" (same folder) — for continuity\n` : "") +
+    `\n\n` +
+    `Write the wiki section for THIS CHAPTER ONLY to the file "${sectionFile}" in your ` +
+    `working folder (writeFile, complete contents): a top-level heading with the chapter ` +
+    `title, then the chapter's plot, characters, locations and events. Do not summarize ` +
+    `other chapters and do not modify "shared-wiki.md". ` +
+    `The per-chapter sections that will be merged are: ${sectionList}.\n\n` +
+    ctx.userPrompt
+  );
+}
+
+/**
+ * The wiki merge turn prompt (chunked fallback): merges the per-chapter
+ * sections into the final wiki.md and updates the shared wiki.
+ *
+ * @param {WikiVolumeCtx} ctx - The volume context (must include bundle).
+ * @returns {string}
+ */
+function buildWikiMergeTurnPrompt(ctx) {
+  const { values, isFirst, previousFolderName } = ctx;
+  const sectionList = ctx.bundle.segments
+    .map((s) => `- "wiki-${s.id}.md" (chapter ${s.id} — ${s.title})`)
+    .join("\n");
+  const previousWikiLines = isFirst
+    ? `- The previous volume wiki and shared wiki: (absent — this is the first volume)`
+    : `- The previous volume wiki: "../${previousFolderName}/wiki.md"\n` +
+      `- The previous shared wiki: "../${previousFolderName}/shared-wiki.md"`;
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    `You are merging the per-chapter wiki sections of volume ${values.INSTALLMENT_NUMBER} ` +
+    `(the volume is processed chapter by chapter because the whole installment is too ` +
+    `large for a single pass) into the final volume wiki.\n` +
+    `Materials (read with readFile before writing anything):\n` +
+    sectionList +
+    `\n- The current shared wiki: "shared-wiki.md" (same folder)\n` +
+    previousWikiLines +
+    `\n\n` +
+    `Write the two output files in your working folder:\n` +
+    `- "wiki.md" — the complete volume wiki, assembled from the chapter sections in ` +
+    `reading order (writeFile, complete contents)\n` +
+    `- "shared-wiki.md" — the updated shared wiki, carrying forward all previous ` +
+    `entries and adding what this volume contributes (writeFile, complete contents)\n` +
+    `Keep every fact from the sections (do not drop or invent plot details); a short ` +
+    `volume summary may be added on top of the chapter sections.\n\n` +
+    ctx.userPrompt
+  );
+}
+
+/**
+ * The per-chapter validator turn prompt (chunked fallback): audits the wiki
+ * against ONE chapter and writes a partial report.
+ *
+ * @param {WikiVolumeCtx} ctx - The volume context (must include bundle).
+ * @param {SourceSegment} segment - The chapter being audited.
+ * @param {number} si - Zero-based position in reading order.
+ * @returns {string}
+ */
+function buildWikiSegmentValidatorPrompt(ctx, segment, si) {
+  const { values, isFirst, previousFolderName } = ctx;
+  const partialFile = `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}-${segment.id}.md`;
+  const previousSharedLine = isFirst
+    ? ""
+    : `- The previous shared wiki: "../${previousFolderName}/shared-wiki.md"\n`;
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    chapterContextBlock(values, ctx.bundle, segment, si) +
+    `This is a per-chapter validation pass: audit the wiki against ONE chapter only.\n` +
+    `Materials (read with readFile before writing anything):\n` +
+    `- The chapter source: "${segment.file}" (same folder)\n` +
+    `- The volume wiki under audit: "wiki.md" (same folder)\n` +
+    `- The shared wiki under audit: "shared-wiki.md" (same folder)\n` +
+    previousSharedLine +
+    `\n` +
+    `Tag every finding with the chapter id "${segment.id}" (e.g. a prefix "[${segment.id}] ").\n` +
+    `Write the partial validation report to the file "${partialFile}" in your working ` +
+    `folder (writeFile, the report format from the system prompt).\n\n` +
+    ctx.validatorUserPrompt
+  );
+}
+
+/**
+ * The findings-merge turn prompt (chunked fallback): consolidates the
+ * per-chapter partial reports into the standard validation report so the
+ * unchanged acceptance one-shot can score it.
+ *
+ * @param {WikiVolumeCtx} ctx - The volume context (must include bundle).
+ * @returns {string}
+ */
+function buildWikiFindingsMergePrompt(ctx) {
+  const { values } = ctx;
+  const list = ctx.bundle.segments
+    .map((s) => `- "jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}-${s.id}.md" (chapter ${s.id})`)
+    .join("\n");
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    `You are consolidating the per-chapter validation partials of volume ` +
+    `${values.INSTALLMENT_NUMBER} into the single standard validation report.\n` +
+    `Materials (read with readFile before writing anything):\n` +
+    list +
+    `\n\n` +
+    `Write the consolidated report to the file ` +
+    `"jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md" in your working folder ` +
+    `(writeFile, complete contents) using EXACTLY the report format from your system ` +
+    `prompt. Preserve the chapter tags on the findings, keep every valid finding ` +
+    `(deduplicate repeats), and produce the summary/verdict sections the format ` +
+    `requires, as if you had audited the whole volume in one pass.`
+  );
+}
+
+/**
+ * The per-chapter feedback turn prompt (chunked fallback): applies the
+ * chapter-tagged findings of the consolidated report to wiki.md and
+ * shared-wiki.md.
+ *
+ * @param {WikiVolumeCtx} ctx - The volume context (must include bundle).
+ * @param {SourceSegment} segment - The chapter whose findings are applied.
+ * @param {number} si - Zero-based position in reading order.
+ * @returns {string}
+ */
+function buildWikiSegmentFeedbackPrompt(ctx, segment, si) {
+  const { values, isFirst, previousFolderName } = ctx;
+  const validationFileName = `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md`;
+  const previousSharedLine = isFirst
+    ? ""
+    : `- The previous shared wiki: "../${previousFolderName}/shared-wiki.md"\n`;
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    chapterContextBlock(values, ctx.bundle, segment, si) +
+    `The validation report "${validationFileName}" in your working folder is your work ` +
+    `order — apply ONLY the findings tagged with chapter "${segment.id}".\n` +
+    `Materials (read with readFile before changing anything):\n` +
+    `- The chapter source: "${segment.file}" (same folder)\n` +
+    `- The current volume wiki to correct: "wiki.md" (same folder)\n` +
+    `- The current shared wiki to correct: "shared-wiki.md" (same folder)\n` +
+    previousSharedLine +
+    `\n` +
+    `Apply the chapter's findings and write the corrected files back: "wiki.md" and ` +
+    `"shared-wiki.md" using writeFile (complete contents, overwrite). Use editFile only ` +
+    `for targeted fixes. Make the smallest changes that resolve each valid finding; do ` +
+    `not touch content this chapter's findings do not concern.\n\n` +
+    ctx.feedbackUserPrompt
   );
 }
 
@@ -265,6 +450,10 @@ module.exports.installmentNumberFromDir = require("./utils/manifest").installmen
 async function jumpInWiki() {
   const dryRun = process.argv.includes("--dry-run");
   const force = process.argv.includes("--force");
+  // Force the chapter-by-chapter fallback for every multi-chapter epub volume
+  // (the default is whole-installment processing; the fallback also triggers
+  // automatically when the whole text exceeds SOURCE_CHUNK_THRESHOLD_CHARS).
+  const chunkedArg = process.argv.includes("--chunked");
 
   if (!seriesDir) {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
@@ -320,12 +509,25 @@ async function jumpInWiki() {
     const i = sortedFolderWithSourceMaterial.indexOf(folderName);
     const volume = volumeByFolder.get(folderName);
     const volumeDir = path.join(seriesDir, folderName);
-    const sourceFile = path.resolve(seriesDir, volume.sourceFile);
+    // Resolve the source into a bundle (utils/source.js): plain-text sources
+    // pass through as-is (the default whole-installment path); .epub sources
+    // are normalized once (cached) into per-chapter + whole Markdown files.
+    const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
+    const sourceFile = bundle.wholePath;
+    const processChunked = shouldProcessChunked(bundle, { forceChunked: chunkedArg });
+    console.log(
+      `Volume ${volume.installmentNumber}: source "${path.basename(bundle.originalPath)}" → ${bundle.format} ` +
+        `(${bundle.wholeChars} chars, ${bundle.segments.length} segment(s)) — processing ` +
+        (processChunked
+          ? "chapter by chapter (fallback: whole installment too large for one pass)"
+          : "as the whole installment (default)") +
+        "."
+    );
     const wikiOutputFile = path.join(volumeDir, "wiki.md");
     const sharedWikiOutputFile = path.join(volumeDir, "shared-wiki.md");
 
-    if (!(await fileExists(sourceFile))) {
-      throw new Error(`Required file not found: ${sourceFile}`);
+    if (!(await fileExists(bundle.originalPath))) {
+      throw new Error(`Required file not found: ${bundle.originalPath}`);
     }
 
     const values = {
@@ -400,6 +602,8 @@ async function jumpInWiki() {
       folderName,
       volumeDir,
       sourceFile,
+      bundle,
+      chunked: processChunked,
       wikiOutputFile,
       sharedWikiOutputFile,
       validationOutputFile,
@@ -427,6 +631,17 @@ async function jumpInWiki() {
         { title: "AGENT — feedback turn (applied by the author session)", prompt: buildWikiFeedbackTurnPrompt(ctx) },
         { title: "One-shot — acceptance user prompt (always tool-less)", prompt: acceptanceUserPrompt },
       ];
+      // Chunked (fallback) volumes: dump the chapter-scoped variants too.
+      if (ctx.chunked && bundle.segments.length > 1) {
+        const seg = bundle.segments[0];
+        sections.push(
+          { title: "CHUNKED — per-chapter section author turn (first chapter)", prompt: buildWikiSectionTurnPrompt(ctx, seg, 0) },
+          { title: "CHUNKED — wiki merge turn", prompt: buildWikiMergeTurnPrompt(ctx) },
+          { title: "CHUNKED — segment validator turn (first chapter)", prompt: buildWikiSegmentValidatorPrompt(ctx, seg, 0) },
+          { title: "CHUNKED — findings merge turn", prompt: buildWikiFindingsMergePrompt(ctx) },
+          { title: "CHUNKED — segment feedback turn (first chapter)", prompt: buildWikiSegmentFeedbackPrompt(ctx, seg, 0) }
+        );
+      }
       const dumpFile = await writePromptDump(
         "jump-in-wiki",
         values.INSTALLMENT_NUMBER,
@@ -490,9 +705,272 @@ async function jumpInWiki() {
 }
 
 /**
+ * Process a single volume chapter by chapter (the FALLBACK path, used when
+ * the whole installment is too large for one pass): a per-chapter section
+ * author writes wiki-<id>.md for each chapter (each with the previous
+ * chapter's section for continuity and the shared wiki read-only), then a
+ * merge pass assembles wiki.md + shared-wiki.md from the sections. The QA
+ * loop then validates the finished volume chapter by chapter (per-chapter
+ * partial reports → findings merge → acceptance) with per-chapter feedback.
+ *
+ * @param {WikiVolumeCtx} ctx - The volume context (must include bundle).
+ */
+async function runChunkedVolumeAgent(ctx) {
+  const { values, bundle, volumeDir, wikiOutputFile, sharedWikiOutputFile } = ctx;
+  console.log(
+    `Volume ${values.INSTALLMENT_NUMBER}: chapter-by-chapter fallback ` +
+      `(${bundle.segments.length} segments, ${bundle.wholeChars} chars whole)...`
+  );
+  const fsGate = await harness.createGatedFsTools({ cwd: volumeDir, allowedDirs: [volumeDir] });
+  ctx.fsGate = fsGate;
+
+  // Remove stale strays from earlier runs (agent name drift).
+  for (const stray of [
+    `jump-in-wiki-${values.INSTALLMENT_NUMBER}.md`,
+    "jump-in-wiki-shared.md",
+  ]) {
+    const strayPath = path.join(volumeDir, stray);
+    if (await fileExists(strayPath)) {
+      await fs.rm(strayPath);
+      console.log(`Removed the stale file "${stray}" (leftover from a previous run).`);
+    }
+  }
+
+  // Per-chapter section generation (fresh author agent per chapter).
+  for (let si = 0; si < bundle.segments.length; si++) {
+    const segment = bundle.segments[si];
+    const sectionFile = path.join(volumeDir, `wiki-${segment.id}.md`);
+    if (!(await fileExists(sectionFile))) {
+      await fs.writeFile(
+        sectionFile,
+        `(stub — the agent replaces this with the complete wiki section for chapter ${segment.id} of volume ${values.INSTALLMENT_NUMBER})\n`,
+        "utf8"
+      );
+    }
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: chapter ${segment.id} (${segment.title}), ` +
+        `${si + 1}/${bundle.segments.length} — writing the wiki section (author agent)...`
+    );
+    const sectionAuthor = await harness.createAgentHandle({
+      name: `wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+      systemPrompt: buildWikiAuthorSystemPrompt(ctx),
+      tools: fsGate.tools,
+      approve: fsGate.approve,
+      cwd: volumeDir,
+      maxSteps: 40,
+    });
+    try {
+      const sectionResult = await sectionAuthor.sendTurn(
+        buildWikiSectionTurnPrompt(ctx, segment, si),
+        { label: `jump-in-wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}` }
+      );
+      await assertWroteWithFallback(sectionFile, "the section author agent", sectionResult?.text);
+    } finally {
+      await sectionAuthor.close();
+    }
+  }
+
+  // Merge pass: assemble wiki.md + shared-wiki.md from the sections.
+  if (!(await fileExists(wikiOutputFile))) {
+    await fs.writeFile(
+      wikiOutputFile,
+      `(stub — the merge pass replaces this with the complete volume wiki for volume ${values.INSTALLMENT_NUMBER})\n`,
+      "utf8"
+    );
+  }
+  if (!(await fileExists(sharedWikiOutputFile))) {
+    await fs.writeFile(
+      sharedWikiOutputFile,
+      `(stub — the merge pass replaces this with the complete shared wiki)\n`,
+      "utf8"
+    );
+  }
+  console.log(`Volume ${values.INSTALLMENT_NUMBER}: merging the chapter sections into the wiki (merge agent)...`);
+  const merger = await harness.createAgentHandle({
+    name: `wiki-merge-${values.INSTALLMENT_NUMBER}`,
+    systemPrompt: buildWikiAuthorSystemPrompt(ctx),
+    tools: fsGate.tools,
+    approve: fsGate.approve,
+    cwd: volumeDir,
+    maxSteps: 40,
+  });
+  try {
+    const mergeResult = await merger.sendTurn(buildWikiMergeTurnPrompt(ctx), {
+      label: `jump-in-wiki-merge-${values.INSTALLMENT_NUMBER}`,
+    });
+    const mergeFallbackUsed = await assertWroteWithFallback(
+      [wikiOutputFile, sharedWikiOutputFile],
+      "the merge agent",
+      mergeResult?.text
+    );
+    if (mergeFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
+      const hasContent = mergeResult?.text && mergeResult.text.trim().length > 0;
+      const recoveryPrompt = hasContent
+        ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead. Please rewrite both files using writeFile now with the exact same content.`
+        : `You produced no output. Please read the chapter sections and write "wiki.md" and "shared-wiki.md" using writeFile now.`;
+      const recoveryResult = await merger.sendTurn(recoveryPrompt, {
+        label: `jump-in-wiki-merge-recovery-${values.INSTALLMENT_NUMBER}`,
+      });
+      await assertWroteWithFallback(
+        [wikiOutputFile, sharedWikiOutputFile],
+        "the merge agent (recovery)",
+        recoveryResult?.text
+      );
+    }
+  } finally {
+    await merger.close();
+  }
+
+  // QA loop: per-chapter validation partials → findings merge → acceptance.
+  await runChunkedQaLoop(ctx);
+}
+
+/**
+ * Chunked (fallback) QA loop: per-chapter validator passes (fresh agent per
+ * chapter) write jump-in-wiki-validation-NN-<id>.md partials; a findings-merge
+ * agent consolidates them into the standard jump-in-wiki-validation-NN.md; the
+ * unchanged acceptance one-shot scores it; on a failed window, per-chapter
+ * feedback agents apply the chapter-tagged findings to wiki.md + shared-wiki.md.
+ *
+ * @param {WikiVolumeCtx} ctx - The volume context (must include ctx.fsGate).
+ */
+async function runChunkedQaLoop(ctx) {
+  const { values, bundle, volumeDir, wikiOutputFile, sharedWikiOutputFile, validationOutputFile } = ctx;
+  const fsGate = ctx.fsGate;
+  const recentRollingScores = [];
+
+  for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: validation iteration ` +
+        `${iteration}/${maxValidationIterations} (chapter by chapter)...`
+    );
+
+    // Per-chapter validation partials (fresh agent per chapter).
+    for (let si = 0; si < bundle.segments.length; si++) {
+      const segment = bundle.segments[si];
+      const partialFile = path.join(
+        volumeDir,
+        `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}-${segment.id}.md`
+      );
+      const validator = await harness.createAgentHandle({
+        name: `wiki-validator-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
+        systemPrompt: buildWikiValidatorSystemPrompt(ctx),
+        tools: fsGate.tools,
+        approve: fsGate.approve,
+        cwd: volumeDir,
+        maxSteps: validatorMaxStepsFor((await fs.stat(path.join(volumeDir, segment.file))).size),
+      });
+      try {
+        const validateResult = await validator.sendTurn(
+          buildWikiSegmentValidatorPrompt(ctx, segment, si),
+          { label: `jump-in-wiki-validate-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
+        );
+        await assertWroteWithFallback(
+          partialFile,
+          `the validator agent (chapter ${segment.id})`,
+          validateResult?.text
+        );
+      } finally {
+        await validator.close();
+      }
+    }
+
+    // Findings merge: consolidate the partials into the standard report.
+    const merger = await harness.createAgentHandle({
+      name: `wiki-validator-merge-${values.INSTALLMENT_NUMBER}-${iteration}`,
+      systemPrompt: buildWikiValidatorSystemPrompt(ctx),
+      tools: fsGate.tools,
+      approve: fsGate.approve,
+      cwd: volumeDir,
+      maxSteps: 20,
+    });
+    try {
+      const mergeResult = await merger.sendTurn(
+        buildWikiFindingsMergePrompt(ctx),
+        { label: `jump-in-wiki-validate-merge-${values.INSTALLMENT_NUMBER}-${iteration}` }
+      );
+      await assertWroteWithFallback(validationOutputFile, "the findings-merge agent", mergeResult?.text);
+    } finally {
+      await merger.close();
+    }
+
+    // Acceptance (unchanged: tool-less one-shot over the standard report).
+    const acceptanceOutput = await harness.runOneShot({
+      systemPrompt: ctx.acceptanceSystemPrompt,
+      messages: [
+        { file: validationOutputFile, name: path.basename(validationOutputFile) },
+        { text: ctx.acceptanceUserPrompt },
+      ],
+      label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    });
+    const score = parseAcceptanceScore(acceptanceOutput);
+    if (score === null) {
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response ` +
+          `(got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`
+      );
+    } else {
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${score}/100 (passing score: ${ACCEPTANCE_PASSING_SCORE})`
+      );
+    }
+    if (score !== null) {
+      recentRollingScores.push(score);
+      if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) recentRollingScores.shift();
+    }
+    await saveRollingState(validationOutputFile.replace(".md", "-rolling-state.json"), recentRollingScores);
+
+    if (meetsAcceptanceCriteria(recentRollingScores)) {
+      const avg = computeRollingAverage(recentRollingScores);
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 ` +
+          `(${recentRollingScores.length} checks) meets the passing score ` +
+          `${ACCEPTANCE_PASSING_SCORE}. Accepted.`
+      );
+      break;
+    }
+
+    // Per-chapter feedback (fresh author agent per chapter, chapter-tagged findings).
+    for (let si = 0; si < bundle.segments.length; si++) {
+      const segment = bundle.segments[si];
+      const feedbackAuthor = await harness.createAgentHandle({
+        name: `wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
+        systemPrompt: buildWikiAuthorSystemPrompt(ctx),
+        tools: fsGate.tools,
+        approve: fsGate.approve,
+        cwd: volumeDir,
+        maxSteps: 40,
+      });
+      try {
+        const feedbackResult = await feedbackAuthor.sendTurn(
+          buildWikiSegmentFeedbackPrompt(ctx, segment, si),
+          { label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
+        );
+        await assertWroteWithFallback(
+          [wikiOutputFile, sharedWikiOutputFile],
+          `the author agent (feedback pass, chapter ${segment.id})`,
+          feedbackResult?.text
+        );
+      } finally {
+        await feedbackAuthor.close();
+      }
+    }
+
+    if (iteration === maxValidationIterations) {
+      ctx.limitReached = true;
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
+          `without a passing grade. The last feedback pass is unvalidated; re-run the task to validate it.`
+      );
+      break;
+    }
+  }
+}
+
+/**
  * Process a single volume: generate the wiki (author agent) -> QA loop
  * (independent validator agent + one-shot acceptance + same author session
- * for feedback).
+ * for feedback). Chunked (fallback) volumes take runChunkedVolumeAgent instead.
  *
  * @param {WikiVolumeCtx} ctx - The volume context (see jumpInWiki()).
  */
@@ -504,6 +982,12 @@ async function runVolumeAgent(ctx) {
     sharedWikiOutputFile,
     wikiAndSharedWikiExists,
   } = ctx;
+
+  // Chunked (fallback) volumes take the per-chapter flow instead.
+  if (ctx.chunked) {
+    await runChunkedVolumeAgent(ctx);
+    return;
+  }
 
   // File tools gated to this volume's folder (reads are allowed anywhere,
   // so the agents can also read the volume source and the previous volume).
@@ -797,4 +1281,12 @@ module.exports = {
   buildWikiAuthorTurnPrompt,
   buildWikiValidatorTurnPrompt,
   buildWikiFeedbackTurnPrompt,
+  buildWikiSectionTurnPrompt,
+  buildWikiMergeTurnPrompt,
+  buildWikiSegmentValidatorPrompt,
+  buildWikiFindingsMergePrompt,
+  buildWikiSegmentFeedbackPrompt,
+  runVolumeAgent,
+  runChunkedVolumeAgent,
+  runChunkedQaLoop,
 };

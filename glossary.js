@@ -57,6 +57,14 @@ const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePr
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
+const {
+  resolveSourceBundle,
+  shouldProcessChunked,
+  sourceMaterialLine,
+  sourceSegmentListLine,
+  chapterSegmentNote,
+  chapterContextBlock,
+} = require("./utils/source");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -187,22 +195,30 @@ function truncateGlossary(content) {
  * @param {GlossaryVolumeCtx} ctx - The volume context.
  * @param {{term: string, type: string, query: string}} term - The term to research.
  * @param {number} index - Zero-based index of the term (used for approximate line counting).
+ * @param {SourceSegment|null} [seg] - When set (chunked fallback), the term
+ *   section lives under this chapter's heading instead of a line number.
  * @returns {string}
  */
-function buildPerTermResearchPrompt(ctx, term, index) {
-  const { values, folderName } = ctx;
+function buildPerTermResearchPrompt(ctx, term, index, seg = null) {
+  const { values } = ctx;
   // Approximate line number: each term in the skeleton gets ~3 lines
   const approxLine = 4 + index * 3;
+  const sourceContextLine = seg
+    ? `Context you may consult (optional): the chapter source "${seg.file}" (same folder) — read it selectively with readFile/grep if you need disambiguation; you do not need to read it all.`
+    : ctx.bundle
+      ? `${ctx.chunked ? sourceSegmentListLine(ctx.bundle) : sourceMaterialLine(ctx.bundle)} — read it selectively with readFile/grep if you need disambiguation; you do not need to read it all.`
+      : `Context you may consult (optional): the volume source "${ctx.folderName}.md" (same folder) — read it selectively with readFile/grep if you need disambiguation; you do not need to read it all.`;
+  const target = seg
+    ? `the "- (pending)" line under the "### ${term.term}" heading in the "## Chapter ${seg.id}" section`
+    : `that term's "- (pending)" line (approximately line ${approxLine})`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
-    `Context you may consult (optional): the volume source "${folderName}.md" (same folder) — ` +
-    `read it selectively with readFile/grep if you need disambiguation; you do ` +
-    `not need to read it all.\n\n` +
+    `${sourceContextLine}\n\n` +
     `Your task: research the following term and write your notes to the file ` +
     `"glossary-research.md" in your working folder:\n\n` +
     `Term: ${term.term} (${term.type}) — suggested query: ${term.query}\n\n` +
     `The file "glossary-research.md" already exists. It contains a "- (pending)" ` +
-    `placeholder line for this term (approximately line ${approxLine}). ` +
+    `placeholder line for this term (${target}). ` +
     `Use editFile to replace ONLY that "- (pending)" line with your final ` +
     `research notes. Do not modify any other term's notes.\n\n` +
     `Per-term budget: at most 2 wiki_search calls and 1 wiki_extract call. Start ` +
@@ -228,9 +244,11 @@ function buildPerTermResearchPrompt(ctx, term, index) {
  * @param {GlossaryVolumeCtx} ctx - The volume context.
  * @param {{term: string, type: string, query: string}} term - The term to research.
  * @param {number} index - Zero-based index of the term.
+ * @param {SourceSegment|null} [seg] - The chapter the term was extracted from
+ *   (chunked fallback only; scopes the optional source read to that chapter).
  * @returns {Promise<void>}
  */
-async function researchOneTerm(ctx, term, index) {
+async function researchOneTerm(ctx, term, index, seg = null) {
   // Fail loudly on a wiring bug instead of registering undefined tools —
   // an undefined tool entry makes the model's first call throw the cryptic
   // "Cannot read properties of undefined (reading 'execute')" (observed live
@@ -253,7 +271,7 @@ async function researchOneTerm(ctx, term, index) {
   });
   try {
     await agent.sendTurn(
-      buildPerTermResearchPrompt(ctx, term, index),
+      buildPerTermResearchPrompt(ctx, term, index, seg),
       { label: `glossary-research-term-${ctx.values.INSTALLMENT_NUMBER}-${term.term.slice(0, 20)}` }
     );
   } finally {
@@ -267,11 +285,13 @@ async function researchOneTerm(ctx, term, index) {
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context.
  * @param {Array<{term: string, type: string, query: string, _idx: number}>} batch - Terms to research in this batch (each with a _idx property for the original index).
+ * @param {SourceSegment|null} [seg] - The chapter the batch was extracted from
+ *   (chunked fallback only).
  * @returns {Promise<void>}
  */
-async function researchBatch(ctx, batch) {
+async function researchBatch(ctx, batch, seg = null) {
   const results = await Promise.allSettled(
-    batch.map((term) => researchOneTerm(ctx, term, term._idx))
+    batch.map((term) => researchOneTerm(ctx, term, term._idx, seg))
   );
   const failed = results.filter((r) => r.status === "rejected");
   if (failed.length > 0) {
@@ -305,15 +325,16 @@ const RESEARCHER_SYSTEM_PROMPT =
  * @returns {string}
  */
 function buildGlossaryResearcherTurnPrompt(ctx, terms) {
-  const { values, folderName } = ctx;
+  const { values } = ctx;
   const termsListText = terms
     .map((t) => `- ${t.term} (${t.type}) — suggested query: ${t.query}`)
     .join("\n");
+  const sourceContextLine = ctx.bundle
+    ? `${ctx.chunked ? sourceSegmentListLine(ctx.bundle) : sourceMaterialLine(ctx.bundle)} — read it selectively with readFile/grep if a term needs disambiguation; you do not need to read it all.`
+    : `Context you may consult (optional): the volume source "${ctx.folderName}.md" (same folder) — read it selectively with readFile/grep if a term needs disambiguation; you do not need to read it all.`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
-    `Context you may consult (optional): the volume source "${folderName}.md" (same folder) — ` +
-    `read it selectively with readFile/grep if a term needs disambiguation; you do ` +
-    `not need to read it all.\n\n` +
+    `${sourceContextLine}\n\n` +
     `The notes file "glossary-research.md" in your working folder already exists and ` +
     `contains a section for each of the following terms, each with the placeholder ` +
     `line "- (pending)":\n${termsListText}\n\n` +
@@ -341,13 +362,20 @@ function buildGlossaryResearcherTurnPrompt(ctx, terms) {
  * The author agent's turn prompt (agent mode): the amended-glossary request
  * with the term list and research-notes references filled in.
  *
+ * With `seg` set (chunked fallback) the prompt is scoped to one chapter: the
+ * source line names the chapter file, and the "previous glossary" line points
+ * at the previous volume (first chapter) or at the current in-volume state
+ * (later chapters).
+ *
  * @param {GlossaryVolumeCtx} ctx - The volume context (must include glossaryTemplate).
  * @param {Array<{term: string, type: string, query: string}>} terms - The new terms.
  * @param {boolean} researchNotesAvailable - Whether glossary-research.md exists.
+ * @param {SourceSegment|null} [seg] - The chapter being processed (fallback).
+ * @param {number} [si] - Zero-based position of the chapter in reading order.
  * @returns {string}
  */
-function buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable) {
-  const { values, folderName, isFirst, previousFolderName } = ctx;
+function buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg = null, si = null) {
+  const { values, isFirst, previousFolderName } = ctx;
   const termsListText =
     terms.length > 0
       ? terms.map((t) => `- ${t.term} (${t.type})`).join("\n")
@@ -360,13 +388,32 @@ function buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable) {
     TERMS_LIST: termsListText,
     RESEARCH_NOTES: researchNotesPlaceholder,
   });
-  const previousGlossaryLine = isFirst
-    ? "- The previous glossary: (absent — this is the first volume)"
-    : `- The previous glossary: "../${previousFolderName}/glossary.md"`;
+  let sourceLine;
+  let previousGlossaryLine;
+  let chapterBlock = "";
+  if (seg) {
+    sourceLine = `- The chapter source: "${seg.file}" (same folder)`;
+    previousGlossaryLine =
+      si === 0
+        ? isFirst
+          ? "- The previous glossary: (absent — this is the first volume)"
+          : `- The previous glossary: "../${previousFolderName}/glossary.md"`
+        : `- The current glossary (state after the earlier chapters of this volume): "glossary.md" (same folder)`;
+    chapterBlock = chapterContextBlock(values, ctx.bundle, seg, si);
+  } else {
+    sourceLine =
+      ctx.bundle
+        ? sourceMaterialLine(ctx.bundle)
+        : `- The volume source: "${ctx.folderName}.md" (same folder)`;
+    previousGlossaryLine = isFirst
+      ? "- The previous glossary: (absent — this is the first volume)"
+      : `- The previous glossary: "../${previousFolderName}/glossary.md"`;
+  }
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
+    chapterBlock +
     `Materials (read with readFile before writing anything):\n` +
-    `- The volume source: "${folderName}.md" (same folder)\n` +
+    `${sourceLine}\n` +
     previousGlossaryLine +
     `\n\n` +
     `Write the complete amended glossary to the file "glossary.md" in your working ` +
@@ -383,14 +430,17 @@ function buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable) {
  * @returns {string}
  */
 function buildGlossaryValidatorTurnPrompt(ctx) {
-  const { folderName, isFirst, previousFolderName } = ctx;
+  const { isFirst, previousFolderName } = ctx;
   const previousGlossaryLine = isFirst
     ? ""
     : `- The previous glossary: "../${previousFolderName}/glossary.md"\n`;
+  const sourceLine = ctx.bundle
+    ? sourceMaterialLine(ctx.bundle)
+    : `- The volume source: "${ctx.folderName}.md" (same folder)`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `Materials (read with readFile before writing anything):\n` +
-    `- The volume source: "${folderName}.md" (same folder)\n` +
+    `${sourceLine}\n` +
     `- The amended glossary under audit: "glossary.md" (same folder)\n` +
     previousGlossaryLine +
     `\n` +
@@ -407,16 +457,19 @@ function buildGlossaryValidatorTurnPrompt(ctx) {
  * @returns {string}
  */
 function buildGlossaryFeedbackTurnPrompt(ctx) {
-  const { folderName, isFirst, previousFolderName } = ctx;
+  const { isFirst, previousFolderName } = ctx;
   const previousGlossaryLine = isFirst
     ? ""
     : `- The previous glossary: "../${previousFolderName}/glossary.md"\n`;
+  const sourceLine = ctx.bundle
+    ? sourceMaterialLine(ctx.bundle)
+    : `- The volume source: "${ctx.folderName}.md" (same folder)`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `The validation report "glossary-validation.md" in your working folder is your ` +
     `work order.\n` +
     `Materials (read with readFile before changing anything):\n` +
-    `- The volume source: "${folderName}.md" (same folder)\n` +
+    `${sourceLine}\n` +
     `- The current glossary to correct: "glossary.md" (same folder)\n` +
     previousGlossaryLine +
     `\n` +
@@ -433,6 +486,10 @@ function buildGlossaryFeedbackTurnPrompt(ctx) {
 async function glossary() {
   const dryRun = process.argv.includes("--dry-run");
   const force = process.argv.includes("--force");
+  // Force the chapter-by-chapter fallback for every multi-chapter epub volume
+  // (the default is whole-installment processing; the fallback also triggers
+  // automatically when the whole text exceeds SOURCE_CHUNK_THRESHOLD_CHARS).
+  const chunkedArg = process.argv.includes("--chunked");
 
   if (!seriesDir) {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
@@ -497,13 +554,27 @@ async function glossary() {
     const i = sorted.indexOf(folderName);
     const volume = volumeByFolder.get(folderName);
     const volumeDir = path.join(seriesDir, folderName);
-    const sourceFile = path.resolve(seriesDir, volume.sourceFile);
+    // Resolve the source into a bundle: plain-text sources pass through as-is
+    // (the default whole-installment path); .epub sources are normalized once
+    // (cached) into <base>-whole.md + per-chapter files + images/ in the
+    // volume folder. The pipelines then work on plain text only.
+    const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
+    const sourceFile = bundle.wholePath;
+    const processChunked = shouldProcessChunked(bundle, { forceChunked: chunkedArg });
+    console.log(
+      `Volume ${volume.installmentNumber}: source "${path.basename(bundle.originalPath)}" → ${bundle.format} ` +
+        `(${bundle.wholeChars} chars, ${bundle.segments.length} segment(s)) — processing ` +
+        (processChunked
+          ? "chapter by chapter (fallback: whole installment too large for one pass)"
+          : "as the whole installment (default)") +
+        "."
+    );
     const glossaryOutputFile = path.join(volumeDir, "glossary.md");
     const validationOutputFile = path.join(volumeDir, "glossary-validation.md");
     const researchNotesFile = path.join(volumeDir, "glossary-research.md");
 
-    if (!(await fileExists(sourceFile))) {
-      throw new Error(`Required source file not found: ${sourceFile}`);
+    if (!(await fileExists(bundle.originalPath))) {
+      throw new Error(`Required source file not found: ${bundle.originalPath}`);
     }
 
     const values = {
@@ -548,6 +619,8 @@ async function glossary() {
       folderName,
       volumeDir,
       sourceFile,
+      bundle,
+      chunked: processChunked,
       glossaryOutputFile,
       validationOutputFile,
       researchNotesFile,
@@ -590,6 +663,29 @@ async function glossary() {
         { title: "AGENT — feedback turn (applied by the author session)", prompt: buildGlossaryFeedbackTurnPrompt(ctx) },
         { title: "One-shot — acceptance user prompt (always tool-less)", prompt: acceptancePrompt },
       ];
+      // Chunked (fallback) volumes: dump the chapter-scoped variants too.
+      if (ctx.chunked && bundle.segments.length > 1) {
+        const seg = bundle.segments[0];
+        sections.push(
+          {
+            title: "CHUNKED — per-chapter terms extraction user prompt (first chapter)",
+            prompt: termsPrompt + "\n\n" + chapterSegmentNote(bundle, seg, 0),
+          },
+          {
+            title: "CHUNKED — segment author turn (illustrative term list)",
+            prompt: buildGlossaryAuthorTurnPrompt(ctx, illustrativeTerms, false, seg, 0),
+          },
+          {
+            title: "CHUNKED — segment validator turn (first chapter)",
+            prompt: buildGlossarySegmentValidatorPrompt(ctx, seg, 0),
+          },
+          { title: "CHUNKED — findings merge turn", prompt: buildGlossaryFindingsMergePrompt(ctx) },
+          {
+            title: "CHUNKED — segment feedback turn (first chapter)",
+            prompt: buildGlossarySegmentFeedbackPrompt(ctx, seg, 0),
+          }
+        );
+      }
       const dumpFile = await writePromptDump(
         "glossary",
         values.INSTALLMENT_NUMBER,
@@ -704,9 +800,355 @@ async function acceptanceCheck(ctx, iteration) {
 }
 
 /**
+ * The per-chapter validator turn prompt (chunked fallback). Each pass audits
+ * the glossary against ONE chapter and writes a partial report named
+ * glossary-validation-<id>.md; the findings-merge pass consolidates the
+ * partials into the standard glossary-validation.md.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @param {SourceSegment} segment - The chapter being audited.
+ * @param {number} si - Zero-based position in reading order.
+ * @returns {string}
+ */
+function buildGlossarySegmentValidatorPrompt(ctx, segment, si) {
+  const { values, isFirst, previousFolderName } = ctx;
+  const partialFile = `glossary-validation-${segment.id}.md`;
+  const previousGlossaryLine = isFirst
+    ? ""
+    : `- The previous glossary: "../${previousFolderName}/glossary.md"\n`;
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    chapterContextBlock(values, ctx.bundle, segment, si) +
+    `This is a per-chapter validation pass: audit the glossary against ONE chapter only.\n` +
+    `Materials (read with readFile before writing anything):\n` +
+    `- The chapter source: "${segment.file}" (same folder)\n` +
+    `- The glossary under audit: "glossary.md" (same folder)\n` +
+    previousGlossaryLine +
+    `\n` +
+    `Check that everything this chapter introduces (terms, names, concepts) is ` +
+    `covered correctly in the glossary, and that nothing contradicts the chapter. ` +
+    `Tag every finding with the chapter id "${segment.id}" (e.g. a prefix "[${segment.id}] ").\n` +
+    `Write the partial validation report to the file "${partialFile}" in your working ` +
+    `folder (writeFile, the report format from the system prompt).\n\n` +
+    ctx.validatorPrompt
+  );
+}
+
+/**
+ * The findings-merge turn prompt (chunked fallback): consolidates the
+ * per-chapter partial reports into the standard glossary-validation.md so the
+ * unchanged acceptance one-shot can score it.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @returns {string}
+ */
+function buildGlossaryFindingsMergePrompt(ctx) {
+  const { values } = ctx;
+  const list = ctx.bundle.segments
+    .map((s) => `- "glossary-validation-${s.id}.md" (chapter ${s.id})`)
+    .join("\n");
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    `You are consolidating the per-chapter validation partials of volume ` +
+    `${values.INSTALLMENT_NUMBER} into the single standard validation report.\n` +
+    `Materials (read with readFile before writing anything):\n` +
+    list +
+    `\n\n` +
+    `Write the consolidated report to the file "glossary-validation.md" in your ` +
+    `working folder (writeFile, complete contents) using EXACTLY the report format ` +
+    `from your system prompt. Preserve the chapter tags on the findings, keep every ` +
+    `valid finding (deduplicate repeats), and produce the summary/verdict sections ` +
+    `the format requires, as if you had audited the whole volume in one pass.`
+  );
+}
+
+/**
+ * The per-chapter feedback turn prompt (chunked fallback): applies the
+ * chapter-tagged findings of the consolidated report to the glossary.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @param {SourceSegment} segment - The chapter whose findings are applied.
+ * @param {number} si - Zero-based position in reading order.
+ * @returns {string}
+ */
+function buildGlossarySegmentFeedbackPrompt(ctx, segment, si) {
+  const { values } = ctx;
+  return (
+    `Working folder: the volume folder (you are in it).\n\n` +
+    chapterContextBlock(values, ctx.bundle, segment, si) +
+    `The validation report "glossary-validation.md" in your working folder is your ` +
+    `work order — apply ONLY the findings tagged with chapter "${segment.id}".\n` +
+    `Materials (read with readFile before changing anything):\n` +
+    `- The chapter source: "${segment.file}" (same folder)\n` +
+    `- The current glossary to correct: "glossary.md" (same folder)\n` +
+    `\n` +
+    `Apply the chapter's findings and write the complete corrected glossary back to ` +
+    `"glossary.md" using writeFile (complete contents, overwrite). Use editFile only ` +
+    `for targeted fixes. Make the smallest changes that resolve each valid finding; ` +
+    `do not touch entries this chapter's findings do not concern.\n\n` +
+    ctx.feedbackPrompt
+  );
+}
+
+/**
+ * Create or extend the skeleton-first research notes file with this chapter's
+ * terms (chunked fallback). Chapter 1 creates the file with the volume header;
+ * later chapters append a "## Chapter <id>" section. Each term gets a
+ * "### <term>" heading with a "- (pending)" placeholder line.
+ *
+ * @param {string} researchNotesFile - Absolute path of glossary-research.md.
+ * @param {{INSTALLMENT_NUMBER: string}} values - The volume values.
+ * @param {SourceSegment} segment - The chapter being researched.
+ * @param {Array<{term: string, type: string, query: string}>} terms - Its new terms.
+ * @param {boolean} isFirstChapter - True for the first chapter of the volume.
+ * @returns {Promise<void>}
+ */
+async function appendResearchSkeleton(researchNotesFile, values, segment, terms, isFirstChapter) {
+  const section = [`## Chapter ${segment.id} — ${segment.title}`, ""];
+  for (const t of terms) {
+    section.push(`### ${t.term}`);
+    section.push("- (pending)");
+  }
+  section.push("");
+  const text = section.join("\n");
+  if (isFirstChapter || !(await fileExists(researchNotesFile))) {
+    await fs.writeFile(
+      researchNotesFile,
+      `# Research Notes — Volume ${values.INSTALLMENT_NUMBER}\n\n${text}`,
+      "utf8"
+    );
+  } else {
+    await fs.appendFile(researchNotesFile, `\n${text}`, "utf8");
+  }
+}
+
+/**
+ * Process a single volume chapter by chapter (the FALLBACK path, used when
+ * the whole installment is too large for one pass): each chapter segment goes
+ * through the same stage sequence a whole volume does — extract → research →
+ * amend — chained so each chapter builds on the previous one's glossary
+ * state. The QA loop then validates the finished volume chapter by chapter
+ * (per-chapter partial reports → findings merge → acceptance) with
+ * per-chapter feedback passes.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context (must include bundle).
+ */
+async function runChunkedVolumeAgent(ctx) {
+  const {
+    values,
+    bundle,
+    volumeDir,
+    glossaryOutputFile,
+    researchNotesFile,
+    isFirst,
+    previousGlossaryFile,
+    termsPrompt,
+    termsSystemPrompt,
+  } = ctx;
+  console.log(
+    `Volume ${values.INSTALLMENT_NUMBER}: chapter-by-chapter fallback ` +
+      `(${bundle.segments.length} segments, ${bundle.wholeChars} chars whole)...`
+  );
+
+  const fsGate = await harness.createGatedFsTools({ cwd: volumeDir, allowedDirs: [volumeDir] });
+  ctx.fsGate = fsGate;
+  ctx.wikiTools = harness.createWikiTools();
+
+  // Stale stray from earlier runs (same name anchor as the whole flow).
+  const strayGlossary = path.join(volumeDir, `glossary-${values.INSTALLMENT_NUMBER}.md`);
+  if (await fileExists(strayGlossary)) {
+    await fs.rm(strayGlossary);
+    console.log(`Removed the stale file "${strayGlossary}" (leftover from a previous run).`);
+  }
+
+  for (let si = 0; si < bundle.segments.length; si++) {
+    const segment = bundle.segments[si];
+    // 1. Extract this chapter's new terms (one-shot). The cumulative reference
+    // is the previous volume's glossary for the first chapter and the current
+    // in-volume glossary afterwards.
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: chapter ${segment.id} (${segment.title}), ` +
+        `${si + 1}/${bundle.segments.length} — extracting terms...`
+    );
+    const messages = [{ file: path.join(volumeDir, segment.file), name: segment.file }];
+    const stateFile = si === 0 ? previousGlossaryFile : glossaryOutputFile;
+    if (stateFile) {
+      messages.push({ file: stateFile, name: si === 0 ? "glossary-previous.md" : "glossary-current.md" });
+    }
+    messages.push({ text: termsPrompt }, { text: chapterSegmentNote(bundle, segment, si) });
+    const termsOutput = await harness.runOneShot({
+      systemPrompt: termsSystemPrompt,
+      messages,
+      label: `glossary-terms-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+    });
+    let terms = [];
+    try {
+      terms = parseTerms(termsOutput);
+    } catch (err) {
+      console.warn(
+        `Volume ${values.INSTALLMENT_NUMBER}: could not parse the term list for ` +
+          `chapter ${segment.id} (${err.message}). Continuing without research.`
+      );
+    }
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: extracted ${terms.length} new term(s) from chapter ${segment.id}.`
+    );
+
+    // 2. Research this chapter's new terms (skeleton-first, appended per chapter).
+    if (researchEnabled && terms.length > 0) {
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: researching ${terms.length} new term(s) ` +
+          `of chapter ${segment.id} (concurrency=${RESEARCH_CONCURRENCY})...`
+      );
+      await appendResearchSkeleton(researchNotesFile, values, segment, terms, si === 0);
+      const termsWithIndices = terms.map((term, idx) => ({ ...term, _idx: idx }));
+      for (let i = 0; i < termsWithIndices.length; i += RESEARCH_CONCURRENCY) {
+        const batch = termsWithIndices.slice(i, i + RESEARCH_CONCURRENCY);
+        await researchBatch(ctx, batch, segment);
+        if (i + RESEARCH_CONCURRENCY < termsWithIndices.length) {
+          const delayMs = parseInt(process.env.RESEARCH_DELAY_MS, 10) || 300;
+          await new Promise((r) => setTimeout(r, delayMs));
+        }
+      }
+    }
+
+    // 3. Amend the glossary with this chapter's terms (fresh author agent).
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: amending the glossary with chapter ${segment.id} (author agent)...`
+    );
+    await generateGlossary(ctx, terms, researchEnabled && terms.length > 0, segment, si);
+  }
+
+  // QA loop: per-chapter validation partials → findings merge → acceptance.
+  await runChunkedQaLoop(ctx);
+}
+
+/**
+ * Chunked (fallback) QA loop: per-chapter validator passes (fresh agent per
+ * chapter) write glossary-validation-<id>.md partials; a findings-merge agent
+ * consolidates them into the standard glossary-validation.md; the unchanged
+ * acceptance one-shot scores it; on a failed window, per-chapter feedback
+ * agents apply the chapter-tagged findings.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context (must include ctx.fsGate).
+ */
+async function runChunkedQaLoop(ctx) {
+  const { values, bundle, volumeDir, glossaryOutputFile, validationOutputFile } = ctx;
+  const fsGate = ctx.fsGate;
+  const recentRollingScores = [];
+
+  for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: validation iteration ` +
+        `${iteration}/${maxValidationIterations} (chapter by chapter)...`
+    );
+
+    // Per-chapter validation partials (fresh agent per chapter).
+    for (let si = 0; si < bundle.segments.length; si++) {
+      const segment = bundle.segments[si];
+      const partialFile = path.join(volumeDir, `glossary-validation-${segment.id}.md`);
+      const validator = await harness.createAgentHandle({
+        name: `validator-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
+        systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE,
+        tools: fsGate.tools,
+        approve: fsGate.approve,
+        cwd: volumeDir,
+        maxSteps: validatorMaxStepsFor((await fs.stat(path.join(volumeDir, segment.file))).size),
+      });
+      try {
+        const validateResult = await validator.sendTurn(
+          buildGlossarySegmentValidatorPrompt(ctx, segment, si),
+          { label: `glossary-validate-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
+        );
+        await assertWroteWithFallback(
+          partialFile,
+          `the validator agent (chapter ${segment.id})`,
+          validateResult?.text
+        );
+      } finally {
+        await validator.close();
+      }
+    }
+
+    // Findings merge: consolidate the partials into the standard report.
+    const merger = await harness.createAgentHandle({
+      name: `validator-merge-${values.INSTALLMENT_NUMBER}-${iteration}`,
+      systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE,
+      tools: fsGate.tools,
+      approve: fsGate.approve,
+      cwd: volumeDir,
+      maxSteps: 20,
+    });
+    try {
+      const mergeResult = await merger.sendTurn(
+        buildGlossaryFindingsMergePrompt(ctx),
+        { label: `glossary-validate-merge-${values.INSTALLMENT_NUMBER}-${iteration}` }
+      );
+      await assertWroteWithFallback(validationOutputFile, "the findings-merge agent", mergeResult?.text);
+    } finally {
+      await merger.close();
+    }
+
+    // Acceptance (unchanged: tool-less one-shot over the standard report).
+    const score = await acceptanceCheck(ctx, iteration);
+    if (score !== null) {
+      recentRollingScores.push(score);
+      if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) recentRollingScores.shift();
+    }
+    const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
+    await saveRollingState(stateFilePath, recentRollingScores);
+
+    if (meetsAcceptanceCriteria(recentRollingScores)) {
+      const avg = computeRollingAverage(recentRollingScores);
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 ` +
+          `(${recentRollingScores.length} checks) meets the passing score ` +
+          `${ACCEPTANCE_PASSING_SCORE}. Accepted.`
+      );
+      break;
+    }
+
+    // Per-chapter feedback (fresh agent per chapter, chapter-tagged findings).
+    for (let si = 0; si < bundle.segments.length; si++) {
+      const segment = bundle.segments[si];
+      const feedbackAuthor = await harness.createAgentHandle({
+        name: `feedback-author-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
+        systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
+        tools: fsGate.tools,
+        approve: fsGate.approve,
+        cwd: volumeDir,
+        maxSteps: 40,
+      });
+      try {
+        const feedbackResult = await feedbackAuthor.sendTurn(
+          buildGlossarySegmentFeedbackPrompt(ctx, segment, si),
+          { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
+        );
+        await assertWroteWithFallback(
+          glossaryOutputFile,
+          `the author agent (feedback pass, chapter ${segment.id})`,
+          feedbackResult?.text
+        );
+      } finally {
+        await feedbackAuthor.close();
+      }
+    }
+
+    if (iteration === maxValidationIterations) {
+      ctx.limitReached = true;
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
+          `without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`
+      );
+      break;
+    }
+  }
+}
+
+/**
  * Process a single volume: extract terms -> research (researcher agent) ->
  * amend the glossary (author agent) -> QA loop (validator agent + acceptance
- * + feedback).
+ * + feedback). Chunked (fallback) volumes take runChunkedVolumeAgent instead.
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
  */
@@ -724,6 +1166,12 @@ async function runVolumeAgent(ctx) {
     termsPrompt,
     termsSystemPrompt,
   } = ctx;
+
+  // Chunked (fallback) volumes take the per-chapter flow instead.
+  if (ctx.chunked) {
+    await runChunkedVolumeAgent(ctx);
+    return;
+  }
 
   // Pass 1: extract the new terms (single-shot, as in classic mode — an
   // exhaustive one-pass JSON extraction that needs no tools).
@@ -843,17 +1291,22 @@ async function runVolumeAgent(ctx) {
 /**
  * Generate (or regenerate) the glossary using a standalone author agent.
  * The agent is created and closed within this function — no persistent session.
+ * With `seg` set (chunked fallback) the pass is scoped to one chapter: the
+ * prompt names the chapter file and the current in-volume state.
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context.
  * @param {Array<{term: string, type: string, query: string}>} terms - The new terms.
  * @param {boolean} researchNotesAvailable - Whether research notes exist.
+ * @param {SourceSegment|null} [seg] - The chapter being processed (fallback).
+ * @param {number} [si] - Zero-based position of the chapter in reading order.
  * @returns {Promise<void>}
  */
-async function generateGlossary(ctx, terms, researchNotesAvailable) {
-  const { values, volumeDir, glossaryOutputFile, sourceFile } = ctx;
+async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, si = null) {
+  const { values, volumeDir, glossaryOutputFile } = ctx;
+  const labelSuffix = seg ? `-${seg.id}` : "";
 
   const author = await harness.createAgentHandle({
-    name: `author-${values.INSTALLMENT_NUMBER}`,
+    name: `author-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
     systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
     tools: ctx.fsGate.tools,
     approve: ctx.fsGate.approve,
@@ -862,8 +1315,8 @@ async function generateGlossary(ctx, terms, researchNotesAvailable) {
   });
   try {
     const amendResult = await author.sendTurn(
-      buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable),
-      { label: `glossary-amend-${values.INSTALLMENT_NUMBER}` }
+      buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg, si),
+      { label: `glossary-amend-${values.INSTALLMENT_NUMBER}${labelSuffix}` }
     );
     const fallbackUsed = await assertWroteWithFallback(
       glossaryOutputFile,
@@ -1083,4 +1536,10 @@ module.exports = {
   buildGlossaryAuthorTurnPrompt,
   buildGlossaryValidatorTurnPrompt,
   buildGlossaryFeedbackTurnPrompt,
+  buildGlossarySegmentValidatorPrompt,
+  buildGlossaryFindingsMergePrompt,
+  buildGlossarySegmentFeedbackPrompt,
+  appendResearchSkeleton,
+  runChunkedVolumeAgent,
+  runChunkedQaLoop,
 };

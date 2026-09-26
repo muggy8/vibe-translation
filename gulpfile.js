@@ -14,6 +14,11 @@
  *   npx gulp glossary --force         # regenerate even if the glossary exists
  *   npx gulp character-voice          # build the character voice reference
  *   npx gulp style-guide              # build the style guide
+ *   npx gulp <task> --chunked         # force the chapter-by-chapter fallback for
+ *                                     # multi-chapter epub volumes (the default is
+ *                                     # whole-installment processing; the fallback
+ *                                     # also triggers automatically when the whole
+ *                                     # text exceeds SOURCE_CHUNK_THRESHOLD_CHARS)
  *   (default task)                     # all four in order:
  *                                     # glossary -> character-voice -> style-guide -> jump-in-wiki
  */

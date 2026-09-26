@@ -90,12 +90,17 @@ const DISCOVERY_SYSTEM_PROMPT = [
   "- A \"volume\" is a top-level subfolder of the series location that holds one",
   "  installment of the series. Ignore anything that is not a volume folder",
   "  (version-control dirs like \".git\", nested tool or client folders, and",
-  "  loose files such as .epub).",
+  "  loose files outside volume folders).",
   "- Inside each volume folder, identify the single file that is the actual",
-  "  source text of the novel. Ignore generated artifacts and assets:",
+  '  source text of the novel. The source is either a Markdown file (the',
+  '  convention is \"<folder>.md\" matching the folder name) or an EPUB file',
+  '  (\"<folder>.epub\"). Ignore generated artifacts, bundle outputs and assets:',
   "  wiki.md, shared-wiki.md, glossary.md, glossary-research.md,",
-  "  glossary-validation.md, jump-in-wiki-validation-*.md, image folders, and",
-  "  the manifest file (translation-target.json).",
+  "  glossary-validation.md, jump-in-wiki-validation-*.md, character-voice.md,",
+  "  character-voice-validation*.md, pov-map.md, style-guide.md,",
+  "  style-guide-validation*.md, *-bundle.meta.json, *-whole.md, *-ch*.md",
+  "  (chapters, chN.K interlude/epilogue files), images/ folders, and the",
+  "  manifest file (translation-target.json).",
   "- Determine each volume's installment number (a zero-padded string, e.g.",
   "  \"01\") and list the volumes in correct reading order (first volume first).",
   "- Be exact. The JSON you write is parsed by code and must be valid JSON.",
@@ -156,8 +161,9 @@ function validateManifest(manifest) {
  * Build a manifest with the legacy hard-coded convention (no AI call). This is
  * the --dry-run backend and a resilience fallback: volume folders are the
  * directories under SERIES_LOCATION whose name contains SERIES_NAME,
- * sorted in natural order, with the source assumed to be "<folder>/<folder>.md".
- * Folders whose expected source file is missing are skipped.
+ * sorted in natural order, with the source assumed to be "<folder>/<folder>.md"
+ * (or "<folder>/<folder>.epub" when the Markdown file is absent). Folders whose
+ * expected source file is missing are skipped.
  *
  * @param {string} seriesDir - The SERIES_LOCATION path.
  * @param {{sourceLanguage: string, targetLanguage: string}} langs - The
@@ -177,8 +183,17 @@ async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLan
   const volumes = [];
   for (const folderName of sorted) {
     const volumeDir = path.join(seriesDir, folderName);
-    const sourceFile = path.join(folderName, `${folderName}.md`); // relative to seriesDir
-    if (!(await fileExists(path.join(seriesDir, sourceFile)))) continue;
+    // Convention: "<folder>/<folder>.md"; epub sources fall back to
+    // "<folder>/<folder>.epub" (the bundle layout normalizes either).
+    const candidates = [`${folderName}.md`, `${folderName}.epub`];
+    let sourceFile = null;
+    for (const candidate of candidates) {
+      if (await fileExists(path.join(volumeDir, candidate))) {
+        sourceFile = path.join(folderName, candidate); // relative to seriesDir
+        break;
+      }
+    }
+    if (!sourceFile) continue;
     volumes.push({
       installmentNumber: installmentNumberFromDir(volumeDir),
       folder: folderName,

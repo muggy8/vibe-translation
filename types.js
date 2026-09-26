@@ -33,6 +33,32 @@
  * @property {TranslationTargetVolume[]}    volumes          — Array of volume entries.
  */
 
+// ─── Source bundles (utils/source.js) ───────────────────────────────────────
+
+/**
+ * @typedef {Object} SourceSegment
+ * One readable segment of a volume's source, in reading order.
+ * @property {string} id    — "whole" | "ch0" | "chN" | "chN.K" (interlude/epilogue K after chapter N).
+ * @property {string} file  — File name inside the volume folder.
+ * @property {string} title — The chapter title (or the file name for text sources).
+ * @property {number} chars — Character count of the segment file.
+ * @property {string} [path] — Absolute path (set by materializeBundle).
+ */
+
+/**
+ * @typedef {Object} SourceBundle
+ * The resolved, normalized source of a volume.
+ * @property {"text"|"epub"} format     — "text" = plain file as-is, "epub" = extracted bundle.
+ * @property {string} originalPath      — The real source file on disk (.md/.txt/.epub).
+ * @property {string} base              — The source base name (no extension).
+ * @property {string} volumeDir         — The volume folder.
+ * @property {string} wholePath         — The text file covering the whole volume.
+ * @property {SourceSegment[]} segments — In reading order (authoritative — chN.K interlude files do not sort by name).
+ * @property {string|null} imagesDir    — The images/ folder (epub bundles with images).
+ * @property {number} wholeChars        — Character count of the whole-volume text.
+ * @property {boolean} cacheHit         — True when a cached epub bundle was reused.
+ */
+
 // ─── Workflow volume contexts ────────────────────────────────────────────────
 
 /**
@@ -47,6 +73,8 @@
  * @property {{INSTALLMENT_NUMBER: string}} values
  * @property {string} volumeDir
  * @property {string} sourceFile
+ * @property {SourceBundle} bundle — The resolved source bundle (utils/source.js).
+ * @property {boolean} chunked — True when the volume uses the chapter-by-chapter fallback.
  * @property {string} glossaryOutputFile
  * @property {string} validationOutputFile
  * @property {string} glossarySystemPrompt
@@ -69,6 +97,8 @@
  * @property {{INSTALLMENT_NUMBER: string}} values
  * @property {string} volumeDir
  * @property {string} sourceFile
+ * @property {SourceBundle} bundle — The resolved source bundle (utils/source.js).
+ * @property {boolean} chunked — True when the volume uses the chapter-by-chapter fallback.
  * @property {string} wikiOutputFile
  * @property {string} sharedWikiOutputFile
  * @property {string} validationOutputFile
@@ -93,6 +123,8 @@
  * @property {{INSTALLMENT_NUMBER: string}} values
  * @property {string} volumeDir
  * @property {string} sourceFile
+ * @property {SourceBundle} bundle — The resolved source bundle (utils/source.js).
+ * @property {boolean} chunked — True when the volume uses the chapter-by-chapter fallback.
  * @property {string} voiceOutputFile
  * @property {string} povOutputFile
  * @property {string} validationOutputFile
@@ -120,6 +152,8 @@
  * @property {{INSTALLMENT_NUMBER: string}} values
  * @property {string} volumeDir
  * @property {string} sourceFile
+ * @property {SourceBundle} bundle — The resolved source bundle (utils/source.js).
+ * @property {boolean} chunked — True when the volume uses the chapter-by-chapter fallback.
  * @property {string} styleOutputFile
  * @property {string} validationOutputFile
  * @property {string} authorSystemPrompt
@@ -226,6 +260,8 @@
 module.exports = {
   TranslationTargetManifest: true,
   TranslationTargetVolume: true,
+  SourceSegment: true,
+  SourceBundle: true,
   ResearchConcurrency: true,
   GlossaryVolumeCtx: true,
   WikiVolumeCtx: true,

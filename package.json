@@ -27,8 +27,10 @@
     "@ai-sdk/openai": "^3.0.104",
     "@openharness/core": "^0.7.0",
     "ai": "^6.0.270",
+    "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
     "file-type": "^22.0.1",
+    "jszip": "^3.10.2",
     "natural-orderby": "^5.0.0",
     "undici": "^8.10.0",
     "zod": "^4.4.3"
@@ -37,4 +39,3 @@
     "gulp": "^5.0.1"
   }
 }
-

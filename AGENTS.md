@@ -25,6 +25,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `... --dry-run` | No AI calls; dump the exact prompts to `.dry-run/<task>-NN.md` |
 | `... --force` | Regenerate even if outputs already exist |
 | `... --volume NN` | Process a single volume (e.g. `--volume 01`) |
+| `... --chunked` | Force the chapter-by-chapter fallback for multi-chapter epub volumes (the default is whole-installment processing; the fallback also triggers automatically when the whole text exceeds `SOURCE_CHUNK_THRESHOLD_CHARS`) |
 | `npm test` | Pure-function tests (no AI, no network) |
 | `npm run smoke` | Live smoke test against the `.env` endpoint (`one-shot` / `research` / `fs` arg selects one check) |
 | `npm start` | Ad-hoc harness CLI: `node harness.js --system "..." --text "..." [--file f --name n]` |
@@ -37,6 +38,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `utils/fs.js` | Filesystem helpers: `fileExists`, `assertWrote`. |
 | `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict` (legacy binary verdict — kept for compatibility, no longer used in the acceptance path), `parseAcceptanceScore` (parses the 0–100 score from the acceptance one-shot reply; `null` = unparseable = failed check), `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
+| `utils/source.js` | Source-bundle helpers: `resolveSourceBundle` (normalizes a volume's source into a `SourceBundle`; plain-text passes through as-is, `.epub` is extracted once and cached), `shouldProcessChunked` (decides whole-installment vs chapter-by-chapter fallback), `extractEpubToBundle` (jszip + cheerio; XHTML → Markdown, per-chapter files, interludes, epilogue, images), `assignSegmentIds`, `classifyTitle`, `xhtmlToMarkdown`, `sourceMaterialLine`, `sourceSegmentListLine`, `chapterSegmentNote`, `chapterContextBlock`, `isEpubPath`, `normalizeZipPath`. All four task modules resolve their source through `resolveSourceBundle` at the choke point. |
 | `harness.js` | The AI layer: one-shot calls, agent handles, wiki tools, gated fs tools, provider plumbing, run logging, and the runaway-generation guard (aborts agent turns that produce excessive text without tool calls). Never bypass it to talk to the model. Logs every AI call to `.logs/<timestamp>/` — per-agent chat histories (system prompt, messages, assistant response, reasoning, tool calls) and one-shot call dumps — plus the summary log (greppable `CALL`/`RESULT`/`WARNING` lines). |
 | `research.js` | Client-side web research (Wikipedia Action API + optional Brave/Tavily/Serper). No LLM involved. |
 | `glossary.js` | Glossary task logic. |
@@ -93,6 +95,17 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
    (no persistent session — each feedback turn starts with a clean context
    that includes the validation report and current glossary).
 4. **Idempotency**: a volume whose outputs already exist and pass acceptance is skipped (unless `--force`). The skip-check reads a persisted rolling-window state file (`*-rolling-state.json`) written alongside the validation report during the last run, recomputing the acceptance decision deterministically — no AI call needed. If the state file is missing or corrupt, the check falls back to regenerating (fail-open). A failed skip-check degrades to "not skipped" (fail-open, by design).
+
+### Source bundle & chapter-by-chapter fallback (`utils/source.js`)
+
+Every task resolves its volume source through `resolveSourceBundle()` at the choke point (right after manifest discovery). A plain-text source passes through as a single-segment bundle; an `.epub` is extracted once (jszip + cheerio, cached in `<base>-bundle.meta.json` + per-chapter files) into a `SourceBundle`. **The default processing mode is whole-installment** (the `-whole.md` file); the **chapter-by-chapter fallback** activates only when the whole text exceeds `SOURCE_CHUNK_THRESHOLD_CHARS` (default 120000) or `--chunked` is passed. Bundle layout in the volume folder:
+
+- `<base>-whole.md` — the full normalized text (what whole-mode stages read)
+- `<base>-ch0.md` — prologue; `<base>-ch1..N.md` — chapters; `<base>-chN.1..K.md` — interludes (and epilogues) after chapter N (the counter K restarts at 1 for each chapter; a segment before any chapter is `ch0.K`)
+- `images/` — extracted images + `manifest.json`
+- `<base>-bundle.meta.json` — extraction cache (epub mtime/hash → skip re-extraction; `--force` re-extracts)
+
+Chunked mode shape (all four pipelines): generation stages run per chapter in reading order — each chapter sees the previous chapter's output (chained, so no client-side merge for the cumulative artifacts: glossary / voice reference / style guide simply carry forward into the next chapter's state). The wiki is the exception: per-chapter section files (`wiki-<id>.md`) are assembled into `wiki.md` + `shared-wiki.md` by a merge agent. QA runs per-chapter validator partials → a findings-merge agent writes the standard `*-validation.md` → the unchanged acceptance one-shot scores it → per-chapter feedback applies the chapter-tagged findings. **Never iterate `bundle.segments` by filename** — `chN.K` interludes do not sort into reading order; always iterate the `segments` array (gotcha 20).
 
 ## 4. Pipeline A: glossary (`glossary.js`)
 
@@ -189,6 +202,12 @@ Artifacts per volume folder: `style-guide.md` (cumulative snapshot), `style-guid
 | `TRANSLATION_SOURCE_LANGUAGE` | Japanese | Source language — fills `{{SOURCE_LANGUAGE}}` in the prompts |
 | `TRANSLATION_TARGET_LANGUAGE` | English | Target language — fills `{{TARGET_LANGUAGE}}` in the prompts |
 
+### Source bundle (`SOURCE_*`)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `SOURCE_CHUNK_THRESHOLD_CHARS` | `120000` | Whole-installment char count above which the chapter-by-chapter fallback activates automatically (see §3 "Source bundle & chapter-by-chapter fallback"). `--chunked` forces it for any multi-chapter epub. |
+
 ### Agents (`AGENT_*`)
 
 | Var | Default | Meaning |
@@ -259,6 +278,7 @@ Artifacts per volume folder: `style-guide.md` (cumulative snapshot), `style-guid
 17. **Runaway-generation guard (`AGENT_TEXT_GUARD_CHARS`):** the harness aborts an agent turn when it produces more than `AGENT_TEXT_GUARD_CHARS` (default 30,000) characters of text with fewer than 3 tool calls. This catches models that emit malformed tool-call text (e.g. Qwen-native `<tool_call>` tags in the content field) instead of using the API-level `tool_calls` protocol. Observed live: a local Qwen3 model generated 962 KB of repeated `listFiles(path='.'); readFile(...)` text without a single valid tool call, burning tokens for over an hour. The guard aborts the underlying fetch via an `AbortController` signal and throws a descriptive error. The threshold is tunable via the env var; lower it if you see false positives with large legitimate outputs, raise it if you see the guard not triggering fast enough.
 18. **Fail-loudly guard for small malformed tool calls (`assertRealToolCalls` in `character-voice.js`):** the 30K runaway guard above only fires on *large* text output. A local Qwen endpoint also intermittently emits *small* malformed tool calls — a few dozen chars of `tool_call` / `<function=…>` text with zero real `tool_calls` — so `npm run smoke fs` can pass while a workflow turn does nothing (no reads, no writes). `character-voice.js` now calls `assertRealToolCalls(result, who, volume)` after every agent `sendTurn` in the compile/validate/feedback stages: when a turn made zero real tool calls but its text contains `tool_call` / `<function=`, it throws a diagnostic error (pointing at `.logs/` and the smoke test) instead of letting `assertWroteWithFallback` pass on a stale file and the acceptance loop burn all iterations. The pure detector `emittedToolCallAsText` is exported and unit-tested. `style-guide.js` ships the identical guard (every agent `sendTurn` in compile/validate/feedback is checked). **`glossary.js` and `jump-in-wiki.js` still have the same latent exposure and should get the identical guard.**
 19. **Never hand the npm undici Agent to Node's global fetch (`makeProviderFetch` in `harness.js`).** The project's `undici` dependency (v8) is a *different build* from Node's bundled undici (which powers the global `fetch`). Passing `noTimeoutAgent` to the global `fetch` mixes request-handler protocols: on Node builds whose bundled undici is older, the dispatch throws `InvalidArgumentError: invalid onRequestStart method` (`UND_ERR_INVALID_ARG`) before any bytes are sent. This is Node-version-dependent, so identical code + `node_modules` can work on one machine (e.g. Windows Node) and fail on another (Linux Node 22) — observed live right after a Windows→Linux migration. The fix pattern: dispatch through undici's *own* `fetch` (same build as the Agent), and normalize `Headers` instances to plain objects first (undici's webidl converter would silently convert a foreign Headers instance to an empty record, dropping auth/content-type).
+20. **Never sort epub bundle segments by filename — iterate `bundle.segments`.** Interlude (and epilogue) files are named `<base>-chN.K.md` where N is the chapter that existed immediately before the segment and K restarts at 1 for each chapter (`ch1.md`, `ch1.1.md`, `ch2.md`, `ch2.1.md`, `ch2.2.md`, `ch3.md`…). A filename sort misorders `chN.md` vs `chN.K.md` (a plain string sort puts `chN.1.md` *before* `chN.md` because `1` < `m`). The `SourceBundle.segments` array is the single source of truth for reading order (set by `assignSegmentIds` during extraction). Related: the epub extraction is cached in `<base>-bundle.meta.json` (keyed on the epub's mtime/size plus a `schema` version — renaming the id scheme bumps `BUNDLE_SCHEMA_VERSION` and forces re-extraction, removing the stale old-named segment files); `--force` re-extracts, and a deleted/stale cache file just triggers re-extraction (fail-open).
 
 ## 10. Conventions
 
@@ -267,4 +287,4 @@ Artifacts per volume folder: `style-guide.md` (cumulative snapshot), `style-guid
 - Errors **fail loudly** with actionable messages (pointing at files, `.env` keys, or `.logs/`).
 - Prompt files stay mode-agnostic; mode-specific text is appended in code (`AGENT_TOOLS_NOTE`), never forked into separate prompt files.
 - Tests: pure logic in `test/test-glossary-load.js` (plain `assert`, no framework — keep it that way); live behavior in `test/harness-smoke.js`.
-- Dependencies: AI SDK v6 + `@openharness/core` v0.7; keep CommonJS, no new frameworks.
+- Dependencies: AI SDK v6 + `@openharness/core` v0.7 + `jszip`/`cheerio` (epub extraction in `utils/source.js`); keep CommonJS, no new frameworks.

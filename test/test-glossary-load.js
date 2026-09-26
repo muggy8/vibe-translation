@@ -577,4 +577,54 @@ for (const [name, prompt] of [
   assert.ok(prompt.includes("../test_story(1)/style-guide.md"), `${name} prompt (volume 02) names the previous guide at its real path`);
 }
 
+// ─── Source bundle: segment id assignment (utils/source.js) ─────────────────
+const { assignSegmentIds, classifyTitle, shouldProcessChunked } = require("../utils/source");
+
+assert.strictEqual(classifyTitle("Interlude: The Train"), "interlude", "classifyTitle detects interludes");
+assert.strictEqual(classifyTitle("序章"), "prologue", "classifyTitle detects Japanese prologues");
+assert.strictEqual(classifyTitle("Epilogue"), "epilogue", "classifyTitle detects epilogues");
+assert.strictEqual(classifyTitle("Chapter 3: The Battle"), "chapter", "classifyTitle defaults to chapter");
+
+// Interludes are anchored to the chapter that existed immediately before
+// them, with the counter restarting at 1 for each chapter (ch2.1, ch2.2,
+// then ch7.1 …). Epilogues get no special id — they continue the chN.K
+// counter of their anchor chapter (the epilogue after ch3 with one
+// interlude is ch3.2).
+assert.deepStrictEqual(
+  assignSegmentIds([
+    "Prologue",
+    "Chapter 1: Beginning",
+    "Interlude 1",
+    "Chapter 2: The Forest",
+    "Interlude 2",
+    "Interlude 3",
+    "Chapter 7: The City",
+    "Interlude 4",
+    "Epilogue",
+  ]),
+  ["ch0", "ch1", "ch1.1", "ch2", "ch2.1", "ch2.2", "ch3", "ch3.1", "ch3.2"],
+  "segment ids: chN.K interludes anchored to the preceding chapter, epilogue as the next chN.K"
+);
+
+// An epilogue with no interludes after its chapter is chN.1.
+assert.deepStrictEqual(
+  assignSegmentIds(["Chapter 1: A", "Epilogue"]),
+  ["ch1", "ch1.1"],
+  "an epilogue with no prior interludes is ch1.1"
+);
+
+// An interlude sitting before any chapter is anchored to ch0.
+assert.deepStrictEqual(
+  assignSegmentIds(["Interlude 0", "Prologue", "Chapter 1: Beginning"]),
+  ["ch0.1", "ch0", "ch1"],
+  "an interlude before any chapter is anchored to ch0"
+);
+
+// shouldProcessChunked: epub-only, threshold- and flag-driven.
+const chunkBundle = { format: "epub", segments: [{ id: "ch1" }, { id: "ch2" }], wholeChars: 5000 };
+assert.strictEqual(shouldProcessChunked(chunkBundle, { thresholdChars: 100 }), true, "falls back above the threshold");
+assert.strictEqual(shouldProcessChunked(chunkBundle, { thresholdChars: 10000 }), false, "stays whole below the threshold");
+assert.strictEqual(shouldProcessChunked(chunkBundle, { thresholdChars: 10000, forceChunked: true }), true, "--chunked forces the fallback");
+assert.strictEqual(shouldProcessChunked({ format: "text", segments: [], wholeChars: 999999 }, {}), false, "text sources are never chunked");
+
 console.log("All tests passed.");
