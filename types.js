@@ -244,6 +244,27 @@
  * @property {Function} wiki_extract
  */
 
+// ─── Pipeline hooks (utils/hooks.js) ─────────────────────────────────────────
+
+/**
+ * @typedef {Object} HookContext
+ * The context describing a pipeline hook invocation (also the source of the
+ * AI_CLIENT_* env vars injected into shell hooks). See utils/hooks.js.
+ * @property {string} task - The step name (glossary / character-voice / style-guide / jump-in-wiki / pipeline).
+ * @property {"before"|"after"} phase - Which side of the step.
+ * @property {string} seriesDir - Absolute SERIES_LOCATION ("" when unset).
+ * @property {string} seriesName - The SERIES_NAME.
+ * @property {boolean} dryRun - True when run with --dry-run.
+ * @property {boolean} force - True when run with --force.
+ * @property {boolean} chunked - True when run with --chunked.
+ * @property {string|null} volume - The --volume argument, or null.
+ * @property {boolean|undefined} succeeded - After hooks only: whether the task resolved.
+ * @property {Error|null} error - After hooks only: the task error (when it threw).
+ * @property {string[]} argv - The process argv.
+ * @property {Object<string,string>} env - The process env.
+ */
+
+
 // ─── Research ────────────────────────────────────────────────────────────────
 
 /**
@@ -275,5 +296,6 @@ module.exports = {
   FetchResult: true,
   WikiTools: true,
   ResearchNote: true,
+  HookContext: true,
 };
 

@@ -39,6 +39,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict` (legacy binary verdict — kept for compatibility, no longer used in the acceptance path), `parseAcceptanceScore` (parses the 0–100 score from the acceptance one-shot reply; `null` = unparseable = failed check), `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
 | `utils/source.js` | Source-bundle helpers: `resolveSourceBundle` (normalizes a volume's source into a `SourceBundle`; plain-text passes through as-is, `.epub` is extracted once and cached), `shouldProcessChunked` (decides whole-installment vs chapter-by-chapter fallback), `extractEpubToBundle` (jszip + cheerio; XHTML → Markdown, per-chapter files, interludes, epilogue, images), `assignSegmentIds`, `classifyTitle`, `xhtmlToMarkdown`, `sourceMaterialLine`, `sourceSegmentListLine`, `chapterSegmentNote`, `chapterContextBlock`, `isEpubPath`, `normalizeZipPath`. All four task modules resolve their source through `resolveSourceBundle` at the choke point. |
+| `utils/hooks.js` | Per-machine pipeline-hook runner (git-style, entirely optional). Discovers `hooks/pre-<task>` / `post-<task>` (and `pre-/post-pipeline`) and `exec`s each as an executable with `AI_CLIENT_*` env vars; skips when the file is absent, under `--dry-run`, or not executable. Applied via `withHooks()` in gulpfile.js. See §3 "Pipeline hooks" and `hooks/README.md`. |
 | `harness.js` | The AI layer: one-shot calls, agent handles, wiki tools, gated fs tools, provider plumbing, run logging, and the runaway-generation guard (aborts agent turns that produce excessive text without tool calls). Never bypass it to talk to the model. Logs every AI call to `.logs/<timestamp>/` — per-agent chat histories (system prompt, messages, assistant response, reasoning, tool calls) and one-shot call dumps — plus the summary log (greppable `CALL`/`RESULT`/`WARNING` lines). |
 | `research.js` | Client-side web research (Wikipedia Action API + optional Brave/Tavily/Serper). No LLM involved. |
 | `glossary.js` | Glossary task logic. |
@@ -47,8 +48,9 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `jump-in-wiki.js` | Wiki task logic **plus the shared helpers** |
 | `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. All four tasks read this manifest instead of guessing folder names. |
 | `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All four tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
-| `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `CharacterVoiceVolumeCtx`, `StyleGuideVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
+| `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `CharacterVoiceVolumeCtx`, `StyleGuideVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`, `HookContext`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
 | `gulpfile.js` | Task wiring only (no logic). |
+| `hooks/` | Per-machine hook scripts (git-style; gitignored — only `README.md` + `*.sample` are tracked). Executable before/after hooks for each step and the whole run. See §3 "Pipeline hooks". |
 | `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Style guide: `style-guide-extract`, `style-guide` (compile), `style-guide-validator`, `style-guide-acceptance`, `style-guide-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. |
 | `test/test-glossary-load.js` | Pure tests (`npm test`). |
 | `test/harness-smoke.js` | Live smoke test (`npm run smoke`). |
@@ -106,6 +108,37 @@ Every task resolves its volume source through `resolveSourceBundle()` at the cho
 - `<base>-bundle.meta.json` — extraction cache (epub mtime/hash → skip re-extraction; `--force` re-extracts)
 
 Chunked mode shape (all four pipelines): generation stages run per chapter in reading order — each chapter sees the previous chapter's output (chained, so no client-side merge for the cumulative artifacts: glossary / voice reference / style guide simply carry forward into the next chapter's state). The wiki is the exception: per-chapter section files (`wiki-<id>.md`) are assembled into `wiki.md` + `shared-wiki.md` by a merge agent. QA runs per-chapter validator partials → a findings-merge agent writes the standard `*-validation.md` → the unchanged acceptance one-shot scores it → per-chapter feedback applies the chapter-tagged findings. **Never iterate `bundle.segments` by filename** — `chN.K` interludes do not sort into reading order; always iterate the `segments` array (gotcha 20).
+
+### Pipeline hooks (per-machine, git-style)
+
+Optional, git-style hooks let each machine attach its own side-effects (git
+sync, notifications, backups, …) before and after each step and around the
+whole default run, **without changing the committed source or `package.json`**.
+See `hooks/README.md` for the full contract and examples.
+
+- **Runner** — `utils/hooks.js` is a dumb "exec an executable file" loop: it
+  discovers the hook, checks it's executable, and runs it with `AI_CLIENT_*`
+  env vars. It never interprets hook content or loads npm packages, so a hook
+  can shell out to whatever the local machine already has (git, curl, mail,
+  `node` with built-ins, …).
+- **Location** — `<root>/hooks/` (gitignored; only `README.md` + `*.sample`
+  are tracked). Override with `AI_CLIENT_HOOKS_DIR` (the git `core.hooksPath`
+  analogue).
+- **Hook files** (first existing name wins) — `pre-<task>` / `post-<task>`
+  (or `.sh` / `.js`) for `glossary`, `character-voice`, `style-guide`,
+  `jump-in-wiki`, plus `pre-pipeline` / `post-pipeline` around the whole
+  default run. Any executable with a shebang works.
+- **Entirely optional** — no file → the step runs exactly as before (the
+  common case); present-but-not-executable → warn + skip. **`--dry-run` runs
+  no hooks** (side-effect-free).
+- **Failure** — a before-hook non-zero exit **aborts the step**; an after-hook
+  runs even when the task failed (so a cleanup / "task failed" notification can
+  fire), and a failed after-hook only masks the task error when the task had
+  already failed (the task error always propagates).
+- **Wiring** — each task is wrapped with `withHooks(task, taskFn)` in
+  `gulpfile.js` (the four task modules are untouched); the default `series` is
+  wrapped as the `pipeline` pseudo-step.
+
 
 ## 4. Pipeline A: glossary (`glossary.js`)
 

@@ -1,0 +1,11 @@
+#!/usr/bin/sh
+# Sample: BEFORE hook for the WHOLE default run (fires once, before all four
+# steps). Use this instead of per-step hooks if you want ONE branch for the
+# entire pipeline rather than one branch per task.
+#
+# Enable: cp hooks/pre-pipeline.sh.sample hooks/pre-pipeline.sh && chmod +x hooks/pre-pipeline.sh
+set -eu
+cd "$AI_CLIENT_SERIES_DIR"
+git checkout main
+git pull
+git checkout -b pipeline main

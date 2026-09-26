@@ -5,7 +5,7 @@
   "main": "harness.js",
   "scripts": {
     "start": "node harness.js",
-    "test": "node test/test-glossary-load.js",
+    "test": "node test/test-glossary-load.js && node test/test-hooks.js",
     "smoke": "node test/harness-smoke.js"
   },
   "engines": {

@@ -41,6 +41,12 @@ yarn-error.log*
 # Dry-run prompt dumps
 .dry-run/
 
+# Pipeline hooks — per-machine executable scripts (git-style). The samples
+# and README stay tracked; the real hooks are local-only (gitignored).
+/hooks/*
+!/hooks/README.md
+!/hooks/*.sample
+
 # Test fixture series: the generated outputs (the story sources stay tracked)
 test-series/**/wiki.md
 test-series/**/shared-wiki.md
