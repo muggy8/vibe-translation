@@ -32,7 +32,7 @@ require("./types");
 const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 
 const clientDir = __dirname;
@@ -49,7 +49,7 @@ const acceptanceUserPromptTemplateFile = path.join(clientDir, "user-prompts", "c
 const feedbackSystemPromptFile = path.join(clientDir, "system-prompts", "character-voice-feedback.md");
 const feedbackUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice-feedback.md");
 
-const maxValidationIterations = Math.max(1, parseInt(process.env.MAX_VALIDATION_ITERATIONS, 10) || 10);
+const maxValidationIterations = Math.max(1, parseInt(process.env.QA_MAX_ITERATIONS, 10) || 10);
 const VOICE_REF_TRUNCATION_THRESHOLD = 64 * 1024;
 const VOICE_REF_TRUNCATION_MAX_ENTRIES = 200;
 
@@ -212,7 +212,7 @@ async function characterVoice() {
     // still resolve the correct manifest entry and previous volume.
     const i = sorted.indexOf(folderName);
     const volume = volumeByFolder.get(folderName);
-    const values = { INSTALLMENT_NUMBER: volume.installmentNumber, SOURCE_NAME: manifest.seriesName, SOURCE_LANGUAGE: process.env.SOURCE_LANGUAGE||"Japanese", TARGET_LANGUAGE: process.env.TARGET_LANGUAGE||"English" };
+    const values = { INSTALLMENT_NUMBER: volume.installmentNumber, SOURCE_NAME: manifest.seriesName, SOURCE_LANGUAGE: process.env.TRANSLATION_SOURCE_LANGUAGE||"Japanese", TARGET_LANGUAGE: process.env.TRANSLATION_TARGET_LANGUAGE||"English" };
     const volumeDir = path.join(seriesDir, folderName);
     const sourceFile = path.join(seriesDir, volume.sourceFile);
     const voiceOutputFile = path.join(volumeDir, "character-voice.md");
@@ -385,7 +385,7 @@ async function runCompile(ctx, extractionOutput) {
     const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults), { label: `character-voice-compile-${values.INSTALLMENT_NUMBER}` });
     assertRealToolCalls(compileResult, "the author agent (compile)", values.INSTALLMENT_NUMBER);
     await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (compile)", compileResult?.text);
-    if (process.env.RECOVERY_ENABLED !== "false") {
+    if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = compileResult?.text && compileResult.text.trim().length > 0;
       const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now with the exact same content.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
       const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `character-voice-compile-recovery-${values.INSTALLMENT_NUMBER}` });
@@ -413,7 +413,7 @@ async function runQaLoop(ctx) {
       const validateResult = await validator.sendTurn(buildValidatorTurnPrompt(ctx), { label: `character-voice-validate-${values.INSTALLMENT_NUMBER}-${iteration}` });
       assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(validationOutputFile, "the validator agent", validateResult?.text);
-      if (process.env.RECOVERY_ENABLED !== "false") {
+      if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
         const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
         const recoveryPrompt = hasContent ? `You were asked to write "character-voice-validation.md" using writeFile, but you replied in chat. Please rewrite the report using writeFile now with the same content.` : `You produced no output. Please write the validation report to "character-voice-validation.md" using writeFile now.`;
         const recoveryResult = await validator.sendTurn(recoveryPrompt, { label: `character-voice-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` });
@@ -426,7 +426,7 @@ async function runQaLoop(ctx) {
       // logged as a failure; not stored).
       if (score !== null) {
         recentRollingScores.push(score);
-        if (recentRollingScores.length > ROLLING_WINDOW_SIZE) {
+        if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) {
           recentRollingScores.shift();
         }
       }
@@ -463,7 +463,7 @@ async function runFeedback(ctx) {
     const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx), { label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}` });
     assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
     await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)", feedbackResult?.text);
-    if (process.env.RECOVERY_ENABLED !== "false") {
+    if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
       const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
       const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}` });

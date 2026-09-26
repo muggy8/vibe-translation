@@ -55,7 +55,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ROLLING_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ const feedbackUserPromptTemplateFile = path.join(clientDir, "user-prompts", "glo
 // before the glossary is left as-is. Read from .env, defaulting to 3.
 const maxValidationIterations = Math.max(
   1,
-  parseInt(process.env.MAX_VALIDATION_ITERATIONS, 10) || 3
+  parseInt(process.env.QA_MAX_ITERATIONS, 10) || 3
 );
 
 // Whether to run web research for the new terms (default: enabled).
@@ -437,8 +437,8 @@ async function glossary() {
   if (!seriesDir) {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
   }
-  if (!process.env.SERIES_NAME_SOURCE) {
-    throw new Error("SERIES_NAME_SOURCE is not set. Please set it in .env.");
+  if (!process.env.SERIES_NAME) {
+    throw new Error("SERIES_NAME is not set. Please set it in .env.");
   }
 
   // Load the system prompts.
@@ -508,9 +508,9 @@ async function glossary() {
 
     const values = {
       INSTALLMENT_NUMBER: volume.installmentNumber,
-      SOURCE_NAME: process.env.SERIES_NAME_SOURCE,
-      SOURCE_LANGUAGE: process.env.SOURCE_LANGUAGE || "Japanese",
-      TARGET_LANGUAGE: process.env.TARGET_LANGUAGE || "English",
+      SOURCE_NAME: process.env.SERIES_NAME,
+      SOURCE_LANGUAGE: process.env.TRANSLATION_SOURCE_LANGUAGE || "Japanese",
+      TARGET_LANGUAGE: process.env.TRANSLATION_TARGET_LANGUAGE || "English",
     };
 
     // The previous volume's glossary (the in-progress glossary). Absent for the
@@ -874,7 +874,7 @@ async function generateGlossary(ctx, terms, researchNotesAvailable) {
     // Recovery turn: if the model replied in chat instead of writeFile,
     // send a second turn asking it to write the file using the content
     // it already generated (the model's session still has that context).
-    if (fallbackUsed && process.env.RECOVERY_ENABLED !== "false") {
+    if (fallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       console.log(
         `Volume ${values.INSTALLMENT_NUMBER}: sending recovery turn ` +
           `(model replied in chat instead of writeFile)...`
@@ -958,7 +958,7 @@ async function runQaLoop(ctx) {
 
       // Recovery turn: if the validator replied in chat instead of writeFile,
       // send a second turn asking it to write the report using writeFile.
-      if (process.env.RECOVERY_ENABLED !== "false") {
+      if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
         const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
         const recoveryPrompt = hasContent
           ? `You were asked to write the validation report to "glossary-validation.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
@@ -988,7 +988,7 @@ async function runQaLoop(ctx) {
     // logged as a failure; not stored).
     if (score !== null) {
       recentRollingScores.push(score);
-      if (recentRollingScores.length > ROLLING_WINDOW_SIZE) {
+      if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) {
         recentRollingScores.shift();
       }
     }
@@ -1036,7 +1036,7 @@ async function runQaLoop(ctx) {
 
       // Recovery turn for feedback pass: if the model produced no output,
       // re-send the full feedback task.
-      if (feedbackFallbackUsed && process.env.RECOVERY_ENABLED !== "false") {
+      if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
         const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
         const recoveryPrompt = hasContent
           ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +

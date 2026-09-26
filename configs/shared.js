@@ -49,21 +49,21 @@ const RESEARCH_CONCURRENCY = Math.max(
  *
  * @type {number}
  */
-const ROLLING_WINDOW_SIZE = Math.max(
+const ACCEPTANCE_WINDOW_SIZE = Math.max(
   2,
-  parseInt(process.env.ROLLING_WINDOW_SIZE, 10) || 5
+  parseInt(process.env.ACCEPTANCE_WINDOW_SIZE, 10) || 5
 );
 
 /**
  * Minimum number of acceptance checks before the rolling average can
- * trigger acceptance. Must be less than ROLLING_WINDOW_SIZE.
+ * trigger acceptance. Must be less than ACCEPTANCE_WINDOW_SIZE.
  * Read from .env, defaulting to 3.
  *
  * @type {number}
  */
-const ROLLING_MIN_SAMPLES = Math.max(
+const ACCEPTANCE_MIN_SAMPLES = Math.max(
   1,
-  parseInt(process.env.ROLLING_MIN_SAMPLES, 10) || 3
+  parseInt(process.env.ACCEPTANCE_MIN_SAMPLES, 10) || 3
 );
 
 /**
@@ -90,7 +90,7 @@ const ACCEPTANCE_PASSING_SCORE = Math.min(
  * Acceptance strategy: how the rolling window of scores is evaluated.
  * - "average" (default): the mean of the recent scores must be >=
  *   ACCEPTANCE_PASSING_SCORE.
- * - "best": at least BEST_OF_MIN_PASSES of the last ROLLING_WINDOW_SIZE
+ * - "best": at least ACCEPTANCE_BEST_MIN_PASSES of the last ACCEPTANCE_WINDOW_SIZE
  *   scores must each be >= ACCEPTANCE_PASSING_SCORE (best-X-out-of-Y).
  * Read from .env, defaulting to "average".
  *
@@ -106,15 +106,15 @@ const ACCEPTANCE_STRATEGY =
 /**
  * For the "best" strategy (best-X-out-of-Y): the minimum number of recent
  * scores that must individually meet ACCEPTANCE_PASSING_SCORE. The window
- * size Y is ROLLING_WINDOW_SIZE.
+ * size Y is ACCEPTANCE_WINDOW_SIZE.
  * Read from .env, defaulting to 3 (i.e. "best 3 out of 5" with the default
  * window).
  *
  * @type {number}
  */
-const BEST_OF_MIN_PASSES = Math.max(
+const ACCEPTANCE_BEST_MIN_PASSES = Math.max(
   1,
-  parseInt(process.env.BEST_OF_MIN_PASSES, 10) || 3
+  parseInt(process.env.ACCEPTANCE_BEST_MIN_PASSES, 10) || 3
 );
 
 /**
@@ -134,20 +134,20 @@ function computeRollingAverage(scores) {
  * configured acceptance criterion.
  *
  * - "average" strategy: the mean of `scores` is >= ACCEPTANCE_PASSING_SCORE.
- * - "best" strategy: at least BEST_OF_MIN_PASSES of `scores` are >=
+ * - "best" strategy: at least ACCEPTANCE_BEST_MIN_PASSES of `scores` are >=
  *   ACCEPTANCE_PASSING_SCORE.
  *
- * Requires at least ROLLING_MIN_SAMPLES scores; returns false for fewer
+ * Requires at least ACCEPTANCE_MIN_SAMPLES scores; returns false for fewer
  * (and for empty / non-array input).
  *
  * @param {number[]} scores - The rolling window of acceptance scores.
  * @returns {boolean} True when the window satisfies the criterion.
  */
 function meetsAcceptanceCriteria(scores) {
-  if (!Array.isArray(scores) || scores.length < ROLLING_MIN_SAMPLES) return false;
+  if (!Array.isArray(scores) || scores.length < ACCEPTANCE_MIN_SAMPLES) return false;
   if (ACCEPTANCE_STRATEGY === "best") {
     const passes = scores.filter((s) => s >= ACCEPTANCE_PASSING_SCORE).length;
-    return passes >= BEST_OF_MIN_PASSES;
+    return passes >= ACCEPTANCE_BEST_MIN_PASSES;
   }
   return computeRollingAverage(scores) >= ACCEPTANCE_PASSING_SCORE;
 }
@@ -220,11 +220,11 @@ async function loadRollingState(filePath) {
 module.exports = {
   AGENT_TOOLS_NOTE,
   RESEARCH_CONCURRENCY,
-  ROLLING_WINDOW_SIZE,
-  ROLLING_MIN_SAMPLES,
+  ACCEPTANCE_WINDOW_SIZE,
+  ACCEPTANCE_MIN_SAMPLES,
   ACCEPTANCE_PASSING_SCORE,
   ACCEPTANCE_STRATEGY,
-  BEST_OF_MIN_PASSES,
+  ACCEPTANCE_BEST_MIN_PASSES,
   computeRollingAverage,
   meetsAcceptanceCriteria,
   isAcceptedState,

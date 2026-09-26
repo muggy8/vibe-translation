@@ -3,7 +3,7 @@
  *
  * The glossary and jump-in-wiki tasks used to discover the volume folders and
  * their source files with hard-coded logic: "a directory under SERIES_LOCATION
- * whose name contains SERIES_NAME_SOURCE", the source being
+ * whose name contains SERIES_NAME", the source being
  * "<folder>/<folder>.md", the number being the trailing "(N)". That breaks the
  * moment a source file is named differently, nested, or a volume folder does
  * not carry the series name.
@@ -155,7 +155,7 @@ function validateManifest(manifest) {
 /**
  * Build a manifest with the legacy hard-coded convention (no AI call). This is
  * the --dry-run backend and a resilience fallback: volume folders are the
- * directories under SERIES_LOCATION whose name contains SERIES_NAME_SOURCE,
+ * directories under SERIES_LOCATION whose name contains SERIES_NAME,
  * sorted in natural order, with the source assumed to be "<folder>/<folder>.md".
  * Folders whose expected source file is missing are skipped.
  *
@@ -166,7 +166,7 @@ function validateManifest(manifest) {
  *   matches the convention).
  */
 async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLanguage }) {
-  const seriesName = process.env.SERIES_NAME_SOURCE;
+  const seriesName = process.env.SERIES_NAME;
   const entries = await fs.readdir(seriesDir, { withFileTypes: true });
   const folderNames = entries
     .filter((entry) => entry.isDirectory())
@@ -371,8 +371,8 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
   if (!seriesDir) {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
   }
-  if (!process.env.SERIES_NAME_SOURCE) {
-    throw new Error("SERIES_NAME_SOURCE is not set. Please set it in .env.");
+  if (!process.env.SERIES_NAME) {
+    throw new Error("SERIES_NAME is not set. Please set it in .env.");
   }
 
   let stat;
@@ -387,9 +387,9 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
     throw new Error(`SERIES_LOCATION is not a directory: ${seriesDir}`);
   }
 
-  const seriesName = process.env.SERIES_NAME_SOURCE;
-  const sourceLanguage = process.env.SOURCE_LANGUAGE || "Japanese";
-  const targetLanguage = process.env.TARGET_LANGUAGE || "English";
+  const seriesName = process.env.SERIES_NAME;
+  const sourceLanguage = process.env.TRANSLATION_SOURCE_LANGUAGE || "Japanese";
+  const targetLanguage = process.env.TRANSLATION_TARGET_LANGUAGE || "English";
 
   // --dry-run: no AI calls. Build the manifest from the legacy convention.
   if (dryRun) {

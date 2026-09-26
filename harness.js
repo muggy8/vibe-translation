@@ -104,9 +104,9 @@ function getLogStream() {
     });
     logStream.write(`=== call-ai run log started: ${new Date().toISOString()} ===\n`);
     logStream.write(
-      `model=${process.env.OPENAI_MODEL || "gpt-4o-mini"} ` +
-        `base_url=${process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"} ` +
-        `max_tokens=${process.env.MAX_TOKENS || "1024"}\n`
+      `model=${process.env.AI_MODEL || "gpt-4o-mini"} ` +
+        `base_url=${process.env.AI_BASE_URL || "https://api.openai.com/v1"} ` +
+        `max_tokens=${process.env.AI_MAX_TOKENS || "1024"}\n`
     );
     console.error(`[call-ai] logging to ${runDir}`);
   }
@@ -168,7 +168,7 @@ function writeOneShotLog(label, systemPrompt, messages, response, result) {
     const ttftMs = result.firstTokenTime ? result.firstTokenTime - result.startTime : null;
 
     let content = `# One-shot call: ${label}\n`;
-    content += `# Model: ${process.env.OPENAI_MODEL || "gpt-4o-mini"}\n`;
+    content += `# Model: ${process.env.AI_MODEL || "gpt-4o-mini"}\n`;
 
     if (result.usage) {
       content += `# Tokens: prompt=${result.usage.inputTokens ?? "?"} completion=${result.usage.outputTokens ?? "?"} total=${result.usage.totalTokens ?? "?"}\n`;
@@ -225,7 +225,7 @@ function writeAgentTurnLog(agentName, turnNumber, opts) {
     let content = `# Agent: ${agentName}\n`;
     content += `# Turn: ${String(turnNumber).padStart(3, "0")}\n`;
     content += `# Label: ${label}\n`;
-    content += `# Model: ${process.env.OPENAI_MODEL || "gpt-4o-mini"}\n`;
+    content += `# Model: ${process.env.AI_MODEL || "gpt-4o-mini"}\n`;
 
     if (result.usage) {
       content += `# Tokens: prompt=${result.usage.inputTokens ?? "?"} completion=${result.usage.outputTokens ?? "?"} total=${result.usage.totalTokens ?? "?"}\n`;
@@ -453,12 +453,12 @@ function makeProviderFetch({ extraBody = null, tapsRef = null } = {}) {
  *   The chat model (AI SDK LanguageModel) plus the resolved endpoint info.
  */
 async function createChatModel({ extraBody = null, tapsRef = null } = {}) {
-  const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-  const apiKey = process.env.OPENAI_API_KEY;
-  const modelId = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const baseUrl = process.env.AI_BASE_URL || "https://api.openai.com/v1";
+  const apiKey = process.env.AI_API_KEY;
+  const modelId = process.env.AI_MODEL || "gpt-4o-mini";
   if (!apiKey) {
     throw new Error(
-      "OPENAI_API_KEY is not set.\n  Set it in a .env file or as an environment variable."
+      "AI_API_KEY is not set.\n  Set it in a .env file or as an environment variable."
     );
   }
   const { openaiProvider } = await loadEsm();
@@ -506,49 +506,49 @@ function envRetry() {
 }
 
 /**
- * Thinking mode (THINKING env, default ON).
+ * Thinking mode (AI_THINKING env, default ON).
  */
 function envThinking() {
   let performThinking = true;
 
-  if (typeof process.env.THINKING === 'undefined' || process.env.THINKING === "") {
+  if (typeof process.env.AI_THINKING === 'undefined' || process.env.AI_THINKING === "") {
     return performThinking;
   }
 
-  return process.env.THINKING === "true" || process.env.THINKING === "1";
+  return process.env.AI_THINKING === "true" || process.env.AI_THINKING === "1";
 }
 
 /**
- * Thinking effort level (THINKING_LEVEL env, default "xhigh").
+ * Thinking effort level (AI_THINKING_LEVEL env, default "xhigh").
  * Sets the `reasoning_effort` parameter on the request body.
  * Valid values: "low", "medium", "xhigh" (model-dependent).
  */
 function envThinkingLevel() {
-  const level = process.env.THINKING_LEVEL;
+  const level = process.env.AI_THINKING_LEVEL;
   if (typeof level === "string" && level.trim() !== "") {
     return level.trim();
   }
   return "xhigh";
 }
 
-/** Maximum output tokens per call (MAX_TOKENS env, default 1024). */
+/** Maximum output tokens per call (AI_MAX_TOKENS env, default 1024). */
 function envMaxTokens() {
-  return parseInt(process.env.MAX_TOKENS, 10) || 1024;
+  return parseInt(process.env.AI_MAX_TOKENS, 10) || 1024;
 }
 
-/** Sampling temperature (TEMPERATURE env, default 0.7). */
+/** Sampling temperature (AI_TEMPERATURE env, default 0.7). */
 function envTemperature() {
-  const t = parseFloat(process.env.TEMPERATURE);
+  const t = parseFloat(process.env.AI_TEMPERATURE);
   return Number.isNaN(t) ? 0.7 : t;
 }
 
 /**
  * Context window (tokens) at which session auto-compaction engages
- * (CONTEXT_WINDOW env, default 128000). Set it to your server's context
+ * (AGENT_CONTEXT_WINDOW env, default 128000). Set it to your server's context
  * size so compaction kicks in before the server runs out of context.
  */
 function envContextWindow() {
-  const n = parseInt(process.env.CONTEXT_WINDOW, 10);
+  const n = parseInt(process.env.AGENT_CONTEXT_WINDOW, 10);
   return Number.isInteger(n) && n >= 4096 ? n : 128000;
 }
 
@@ -1059,8 +1059,8 @@ function logResultLine(r, label) {
  * @param {string} cfg.systemPrompt - The system prompt.
  * @param {Array<IMessage>} cfg.messages - IMessages ({ text } | { file, name }).
  * @param {number} [cfg.retry] - Extra attempts on empty/error (default: AI_RETRY).
- * @param {boolean} [cfg.thinking] - Thinking mode (default: THINKING env, on).
- * @param {string} [cfg.thinkingLevel] - reasoning_effort level (default: THINKING_LEVEL env / "xhigh").
+ * @param {boolean} [cfg.thinking] - Thinking mode (default: AI_THINKING env, on).
+ * @param {string} [cfg.thinkingLevel] - reasoning_effort level (default: AI_THINKING_LEVEL env / "xhigh").
  * @param {string} [cfg.label] - Log label (default: "one-shot").
  * @returns {Promise<string>} The model's content.
  */
@@ -1173,7 +1173,7 @@ async function runOneShot({
     throw new Error(
       `The model returned no content (finish_reason=${result.finishReason ?? "n/a"}). ` +
         (result.reasoning
-          ? "The token budget appears to have been spent on reasoning; try increasing MAX_TOKENS or the model's context limit. "
+          ? "The token budget appears to have been spent on reasoning; try increasing AI_MAX_TOKENS or the model's context limit. "
           : "") +
         `Check the run log: ${logFilePath}`
     );
@@ -1201,11 +1201,11 @@ async function runOneShot({
  * @param {string} [cfg.cwd] - Base dir for fs tools (default: process.cwd()).
  * @param {number} [cfg.maxSteps] - Step cap (default: AGENT_MAX_STEPS env / 20).
  * @param {number} [cfg.retry] - Error retries (default: AI_RETRY env).
- * @param {boolean} [cfg.thinking] - Thinking mode (default: THINKING env, on —
- *   agents use full thinking for higher-quality output; tune THINKING_LEVEL
+ * @param {boolean} [cfg.thinking] - Thinking mode (default: AI_THINKING env, on —
+ *   agents use full thinking for higher-quality output; tune AI_THINKING_LEVEL
  *   to control reasoning spend).
- * @param {string} [cfg.thinkingLevel] - reasoning_effort level (default: THINKING_LEVEL env / "xhigh").
- * @param {number} [cfg.contextWindow] - Compaction window (default: CONTEXT_WINDOW env).
+ * @param {string} [cfg.thinkingLevel] - reasoning_effort level (default: AI_THINKING_LEVEL env / "xhigh").
+ * @param {number} [cfg.contextWindow] - Compaction window (default: AGENT_CONTEXT_WINDOW env).
  * @returns {Promise<Object>} { name, session, sendTurn, close }
  */
 async function createAgentHandle({

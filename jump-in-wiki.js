@@ -13,7 +13,7 @@
  *          previous wikis with file tools and writes both files directly
  *          (no marker-based output parsing).
  *     2. Repeats the following until the score-based acceptance criterion
- *        is met or the iteration cap (MAX_VALIDATION_ITERATIONS, default 10)
+ *        is met or the iteration cap (QA_MAX_ITERATIONS, default 10)
  *        is reached:
  *        a. Validates the wiki with the validator prompts
  *           (system-prompts/jump-in-wiki-validator.md and
@@ -50,7 +50,7 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ROLLING_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
@@ -72,7 +72,7 @@ const acceptanceUserPromptTemplateFile = path.join(clientDir, "user-prompts", "j
 // before the wiki is left as-is. Read from .env, defaulting to 3.
 const maxValidationIterations = Math.max(
   1,
-  parseInt(process.env.MAX_VALIDATION_ITERATIONS, 10) || 3
+  parseInt(process.env.QA_MAX_ITERATIONS, 10) || 3
 );
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -269,8 +269,8 @@ async function jumpInWiki() {
   if (!seriesDir) {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
   }
-  if (!process.env.SERIES_NAME_SOURCE) {
-    throw new Error("SERIES_NAME_SOURCE is not set. Please set it in .env.");
+  if (!process.env.SERIES_NAME) {
+    throw new Error("SERIES_NAME is not set. Please set it in .env.");
   }
 
   // Discover the volumes with the AI-driven translation-target manifest (see
@@ -330,8 +330,8 @@ async function jumpInWiki() {
 
     const values = {
       INSTALLMENT_NUMBER: volume.installmentNumber,
-      SOURCE_NAME: process.env.SERIES_NAME_SOURCE,
-      SOURCE_LANGUAGE: process.env.SOURCE_LANGUAGE || "Japanese",
+      SOURCE_NAME: process.env.SERIES_NAME,
+      SOURCE_LANGUAGE: process.env.TRANSLATION_SOURCE_LANGUAGE || "Japanese",
     };
 
     const userPrompt = transformUserPrompt(template, values);
@@ -484,7 +484,7 @@ async function jumpInWiki() {
     console.log(
       `\n${limitReachedCount} of ${sortedFolderWithSourceMaterial.length} volume(s) reached the ` +
       `validation iteration limit (${maxValidationIterations}). Consider increasing ` +
-      `MAX_VALIDATION_ITERATIONS if this is unexpected.`
+      `QA_MAX_ITERATIONS if this is unexpected.`
     );
   }
 }
@@ -573,7 +573,7 @@ async function runVolumeAgent(ctx) {
       // Recovery turn: if the model replied in chat instead of writeFile,
       // send a second turn asking it to write both files using the content
       // it already generated (the model's session still has that context).
-      if (wikiFallbackUsed && process.env.RECOVERY_ENABLED !== "false") {
+      if (wikiFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
         console.log(
           `Volume ${values.INSTALLMENT_NUMBER}: sending recovery turn ` +
             `(model replied in chat instead of writeFile)...`
@@ -661,7 +661,7 @@ async function runQaLoop(ctx, author) {
 
       // Recovery turn: if the validator replied in chat instead of writeFile,
       // send a second turn asking it to write the report using writeFile.
-      if (process.env.RECOVERY_ENABLED !== "false") {
+      if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
         const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
         const recoveryPrompt = hasContent
           ? `You were asked to write the validation report to "jump-in-wiki-validation-NN.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
@@ -712,7 +712,7 @@ async function runQaLoop(ctx, author) {
     // logged as a failure; not stored).
     if (score !== null) {
       recentRollingScores.push(score);
-      if (recentRollingScores.length > ROLLING_WINDOW_SIZE) {
+      if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) {
         recentRollingScores.shift();
       }
     }
@@ -749,7 +749,7 @@ async function runQaLoop(ctx, author) {
 
     // Recovery turn for feedback pass: if the model produced no output,
     // re-send the full feedback task.
-    if (wikiFeedbackFallbackUsed && process.env.RECOVERY_ENABLED !== "false") {
+    if (wikiFeedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const wikiFeedbackHasContent = wikiFeedbackResult?.text && wikiFeedbackResult.text.trim().length > 0;
       const wikiFeedbackRecoveryPrompt = wikiFeedbackHasContent
         ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +

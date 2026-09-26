@@ -12,8 +12,8 @@ const { execFileSync } = require("child_process");
 // values that are already set in the environment).
 process.env.ACCEPTANCE_PASSING_SCORE = "70";
 process.env.ACCEPTANCE_STRATEGY = "average";
-process.env.BEST_OF_MIN_PASSES = "3";
-process.env.ROLLING_MIN_SAMPLES = "3";
+process.env.ACCEPTANCE_BEST_MIN_PASSES = "3";
+process.env.ACCEPTANCE_MIN_SAMPLES = "3";
 
 const {
   parseTerms,
@@ -119,7 +119,7 @@ assert.strictEqual(computeRollingAverage([]), 0);
 assert.strictEqual(computeRollingAverage(null), 0);
 
 // ─── meetsAcceptanceCriteria (rolling-average strategy; env pinned above) ──
-// Fewer than ROLLING_MIN_SAMPLES (3) checks → never accepted.
+// Fewer than ACCEPTANCE_MIN_SAMPLES (3) checks → never accepted.
 assert.strictEqual(meetsAcceptanceCriteria([100]), false);
 assert.strictEqual(meetsAcceptanceCriteria([100, 100]), false);
 // Average >= 70 → accepted (boundary is inclusive).
@@ -154,8 +154,8 @@ function bestStrategyCheck(scores) {
       ...process.env,
       ACCEPTANCE_STRATEGY: "best",
       ACCEPTANCE_PASSING_SCORE: "70",
-      BEST_OF_MIN_PASSES: "3",
-      ROLLING_MIN_SAMPLES: "3",
+      ACCEPTANCE_BEST_MIN_PASSES: "3",
+      ACCEPTANCE_MIN_SAMPLES: "3",
     },
   });
   return out.trim() === "true";
@@ -164,7 +164,7 @@ function bestStrategyCheck(scores) {
 assert.strictEqual(bestStrategyCheck([80, 80, 80, 60, 60]), true);
 assert.strictEqual(bestStrategyCheck([70, 70, 70]), true);
 assert.strictEqual(bestStrategyCheck([100, 100]), false);
-// Fewer than BEST_OF_MIN_PASSES qualifying scores → not accepted, even when
+// Fewer than ACCEPTANCE_BEST_MIN_PASSES qualifying scores → not accepted, even when
 // the average would pass.
 assert.strictEqual(bestStrategyCheck([95, 45, 45, 45, 45]), false);
 assert.strictEqual(bestStrategyCheck([80, 80, 60, 60, 60]), false);

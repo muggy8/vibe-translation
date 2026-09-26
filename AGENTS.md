@@ -33,7 +33,7 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 
 | Path | Role |
 |---|---|
-| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and score-based acceptance config (`ROLLING_WINDOW_SIZE`, `ROLLING_MIN_SAMPLES`, `ACCEPTANCE_PASSING_SCORE`, `ACCEPTANCE_STRATEGY`, `BEST_OF_MIN_PASSES`, `computeRollingAverage`, `meetsAcceptanceCriteria`, `isAcceptedState`). All four task modules import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window of scores to disk (see §3). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). |
+| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and score-based acceptance config (`ACCEPTANCE_WINDOW_SIZE`, `ACCEPTANCE_MIN_SAMPLES`, `ACCEPTANCE_PASSING_SCORE`, `ACCEPTANCE_STRATEGY`, `ACCEPTANCE_BEST_MIN_PASSES`, `computeRollingAverage`, `meetsAcceptanceCriteria`, `isAcceptedState`). All four task modules import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window of scores to disk (see §3). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). |
 | `utils/fs.js` | Filesystem helpers: `fileExists`, `assertWrote`. |
 | `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict` (legacy binary verdict — kept for compatibility, no longer used in the acceptance path), `parseAcceptanceScore` (parses the 0–100 score from the acceptance one-shot reply; `null` = unparseable = failed check), `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
@@ -62,7 +62,7 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
 ### harness.js primitives (the only way to talk to the model)
 
 - **`runOneShot({ systemPrompt, messages, ... })`** — one tool-less call. `messages` are `{ text }` or `{ file, name }` (images/wav/mp3 become binary parts; undetectable types are inlined as text). Streaming with a non-streaming fallback; retries empty/error responses up to `AI_RETRY`; **throws on empty — it never returns `""`** (workflows persist the returned string verbatim, so an empty result must fail the run instead of corrupting an artifact).
-- **`createAgentHandle({ name, systemPrompt, tools, approve, cwd, maxSteps, ... })`** — a tool-using agent backed by an OpenHarness `Session`: context auto-compaction at `CONTEXT_WINDOW` tokens and retry-with-backoff. `sendTurn()` keeps message history across turns (author sessions reuse one session for generation + all feedback passes). For writing agents an empty final chat reply is *success* (the output went to disk) — no empty-retry there.
+- **`createAgentHandle({ name, systemPrompt, tools, approve, cwd, maxSteps, ... })`** — a tool-using agent backed by an OpenHarness `Session`: context auto-compaction at `AGENT_CONTEXT_WINDOW` tokens and retry-with-backoff. `sendTurn()` keeps message history across turns (author sessions reuse one session for generation + all feedback passes). For writing agents an empty final chat reply is *success* (the output went to disk) — no empty-retry there.
 - **`createWikiTools()`** — `wiki_search(query, lang?)` / `wiki_extract(title, lang)` backed by research.js.
 - **`createGatedFsTools({ cwd, allowedDirs })`** — OpenHarness fs tools (readFile/listFiles/grep/writeFile/editFile/deleteFile) with an **approve gate**: reads always allowed, `writeFile`/`editFile` confined to `allowedDirs` (the volume folder), `deleteFile` always denied. This is the sandbox — do not weaken it.
 
@@ -76,16 +76,16 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
 
 1. Discover volume folders and source files via the translation-target manifest (`getTranslationTarget()`). An AI agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes the result to `<SERIES_LOCATION>/translation-target.json`. With `--dry-run` a deterministic fallback (the legacy convention) builds the manifest instead, so prompt previews stay fully offline.
 2. Fill `{{PLACEHOLDER}}`s in the user-prompt templates (`transformUserPrompt` — **strict**: throws on a missing value or any leftover placeholder).
-3. **QA loop** per volume, up to `MAX_VALIDATION_ITERATIONS`: score-based
+3. **QA loop** per volume, up to `QA_MAX_ITERATIONS`: score-based
    acceptance — the acceptance one-shot check (tool-less) scores the audited
    output **0–100** (100 = perfect, 0 = atrocious) using a banded rubric in
    the `*-acceptance.md` system prompts (Pass → 85–100, Pass with minor
    edits → 70–84, Requires revision → 40–69, Reject → 0–39). Each score is
-   tracked in a rolling window (`ROLLING_WINDOW_SIZE`, default 5). When the
+   tracked in a rolling window (`ACCEPTANCE_WINDOW_SIZE`, default 5). When the
    window meets the criterion from `meetsAcceptanceCriteria()` (default
    strategy `average`: rolling average of scores ≥ `ACCEPTANCE_PASSING_SCORE`,
-   default 70; alternative `best`: at least `BEST_OF_MIN_PASSES` of the
-   scores ≥ the passing score) and we have at least `ROLLING_MIN_SAMPLES`
+   default 70; alternative `best`: at least `ACCEPTANCE_BEST_MIN_PASSES` of the
+   scores ≥ the passing score) and we have at least `ACCEPTANCE_MIN_SAMPLES`
    checks (default 3), the output is accepted. An unparseable acceptance
    reply counts as a failed check (fail-closed) and is not stored. Otherwise,
    feedback is applied and the loop continues. A passing output
@@ -162,44 +162,78 @@ Artifacts per volume folder: `style-guide.md` (cumulative snapshot), `style-guid
 
 ## 8. Environment reference (`.env`)
 
+### AI provider (`AI_*`)
+
 | Var | Default | Meaning |
 |---|---|---|
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint |
-| `OPENAI_API_KEY` | — (required) | Auth |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Model id |
-| `MAX_TOKENS` | `1024` | Max output tokens per call |
-| `TEMPERATURE` | `0.7` | Sampling temperature |
+| `AI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint |
+| `AI_API_KEY` | — (required) | Auth |
+| `AI_MODEL` | `gpt-4o-mini` | Model id |
+| `AI_MAX_TOKENS` | `1024` | Max output tokens per call |
+| `AI_TEMPERATURE` | `0.7` | Sampling temperature |
 | `AI_RETRY` | `0` | Retries per AI call (API errors + empty responses) |
-| `SERIES_NAME_SOURCE` | — (required) | Series name; volume folders must contain it |
+| `AI_THINKING` | on | Qwen3 thinking phase — **enabled by default**. See §9. |
+| `AI_THINKING_LEVEL` | xhigh | reasoning_effort: "low" / "medium" / "xhigh" (model-dependent). |
+
+### Series (`SERIES_*`)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `SERIES_NAME` | — (required) | Series name; volume folders must contain it |
 | `SERIES_LOCATION` | — (required) | Folder containing the volume folders |
-| `SOURCE_LANGUAGE` / `TARGET_LANGUAGE` | Japanese / English | Filled into the prompts |
-| `MAX_VALIDATION_ITERATIONS` | `10` | QA-loop cap per volume (increased to allow rolling average to converge) |
-| `ROLLING_WINDOW_SIZE` | `5` | Number of recent acceptance checks in the rolling window |
-| `ROLLING_MIN_SAMPLES` | `3` | Minimum checks before the criterion can trigger acceptance |
-| `ACCEPTANCE_PASSING_SCORE` | `70` | Passing score (0–100) for the score-based acceptance criterion — the rubric boundary between "Pass with minor edits" (70–84) and "Requires revision" (40–69) |
-| `ACCEPTANCE_STRATEGY` | `average` | How the window is evaluated: `average` (mean of scores ≥ passing score) or `best` (≥ `BEST_OF_MIN_PASSES` scores ≥ passing score) |
-| `BEST_OF_MIN_PASSES` | `3` | For `ACCEPTANCE_STRATEGY=best`: minimum scores ≥ passing score needed ("best 3 of 5" with the default window) |
-| `CONTEXT_WINDOW` | `128000` | Tokens at which agent sessions auto-compact |
+
+### Translation (`TRANSLATION_*`)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `TRANSLATION_SOURCE_LANGUAGE` | Japanese | Source language — fills `{{SOURCE_LANGUAGE}}` in the prompts |
+| `TRANSLATION_TARGET_LANGUAGE` | English | Target language — fills `{{TARGET_LANGUAGE}}` in the prompts |
+
+### Agents (`AGENT_*`)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `AGENT_CONTEXT_WINDOW` | `128000` | Tokens at which agent sessions auto-compact |
 | `AGENT_MAX_STEPS` | `20` | Default step cap for tool agents (workflows pass higher caps where needed) |
 | `AGENT_TEXT_GUARD_CHARS` | `30000` | Runaway-generation guard: abort an agent turn when it produces more than this many chars of text with fewer than 3 tool calls. Catches models that emit malformed tool-call text instead of using the tool-calling API. |
+| `AGENT_RECOVERY_ENABLED` | `true` | Recovery turn when an author agent replies in chat instead of `writeFile` — asks it to write the file with the content it already generated |
+
+### QA loop & acceptance (`QA_*`, `ACCEPTANCE_*`)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `QA_MAX_ITERATIONS` | `10` | QA-loop cap per volume (increased to allow rolling average to converge) |
+| `ACCEPTANCE_WINDOW_SIZE` | `5` | Number of recent acceptance checks in the rolling window |
+| `ACCEPTANCE_MIN_SAMPLES` | `3` | Minimum checks before the criterion can trigger acceptance |
+| `ACCEPTANCE_PASSING_SCORE` | `70` | Passing score (0–100) for the score-based acceptance criterion — the rubric boundary between "Pass with minor edits" (70–84) and "Requires revision" (40–69) |
+| `ACCEPTANCE_STRATEGY` | `average` | How the window is evaluated: `average` (mean of scores ≥ passing score) or `best` (≥ `ACCEPTANCE_BEST_MIN_PASSES` scores ≥ passing score) |
+| `ACCEPTANCE_BEST_MIN_PASSES` | `3` | For `ACCEPTANCE_STRATEGY=best`: minimum scores ≥ passing score needed ("best 3 of 5" with the default window) |
+
+### Output locations (`*_OUTPUT_FILE`)
+
+| Var | Default | Meaning |
+|---|---|---|
 | `GLOSSARY_OUTPUT_FILE` | `<SERIES_LOCATION>/glossary.md` | Final glossary location |
 | `VOICE_OUTPUT_FILE` | `<SERIES_LOCATION>/character-voice.md` | Final character voice reference location |
 | `STYLE_OUTPUT_FILE` | `<SERIES_LOCATION>/style-guide.md` | Final style guide location |
+
+### Research (`RESEARCH_*`, `WIKI_*`, `SEARCH_*`)
+
+| Var | Default | Meaning |
+|---|---|---|
 | `RESEARCH_ENABLED` | `true` | Research new glossary terms |
 | `RESEARCH_CONCURRENCY` | `3` | Number of parallel research agents (one per term, batched). Set to `1` for sequential processing. |
-| `WIKI_LANGS` | `ja,en` | Wikipedia languages to query |
 | `RESEARCH_MAX_RESULTS` / `RESEARCH_EXTRACT_CHARS` | `3` / `800` | Research result size |
 | `RESEARCH_DELAY_MS` / `RESEARCH_TIMEOUT_MS` | `300` / `30000` | Politeness delay / per-request timeout |
+| `WIKI_LANGS` | `ja,en` | Wikipedia languages to query |
 | `WIKI_USER_AGENT` | built-in | Descriptive UA (Wikipedia requires one) |
 | `SEARCH_API` / `SEARCH_API_KEY` | off | Optional brave / tavily / serper backend |
-| `THINKING` | on | Qwen3 thinking phase — **enabled by default**. See §9. |
-| `THINKING_LEVEL` | xhigh | reasoning_effort: "low" / "medium" / "xhigh" (model-dependent). |
 
-**Current local setup** (the committed `.env`): local Qwen at `http://localhost:9200/v1`, `MAX_TOKENS=262144`, `TEMPERATURE=0.6`, `AI_RETRY=2`, `MAX_VALIDATION_ITERATIONS=10`, `ROLLING_WINDOW_SIZE=5`, `ROLLING_MIN_SAMPLES=3`, `ACCEPTANCE_PASSING_SCORE=70`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, THINKING=on, THINKING_LEVEL=xhigh, series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
+**Current local setup** (the committed `.env`): local Qwen at `AI_BASE_URL=http://localhost:9200/v1` with `AI_MODEL=local`, `AI_MAX_TOKENS=262144`, `AI_TEMPERATURE=0.6`, `AI_RETRY=2`, `AGENT_CONTEXT_WINDOW=262144`, `QA_MAX_ITERATIONS=5`, `ACCEPTANCE_WINDOW_SIZE=5`, `ACCEPTANCE_MIN_SAMPLES=3`, `ACCEPTANCE_PASSING_SCORE=69`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, thinking on at `xhigh` (defaults), series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
 
 ## 9. Gotchas (hard-won — read before changing behavior)
 
-1. **`THINKING_LEVEL` tuning is per-series.** Reasoning token burn varies dramatically across series — a series with heavy technical jargon may need "xhigh" while a simpler narrative may run fine on "medium". Start with "xhigh" (the default), monitor `.logs/call-ai-*.log` for reasoning content sizes, and tune down to "medium" or "low" if the reasoning spend is excessive relative to content output. Set `THINKING=false` to disable entirely.
+1. **`AI_THINKING_LEVEL` tuning is per-series.** Reasoning token burn varies dramatically across series — a series with heavy technical jargon may need "xhigh" while a simpler narrative may run fine on "medium". Start with "xhigh" (the default), monitor `.logs/call-ai-*.log` for reasoning content sizes, and tune down to "medium" or "low" if the reasoning spend is excessive relative to content output. Set `AI_THINKING=false` to disable entirely.
 2. **Never let a stage persist empty output.** `runOneShot` throws on empty by design; agent stages are guarded by `assertWrote` (missing/empty file → hard error pointing at `.logs/`). If you add a stage, add both guarantees.
 3. **Do not touch the agent-mode prompt safety nets** (the stray-file cleanups): each was added after a live failure (wrong file names, stale strays being audited, marker-format conflicts). The pure tests pin their behavior — run `npm test` after touching any prompt or file name.
 4. **Validator step caps scale with source size** (`validatorMaxStepsFor`): a fixed cap of 40 ran out on the 521KB volume-01 source before the validator wrote its report.
