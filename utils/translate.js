@@ -486,6 +486,18 @@ function roleEndpoint(prefix) {
  * to empty references with a warning, except the glossary which is the
  * canonical terminology source).
  *
+ * `background` is the story-context layer (shared wiki → volume wiki →
+ * POV map, in that order): the "what is happening up to this installment"
+ * context. It feeds translate/retranslate (the [Translation Tasks]
+ * background line) and verify-translate (the [Story Background] section).
+ *
+ * The shared wiki is read from the VOLUME FOLDER's own `shared-wiki.md`
+ * copy — the living state "through this volume". The series-root copy holds
+ * the LATEST volume's state and would leak later-volume spoilers into
+ * earlier volumes' prompts (observed design constraint of the two-file
+ * wiki architecture: per-volume `wiki.md` is frozen to its own volume;
+ * `shared-wiki.md` is the cumulative state).
+ *
  * @param {string} volumeDir - Absolute path to the volume folder.
  * @returns {Promise<{glossaryText: string, terms: Array<{term: string, rendering: string, section: string}>, terminologyLines: string[], styleRules: string, background: string, voiceNotes: string, contextHash: string}>}
  *   `contextHash` is the sha256 of (glossary + styleRules + background) —
@@ -499,13 +511,15 @@ async function loadVolumeReferences(volumeDir) {
       return "";
     }
   };
-  const [glossaryText, styleGuideText, wikiText, povMapText, voiceText] = await Promise.all([
-    read("glossary.md"),
-    read("style-guide.md"),
-    read("wiki.md"),
-    read("pov-map.md"),
-    read("character-voice.md"),
-  ]);
+  const [glossaryText, styleGuideText, sharedWikiText, wikiText, povMapText, voiceText] =
+    await Promise.all([
+      read("glossary.md"),
+      read("style-guide.md"),
+      read("shared-wiki.md"),
+      read("wiki.md"),
+      read("pov-map.md"),
+      read("character-voice.md"),
+    ]);
   if (!glossaryText.trim()) {
     console.warn(
       `[translation] ${volumeDir}: no glossary.md — the translation will run WITHOUT terminology constraints. ` +
@@ -515,16 +529,22 @@ async function loadVolumeReferences(volumeDir) {
   const terms = parseGlossaryTerms(glossaryText);
   const terminologyLines = terms.map((t) => `"${t.term}" translates to "${t.rendering}"`);
   const styleRules = extractStyleRules(styleGuideText);
-  // Background for the translation prompt: the volume wiki (the "what is
-  // happening" layer) plus the POV map (who is narrating what) — both
-  // truncated (they are context, not law; the glossary/style rules are law).
+  // Background for the translation/verification prompts: the shared wiki
+  // (the cumulative "series state through this volume" — prior context),
+  // the volume wiki (this volume's own plot beats — a condensed checklist
+  // of what the chapter contains), and the POV map (who is narrating
+  // what) — all truncated (they are context, not law; the glossary/style
+  // rules are law).
+  const sharedPart = sharedWikiText.trim()
+    ? `## Shared Wiki (series state through this volume)\n${sharedWikiText.trim().slice(0, 8000)}`
+    : "";
   const wikiPart = wikiText.trim()
     ? `## Volume Wiki\n${wikiText.trim().slice(0, 6000)}`
     : "";
   const povPart = povMapText.trim()
     ? `## POV Map\n${povMapText.trim().slice(0, 2000)}`
     : "";
-  const background = [wikiPart, povPart].filter(Boolean).join("\n\n");
+  const background = [sharedPart, wikiPart, povPart].filter(Boolean).join("\n\n");
   const voiceNotes = voiceText.trim().slice(0, 4000);
   const contextHash = sha256(`${glossaryText}\n---\n${styleRules}\n---\n${background}`);
   return {

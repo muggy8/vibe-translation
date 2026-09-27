@@ -293,7 +293,7 @@ endpoints:
 | Step | Task | Model (env) | What it does |
 |---|---|---|---|
 | 1 | `translate` | Hy-MT2-30B-A3B (`TRANSLATE_*`) | Fresh translation per chapter, official single-user-message prompt (no system prompt), official sampling (temp 0.7 / top_p 1.0 / top_k -1 / rep-pen 1.0), `no_think` by default |
-| 2 | `verify-translate` | Qwen3.8-27B (`VERIFY_*`) | Source-anchored 0–100 score + severity-banded findings per chapter; PASS ≥ `VERIFY_PASSING_SCORE` (70); unparseable = FAIL (fail-closed) |
+| 2 | `verify-translate` | Qwen3.8-27B (`VERIFY_*`) | Source-anchored 0–100 score + severity-banded findings per chapter (against source + glossary + style rules + **story background** — shared wiki / volume wiki / POV map; the source outranks the wiki, wiki-only findings cap at MEDIUM); PASS ≥ `VERIFY_PASSING_SCORE` (70); unparseable = FAIL (fail-closed) |
 | 3 | `retranslate` | Hy-MT2 (`TRANSLATE_*`) | Fresh pass over every FAIL chapter — the findings are injected as a numbered "fix these" task; the bad draft is **not** fed back |
 | 4 | `verify-translate` | Qwen (`VERIFY_*`) | Re-runs automatically; only re-checks chapters whose draft changed (idempotent skips for the rest) |
 | 5 | `polish` | Qwen (`EDIT_*`) | Final proofreading pass (thinking on) with a deterministic regression guard |
@@ -309,11 +309,23 @@ endpoints:
 - **Per-chapter idempotency via `translation-state.json`** (per volume
   folder, fail-open like the rolling-state files): each chapter entry carries
   `sourceHash` (the chapter's source text), `contextHash` (sha256 of glossary
-  + style rules + wiki/POV background — regenerating any reference
-  invalidates every draft), `draftHash`, `retranslated`, `findingsHash`, and
-  `polishedDraftHash`. A changed source, a re-run of the glossary/style
+  + style rules + shared-wiki/volume-wiki/POV background — regenerating any
+  reference invalidates every draft), `draftHash`, `retranslated`,
+  `findingsHash`, and
+  `polishedDraftHash`. A changed source, a re-run of the glossary/style/wiki
   tasks, or a retranslate (which bumps `draftHash` and clears
   `polishedDraftHash`) makes the dependent steps re-run on the next pass.
+- **Story background injection** — `loadVolumeReferences` (utils/translate.js)
+  builds `background` from the volume folder's `shared-wiki.md` (the
+  cumulative "series state through this volume" — the per-volume copy, NOT
+  the series-root one, which would leak later-volume spoilers), `wiki.md`
+  (this volume's own plot beats), and `pov-map.md` (all truncated). It feeds
+  the translate/retranslate prompts' background task line AND the
+  verify-translate prompt's [Story Background] section (a 5th audit
+  dimension: consistency with established facts, with the source text as
+  ground truth — a wiki-only finding is capped at MEDIUM so a stale wiki
+  cannot fail a correct translation). `polish` deliberately gets no
+  background (its role is surface cleanup of already-verified text).
 - **Chapter splitting** — a chapter longer than `TRANSLATE_CHUNK_CHARS`
   (default 24000) is split by `splitChapter` (paragraph-aware) and the parts
   are translated in order — both in `translate` and in `retranslate`; each

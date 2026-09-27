@@ -6,7 +6,7 @@
  *   For each volume (in natural order):
  *     1. Resolve the volume's source bundle (utils/source.js) and load the
  *        reference artifacts (glossary.md → terminology, style-guide.md
- *        → house rules, wiki.md + pov-map.md → background).
+ *        → house rules, shared-wiki.md + wiki.md + pov-map.md → background).
  *     2. For each chapter segment (reading order — the bundle's segments
  *        array, NEVER a filename sort):
  *        - Skip it when its translation-<id>.md draft exists and the state

@@ -8,9 +8,10 @@
  *        already covers the CURRENT source + draft hashes (idempotency;
  *        --force re-verifies).
  *     2. One-shot call to the verify model (Qwen3.8-27B via VERIFY_* env):
- *        source + draft + glossary + style rules → a 0–100 score with
- *        banded rubric + severity-banded findings (system-prompts/
- *        verify-translate.md, user-prompts/verify-translate.md).
+ *        source + draft + glossary + style rules + story background
+ *        (shared wiki + volume wiki + POV map — refs.background) → a
+ *        0–100 score with banded rubric + severity-banded findings
+ *        (system-prompts/verify-translate.md, user-prompts/verify-translate.md).
  *     3. PASS when the score >= VERIFY_PASSING_SCORE (default 70). An
  *        unparseable score is a FAIL (fail-closed) — the retranslate task
  *        gets another shot at the chapter.
@@ -109,7 +110,7 @@ function findingsOf(raw) {
  *   volume: {folder: string, sourceFile: string, installmentNumber: string},
  *   volumeDir: string,
  *   bundle: {segments: Array<{id: string, file: string, title: string, chars: number}>},
- *   refs: {terms: Array<{term: string, rendering: string}>, styleRules: string},
+ *   refs: {terms: Array<{term: string, rendering: string}>, styleRules: string, background: string},
  *   systemPrompt: string,
  *   template: string,
  *   endpoint: {baseUrl: string, apiKey?: string, model: string},
@@ -174,6 +175,7 @@ async function processVerifyVolume(ctx) {
       TRANSLATION_TEXT: draft,
       GLOSSARY: glossaryBlock(refs.terms),
       STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
+      BACKGROUND: refs.background || "(none provided — run the jump-in-wiki task)",
     };
     const prompt = transformUserPrompt(template, values);
 
