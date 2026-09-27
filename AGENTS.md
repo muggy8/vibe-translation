@@ -1,6 +1,6 @@
 # AGENTS.md — ai-client
 
-**Read this first.** This is the entry point for AI agents working in this project. The codebase is small (~12k lines across 9 task modules + harness.js + utils/) and the JSDoc in each file is excellent — this doc is the map plus the hard-won gotchas; open the referenced file when you need depth.
+**Read this first.** This is the entry point for AI agents working in this project. The codebase is small (~12k lines across 10 task modules + harness.js + utils/) and the JSDoc in each file is excellent — this doc is the map plus the hard-won gotchas; open the referenced file when you need depth.
 
 ## 1. What this is
 
@@ -11,7 +11,7 @@ An agentic AI client (v2.0.0, CommonJS, Node ≥ 22.19) that processes a light-n
 - `style-guide` task → a cumulative style guide (house-style policies for rendering source-language constructs in the target language)
 - `jump-in-wiki` task → a per-volume `wiki.md` plus a "living" `shared-wiki.md` (newest copy at the series root)
 - `consistency-audit` task → a final cross-artifact audit (`consistency-report.md`, PASS/FAIL sign-off before translation)
-- **translation stage** (`translate` → `verify-translate` → `retranslate` → `verify-translate` → `polish`) → the actual translation of every volume, per chapter, by a **multi-model chain** (Hy-MT2 translates, Qwen verifies, Hy-MT2 retranslates the failures, Qwen re-verifies, Qwen polishes) — see §8.5
+- **translation stage** (`translate` → `translate-qa` → `polish`) → the actual translation of every volume, per chapter, by a **multi-model chain** (Hy-MT2 translates; the `translate-qa` loop then runs verify (Qwen) → retranslate (Hy-MT2) rounds until every chapter passes verification — or the round cap / stall guard stops it — and Qwen polishes last) — see §8.5
 - plus deterministic translation-handoff artifacts per volume: `chapters.json` + `translation-brief.md` (and the persisted extraction JSONs / glossary coverage report)
 
 It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@openharness/core`. Tool-calling agents read the sources and write the outputs themselves through sandboxed file tools.
@@ -28,8 +28,9 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `npx gulp translate` | Translate all volumes, per chapter (Hy-MT2 endpoint; `TRANSLATE_*` env) |
 | `npx gulp verify-translate` | Source-anchored verification of the drafts, per chapter (Qwen endpoint; `VERIFY_*` env). FAILs are fixed by `retranslate`. Default-ON — `VERIFY_TRANSLATE_ENABLED=false` makes it (and `retranslate`) a no-op |
 | `npx gulp retranslate` | Retranslate the chapters that FAILED verification (Hy-MT2, findings injected as correction tasks; the bad draft is not fed back) |
+| `npx gulp translate-qa` | The translation QA loop: verify batch (Qwen) → retranslate batch (Hy-MT2), repeated until every chapter passes, a round retranslates nothing (stalled), or `TRANSLATE_QA_MAX_ROUNDS` (default 3) rounds run |
 | `npx gulp polish` | Final Qwen polish pass per chapter (with a deterministic regression guard that rejects a polish worse than the draft) |
-| `npx gulp` (default) | All ten in order: glossary → character-voice → style-guide → jump-in-wiki → consistency-audit → translate → verify-translate → retranslate → verify-translate → polish |
+| `npx gulp` (default) | All eight in order: glossary → character-voice → style-guide → jump-in-wiki → consistency-audit → translate → translate-qa → polish (translate-qa loops verify → retranslate internally) |
 | `... --dry-run` | No AI calls; dump the exact prompts to `.dry-run/<task>-NN.md` |
 | `... --force` | Regenerate even if outputs already exist |
 | `... --volume NN` | Process a single volume (e.g. `--volume 01`) |
@@ -57,19 +58,20 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `jump-in-wiki.js` | Wiki task logic **plus the shared helpers**. After all volumes: the last existing `shared-wiki.md` is copied to `SHARED_WIKI_OUTPUT_FILE` (default `<SERIES_LOCATION>/shared-wiki.md`); writes the per-volume translation handoff (`utils/handoff.js`) on both paths. |
 | `consistency-audit.js` | Final cross-artifact consistency audit (the pre-translation sign-off). An audit agent (gated fs tools, cwd = series root, writes confined to the root) reads the four series-root artifacts (`glossary.md`, `character-voice.md`, `style-guide.md`, `shared-wiki.md`) and writes `consistency-report.md` (PASS/FAIL verdict + severity-banded findings with quoted snippets). No QA loop. Idempotent: the report is skipped while it is newer than all four artifacts (`--force` re-audits). A FAIL verdict is logged loudly but does not fail the task — the report is the deliverable. |
 | `translate.js` | Translation task (first stage of the multi-model chain; §8.5). Per volume, per chapter (in `bundle.segments` order): skip when the draft + `translation-state.json` cover the current source/reference hashes, split oversized chapters (`TRANSLATE_CHUNK_CHARS`), translate each part via `runOneShot` on the `TRANSLATE_*` endpoint — **no system prompt** (Hy-MT2's single-user-message contract), official sampling, `no_think` by default — with the previous part's ending as continuity context, deterministic QA (`checkTranslationQa`), per-chapter state persistence, and the merged `translation.md` + `translation-qa.md`. Also exports `chapterArtifactNames` / `mergeVolumeTranslationFiles` shared by the other three tasks. |
-| `verify-translate.js` | Verification task (§8.5). Per chapter with a draft: one-shot source-anchored check on the `VERIFY_*` endpoint (Qwen) → 0–100 score (fail-closed: unparseable = FAIL) + severity-banded findings → `translation-verification.json` sidecar + `translation-verification.md` report. PASS = score ≥ `VERIFY_PASSING_SCORE` (default 70). `VERIFY_TRANSLATE_ENABLED=false` makes it a no-op. Exports `loadVerificationSidecar` (read by retranslate) and `glossaryBlock` (read by polish). |
-| `retranslate.js` | Correction task (§8.5). Per chapter that FAILED verification (and whose sidecar entry still covers the current source + draft): a fresh Hy-MT2 pass with the verification findings injected as a numbered "fix these" task in the official prompt — the bad draft is **deliberately not** fed back (re-reading a bad translation anchors the model to its errors). Same part-by-part splitting as `translate` (the findings are injected into every part). Overwrites the draft, updates the state (invalidating any earlier polish), re-merges `translation.md`. Runs only when verification is enabled. |
+| `verify-translate.js` | Verification task (§8.5). Per chapter with a draft: one-shot source-anchored check on the `VERIFY_*` endpoint (Qwen) → 0–100 score (fail-closed: unparseable = FAIL) + severity-banded findings → `translation-verification.json` sidecar + `translation-verification.md` report. PASS = score ≥ `VERIFY_PASSING_SCORE` (default 70). `VERIFY_TRANSLATE_ENABLED=false` makes it a no-op. Exports `loadVerificationSidecar` (read by retranslate) and `glossaryBlock` (read by polish); returns the aggregated run summary (`failed` — read by the `translate-qa` loop). |
+| `retranslate.js` | Correction task (§8.5). Per chapter that FAILED verification (and whose sidecar entry still covers the current source + draft): a fresh Hy-MT2 pass with the verification findings injected as a numbered "fix these" task in the official prompt — the bad draft is **deliberately not** fed back (re-reading a bad translation anchors the model to its errors). Same part-by-part splitting as `translate` (the findings are injected into every part). Overwrites the draft, updates the state (invalidating any earlier polish), re-merges `translation.md`. Runs only when verification is enabled; returns the aggregated run summary (`retranslated` — the `translate-qa` loop's stall guard). |
+| `translate-qa.js` | The batched translation QA loop (§8.5) — one gulp task that mirrors the pre-production "translate → validate → apply → re-validate …" loop: up to `TRANSLATE_QA_MAX_ROUNDS` rounds of [verify batch (Qwen) → retranslate batch (Hy-MT2)], stopping when every chapter passes, a round retranslates nothing (stalled), or the round cap is hit. Batched because the local model containers share one port: each half-round is a whole single-model task run invoked through `withHooks()` (the per-batch model-switch hooks fire at every boundary). Owns no prompt/model logic — the stop-decision is the pure `qaLoopDecision` in `utils/translate.js`. |
 | `polish.js` | Final pass (§8.5). Per chapter: one-shot polish on the `EDIT_*` endpoint (Qwen, thinking on) → **deterministic regression guard**: if the polished text fails the QA the draft passed, or loses glossary coverage the draft had, the polish is rejected and the draft kept (chapter left unpolished, retried next run). Writes `polished-<id>.md`, records `polishedDraftHash` in the state, re-merges `translation.md` (polished text wins). |
-| `utils/translate.js` | Pure translation-stage helpers shared by the four tasks: `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `buildTranslationTaskLines` / `buildTranslationPrompt` (the official Hy-MT2 single-user-message shape), `cjkRatio`, `countOccurrences`, `checkTranslationQa` (hard fails: empty draft, CJK ratio > 5%; warnings: CJK > 0.5%, length ratio outside 0.6–2.5, missing glossary renderings), `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `loadTranslationState` / `saveTranslationState` (fail-open), `roleEndpoint` (`<PREFIX>_BASE_URL`/`_API_KEY`/`_MODEL` with `AI_*` fallback), `loadVolumeReferences` (glossary terms, style rules, wiki + POV-map background, voice notes, and the `contextHash` idempotency key). |
-| `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. All nine tasks read this manifest instead of guessing folder names. |
-| `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All nine tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
+| `utils/translate.js` | Pure translation-stage helpers shared by the four tasks: `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `buildTranslationTaskLines` / `buildTranslationPrompt` (the official Hy-MT2 single-user-message shape), `cjkRatio`, `countOccurrences`, `checkTranslationQa` (hard fails: empty draft, CJK ratio > 5%; warnings: CJK > 0.5%, length ratio outside 0.6–2.5, missing glossary renderings), `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `loadTranslationState` / `saveTranslationState` (fail-open), `roleEndpoint` (`<PREFIX>_BASE_URL`/`_API_KEY`/`_MODEL` with `AI_*` fallback), `loadVolumeReferences` (glossary terms, style rules, wiki + POV-map background, voice notes, and the `contextHash` idempotency key), `qaLoopDecision` (the translate-qa loop's pure stop-decision: all-pass / round-limit / stalled) and `qaMaxRounds` (the `TRANSLATE_QA_MAX_ROUNDS` cap). |
+| `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. All ten tasks read this manifest instead of guessing folder names. |
+| `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All ten tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
 | `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `CharacterVoiceVolumeCtx`, `StyleGuideVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`, `HookContext`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
-| `gulpfile.js` | Task wiring plus the `ON_TASK_ERROR`-aware `runPipeline()` runner for the default all-ten run (see §3 "Un-monitored run policies"). |
+| `gulpfile.js` | Task wiring plus the `ON_TASK_ERROR`-aware `runPipeline()` runner for the default run (see §3 "Un-monitored run policies"). |
 | `hooks/` | Per-machine hook scripts (git-style; gitignored — only `README.md` + `*.sample` are tracked). Executable before/after hooks for each step and the whole run. See §3 "Pipeline hooks". |
 | `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Style guide: `style-guide-extract`, `style-guide` (compile), `style-guide-validator`, `style-guide-acceptance`, `style-guide-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. Consistency audit: `consistency-audit`. Translation stage: `translate` (user only — the official Hy-MT2 single-user-message prompt, **no system prompt file**), `verify-translate` (system + user — source-anchored 0–100 scoring rubric), `polish` (system + user — final proofreading pass). |
 | `test/test-glossary-load.js` | Pure tests (`npm test`). |
-| `test/test-translate.js` | Pure tests for the translation-stage helpers (`utils/translate.js`): `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `checkTranslationQa`, `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `roleEndpoint`. |
-| `test/test-hooks.js` | Pure tests for the hook runner (`utils/hooks.js`), including the `TASKS` list (all nine tasks + pipeline). |
+| `test/test-translate.js` | Pure tests for the translation-stage helpers (`utils/translate.js`): `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `checkTranslationQa`, `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `roleEndpoint`, `qaLoopDecision`, `qaMaxRounds`. |
+| `test/test-hooks.js` | Pure tests for the hook runner (`utils/hooks.js`), including the `TASKS` list (all ten tasks + pipeline). |
 | `test/harness-smoke.js` | Live smoke test (`npm run smoke`). |
 | `test-series/` | Fixture series (`test_story(1)`, `test_story(2)`); generated outputs are gitignored. |
 | `.env` / `.env.example` | Configuration (see §8). |
@@ -121,7 +123,7 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
 - `ON_VOLUME_ERROR` (`abort` default / `skip`): when a volume's processing throws, the per-volume body of each task is wrapped in a try/catch — `skip` records the volume and continues with the next one (in the cumulative tasks the next volume then misses its previous artifact and is skipped in turn by `ON_MISSING_PREVIOUS=skip`, cascading to the end of the task).
 - `ON_MISSING_PREVIOUS` (`abort` default / `skip`): replaces the "process the earlier volume first" throw in the three cumulative tasks with an optional warn-and-skip.
 - `ON_QA_LIMIT` (`accept` default / `fail`): when the QA loop hits `QA_MAX_ITERATIONS` without a passing grade — accept the output as-is (legacy) or fail the volume.
-- `ON_TASK_ERROR` (`abort` default / `continue`): in the default all-ten run, a failing step either stops the run (gulp `series` behavior) or the remaining steps still run and the run fails at the end with a summary of all failed steps (`runPipeline()` in gulpfile.js).
+- `ON_TASK_ERROR` (`abort` default / `continue`): in the default run, a failing step either stops the run (gulp `series` behavior) or the remaining steps still run and the run fails at the end with a summary of all failed steps (`runPipeline()` in gulpfile.js).
 - `DISCOVERY_MAX_ATTEMPTS` (default 1): the discovery agent is retried with a fresh agent (10 s apart) when it produces an invalid manifest or references missing source files.
 
 ### Source bundle & chapter-by-chapter fallback (`utils/source.js`)
@@ -153,15 +155,19 @@ See `hooks/README.md` for the full contract and examples.
 - **Hook files** (first existing name wins) — `pre-<task>` / `post-<task>`
   (or `.sh` / `.js`) for `glossary`, `character-voice`, `style-guide`,
   `jump-in-wiki`, `consistency-audit`, `translate`, `verify-translate`,
-  `retranslate`, `polish`, plus `pre-pipeline` / `post-pipeline` around the
-  whole default run. Any executable with a shebang works.
+  `retranslate`, `translate-qa`, `polish`, plus `pre-pipeline` /
+  `post-pipeline` around the whole default run. Any executable with a
+  shebang works. `pre-/post-translate-qa` wrap the WHOLE QA loop (a logical
+  wrapper — they must not switch models).
 - **Model switching for the translation stage** — the translation stage uses
   two different models, but on local setups the containers share one port, so
   only one can serve at a time. The per-machine pre-hooks for the four
   translation tasks are what start the right container (`model-switch.sh`,
   `hooks/README.md` Example 4 — idempotent, `/health`-polled). The task code
   contains no Docker logic; it only runs a `GET /v1/models` sanity check
-  (`harness.assertModelServing`) before its first call.
+  (`harness.assertModelServing`) before its first call. The `translate-qa`
+  loop fires these batch hooks on every round (up to two switches per round;
+  a repeat is a no-op when the right container already serves).
 - **Entirely optional** — no file → the step runs exactly as before (the
   common case); present-but-not-executable → warn + skip. **`--dry-run` runs
   no hooks** (side-effect-free).
@@ -170,8 +176,10 @@ See `hooks/README.md` for the full contract and examples.
   fire), and a failed after-hook only masks the task error when the task had
   already failed (the task error always propagates).
 - **Wiring** — each task is wrapped with `withHooks(task, taskFn)` in
-  `gulpfile.js` (the nine task modules are untouched); the default run is
-  wrapped as the `pipeline` pseudo-step.
+  `gulpfile.js` (the task modules are untouched); `translate-qa` wraps its
+  two half-round tasks the same way inside the loop (the per-batch hooks
+  fire on every round); the default run is wrapped as the `pipeline`
+  pseudo-step.
 
 
 ## 4. Pipeline A: glossary (`glossary.js`)
@@ -293,19 +301,38 @@ endpoints:
 | Step | Task | Model (env) | What it does |
 |---|---|---|---|
 | 1 | `translate` | Hy-MT2-30B-A3B (`TRANSLATE_*`) | Fresh translation per chapter, official single-user-message prompt (no system prompt), official sampling (temp 0.7 / top_p 1.0 / top_k -1 / rep-pen 1.0), `no_think` by default |
-| 2 | `verify-translate` | Qwen3.8-27B (`VERIFY_*`) | Source-anchored 0–100 score + severity-banded findings per chapter (against source + glossary + style rules + **story background** — shared wiki / volume wiki / POV map; the source outranks the wiki, wiki-only findings cap at MEDIUM); PASS ≥ `VERIFY_PASSING_SCORE` (70); unparseable = FAIL (fail-closed) |
-| 3 | `retranslate` | Hy-MT2 (`TRANSLATE_*`) | Fresh pass over every FAIL chapter — the findings are injected as a numbered "fix these" task; the bad draft is **not** fed back |
-| 4 | `verify-translate` | Qwen (`VERIFY_*`) | Re-runs automatically; only re-checks chapters whose draft changed (idempotent skips for the rest) |
-| 5 | `polish` | Qwen (`EDIT_*`) | Final proofreading pass (thinking on) with a deterministic regression guard |
+| 2 | `translate-qa` (round N) | verify: Qwen3.8-27B (`VERIFY_*`) · retranslate: Hy-MT2 (`TRANSLATE_*`) | The batched QA loop (see the design notes below). Each round: a **verify batch** — source-anchored 0–100 score + severity-banded findings per chapter (against source + glossary + style rules + **story background** — shared wiki / volume wiki / POV map; the source outranks the wiki, wiki-only findings cap at MEDIUM); PASS ≥ `VERIFY_PASSING_SCORE` (70); unparseable = FAIL (fail-closed) — then a **retranslate batch** — a fresh pass over every FAIL chapter, the findings injected as a numbered "fix these" task; the bad draft is **not** fed back. Rounds repeat until every chapter passes (round N+1's verify only re-scores the chapters round N retranslated — idempotent skips for the rest) |
+| 3 | `polish` | Qwen (`EDIT_*`) | Final proofreading pass (thinking on) with a deterministic regression guard (runs on whatever drafts exist — including round-cap FAILs) |
 
 **Design notes:**
 
-- **No QA loop in the translation stage.** Each step is a one-shot call per
-  chapter with deterministic (no-AI) gates — the multi-model chain *is* the
-  quality control (a different model grades the work). `verify-translate` is
-  default-ON; `VERIFY_TRANSLATE_ENABLED=false` disables it **and**
-  `retranslate` (they are one QA chain) — the pipeline degrades to
-  translate → polish.
+- **The QA loop is batched, not per-chapter** (`translate-qa.js`). The
+  pre-production pipeline loops "translate → validate → apply validation →
+  re-validate …" until the validator is happy with the accuracy; the
+  translation stage mirrors it as `translate` → **N rounds of
+  [verify batch → retranslate batch]** → `polish` (N =
+  `TRANSLATE_QA_MAX_ROUNDS`, default 3). Batching is forced by the local
+  setup: the Hy-MT2 and Qwen containers share one port (only one serves at
+  a time; switching is expensive), so the loop never interleaves models per
+  chapter — each half-round is a whole single-model task run, invoked
+  through `withHooks()` so the per-batch model-switch hooks fire at every
+  boundary. The hash-keyed idempotency (verification sidecar +
+  `translation-state.json`) makes round N+1 re-do only what round N
+  changed: unchanged drafts are verify skips, PASS chapters are retranslate
+  skips. **Stop conditions** (checked in order, pure `qaLoopDecision` in
+  `utils/translate.js`): **all-pass** (the validator is happy),
+  **stalled** (a retranslate batch applied nothing — every FAIL chapter
+  already carries exactly those findings, per the `findingsHash` skip —
+  nothing new can be applied; a plain re-run is then a cheap no-op and
+  `--force` retries), **round-limit** (N rounds ran; still-FAIL chapters
+  keep their latest draft — polish still runs on them).
+- **No per-chapter QA loop inside a batch.** Each half-round is still
+  one-shot calls per chapter with deterministic (no-AI) gates — the
+  multi-model chain *is* the quality control (a different model grades the
+  work). `verify-translate` is default-ON;
+  `VERIFY_TRANSLATE_ENABLED=false` disables it **and** `retranslate`
+  **and** the `translate-qa` loop (they are one QA chain) — the pipeline
+  degrades to translate → polish.
 - **Per-chapter idempotency via `translation-state.json`** (per volume
   folder, fail-open like the rolling-state files): each chapter entry carries
   `sourceHash` (the chapter's source text), `contextHash` (sha256 of glossary
@@ -348,7 +375,8 @@ endpoints:
   CURRENT draft (`polishedDraftHash === draftHash`), otherwise the draft.
 - **Endpoint sanity check** — every task calls `harness.assertModelServing`
   (`GET /v1/models`) before its first call and fails loudly when nothing is
-  serving or the model id is missing. The task code contains **zero Docker
+  serving or the model id is missing — the loop re-checks before every
+  batch. The task code contains **zero Docker
   logic** — on local multi-model setups the per-machine pre-hooks switch the
   containers (see §3 "Pipeline hooks" and `hooks/README.md` Example 4).
 
@@ -402,7 +430,8 @@ setups the per-machine pre-hooks switch the model container per stage
 | `TRANSLATE_THINKING` | `no_think` | Hy-MT2 thinking dialect: `no_think` / `low` / `high` (also accepts `true` → `low`, `false` → `no_think`) — mapped to `reasoning_effort` |
 | `TRANSLATE_CHUNK_CHARS` | `24000` | Max chars per translation call; longer chapters are split (paragraph-aware) and translated in order |
 | `TRANSLATE_CONTINUITY_CHARS` | `400` | Chars of the previous chapter-part's ending fed to the next part as continuity context (`0` = off) |
-| `VERIFY_TRANSLATE_ENABLED` | `true` | `false` disables `verify-translate` **and** `retranslate` (one QA chain) — the pipeline degrades to translate → polish |
+| `TRANSLATE_QA_MAX_ROUNDS` | `3` | Max `translate-qa` rounds (round = verify batch + retranslate batch); the loop stops earlier when all chapters pass or a round retranslates nothing (stalled) |
+| `VERIFY_TRANSLATE_ENABLED` | `true` | `false` disables `verify-translate` **and** `retranslate` **and** the `translate-qa` loop (one QA chain) — the pipeline degrades to translate → polish |
 | `VERIFY_PASSING_SCORE` | `70` | Score (0–100) at or above which a chapter passes verification |
 | `VERIFY_BASE_URL` / `VERIFY_API_KEY` / `VERIFY_MODEL` | `AI_*` | Endpoint for `verify-translate` (Qwen) |
 | `VERIFY_TEMPERATURE` | `0.2` | Verification sampling temperature |
@@ -448,7 +477,7 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 | `ON_VOLUME_ERROR` | `abort` | When a volume's processing fails: `abort` stops the task; `skip` logs the error and continues with the next volume |
 | `ON_MISSING_PREVIOUS` | `abort` | When a cumulative task finds the previous volume's artifact missing: `abort` fails loudly; `skip` warns and skips the volume (later volumes cascade the same way) |
 | `ON_QA_LIMIT` | `accept` | When the QA loop hits `QA_MAX_ITERATIONS` without a passing grade: `accept` keeps the output as-is; `fail` treats the volume as failed (then subject to `ON_VOLUME_ERROR`) |
-| `ON_TASK_ERROR` | `abort` | Default all-ten run: `abort` stops at the first failing step; `continue` runs the remaining steps, then fails the run with a summary |
+| `ON_TASK_ERROR` | `abort` | Default run: `abort` stops at the first failing step; `continue` runs the remaining steps, then fails the run with a summary |
 | `DISCOVERY_MAX_ATTEMPTS` | `1` | Discovery-agent attempts before failing the task (fresh agent each attempt, 10 s apart; per-attempt endpoint retries still apply via `AI_RETRY`) |
 
 ### Output locations (`*_OUTPUT_FILE`)
@@ -472,7 +501,7 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 | `WIKI_USER_AGENT` | built-in | Descriptive UA (Wikipedia requires one) |
 | `SEARCH_API` / `SEARCH_API_KEY` | off | Optional brave / tavily / serper backend |
 
-**Current local setup** (the committed `.env`): local Qwen at `AI_BASE_URL=http://localhost:9200/v1` with `AI_MODEL=local`, `AI_MAX_TOKENS=262144`, `AI_TEMPERATURE=0.6`, `AI_RETRY=2`, `AGENT_CONTEXT_WINDOW=262144`, `QA_MAX_ITERATIONS=5`, `ACCEPTANCE_WINDOW_SIZE=5`, `ACCEPTANCE_MIN_SAMPLES=3`, `ACCEPTANCE_PASSING_SCORE=69`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, thinking on at `xhigh` (defaults), series = `test-series` (the `test_story` fixture), JP→EN. The translation stage is configured for the local two-model setup: all three role endpoints (`TRANSLATE_*` / `VERIFY_*` / `EDIT_*`) point at the same `http://localhost:9200/v1` with `MODEL=local` — the per-machine hooks (`hooks/pre-translate.sh` → Hy-MT2, `hooks/pre-verify-translate.sh` / `pre-polish.sh` → Qwen, `hooks/pre-retranslate.sh` → Hy-MT2) switch the container per stage, because every local container advertises the same `local` alias and shares the one port. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
+**Current local setup** (the committed `.env`): local Qwen at `AI_BASE_URL=http://localhost:9200/v1` with `AI_MODEL=local`, `AI_MAX_TOKENS=262144`, `AI_TEMPERATURE=0.6`, `AI_RETRY=2`, `AGENT_CONTEXT_WINDOW=262144`, `QA_MAX_ITERATIONS=5`, `ACCEPTANCE_WINDOW_SIZE=5`, `ACCEPTANCE_MIN_SAMPLES=3`, `ACCEPTANCE_PASSING_SCORE=69`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, `TRANSLATE_QA_MAX_ROUNDS=5`, thinking on at `xhigh` (defaults), series = `test-series` (the `test_story` fixture), JP→EN. The translation stage is configured for the local two-model setup: all three role endpoints (`TRANSLATE_*` / `VERIFY_*` / `EDIT_*`) point at the same `http://localhost:9200/v1` with `MODEL=local` — the per-machine hooks (`hooks/pre-translate.sh` → Hy-MT2, `hooks/pre-verify-translate.sh` / `pre-polish.sh` → Qwen, `hooks/pre-retranslate.sh` → Hy-MT2) switch the container per stage (the `translate-qa` loop re-fires the batch hooks on every round boundary; the state file makes a repeat switch a no-op), because every local container advertises the same `local` alias and shares the one port. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
 
 ## 10. Gotchas (hard-won — read before changing behavior)
 
@@ -504,7 +533,8 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 19. **Never hand the npm undici Agent to Node's global fetch (`makeProviderFetch` in `harness.js`).** The project's `undici` dependency (v8) is a *different build* from Node's bundled undici (which powers the global `fetch`). Passing `noTimeoutAgent` to the global `fetch` mixes request-handler protocols: on Node builds whose bundled undici is older, the dispatch throws `InvalidArgumentError: invalid onRequestStart method` (`UND_ERR_INVALID_ARG`) before any bytes are sent. This is Node-version-dependent, so identical code + `node_modules` can work on one machine (e.g. Windows Node) and fail on another (Linux Node 22) — observed live right after a Windows→Linux migration. The fix pattern: dispatch through undici's *own* `fetch` (same build as the Agent), and normalize `Headers` instances to plain objects first (undici's webidl converter would silently convert a foreign Headers instance to an empty record, dropping auth/content-type).
 20. **Never sort epub bundle segments by filename — iterate `bundle.segments`.** Interlude (and epilogue) files are named `<base>-chN.K.md` where N is the chapter that existed immediately before the segment and K restarts at 1 for each chapter (`ch1.md`, `ch1.1.md`, `ch2.md`, `ch2.1.md`, `ch2.2.md`, `ch3.md`…). A filename sort misorders `chN.md` vs `chN.K.md` (a plain string sort puts `chN.1.md` *before* `chN.md` because `1` < `m`). The `SourceBundle.segments` array is the single source of truth for reading order (set by `assignSegmentIds` during extraction). Related: the epub extraction is cached in `<base>-bundle.meta.json` (keyed on the epub's mtime/size plus a `schema` version — renaming the id scheme bumps `BUNDLE_SCHEMA_VERSION` and forces re-extraction, removing the stale old-named segment files); `--force` re-extracts, and a deleted/stale cache file just triggers re-extraction (fail-open).
 21. **Un-monitored run policies change where failures surface — read the summary, not just the last log line.** With the un-monitored values in `.env` (`ON_VOLUME_ERROR=skip`, `ON_MISSING_PREVIOUS=skip`, `ON_TASK_ERROR=continue`), a broken volume no longer aborts its task or the pipeline: the task logs `[skip] Volume NN (…) failed: …`, keeps going (in the cumulative tasks the skip cascades through the remaining volumes via the missing-previous check), and the pipeline finishes with a `N of M volume(s) failed` / `Pipeline finished with N failed step(s)` summary that still fails the run (non-zero exit). The final series-root copy uses the **last existing** snapshot, so a partially failed run publishes the last good volume's artifact rather than nothing. Recovery is a plain re-run: idempotent skip-checks make it cheap, and the failed/skipped volumes are picked up. Code defaults are the opposite (fail loudly at the first problem) — keep them that way so interactive runs stay safe, and don't "fix" the cascade by making per-volume idempotency independent of the previous volume's artifact.
-22. **The translation stage's model switching lives in the hooks — not in the task code.** Every local model container (Hy-MT2, Qwen3.8-27B, …) advertises the **same model alias** (`local`) and shares **one host port** (9200), so the ai-client cannot tell the models apart by name — `TRANSLATE_MODEL` / `VERIFY_MODEL` / `EDIT_MODEL` are all `local`. The per-machine pre-hooks (`hooks/pre-<task>.sh` → `model-switch.sh <compose dir>`) stop the current port owner, start the stage's container, and poll `/health` until the model is loaded. Consequences: (a) never add Docker/container logic to the task modules — the `/v1/models` check (`assertModelServing`) is the only endpoint contact; (b) running a translation task standalone on the wrong model fails loudly at the sanity check only if the model id differs — with identical aliases it translates with whatever happens to be up, so on local setups always run the tasks via the hooked pipeline (or the per-task gulp tasks, which fire the hooks); (c) `model-switch.sh` is idempotent via `hooks/.model-switch-state` (the compose dir it last started — the compose PROJECT label is *not* usable: compose sanitizes project names, so `Qwen3.8-27b-beellama` becomes `qwen38-27b-beellama` and never matches a dir-name comparison); a container started manually (no state file) is treated as "unknown" and swapped.
+22. **The translation stage's model switching lives in the hooks — not in the task code.** Every local model container (Hy-MT2, Qwen3.8-27B, …) advertises the **same model alias** (`local`) and shares **one host port** (9200), so the ai-client cannot tell the models apart by name — `TRANSLATE_MODEL` / `VERIFY_MODEL` / `EDIT_MODEL` are all `local`. The per-machine pre-hooks (`hooks/pre-<task>.sh` → `model-switch.sh <compose dir>`) stop the current port owner, start the stage's container, and poll `/health` until the model is loaded. Consequences: (a) never add Docker/container logic to the task modules — the `/v1/models` check (`assertModelServing`) is the only endpoint contact; (b) running a translation task standalone on the wrong model fails loudly at the sanity check only if the model id differs — with identical aliases it translates with whatever happens to be up, so on local setups always run the tasks via the hooked pipeline (or the per-task gulp tasks, which fire the hooks); (c) `model-switch.sh` is idempotent via `hooks/.model-switch-state` (the compose dir it last started — the compose PROJECT label is *not* usable: compose sanitizes project names, so `Qwen3.8-27b-beellama` becomes `qwen38-27b-beellama` and never matches a dir-name comparison); a container started manually (no state file) is treated as "unknown" and swapped; (d) the `translate-qa` loop re-fires these batch hooks on every round (up to two switches per round) — a repeat switch is a no-op via the state file, so a round that ends on the model the next round needs costs nothing.
+23. **The translate-qa loop stops on "stalled" — a stuck chapter is not retried on a plain re-run.** The retranslate task skips a chapter when it was already retranslated for byte-identical findings (`findingsHash` match — cross-run idempotency). In the loop, when a retranslate batch therefore applies nothing (`retranslated === 0`), the loop stops ("stalled") instead of burning identical model calls round after round. Consequence: a chapter whose verification keeps failing with identical findings keeps its latest draft; a plain re-run is cheap (one verify batch of skips + stall) and `npx gulp translate-qa --force` (bypasses the skip) gives it a fresh stochastic attempt (Hy-MT2 runs at temp 0.7, so a retry can succeed). The round cap (`TRANSLATE_QA_MAX_ROUNDS`) is the backstop for oscillating findings (different text each round) — it bounds the worst case at N verify batches + N−1 retranslate batches per pipeline run, and still-FAIL chapters keep their latest draft (polish still runs on them; the verification report records the FAIL).
 
 ## 11. Conventions
 

@@ -14,7 +14,7 @@
  * exactly as before (hooks are a no-op). On local multi-model setups the
  * translation steps' hooks are what start/stop the model containers (the
  * tasks only check the endpoint via a /v1/models sanity call). The default
- * (all-ten) run is additionally wrapped as the "pipeline" pseudo-step
+ * run is additionally wrapped as the "pipeline" pseudo-step
  * (pre-/post-pipeline).
  *
  * Usage:
@@ -31,17 +31,23 @@
  *   npx gulp translate                # translate all volumes (Hy-MT2, per chapter)
  *   npx gulp verify-translate         # source-anchored verification (Qwen, per chapter)
  *   npx gulp retranslate              # retranslate the FAILED chapters (Hy-MT2)
+ *   npx gulp translate-qa             # the QA loop: verify batch -> retranslate
+ *                                     # batch, repeated until every chapter passes
+ *                                     # (or a round retranslates nothing / the
+ *                                     # TRANSLATE_QA_MAX_ROUNDS limit is hit)
  *   npx gulp polish                   # final polish pass (Qwen, per chapter)
  *   npx gulp <task> --chunked         # force the chapter-by-chapter fallback for
  *                                     # multi-chapter epub volumes (the default is
  *                                     # whole-installment processing; the fallback
  *                                     # also triggers automatically when the whole
  *                                     # text exceeds SOURCE_CHUNK_THRESHOLD_CHARS)
- *   (default task)                     # all ten in order:
+ *   (default task)                     # all eight in order:
  *                                     # glossary -> character-voice -> style-guide ->
  *                                     # jump-in-wiki -> consistency-audit ->
- *                                     # translate -> verify-translate -> retranslate
- *                                     # -> verify-translate -> polish
+ *                                     # translate -> translate-qa -> polish
+ *                                     # (translate-qa loops verify -> retranslate
+ *                                     # until every chapter passes — see
+ *                                     # translate-qa.js)
  *                                     # (a failing step aborts the run by default;
  *                                     # ON_TASK_ERROR=continue in .env lets the
  *                                     # remaining steps run for un-monitored runs)
@@ -56,6 +62,7 @@ const { consistencyAudit } = require("./consistency-audit");
 const { translate } = require("./translate");
 const { verifyTranslate } = require("./verify-translate");
 const { retranslate } = require("./retranslate");
+const { translateQa } = require("./translate-qa");
 const { polish } = require("./polish");
 const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
 
@@ -70,13 +77,17 @@ const consistencyAuditTask = withHooks("consistency-audit", consistencyAudit);
 const translateTask = withHooks("translate", translate);
 const verifyTranslateTask = withHooks("verify-translate", verifyTranslate);
 const retranslateTask = withHooks("retranslate", retranslate);
+const translateQaTask = withHooks("translate-qa", translateQa);
 const polishTask = withHooks("polish", polish);
 
 /**
- * The ten pipeline steps in run order (step name + hooked task function).
- * verify-translate runs twice: once after the drafts, once after the
- * retranslate pass re-scored the fixed chapters (the second run only re-checks
- * the chapters whose draft changed — the rest are idempotent skips).
+ * The eight pipeline steps in run order (step name + hooked task function).
+ * The translation QA stage (translate-qa) loops verify-translate →
+ * retranslate until every chapter passes verification, until a round
+ * retranslates nothing (stalled), or until TRANSLATE_QA_MAX_ROUNDS is
+ * reached — each round is two single-model batches, so the local model
+ * containers only switch at batch boundaries (the idempotent skips make
+ * round N+1 re-check only the chapters round N retranslated).
  * @type {Array<{name: string, run: Function}>}
  */
 const PIPELINE_STEPS = [
@@ -89,9 +100,7 @@ const PIPELINE_STEPS = [
   // endpoint, verify/polish on the Qwen endpoint — see the TRANSLATE_,
   // VERIFY_, and EDIT_ env prefixes).
   { name: "translate", run: translateTask },
-  { name: "verify-translate", run: verifyTranslateTask },
-  { name: "retranslate", run: retranslateTask },
-  { name: "verify-translate", run: verifyTranslateTask },
+  { name: "translate-qa", run: translateQaTask },
   { name: "polish", run: polishTask },
 ];
 
@@ -146,6 +155,7 @@ exports["consistency-audit"] = consistencyAuditTask;
 exports.translate = translateTask;
 exports["verify-translate"] = verifyTranslateTask;
 exports.retranslate = retranslateTask;
+exports["translate-qa"] = translateQaTask;
 exports.polish = polishTask;
-// The whole default run also fires pre-pipeline / post-pipeline around all ten.
+// The whole default run also fires pre-pipeline / post-pipeline around all eight.
 exports.default = withHooks(PIPELINE_TASK, runPipeline);

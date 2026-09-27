@@ -25,6 +25,8 @@ const {
   loadTranslationState,
   saveTranslationState,
   roleEndpoint,
+  qaLoopDecision,
+  qaMaxRounds,
 } = require("../utils/translate");
 
 // ─── sha256 ───────────────────────────────────────────────────────────────────
@@ -286,6 +288,57 @@ assert.strictEqual(sha256("a"), sha256("a"));
   else process.env.AI_BASE_URL = prevAi.url;
   if (prevAi.model === undefined) delete process.env.AI_MODEL;
   else process.env.AI_MODEL = prevAi.model;
+}
+
+// ─── qaLoopDecision (the translate-qa loop's stop rules) ────────────────────
+
+{
+  // after-verify: zero FAILs → stop (all-pass), even at the round cap.
+  assert.deepStrictEqual(
+    qaLoopDecision({ phase: "after-verify", round: 3, maxRounds: 3, failed: 0 }),
+    { stop: true, reason: "all-pass" }
+  );
+  // after-verify: FAILs remain and the round cap is hit → stop (round-limit).
+  assert.deepStrictEqual(
+    qaLoopDecision({ phase: "after-verify", round: 3, maxRounds: 3, failed: 2 }),
+    { stop: true, reason: "round-limit" }
+  );
+  // after-verify: FAILs remain and rounds remain → continue.
+  assert.deepStrictEqual(
+    qaLoopDecision({ phase: "after-verify", round: 2, maxRounds: 3, failed: 2 }),
+    { stop: false, reason: null }
+  );
+  // after-retranslate: nothing applied → stop (stalled).
+  assert.deepStrictEqual(
+    qaLoopDecision({ phase: "after-retranslate", round: 1, maxRounds: 3, retranslated: 0 }),
+    { stop: true, reason: "stalled" }
+  );
+  // after-retranslate: something applied → continue to the next verify batch.
+  // (In the actual loop this phase is only reached with round < maxRounds —
+  // the cap is checked before the retranslate half, so every applied
+  // correction is always followed by a fresh verification.)
+  assert.deepStrictEqual(
+    qaLoopDecision({ phase: "after-retranslate", round: 2, maxRounds: 3, retranslated: 4 }),
+    { stop: false, reason: null }
+  );
+  // Unknown phase → fail loudly.
+  assert.throws(() => qaLoopDecision({ phase: "nope", round: 1, maxRounds: 3 }), /unknown phase/);
+}
+
+// ─── qaMaxRounds ──────────────────────────────────────────────────────────────
+
+{
+  const prev = process.env.TRANSLATE_QA_MAX_ROUNDS;
+  delete process.env.TRANSLATE_QA_MAX_ROUNDS;
+  assert.strictEqual(qaMaxRounds(), 3, "default is 3");
+  process.env.TRANSLATE_QA_MAX_ROUNDS = "7";
+  assert.strictEqual(qaMaxRounds(), 7, "env var wins");
+  process.env.TRANSLATE_QA_MAX_ROUNDS = "0";
+  assert.strictEqual(qaMaxRounds(), 1, "clamped to a minimum of 1");
+  process.env.TRANSLATE_QA_MAX_ROUNDS = "junk";
+  assert.strictEqual(qaMaxRounds(), 3, "invalid value falls back to the default");
+  if (prev === undefined) delete process.env.TRANSLATE_QA_MAX_ROUNDS;
+  else process.env.TRANSLATE_QA_MAX_ROUNDS = prev;
 }
 
 // ─── translation state (async, temp dir) ─────────────────────────────────────

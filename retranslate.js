@@ -284,7 +284,11 @@ async function processRetranslateVolume(ctx) {
 /**
  * Run the retranslate task (all volumes, or --volume NN).
  *
- * @returns {Promise<void>}
+ * Returns the aggregated run summary — the translate-qa loop reads
+ * `retranslated` for its stall guard. (A volume that fails the run under
+ * ON_VOLUME_ERROR=skip still throws, as before.)
+ *
+ * @returns {Promise<{retranslated: number, skipped: number, none: number}>}
  */
 async function retranslate() {
   const dryRun = process.argv.includes("--dry-run");
@@ -343,6 +347,7 @@ async function retranslate() {
   const failedVolumes = [];
   let totalRetranslated = 0;
   let totalSkipped = 0;
+  let totalNone = 0;
 
   for (const folderName of volumes) {
     const volume = volumeByFolder.get(folderName);
@@ -364,6 +369,7 @@ async function retranslate() {
       });
       totalRetranslated += result.retranslated;
       totalSkipped += result.skipped;
+      totalNone += result.none;
       console.log(
         `[retranslate] Volume ${volume.installmentNumber}: ${result.retranslated} retranslated, ` +
           `${result.skipped} skipped, ${result.none} not applicable.`
@@ -387,6 +393,11 @@ async function retranslate() {
       `${failedVolumes.length} of ${volumes.length} volume(s) failed: ${failedVolumes.join(", ")}.`
     );
   }
+  return {
+    retranslated: totalRetranslated,
+    skipped: totalSkipped,
+    none: totalNone,
+  };
 }
 
 module.exports = {

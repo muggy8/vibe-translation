@@ -50,6 +50,7 @@ assert.deepStrictEqual(
     "translate",
     "verify-translate",
     "retranslate",
+    "translate-qa",
     "polish",
   ]
 );

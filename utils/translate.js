@@ -6,7 +6,8 @@
  * one-shot model call over a single chapter, plus deterministic QA and
  * state-file idempotency. This module holds the pure logic (chapter
  * splitting, prompt construction, deterministic QA, state load/save,
- * merging) so the task modules stay thin and the logic stays unit-testable
+ * merging, QA-loop stop-decision) so the task modules stay thin and the
+ * logic stays unit-testable
  * without the filesystem or the AI (test/test-translate.js).
  *
  * Model roles (see the TRANSLATE_* / VERIFY_* / EDIT_* env vars):
@@ -443,6 +444,59 @@ async function saveTranslationState(filePath, state) {
   );
 }
 
+// ─── QA loop (translate-qa) ─────────────────────────────────────────────────
+
+/**
+ * Pure stop-decision for the translate-qa loop (the batched
+ * "verify → retranslate … until the validator is happy" loop).
+ *
+ * Rules (checked in this order):
+ *   - phase "after-verify": stop with "all-pass" when zero chapters FAIL
+ *     (the validator is satisfied — every chapter scores at or above the
+ *     passing score); else stop with "round-limit" when this was the last
+ *     allowed round; else continue to the retranslate batch.
+ *   - phase "after-retranslate": stop with "stalled" when nothing was
+ *     retranslated (every FAIL chapter already carries exactly those
+ *     findings — the retranslate task's findingsHash skip-check fired, so
+ *     nothing new can be applied); else continue to the next verify batch.
+ *
+ * @param {{
+ *   phase: "after-verify"|"after-retranslate",
+ *   round: number,
+ *   maxRounds: number,
+ *   failed?: number,
+ *   retranslated?: number,
+ * }} p
+ * @returns {{stop: boolean, reason: "all-pass"|"round-limit"|"stalled"|null}}
+ */
+function qaLoopDecision({ phase, round, maxRounds, failed = 0, retranslated = 0 }) {
+  if (phase === "after-verify") {
+    if (failed === 0) return { stop: true, reason: "all-pass" };
+    if (round >= maxRounds) return { stop: true, reason: "round-limit" };
+    return { stop: false, reason: null };
+  }
+  if (phase === "after-retranslate") {
+    if (retranslated === 0) return { stop: true, reason: "stalled" };
+    return { stop: false, reason: null };
+  }
+  throw new Error(
+    `qaLoopDecision: unknown phase "${phase}" (expected "after-verify" or "after-retranslate").`
+  );
+}
+
+/**
+ * The max number of translate-qa rounds (TRANSLATE_QA_MAX_ROUNDS, default
+ * 3, minimum 1). One round = one verify batch + one retranslate batch; the
+ * loop also stops early when all chapters pass or a round retranslates
+ * nothing (see qaLoopDecision).
+ *
+ * @returns {number}
+ */
+function qaMaxRounds() {
+  const parsed = parseInt(process.env.TRANSLATE_QA_MAX_ROUNDS, 10);
+  return Number.isFinite(parsed) ? Math.max(1, parsed) : 3;
+}
+
 module.exports = {
   sha256,
   splitChapter,
@@ -460,6 +514,8 @@ module.exports = {
   saveTranslationState,
   roleEndpoint,
   loadVolumeReferences,
+  qaLoopDecision,
+  qaMaxRounds,
 };
 
 // ─── Role endpoint & volume references (shared by the four tasks) ───────────

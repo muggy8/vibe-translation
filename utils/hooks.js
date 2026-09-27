@@ -2,8 +2,10 @@
  * utils/hooks.js — Per-machine pipeline hooks (git-style, entirely optional).
  *
  * Lets each machine attach small executable "hooks" that run before and after
- * each pipeline step (glossary, character-voice, style-guide, jump-in-wiki) and
- * around the whole default run (the "pipeline" pseudo-step). The hooks are
+ * each pipeline step (glossary, character-voice, style-guide, jump-in-wiki,
+ * consistency-audit, translate, verify-translate, retranslate, translate-qa,
+ * polish) and around the whole default run (the "pipeline" pseudo-step). The
+ * hooks are
  * user-specific and live OUTSIDE the committed source: they are executable
  * files in a local `hooks/` directory (gitignored), named like git hooks.
  *
@@ -68,11 +70,12 @@ const TASKS = [
   "translate",
   "verify-translate",
   "retranslate",
+  "translate-qa",
   "polish",
 ];
 
 /**
- * Pseudo-step that wraps the whole default run (all ten steps).
+ * Pseudo-step that wraps the whole default run (all eight steps).
  * @type {string}
  */
 const PIPELINE_TASK = "pipeline";

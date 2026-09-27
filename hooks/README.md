@@ -33,6 +33,7 @@ Default: `<project root>/hooks/`. Override the directory with the
 | before / after `translate` | `pre-translate` / `post-translate` (or `.sh` / `.js`) |
 | before / after `verify-translate` | `pre-verify-translate` / `post-verify-translate` (or `.sh` / `.js`) |
 | before / after `retranslate` | `pre-retranslate` / `post-retranslate` (or `.sh` / `.js`) |
+| before / after `translate-qa` (the QA loop as a whole) | `pre-translate-qa` / `post-translate-qa` (or `.sh` / `.js`) |
 | before / after `polish` | `pre-polish` / `post-polish` (or `.sh` / `.js`) |
 | around the whole default run | `pre-pipeline` / `post-pipeline` (or `.sh` / `.js`) |
 
@@ -114,12 +115,12 @@ A `post-<task>` hook can send an email using only what's on the machine — no
 
 ## Example 4 — switch the local model container per translation stage
 
-The translation stage (`translate` → `verify-translate` → `retranslate` →
-`verify-translate` → `polish`) uses **two different models**. On a local
-setup the model containers share one host port, so only one can serve at a
-time — the per-machine hooks do the switching, and the task code never
-touches the containers (it only checks `GET /v1/models` before its first
-call, via `harness.assertModelServing`).
+The translation stage (`translate` → `translate-qa` [verify ↔ retranslate
+loop] → `polish`) uses **two different models**. On a local setup the model
+containers share one host port, so only one can serve at a time — the
+per-machine hooks do the switching, and the task code never touches the
+containers (it only checks `GET /v1/models` before its first call, via
+`harness.assertModelServing`).
 
 `model-switch.sh` (copy of `model-switch.sh.sample`) starts the container of
 the compose dir you give it: if that container already serves the port it
@@ -136,10 +137,17 @@ stops the current port owner, `docker compose up -d` the target, and polls
     # hooks/pre-polish.sh           (Qwen again)
     exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Qwen3.8-27b
 
-A full default run therefore makes 4 container switches
-(Qwen → Hy-MT2 → Qwen → Hy-MT2 → Qwen). Note the local containers may all
-advertise the same model alias (e.g. `local`), which is exactly why the
-switching lives here — the ai-client cannot tell the models apart by name.
+A full default run therefore makes at least 4 container switches
+(Hy-MT2 → Qwen → Hy-MT2 → Qwen → Qwen — the last two can be the same
+container already up, which the state file turns into a no-op). The
+`translate-qa` loop fires these batch hooks repeatedly — up to two switches
+per round (→Qwen before each verify batch, →Hy-MT2 before each retranslate
+batch) — and a repeat switch is a no-op when the right container already
+serves the port, so a round that ends on the model the next round needs
+costs nothing. The `pre-/post-translate-qa` hooks wrap the WHOLE loop and
+must not switch models. Note the local containers may all advertise the same
+model alias (e.g. `local`), which is exactly why the switching lives here —
+the ai-client cannot tell the models apart by name.
 
 ## Disabling a hook
 

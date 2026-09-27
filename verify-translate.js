@@ -298,7 +298,11 @@ function buildVerificationReportMarkdown(volume, rows) {
 /**
  * Run the verify-translate task (all volumes, or --volume NN).
  *
- * @returns {Promise<void>}
+ * Returns the aggregated run summary — the translate-qa loop reads
+ * `failed` to decide whether the validator is happy. (A volume that fails
+ * the run under ON_VOLUME_ERROR=skip still throws, as before.)
+ *
+ * @returns {Promise<{verified: number, passed: number, failed: number, skipped: number, noDraft: number}>}
  */
 async function verifyTranslate() {
   const dryRun = process.argv.includes("--dry-run");
@@ -357,6 +361,8 @@ async function verifyTranslate() {
   let totalVerified = 0;
   let totalPassed = 0;
   let totalFailed = 0;
+  let totalSkipped = 0;
+  let totalNoDraft = 0;
 
   for (const folderName of volumes) {
     const volume = volumeByFolder.get(folderName);
@@ -378,6 +384,8 @@ async function verifyTranslate() {
       totalVerified += result.verified;
       totalPassed += result.passed;
       totalFailed += result.failed;
+      totalSkipped += result.skipped;
+      totalNoDraft += result.noDraft;
       console.log(
         `[verify-translate] Volume ${volume.installmentNumber}: ${result.verified} verified, ` +
           `${result.passed} PASS, ${result.failed} FAIL, ${result.skipped} skipped, ${result.noDraft} without draft.`
@@ -403,6 +411,13 @@ async function verifyTranslate() {
       `${failedVolumes.length} of ${volumes.length} volume(s) failed: ${failedVolumes.join(", ")}.`
     );
   }
+  return {
+    verified: totalVerified,
+    passed: totalPassed,
+    failed: totalFailed,
+    skipped: totalSkipped,
+    noDraft: totalNoDraft,
+  };
 }
 
 module.exports = {
