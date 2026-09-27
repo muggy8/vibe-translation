@@ -30,6 +30,10 @@ Default: `<project root>/hooks/`. Override the directory with the
 | before / after `style-guide` | `pre-style-guide` / `post-style-guide` (or `.sh` / `.js`) |
 | before / after `jump-in-wiki` | `pre-jump-in-wiki` / `post-jump-in-wiki` (or `.sh` / `.js`) |
 | before / after `consistency-audit` | `pre-consistency-audit` / `post-consistency-audit` (or `.sh` / `.js`) |
+| before / after `translate` | `pre-translate` / `post-translate` (or `.sh` / `.js`) |
+| before / after `verify-translate` | `pre-verify-translate` / `post-verify-translate` (or `.sh` / `.js`) |
+| before / after `retranslate` | `pre-retranslate` / `post-retranslate` (or `.sh` / `.js`) |
+| before / after `polish` | `pre-polish` / `post-polish` (or `.sh` / `.js`) |
 | around the whole default run | `pre-pipeline` / `post-pipeline` (or `.sh` / `.js`) |
 
 A hook file must be **executable** (`chmod +x`) and start with a **shebang**
@@ -107,6 +111,35 @@ A `post-<task>` hook can send an email using only what's on the machine — no
     # curl -sSf "$NOTIFY_API_URL" -H "Authorization: Bearer $NOTIFY_API_KEY" \
     #   -H "Content-Type: application/json" \
     #   -d "{\"subject\":\"[$AI_CLIENT_TASK] $status\",\"to\":\"$NOTIFY_EMAIL\"}"
+
+## Example 4 — switch the local model container per translation stage
+
+The translation stage (`translate` → `verify-translate` → `retranslate` →
+`verify-translate` → `polish`) uses **two different models**. On a local
+setup the model containers share one host port, so only one can serve at a
+time — the per-machine hooks do the switching, and the task code never
+touches the containers (it only checks `GET /v1/models` before its first
+call, via `harness.assertModelServing`).
+
+`model-switch.sh` (copy of `model-switch.sh.sample`) starts the container of
+the compose dir you give it: if that container already serves the port it
+no-ops (idempotent — state file `hooks/.model-switch-state`), otherwise it
+stops the current port owner, `docker compose up -d` the target, and polls
+`/health` until the model is loaded. The pre-hooks just call it:
+
+    # hooks/pre-translate.sh        (Hy-MT2 translates)
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Hy-MT2
+    # hooks/pre-verify-translate.sh (Qwen verifies)
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Qwen3.8-27b
+    # hooks/pre-retranslate.sh      (Hy-MT2 again)
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Hy-MT2
+    # hooks/pre-polish.sh           (Qwen again)
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Qwen3.8-27b
+
+A full default run therefore makes 4 container switches
+(Qwen → Hy-MT2 → Qwen → Hy-MT2 → Qwen). Note the local containers may all
+advertise the same model alias (e.g. `local`), which is exactly why the
+switching lives here — the ai-client cannot tell the models apart by name.
 
 ## Disabling a hook
 

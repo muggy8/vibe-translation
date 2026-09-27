@@ -1,6 +1,6 @@
 # AGENTS.md — ai-client
 
-**Read this first.** This is the entry point for AI agents working in this project. The codebase is small (~5k lines across 7 core files + types.js) and the JSDoc in each file is excellent — this doc is the map plus the hard-won gotchas; open the referenced file when you need depth.
+**Read this first.** This is the entry point for AI agents working in this project. The codebase is small (~12k lines across 9 task modules + harness.js + utils/) and the JSDoc in each file is excellent — this doc is the map plus the hard-won gotchas; open the referenced file when you need depth.
 
 ## 1. What this is
 
@@ -11,6 +11,7 @@ An agentic AI client (v2.0.0, CommonJS, Node ≥ 22.19) that processes a light-n
 - `style-guide` task → a cumulative style guide (house-style policies for rendering source-language constructs in the target language)
 - `jump-in-wiki` task → a per-volume `wiki.md` plus a "living" `shared-wiki.md` (newest copy at the series root)
 - `consistency-audit` task → a final cross-artifact audit (`consistency-report.md`, PASS/FAIL sign-off before translation)
+- **translation stage** (`translate` → `verify-translate` → `retranslate` → `verify-translate` → `polish`) → the actual translation of every volume, per chapter, by a **multi-model chain** (Hy-MT2 translates, Qwen verifies, Hy-MT2 retranslates the failures, Qwen re-verifies, Qwen polishes) — see §8.5
 - plus deterministic translation-handoff artifacts per volume: `chapters.json` + `translation-brief.md` (and the persisted extraction JSONs / glossary coverage report)
 
 It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@openharness/core`. Tool-calling agents read the sources and write the outputs themselves through sandboxed file tools.
@@ -24,7 +25,11 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `npx gulp style-guide` | Run the style guide task (all volumes) |
 | `npx gulp jump-in-wiki` | Run the wiki task |
 | `npx gulp consistency-audit` | Run the final cross-artifact consistency audit (writes `consistency-report.md`) |
-| `npx gulp` (default) | All five in order: glossary → character-voice → style-guide → jump-in-wiki → consistency-audit |
+| `npx gulp translate` | Translate all volumes, per chapter (Hy-MT2 endpoint; `TRANSLATE_*` env) |
+| `npx gulp verify-translate` | Source-anchored verification of the drafts, per chapter (Qwen endpoint; `VERIFY_*` env). FAILs are fixed by `retranslate`. Default-ON — `VERIFY_TRANSLATE_ENABLED=false` makes it (and `retranslate`) a no-op |
+| `npx gulp retranslate` | Retranslate the chapters that FAILED verification (Hy-MT2, findings injected as correction tasks; the bad draft is not fed back) |
+| `npx gulp polish` | Final Qwen polish pass per chapter (with a deterministic regression guard that rejects a polish worse than the draft) |
+| `npx gulp` (default) | All ten in order: glossary → character-voice → style-guide → jump-in-wiki → consistency-audit → translate → verify-translate → retranslate → verify-translate → polish |
 | `... --dry-run` | No AI calls; dump the exact prompts to `.dry-run/<task>-NN.md` |
 | `... --force` | Regenerate even if outputs already exist |
 | `... --volume NN` | Process a single volume (e.g. `--volume 01`) |
@@ -37,27 +42,34 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 
 | Path | Role |
 |---|---|
-| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and score-based acceptance config (`ACCEPTANCE_WINDOW_SIZE`, `ACCEPTANCE_MIN_SAMPLES`, `ACCEPTANCE_PASSING_SCORE`, `ACCEPTANCE_STRATEGY`, `ACCEPTANCE_BEST_MIN_PASSES`, `computeRollingAverage`, `meetsAcceptanceCriteria`, `isAcceptedState`). All five task modules import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window of scores to disk (the state file also carries the run's `sourceFingerprint` — see §3 "Source-staleness detection") and `isSourceStale(state, bundle)` (fail-open when either side lacks a fingerprint). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). Also provides the un-monitored run policies (`normalizePolicy`, `ON_VOLUME_ERROR`, `ON_MISSING_PREVIOUS`, `ON_QA_LIMIT`) and `validateRequiredEnv({ dryRun })` — the fail-fast check for missing required env vars (see §3 "Un-monitored run policies"). |
+| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and score-based acceptance config (`ACCEPTANCE_WINDOW_SIZE`, `ACCEPTANCE_MIN_SAMPLES`, `ACCEPTANCE_PASSING_SCORE`, `ACCEPTANCE_STRATEGY`, `ACCEPTANCE_BEST_MIN_PASSES`, `computeRollingAverage`, `meetsAcceptanceCriteria`, `isAcceptedState`). All nine task modules import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window of scores to disk (the state file also carries the run's `sourceFingerprint` — see §3 "Source-staleness detection") and `isSourceStale(state, bundle)` (fail-open when either side lacks a fingerprint). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). Also provides the un-monitored run policies (`normalizePolicy`, `ON_VOLUME_ERROR`, `ON_MISSING_PREVIOUS`, `ON_QA_LIMIT`) and `validateRequiredEnv({ dryRun })` — the fail-fast check for missing required env vars (see §3 "Un-monitored run policies"). |
 | `utils/fs.js` | Filesystem helpers: `fileExists`, `assertWrote`. |
 | `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict` (legacy binary verdict — kept for compatibility, no longer used in the acceptance path), `parseAcceptanceScore` (parses the 0–100 score from the acceptance one-shot reply; `null` = unparseable = failed check), `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
-| `utils/source.js` | Source-bundle helpers: `resolveSourceBundle` (normalizes a volume's source into a `SourceBundle`; plain-text passes through as-is, `.epub` is extracted once and cached; every bundle carries a `sourceFingerprint` — `sha256OfFile(originalPath)` for plain text, the cache `sha256` for epub — used by the source-staleness detection, see §3), `shouldProcessChunked` (decides whole-installment vs chapter-by-chapter fallback), `extractEpubToBundle` (jszip + cheerio; XHTML → Markdown, per-chapter files, interludes, epilogue, images), `assignSegmentIds`, `classifyTitle`, `xhtmlToMarkdown`, `sourceMaterialLine`, `sourceSegmentListLine`, `chapterSegmentNote`, `chapterContextBlock`, `isEpubPath`, `normalizeZipPath`, `sha256OfFile`. All five task modules resolve their source through `resolveSourceBundle` at the choke point. |
+| `utils/source.js` | Source-bundle helpers: `resolveSourceBundle` (normalizes a volume's source into a `SourceBundle`; plain-text passes through as-is, `.epub` is extracted once and cached; every bundle carries a `sourceFingerprint` — `sha256OfFile(originalPath)` for plain text, the cache `sha256` for epub — used by the source-staleness detection, see §3), `shouldProcessChunked` (decides whole-installment vs chapter-by-chapter fallback), `extractEpubToBundle` (jszip + cheerio; XHTML → Markdown, per-chapter files, interludes, epilogue, images), `assignSegmentIds`, `classifyTitle`, `xhtmlToMarkdown`, `sourceMaterialLine`, `sourceSegmentListLine`, `chapterSegmentNote`, `chapterContextBlock`, `isEpubPath`, `normalizeZipPath`, `sha256OfFile`. All nine task modules resolve their source through `resolveSourceBundle` at the choke point. |
 | `utils/handoff.js` | Deterministic per-volume translation handoff (no AI): `buildChaptersJson` (chapter list from the bundle segments), `renderNewEntry`, `buildTranslationBriefMarkdown` (pure — the one-page brief: new terms/voices/style rules from the persisted extraction JSONs, chapter table, pointers to every per-volume + series-level reference artifact), `writeVolumeHandoff` (best-effort writer of `chapters.json` + `translation-brief.md`; called from jump-in-wiki.js on both the processed and skipped paths — a failure warns, never fails a volume). |
 | `utils/hooks.js` | Per-machine pipeline-hook runner (git-style, entirely optional). Discovers `hooks/pre-<task>` / `post-<task>` (and `pre-/post-pipeline`) and `exec`s each as an executable with `AI_CLIENT_*` env vars; skips when the file is absent, under `--dry-run`, or not executable. Applied via `withHooks()` in gulpfile.js. See §3 "Pipeline hooks" and `hooks/README.md`. |
-| `harness.js` | The AI layer: one-shot calls, agent handles, wiki tools, gated fs tools, provider plumbing, run logging, and the runaway-generation guard (aborts agent turns that produce excessive text without tool calls). Never bypass it to talk to the model. Logs every AI call to `.logs/<timestamp>/` — per-agent chat histories (system prompt, messages, assistant response, reasoning, tool calls) and one-shot call dumps — plus the summary log (greppable `CALL`/`RESULT`/`WARNING` lines). |
+| `harness.js` | The AI layer: one-shot calls, agent handles, wiki tools, gated fs tools, provider plumbing, run logging, and the runaway-generation guard (aborts agent turns that produce excessive text without tool calls). Never bypass it to talk to the model. Multi-model support: per-call `endpoint` override (baseUrl/apiKey/model, falling back to `AI_*`), per-call `temperature` + sampling params (`topP/topK/minP/repetitionPenalty/presencePenalty`), the `hy-mt` thinking dialect (`no_think|low|high` → `reasoning_effort`), nullable `systemPrompt` (Hy-MT2's single-user-message contract), and `assertModelServing()` — a `GET /v1/models` control-plane check that fails loudly before a stage's first call. Logs every AI call to `.logs/<timestamp>/` — per-agent chat histories (system prompt, messages, assistant response, reasoning, tool calls) and one-shot call dumps — plus the summary log (greppable `CALL`/`RESULT`/`WARNING` lines). |
 | `research.js` | Client-side web research (Wikipedia Action API + optional Brave/Tavily/Serper). No LLM involved. |
 | `glossary.js` | Glossary task logic. |
 | `character-voice.js` | Character voice reference task logic — extracts speech quirks, POV markers, narration types, and produces a cumulative character voice reference and per-volume POV maps. |
 | `style-guide.js` | Style guide task logic — extracts style-relevant constructs (honorifics, pronouns, particles, internal-monologue markers, onomatopoeia, POV/scene markers, tense, punctuation, wordplay) and produces a cumulative style guide of rendering policies for the target language. |
 | `jump-in-wiki.js` | Wiki task logic **plus the shared helpers**. After all volumes: the last existing `shared-wiki.md` is copied to `SHARED_WIKI_OUTPUT_FILE` (default `<SERIES_LOCATION>/shared-wiki.md`); writes the per-volume translation handoff (`utils/handoff.js`) on both paths. |
 | `consistency-audit.js` | Final cross-artifact consistency audit (the pre-translation sign-off). An audit agent (gated fs tools, cwd = series root, writes confined to the root) reads the four series-root artifacts (`glossary.md`, `character-voice.md`, `style-guide.md`, `shared-wiki.md`) and writes `consistency-report.md` (PASS/FAIL verdict + severity-banded findings with quoted snippets). No QA loop. Idempotent: the report is skipped while it is newer than all four artifacts (`--force` re-audits). A FAIL verdict is logged loudly but does not fail the task — the report is the deliverable. |
-| `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. All five tasks read this manifest instead of guessing folder names. |
-| `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All five tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
+| `translate.js` | Translation task (first stage of the multi-model chain; §8.5). Per volume, per chapter (in `bundle.segments` order): skip when the draft + `translation-state.json` cover the current source/reference hashes, split oversized chapters (`TRANSLATE_CHUNK_CHARS`), translate each part via `runOneShot` on the `TRANSLATE_*` endpoint — **no system prompt** (Hy-MT2's single-user-message contract), official sampling, `no_think` by default — with the previous part's ending as continuity context, deterministic QA (`checkTranslationQa`), per-chapter state persistence, and the merged `translation.md` + `translation-qa.md`. Also exports `chapterArtifactNames` / `mergeVolumeTranslationFiles` shared by the other three tasks. |
+| `verify-translate.js` | Verification task (§8.5). Per chapter with a draft: one-shot source-anchored check on the `VERIFY_*` endpoint (Qwen) → 0–100 score (fail-closed: unparseable = FAIL) + severity-banded findings → `translation-verification.json` sidecar + `translation-verification.md` report. PASS = score ≥ `VERIFY_PASSING_SCORE` (default 70). `VERIFY_TRANSLATE_ENABLED=false` makes it a no-op. Exports `loadVerificationSidecar` (read by retranslate) and `glossaryBlock` (read by polish). |
+| `retranslate.js` | Correction task (§8.5). Per chapter that FAILED verification (and whose sidecar entry still covers the current source + draft): a fresh Hy-MT2 pass with the verification findings injected as a numbered "fix these" task in the official prompt — the bad draft is **deliberately not** fed back (re-reading a bad translation anchors the model to its errors). Same part-by-part splitting as `translate` (the findings are injected into every part). Overwrites the draft, updates the state (invalidating any earlier polish), re-merges `translation.md`. Runs only when verification is enabled. |
+| `polish.js` | Final pass (§8.5). Per chapter: one-shot polish on the `EDIT_*` endpoint (Qwen, thinking on) → **deterministic regression guard**: if the polished text fails the QA the draft passed, or loses glossary coverage the draft had, the polish is rejected and the draft kept (chapter left unpolished, retried next run). Writes `polished-<id>.md`, records `polishedDraftHash` in the state, re-merges `translation.md` (polished text wins). |
+| `utils/translate.js` | Pure translation-stage helpers shared by the four tasks: `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `buildTranslationTaskLines` / `buildTranslationPrompt` (the official Hy-MT2 single-user-message shape), `cjkRatio`, `countOccurrences`, `checkTranslationQa` (hard fails: empty draft, CJK ratio > 5%; warnings: CJK > 0.5%, length ratio outside 0.6–2.5, missing glossary renderings), `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `loadTranslationState` / `saveTranslationState` (fail-open), `roleEndpoint` (`<PREFIX>_BASE_URL`/`_API_KEY`/`_MODEL` with `AI_*` fallback), `loadVolumeReferences` (glossary terms, style rules, wiki + POV-map background, voice notes, and the `contextHash` idempotency key). |
+| `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. All nine tasks read this manifest instead of guessing folder names. |
+| `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All nine tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
 | `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `CharacterVoiceVolumeCtx`, `StyleGuideVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`, `HookContext`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
-| `gulpfile.js` | Task wiring plus the `ON_TASK_ERROR`-aware `runPipeline()` runner for the default all-five run (see §3 "Un-monitored run policies"). |
+| `gulpfile.js` | Task wiring plus the `ON_TASK_ERROR`-aware `runPipeline()` runner for the default all-ten run (see §3 "Un-monitored run policies"). |
 | `hooks/` | Per-machine hook scripts (git-style; gitignored — only `README.md` + `*.sample` are tracked). Executable before/after hooks for each step and the whole run. See §3 "Pipeline hooks". |
-| `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Style guide: `style-guide-extract`, `style-guide` (compile), `style-guide-validator`, `style-guide-acceptance`, `style-guide-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. Consistency audit: `consistency-audit`. |
+| `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Style guide: `style-guide-extract`, `style-guide` (compile), `style-guide-validator`, `style-guide-acceptance`, `style-guide-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. Consistency audit: `consistency-audit`. Translation stage: `translate` (user only — the official Hy-MT2 single-user-message prompt, **no system prompt file**), `verify-translate` (system + user — source-anchored 0–100 scoring rubric), `polish` (system + user — final proofreading pass). |
 | `test/test-glossary-load.js` | Pure tests (`npm test`). |
+| `test/test-translate.js` | Pure tests for the translation-stage helpers (`utils/translate.js`): `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `checkTranslationQa`, `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `roleEndpoint`. |
+| `test/test-hooks.js` | Pure tests for the hook runner (`utils/hooks.js`), including the `TASKS` list (all nine tasks + pipeline). |
 | `test/harness-smoke.js` | Live smoke test (`npm run smoke`). |
 | `test-series/` | Fixture series (`test_story(1)`, `test_story(2)`); generated outputs are gitignored. |
 | `.env` / `.env.example` | Configuration (see §8). |
@@ -109,7 +121,7 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
 - `ON_VOLUME_ERROR` (`abort` default / `skip`): when a volume's processing throws, the per-volume body of each task is wrapped in a try/catch — `skip` records the volume and continues with the next one (in the cumulative tasks the next volume then misses its previous artifact and is skipped in turn by `ON_MISSING_PREVIOUS=skip`, cascading to the end of the task).
 - `ON_MISSING_PREVIOUS` (`abort` default / `skip`): replaces the "process the earlier volume first" throw in the three cumulative tasks with an optional warn-and-skip.
 - `ON_QA_LIMIT` (`accept` default / `fail`): when the QA loop hits `QA_MAX_ITERATIONS` without a passing grade — accept the output as-is (legacy) or fail the volume.
-- `ON_TASK_ERROR` (`abort` default / `continue`): in the default all-five run, a failing step either stops the run (gulp `series` behavior) or the remaining steps still run and the run fails at the end with a summary of all failed steps (`runPipeline()` in gulpfile.js).
+- `ON_TASK_ERROR` (`abort` default / `continue`): in the default all-ten run, a failing step either stops the run (gulp `series` behavior) or the remaining steps still run and the run fails at the end with a summary of all failed steps (`runPipeline()` in gulpfile.js).
 - `DISCOVERY_MAX_ATTEMPTS` (default 1): the discovery agent is retried with a fresh agent (10 s apart) when it produces an invalid manifest or references missing source files.
 
 ### Source bundle & chapter-by-chapter fallback (`utils/source.js`)
@@ -140,8 +152,16 @@ See `hooks/README.md` for the full contract and examples.
   analogue).
 - **Hook files** (first existing name wins) — `pre-<task>` / `post-<task>`
   (or `.sh` / `.js`) for `glossary`, `character-voice`, `style-guide`,
-  `jump-in-wiki`, plus `pre-pipeline` / `post-pipeline` around the whole
-  default run. Any executable with a shebang works.
+  `jump-in-wiki`, `consistency-audit`, `translate`, `verify-translate`,
+  `retranslate`, `polish`, plus `pre-pipeline` / `post-pipeline` around the
+  whole default run. Any executable with a shebang works.
+- **Model switching for the translation stage** — the translation stage uses
+  two different models, but on local setups the containers share one port, so
+  only one can serve at a time. The per-machine pre-hooks for the four
+  translation tasks are what start the right container (`model-switch.sh`,
+  `hooks/README.md` Example 4 — idempotent, `/health`-polled). The task code
+  contains no Docker logic; it only runs a `GET /v1/models` sanity check
+  (`harness.assertModelServing`) before its first call.
 - **Entirely optional** — no file → the step runs exactly as before (the
   common case); present-but-not-executable → warn + skip. **`--dry-run` runs
   no hooks** (side-effect-free).
@@ -150,7 +170,7 @@ See `hooks/README.md` for the full contract and examples.
   fire), and a failed after-hook only masks the task error when the task had
   already failed (the task error always propagates).
 - **Wiring** — each task is wrapped with `withHooks(task, taskFn)` in
-  `gulpfile.js` (the four task modules are untouched); the default `series` is
+  `gulpfile.js` (the nine task modules are untouched); the default run is
   wrapped as the `pipeline` pseudo-step.
 
 
@@ -262,6 +282,70 @@ jump-in-wiki task on both the processed and skipped paths:
   pointers to every per-volume + series-level reference artifact (missing
   ones struck through, so the brief doubles as a completeness check).
 
+## 8.5. Pipeline F: the translation stage (multi-model)
+
+The final stage turns the reference artifacts into the actual translation.
+It runs **per chapter** (segment ids from `chapters.json` / the source
+bundle — plain-text volumes are one `whole` segment, epub volumes their
+chapters + interludes) and uses **two different models** through role
+endpoints:
+
+| Step | Task | Model (env) | What it does |
+|---|---|---|---|
+| 1 | `translate` | Hy-MT2-30B-A3B (`TRANSLATE_*`) | Fresh translation per chapter, official single-user-message prompt (no system prompt), official sampling (temp 0.7 / top_p 1.0 / top_k -1 / rep-pen 1.0), `no_think` by default |
+| 2 | `verify-translate` | Qwen3.8-27B (`VERIFY_*`) | Source-anchored 0–100 score + severity-banded findings per chapter; PASS ≥ `VERIFY_PASSING_SCORE` (70); unparseable = FAIL (fail-closed) |
+| 3 | `retranslate` | Hy-MT2 (`TRANSLATE_*`) | Fresh pass over every FAIL chapter — the findings are injected as a numbered "fix these" task; the bad draft is **not** fed back |
+| 4 | `verify-translate` | Qwen (`VERIFY_*`) | Re-runs automatically; only re-checks chapters whose draft changed (idempotent skips for the rest) |
+| 5 | `polish` | Qwen (`EDIT_*`) | Final proofreading pass (thinking on) with a deterministic regression guard |
+
+**Design notes:**
+
+- **No QA loop in the translation stage.** Each step is a one-shot call per
+  chapter with deterministic (no-AI) gates — the multi-model chain *is* the
+  quality control (a different model grades the work). `verify-translate` is
+  default-ON; `VERIFY_TRANSLATE_ENABLED=false` disables it **and**
+  `retranslate` (they are one QA chain) — the pipeline degrades to
+  translate → polish.
+- **Per-chapter idempotency via `translation-state.json`** (per volume
+  folder, fail-open like the rolling-state files): each chapter entry carries
+  `sourceHash` (the chapter's source text), `contextHash` (sha256 of glossary
+  + style rules + wiki/POV background — regenerating any reference
+  invalidates every draft), `draftHash`, `retranslated`, `findingsHash`, and
+  `polishedDraftHash`. A changed source, a re-run of the glossary/style
+  tasks, or a retranslate (which bumps `draftHash` and clears
+  `polishedDraftHash`) makes the dependent steps re-run on the next pass.
+- **Chapter splitting** — a chapter longer than `TRANSLATE_CHUNK_CHARS`
+  (default 24000) is split by `splitChapter` (paragraph-aware) and the parts
+  are translated in order — both in `translate` and in `retranslate`; each
+  part after the first receives the previous part's ending
+  (`TRANSLATE_CONTINUITY_CHARS`, default 400, `0` = off) as continuity
+  context. The parts are concatenated back into the single draft.
+- **Deterministic QA** (`checkTranslationQa`, per draft): hard fails —
+  empty draft, CJK ratio > 5% (the model echoed the source); warnings —
+  CJK > 0.5%, length ratio outside 0.6–2.5, glossary terms present in the
+  source whose canonical rendering is absent from the draft. Per-volume
+  reports: `translation-qa.md` (translate), `translation-verification.md`
+  (+ `translation-verification.json` sidecar), `polish-qa.md` (polish).
+- **Polish regression guard** — the polished text is only accepted when it
+  passes the QA the draft passed **and** keeps the draft's glossary coverage;
+  otherwise it is rejected, the draft is kept, and the chapter is left
+  unpolished (retried on the next run).
+- **Merge** — after every step, `mergeVolumeTranslationFiles` rewrites the
+  volume's `translation.md` from the per-chapter files: the
+  `polished-<id>.md` text wins when the state shows it was produced from the
+  CURRENT draft (`polishedDraftHash === draftHash`), otherwise the draft.
+- **Endpoint sanity check** — every task calls `harness.assertModelServing`
+  (`GET /v1/models`) before its first call and fails loudly when nothing is
+  serving or the model id is missing. The task code contains **zero Docker
+  logic** — on local multi-model setups the per-machine pre-hooks switch the
+  containers (see §3 "Pipeline hooks" and `hooks/README.md` Example 4).
+
+**Artifacts per volume folder:** `translation-<id>.md` (draft per chapter),
+`polished-<id>.md` (when the polish pass was accepted), `translation.md`
+(the merged volume), `translation-qa.md`, `translation-verification.json` +
+`translation-verification.md`, `polish-qa.md`, `translation-state.json`.
+All gitignored (generated output).
+
 ## 9. Environment reference (`.env`)
 
 ### AI provider (`AI_*`)
@@ -290,6 +374,30 @@ jump-in-wiki task on both the processed and skipped paths:
 |---|---|---|
 | `TRANSLATION_SOURCE_LANGUAGE` | Japanese | Source language — fills `{{SOURCE_LANGUAGE}}` in the prompts |
 | `TRANSLATION_TARGET_LANGUAGE` | English | Target language — fills `{{TARGET_LANGUAGE}}` in the prompts |
+
+### Translation stage (`TRANSLATE_*`, `VERIFY_*`, `EDIT_*`)
+
+Multi-model chain of the translation stage (§8.5). Every role prefix
+resolves `BASE_URL` / `API_KEY` / `MODEL` with fallback to the global `AI_*`
+settings, so a single-model setup needs none of these. On local multi-model
+setups the per-machine pre-hooks switch the model container per stage
+(`hooks/README.md` Example 4) — the tasks only run the `/v1/models` check.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `TRANSLATE_BASE_URL` / `TRANSLATE_API_KEY` / `TRANSLATE_MODEL` | `AI_*` | Endpoint for `translate` + `retranslate` (Hy-MT2) |
+| `TRANSLATE_TEMPERATURE` | `0.7` | Hy-MT2 official sampling temperature (top_p 1.0 / top_k -1 / rep-pen 1.0 are fixed by the official recipe) |
+| `TRANSLATE_THINKING` | `no_think` | Hy-MT2 thinking dialect: `no_think` / `low` / `high` (also accepts `true` → `low`, `false` → `no_think`) — mapped to `reasoning_effort` |
+| `TRANSLATE_CHUNK_CHARS` | `24000` | Max chars per translation call; longer chapters are split (paragraph-aware) and translated in order |
+| `TRANSLATE_CONTINUITY_CHARS` | `400` | Chars of the previous chapter-part's ending fed to the next part as continuity context (`0` = off) |
+| `VERIFY_TRANSLATE_ENABLED` | `true` | `false` disables `verify-translate` **and** `retranslate` (one QA chain) — the pipeline degrades to translate → polish |
+| `VERIFY_PASSING_SCORE` | `70` | Score (0–100) at or above which a chapter passes verification |
+| `VERIFY_BASE_URL` / `VERIFY_API_KEY` / `VERIFY_MODEL` | `AI_*` | Endpoint for `verify-translate` (Qwen) |
+| `VERIFY_TEMPERATURE` | `0.2` | Verification sampling temperature |
+| `VERIFY_THINKING` / `VERIFY_THINKING_LEVEL` | `true` / `medium` | Qwen3-style thinking for the verification pass |
+| `EDIT_BASE_URL` / `EDIT_API_KEY` / `EDIT_MODEL` | `AI_*` | Endpoint for `polish` (Qwen) |
+| `EDIT_TEMPERATURE` | `0.6` | Polish sampling temperature |
+| `EDIT_THINKING` / `EDIT_THINKING_LEVEL` | `true` / `medium` | Qwen3-style thinking for the polish pass (it runs last — it benefits from deliberation) |
 
 ### Source bundle (`SOURCE_*`)
 
@@ -328,7 +436,7 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 | `ON_VOLUME_ERROR` | `abort` | When a volume's processing fails: `abort` stops the task; `skip` logs the error and continues with the next volume |
 | `ON_MISSING_PREVIOUS` | `abort` | When a cumulative task finds the previous volume's artifact missing: `abort` fails loudly; `skip` warns and skips the volume (later volumes cascade the same way) |
 | `ON_QA_LIMIT` | `accept` | When the QA loop hits `QA_MAX_ITERATIONS` without a passing grade: `accept` keeps the output as-is; `fail` treats the volume as failed (then subject to `ON_VOLUME_ERROR`) |
-| `ON_TASK_ERROR` | `abort` | Default all-five run: `abort` stops at the first failing step; `continue` runs the remaining steps, then fails the run with a summary |
+| `ON_TASK_ERROR` | `abort` | Default all-ten run: `abort` stops at the first failing step; `continue` runs the remaining steps, then fails the run with a summary |
 | `DISCOVERY_MAX_ATTEMPTS` | `1` | Discovery-agent attempts before failing the task (fresh agent each attempt, 10 s apart; per-attempt endpoint retries still apply via `AI_RETRY`) |
 
 ### Output locations (`*_OUTPUT_FILE`)
@@ -352,7 +460,7 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 | `WIKI_USER_AGENT` | built-in | Descriptive UA (Wikipedia requires one) |
 | `SEARCH_API` / `SEARCH_API_KEY` | off | Optional brave / tavily / serper backend |
 
-**Current local setup** (the committed `.env`): local Qwen at `AI_BASE_URL=http://localhost:9200/v1` with `AI_MODEL=local`, `AI_MAX_TOKENS=262144`, `AI_TEMPERATURE=0.6`, `AI_RETRY=2`, `AGENT_CONTEXT_WINDOW=262144`, `QA_MAX_ITERATIONS=5`, `ACCEPTANCE_WINDOW_SIZE=5`, `ACCEPTANCE_MIN_SAMPLES=3`, `ACCEPTANCE_PASSING_SCORE=69`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, thinking on at `xhigh` (defaults), series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
+**Current local setup** (the committed `.env`): local Qwen at `AI_BASE_URL=http://localhost:9200/v1` with `AI_MODEL=local`, `AI_MAX_TOKENS=262144`, `AI_TEMPERATURE=0.6`, `AI_RETRY=2`, `AGENT_CONTEXT_WINDOW=262144`, `QA_MAX_ITERATIONS=5`, `ACCEPTANCE_WINDOW_SIZE=5`, `ACCEPTANCE_MIN_SAMPLES=3`, `ACCEPTANCE_PASSING_SCORE=69`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, thinking on at `xhigh` (defaults), series = `test-series` (the `test_story` fixture), JP→EN. The translation stage is configured for the local two-model setup: all three role endpoints (`TRANSLATE_*` / `VERIFY_*` / `EDIT_*`) point at the same `http://localhost:9200/v1` with `MODEL=local` — the per-machine hooks (`hooks/pre-translate.sh` → Hy-MT2, `hooks/pre-verify-translate.sh` / `pre-polish.sh` → Qwen, `hooks/pre-retranslate.sh` → Hy-MT2) switch the container per stage, because every local container advertises the same `local` alias and shares the one port. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
 
 ## 10. Gotchas (hard-won — read before changing behavior)
 
@@ -384,6 +492,7 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 19. **Never hand the npm undici Agent to Node's global fetch (`makeProviderFetch` in `harness.js`).** The project's `undici` dependency (v8) is a *different build* from Node's bundled undici (which powers the global `fetch`). Passing `noTimeoutAgent` to the global `fetch` mixes request-handler protocols: on Node builds whose bundled undici is older, the dispatch throws `InvalidArgumentError: invalid onRequestStart method` (`UND_ERR_INVALID_ARG`) before any bytes are sent. This is Node-version-dependent, so identical code + `node_modules` can work on one machine (e.g. Windows Node) and fail on another (Linux Node 22) — observed live right after a Windows→Linux migration. The fix pattern: dispatch through undici's *own* `fetch` (same build as the Agent), and normalize `Headers` instances to plain objects first (undici's webidl converter would silently convert a foreign Headers instance to an empty record, dropping auth/content-type).
 20. **Never sort epub bundle segments by filename — iterate `bundle.segments`.** Interlude (and epilogue) files are named `<base>-chN.K.md` where N is the chapter that existed immediately before the segment and K restarts at 1 for each chapter (`ch1.md`, `ch1.1.md`, `ch2.md`, `ch2.1.md`, `ch2.2.md`, `ch3.md`…). A filename sort misorders `chN.md` vs `chN.K.md` (a plain string sort puts `chN.1.md` *before* `chN.md` because `1` < `m`). The `SourceBundle.segments` array is the single source of truth for reading order (set by `assignSegmentIds` during extraction). Related: the epub extraction is cached in `<base>-bundle.meta.json` (keyed on the epub's mtime/size plus a `schema` version — renaming the id scheme bumps `BUNDLE_SCHEMA_VERSION` and forces re-extraction, removing the stale old-named segment files); `--force` re-extracts, and a deleted/stale cache file just triggers re-extraction (fail-open).
 21. **Un-monitored run policies change where failures surface — read the summary, not just the last log line.** With the un-monitored values in `.env` (`ON_VOLUME_ERROR=skip`, `ON_MISSING_PREVIOUS=skip`, `ON_TASK_ERROR=continue`), a broken volume no longer aborts its task or the pipeline: the task logs `[skip] Volume NN (…) failed: …`, keeps going (in the cumulative tasks the skip cascades through the remaining volumes via the missing-previous check), and the pipeline finishes with a `N of M volume(s) failed` / `Pipeline finished with N failed step(s)` summary that still fails the run (non-zero exit). The final series-root copy uses the **last existing** snapshot, so a partially failed run publishes the last good volume's artifact rather than nothing. Recovery is a plain re-run: idempotent skip-checks make it cheap, and the failed/skipped volumes are picked up. Code defaults are the opposite (fail loudly at the first problem) — keep them that way so interactive runs stay safe, and don't "fix" the cascade by making per-volume idempotency independent of the previous volume's artifact.
+22. **The translation stage's model switching lives in the hooks — not in the task code.** Every local model container (Hy-MT2, Qwen3.8-27B, …) advertises the **same model alias** (`local`) and shares **one host port** (9200), so the ai-client cannot tell the models apart by name — `TRANSLATE_MODEL` / `VERIFY_MODEL` / `EDIT_MODEL` are all `local`. The per-machine pre-hooks (`hooks/pre-<task>.sh` → `model-switch.sh <compose dir>`) stop the current port owner, start the stage's container, and poll `/health` until the model is loaded. Consequences: (a) never add Docker/container logic to the task modules — the `/v1/models` check (`assertModelServing`) is the only endpoint contact; (b) running a translation task standalone on the wrong model fails loudly at the sanity check only if the model id differs — with identical aliases it translates with whatever happens to be up, so on local setups always run the tasks via the hooked pipeline (or the per-task gulp tasks, which fire the hooks); (c) `model-switch.sh` is idempotent via `hooks/.model-switch-state` (the compose dir it last started — the compose PROJECT label is *not* usable: compose sanitizes project names, so `Qwen3.8-27b-beellama` becomes `qwen38-27b-beellama` and never matches a dir-name comparison); a container started manually (no state file) is treated as "unknown" and swapped.
 
 ## 11. Conventions
 
@@ -391,5 +500,5 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 - **Update AGENTS.md after changes.** If your work adds, removes, or significantly modifies files, functions, or conventions, update this document to reflect the new state. Agents reading AGENTS.md should be able to rely on it as a current map of the codebase — not a stale one.
 - Errors **fail loudly** with actionable messages (pointing at files, `.env` keys, or `.logs/`).
 - Prompt files stay mode-agnostic; mode-specific text is appended in code (`AGENT_TOOLS_NOTE`), never forked into separate prompt files.
-- Tests: pure logic in `test/test-glossary-load.js` (plain `assert`, no framework — keep it that way); live behavior in `test/harness-smoke.js`.
+- Tests: pure logic in `test/test-glossary-load.js`, `test/test-translate.js` (translation-stage helpers), and `test/test-hooks.js` (hook runner) — all plain `assert`, no framework (keep it that way); live behavior in `test/harness-smoke.js`.
 - Dependencies: AI SDK v6 + `@openharness/core` v0.7 + `jszip`/`cheerio` (epub extraction in `utils/source.js`); keep CommonJS, no new frameworks.

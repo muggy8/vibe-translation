@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# pre-retranslate.sample — BEFORE the retranslate task (Hy-MT2 stage —
+# retranslate uses the SAME model as translate). Copy to
+# hooks/pre-retranslate.sh, chmod +x.
+set -euo pipefail
+exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/Hy-MT2

@@ -59,10 +59,20 @@ const harness = require("../harness");
  * The pipeline steps (gulp task names).
  * @type {string[]}
  */
-const TASKS = ["glossary", "character-voice", "style-guide", "jump-in-wiki"];
+const TASKS = [
+  "glossary",
+  "character-voice",
+  "style-guide",
+  "jump-in-wiki",
+  "consistency-audit",
+  "translate",
+  "verify-translate",
+  "retranslate",
+  "polish",
+];
 
 /**
- * Pseudo-step that wraps the whole default run (all four steps).
+ * Pseudo-step that wraps the whole default run (all ten steps).
  * @type {string}
  */
 const PIPELINE_TASK = "pipeline";

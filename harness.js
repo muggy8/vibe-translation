@@ -6,8 +6,12 @@
  * the glossary and jump-in-wiki workflows drive:
  *
  *   - runOneShot(...)        a single tool-less model call (acceptance
- *                            checks, classic-mode pipeline stages, the
- *                            ad-hoc CLI below) — replaces the old callAi()
+ *                            checks, classic-mode pipeline stages, and the
+ *                            translation stage's per-chapter one-shot calls
+ *                            — role-specific endpoints, sampling, and a
+ *                            no-system-prompt mode for the Hy-MT2
+ *                            translation model, which takes a single user
+ *                            message by design) — replaces the old callAi()
  *   - createAgentHandle(...) a tool-using agent backed by an open-harness
  *                            Session (retry with backoff + context
  *                            compaction) for the agentic stages
@@ -151,12 +155,15 @@ const CODE_BLOCK = "\x60\x60\x60";
  * Called after runOneShot completes.
  *
  * @param {string} label - The label for this call (used in filename).
- * @param {string} systemPrompt - The full system prompt.
+ * @param {string|null} systemPrompt - The full system prompt (null/empty when
+ *   the call intentionally sends none — e.g. the Hy-MT2 translation role).
  * @param {Array} messages - The messages sent.
  * @param {string} response - The model's response text.
  * @param {Object} result - The consumeEvents result (usage, timing, etc.).
+ * @param {string} [modelName] - The model actually called (role endpoints can
+ *   differ from the global AI_MODEL; defaults to the env value).
  */
-function writeOneShotLog(label, systemPrompt, messages, response, result) {
+function writeOneShotLog(label, systemPrompt, messages, response, result, modelName = null) {
   try {
     const oneShotDir = path.join(runDir, "one-shot");
     fs.mkdirSync(oneShotDir, { recursive: true });
@@ -168,7 +175,7 @@ function writeOneShotLog(label, systemPrompt, messages, response, result) {
     const ttftMs = result.firstTokenTime ? result.firstTokenTime - result.startTime : null;
 
     let content = `# One-shot call: ${label}\n`;
-    content += `# Model: ${process.env.AI_MODEL || "gpt-4o-mini"}\n`;
+    content += `# Model: ${modelName || process.env.AI_MODEL || "gpt-4o-mini"}\n`;
 
     if (result.usage) {
       content += `# Tokens: prompt=${result.usage.inputTokens ?? "?"} completion=${result.usage.outputTokens ?? "?"} total=${result.usage.totalTokens ?? "?"}\n`;
@@ -180,7 +187,9 @@ function writeOneShotLog(label, systemPrompt, messages, response, result) {
     content += `\n`;
 
     content += `## System Prompt\n`;
-    content += `${CODE_BLOCK}\n${escapeCodeBlock(systemPrompt)}\n${CODE_BLOCK}\n\n`;
+    content += systemPrompt
+      ? `${CODE_BLOCK}\n${escapeCodeBlock(systemPrompt)}\n${CODE_BLOCK}\n\n`
+      : "(none — this call sends no system message by design)\n\n";
 
     content += `## Messages\n`;
     for (const msg of messages) {
@@ -446,19 +455,23 @@ function makeProviderFetch({ extraBody = null, tapsRef = null } = {}) {
 }
 
 /**
- * Create the OpenAI-compatible chat model for the endpoint in .env.
+ * Create the OpenAI-compatible chat model for the endpoint in .env (or an
+ * explicit per-call endpoint override — the translation stage's roles each
+ * point at their own model: TRANSLATE_* / VERIFY_* / EDIT_* in .env, which
+ * all fall back to the global AI_* settings).
  *
- * @param {{extraBody?: Object|null, tapsRef?: {current: Object}|null}} [options]
+ * @param {{extraBody?: Object|null, tapsRef?: {current: Object}|null, endpoint?: {baseUrl?: string, apiKey?: string, model?: string}|null}} [options]
  * @returns {Promise<{model: Object, baseUrl: string, modelId: string}>}
  *   The chat model (AI SDK LanguageModel) plus the resolved endpoint info.
  */
-async function createChatModel({ extraBody = null, tapsRef = null } = {}) {
-  const baseUrl = process.env.AI_BASE_URL || "https://api.openai.com/v1";
-  const apiKey = process.env.AI_API_KEY;
-  const modelId = process.env.AI_MODEL || "gpt-4o-mini";
+async function createChatModel({ extraBody = null, tapsRef = null, endpoint = null } = {}) {
+  const baseUrl =
+    endpoint?.baseUrl || process.env.AI_BASE_URL || "https://api.openai.com/v1";
+  const apiKey = endpoint?.apiKey || process.env.AI_API_KEY;
+  const modelId = endpoint?.model || process.env.AI_MODEL || "gpt-4o-mini";
   if (!apiKey) {
     throw new Error(
-      "AI_API_KEY is not set.\n  Set it in a .env file or as an environment variable."
+      "AI_API_KEY is not set. Set it in a .env file or as an environment variable."
     );
   }
   const { openaiProvider } = await loadEsm();
@@ -480,10 +493,37 @@ async function createChatModel({ extraBody = null, tapsRef = null } = {}) {
  * the OpenAI-standard reasoning_effort parameter (also supported by
  * llama.cpp and Ollama).
  *
- * @param {{thinking?: boolean, thinkingLevel?: string}} [cfg]
+ * Two chat-template dialects:
+ *   - "qwen" (default): Qwen3-style models. thinking=false sends
+ *     chat_template_kwargs {thinking:false, enable_thinking:false}; thinking
+ *     on sends reasoning_effort (the explicit level or the env default).
+ *   - "hy-mt": the Hy-MT2 (hy_v3) translation model. Its Jinja template
+ *     toggles thinking via the reasoning_effort variable ONLY — "low"/"high"
+ *     open the think tag (slow thinking) and "no_think" forces the fast
+ *     (non-thinking) translation mode, which is the mode the model is
+ *     benchmarked in. Booleans map: false -> "no_think", true -> the level
+ *     or "low". The Qwen-style chat_template_kwargs keys do not exist in
+ *     that template, so they are never sent for this dialect.
+ *
+ * @param {{thinking?: boolean|string, thinkingLevel?: string, template?: "qwen"|"hy-mt"}} [cfg]
  * @returns {Object|null} The parameters to merge into the request body, or null.
  */
-function thinkingExtraBody({ thinking = true, thinkingLevel } = {}) {
+function thinkingExtraBody({ thinking = true, thinkingLevel, template = "qwen" } = {}) {
+  if (template === "hy-mt") {
+    const value =
+      thinking === false
+        ? "no_think"
+        : typeof thinking === "string"
+          ? thinking
+          : thinkingLevel || "low";
+    if (!["no_think", "low", "high"].includes(value)) {
+      throw new Error(
+        `Invalid thinking value "${value}" for the hy-mt template ` +
+          `(expected "no_think", "low", or "high").`
+      );
+    }
+    return { reasoning_effort: value };
+  }
   const extra = {};
   if (thinking === false) {
     // llama.cpp / Ollama honor a top-level `chat_template_kwargs` to disable
@@ -1056,35 +1096,81 @@ function logResultLine(r, label) {
  * returning empty) so callers never persist an empty result.
  *
  * @param {RunOneShotCfg} cfg
- * @param {string} cfg.systemPrompt - The system prompt.
+ * @param {string|null} [cfg.systemPrompt] - The system prompt. `null`/
+ *   `undefined` sends NO system message at all (required by the Hy-MT2
+ *   translation role — its official prompt contract is a single user
+ *   message; the model has no system prompt).
  * @param {Array<IMessage>} cfg.messages - IMessages ({ text } | { file, name }).
  * @param {number} [cfg.retry] - Extra attempts on empty/error (default: AI_RETRY).
- * @param {boolean} [cfg.thinking] - Thinking mode (default: AI_THINKING env, on).
+ * @param {boolean|string} [cfg.thinking] - Thinking mode (default: AI_THINKING env, on).
+ *   For the hy-mt template dialect also accepts "no_think" | "low" | "high".
  * @param {string} [cfg.thinkingLevel] - reasoning_effort level (default: AI_THINKING_LEVEL env / "xhigh").
+ * @param {"qwen"|"hy-mt"} [cfg.thinkingTemplate] - Chat-template dialect for the
+ *   thinking parameters (default: "qwen"; "hy-mt" for the Hy-MT2 translation
+ *   model — see thinkingExtraBody).
+ * @param {{baseUrl?: string, apiKey?: string, model?: string}} [cfg.endpoint] -
+ *   Per-call endpoint override (a role's own model; defaults to the global
+ *   AI_* settings). The translation stage's roles each use their own.
+ * @param {number} [cfg.temperature] - Per-call temperature (default: AI_TEMPERATURE env).
+ * @param {{topP?: number, topK?: number, minP?: number, repetitionPenalty?: number, presencePenalty?: number}} [cfg.sampling] -
+ *   Per-call sampling parameters merged into the request body (llama.cpp's
+ *   OpenAI-compatible API accepts all of these; the server's own defaults
+ *   apply to any omitted key).
  * @param {string} [cfg.label] - Log label (default: "one-shot").
  * @returns {Promise<string>} The model's content.
  */
 async function runOneShot({
-  systemPrompt,
+  systemPrompt = null,
   messages,
   retry,
   thinking = envThinking(),
   thinkingLevel,
+  thinkingTemplate = "qwen",
+  endpoint = null,
+  temperature = null,
+  sampling = null,
   label = "one-shot",
 }) {
-  if (typeof systemPrompt !== "string" || !systemPrompt.trim()) {
-    throw new Error("systemPrompt must be a non-empty string.");
+  if (systemPrompt != null && (typeof systemPrompt !== "string" || !systemPrompt.trim())) {
+    throw new Error(
+      "systemPrompt must be a non-empty string (or null/undefined to send no system message)."
+    );
   }
   const retryCount =
     Number.isInteger(retry) && retry >= 0 ? retry : envRetry();
   const apiMessages = await toModelMessages(messages);
-  const extraBody = thinkingExtraBody({ thinking, thinkingLevel });
-  const temperature = envTemperature();
+  let extraBody = thinkingExtraBody({ thinking, thinkingLevel, template: thinkingTemplate });
+  if (sampling && typeof sampling === "object") {
+    const wireNames = {
+      topP: "top_p",
+      topK: "top_k",
+      minP: "min_p",
+      repetitionPenalty: "repetition_penalty",
+      presencePenalty: "presence_penalty",
+    };
+    for (const [key, wire] of Object.entries(wireNames)) {
+      if (typeof sampling[key] === "number" && Number.isFinite(sampling[key])) {
+        extraBody = { ...(extraBody || {}), [wire]: sampling[key] };
+      }
+    }
+  }
+  const temperatureValue =
+    typeof temperature === "number" && Number.isFinite(temperature)
+      ? temperature
+      : envTemperature();
   const maxTokens = envMaxTokens();
 
-  const systemPreview = systemPrompt.trim().split("\n")[0].slice(0, 80);
+  // Resolve the endpoint this call targets (role override or global AI_*).
+  const baseUrl =
+    endpoint?.baseUrl || process.env.AI_BASE_URL || "https://api.openai.com/v1";
+  const modelId = endpoint?.model || process.env.AI_MODEL || "gpt-4o-mini";
+
+  const systemPreview = systemPrompt
+    ? systemPrompt.trim().split("\n")[0].slice(0, 80)
+    : "(no system prompt)";
   logLine(
-    `[call-ai] CALL system="${systemPreview}" messages=${messages.length} retry=${retryCount}`
+    `[call-ai] CALL system="${systemPreview}" messages=${messages.length} retry=${retryCount} ` +
+      `model=${modelId} endpoint=${baseUrl}`
   );
 
   const { core } = await loadEsm();
@@ -1092,12 +1178,13 @@ async function runOneShot({
   for (;;) {
     const tapsRef = createTapsRef();
     tapsRef.current = createTaps();
-    const { model } = await createChatModel({ extraBody, tapsRef });
+    const { model } = await createChatModel({ extraBody, tapsRef, endpoint });
     const agent = new core.Agent({
       name: label,
       model,
-      systemPrompt,
-      temperature,
+      // OpenHarness filters falsy system parts, so "" = no system message.
+      systemPrompt: systemPrompt || "",
+      temperature: temperatureValue,
       maxTokens,
       instructions: false,
       maxSteps: 1,
@@ -1127,13 +1214,14 @@ async function runOneShot({
       const { model: fallbackModel } = await createChatModel({
         extraBody,
         tapsRef: fallbackTapsRef,
+        endpoint,
       });
       try {
         const completion = await generateText({
           model: fallbackModel,
-          system: systemPrompt,
+          system: systemPrompt || undefined,
           messages: apiMessages,
-          temperature,
+          temperature: temperatureValue,
           maxOutputTokens: maxTokens,
         });
         await fallbackTapsRef.current.jsonReasoningReady?.catch(() => {});
@@ -1160,7 +1248,7 @@ async function runOneShot({
     logResultLine(result, label);
 
     // Log full call details (system prompt, messages, response).
-    writeOneShotLog(label, systemPrompt, messages, result.text, result);
+    writeOneShotLog(label, systemPrompt, messages, result.text, result, modelId);
 
     if (result.text) return result.text;
     if (remaining > 0) {
@@ -1294,6 +1382,81 @@ async function createAgentHandle({
   };
 }
 
+// ─── Endpoint sanity check ──────────────────────────────────────────────────
+
+/**
+ * Control-plane check that a (role) endpoint is up and serving the expected
+ * model — the translation stage's tasks call this at startup instead of
+ * failing mid-chapter on a dead/wrong endpoint.
+ *
+ * The task code deliberately does NOT start or stop containers: that is the
+ * per-machine hooks' job (hooks/, gitignored). This check only verifies
+ * reachability and — when the endpoint lists its models — that the expected
+ * model id is among them, and fails fast with an actionable message when not.
+ *
+ * Note: local containers may all advertise the same alias (e.g. every local
+ * container here reports model id "local"), in which case this check
+ * validates that SOMETHING is serving that alias at the expected base URL;
+ * which model is actually loaded is guaranteed by the hooks, not by this.
+ *
+ * @param {{baseUrl?: string, apiKey?: string, model?: string, label?: string, timeoutMs?: number}} cfg
+ * @returns {Promise<void>}
+ * @throws {Error} When the endpoint is unreachable, errors, or lists no
+ *   model matching the expected id.
+ */
+async function assertModelServing({
+  baseUrl,
+  apiKey,
+  model,
+  label = "AI endpoint",
+  timeoutMs = 30000,
+} = {}) {
+  const base = (baseUrl || process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
+  const expected = model || process.env.AI_MODEL || "";
+  const url = `${base}/models`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let response;
+  try {
+    response = await undiciFetch(url, {
+      headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},
+      signal: ctrl.signal,
+      dispatcher: noTimeoutAgent,
+    });
+  } catch (err) {
+    throw new Error(
+      `${label}: cannot reach the model endpoint at ${base} (${err.message}). ` +
+        `Is the model server/container for this stage running? On local setups the ` +
+        `per-machine pre-<task> hook (hooks/, see hooks/README.md) is responsible for ` +
+        `starting it before the task runs.`
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response.ok) {
+    throw new Error(
+      `${label}: model endpoint ${url} responded with HTTP ${response.status}.`
+    );
+  }
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error(`${label}: model endpoint ${url} returned a non-JSON body.`);
+  }
+  const ids = (payload?.data || []).map((m) => m?.id).filter(Boolean);
+  if (!expected) return; // no expected model configured — reachability only
+  if (!ids.includes(expected)) {
+    throw new Error(
+      `${label}: endpoint ${base} lists model(s) [${ids.join(", ") || "(none)"}] ` +
+        `but this stage expects "${expected}". If several local containers share the ` +
+        `same alias, the pre-<task> hook must start the container that serves ` +
+        `"${expected}" (check hooks/ and hooks/README.md).`
+    );
+  }
+  console.log(`[endpoint] ${label}: ${base} is up and lists model "${expected}".`);
+}
+
 // ─── Exports ────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -1307,6 +1470,7 @@ module.exports = {
   createChatModel,
   thinkingExtraBody,
   toModelMessages,
+  assertModelServing,
   // Env helpers (workflows read the same settings through these).
   envRetry,
   envMaxTokens,

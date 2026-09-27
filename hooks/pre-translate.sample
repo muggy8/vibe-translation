@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# pre-translate.sample — BEFORE the translate task (Hy-MT2 stage).
+# Copy to hooks/pre-translate.sh, chmod +x, and point it at YOUR Hy-MT2
+# container's compose dir. The helper (hooks/model-switch.sh) is
+# idempotent: if the Hy-MT2 container already serves the port it no-ops.
+set -euo pipefail
+exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/Hy-MT2

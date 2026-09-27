@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# pre-polish.sample — BEFORE the polish task (Qwen stage — polish uses the
+# SAME model as verify). Copy to hooks/pre-polish.sh, chmod +x.
+set -euo pipefail
+exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/Qwen3.8-27b

@@ -184,13 +184,33 @@
  */
 
 /**
+ * @typedef {Object} EndpointOverride
+ * A role-specific endpoint for runOneShot (the translation stage's roles —
+ * the TRANSLATE_, VERIFY_, and EDIT_ env prefixes — each resolve to one of
+ * these).
+ * @property {string} [baseUrl] — OpenAI-compatible base URL (default: AI_BASE_URL).
+ * @property {string} [apiKey] — Auth key (default: AI_API_KEY).
+ * @property {string} [model] — Model id (default: AI_MODEL).
+ */
+
+/**
  * @typedef {Object} RunOneShotCfg
  * Configuration for harness.runOneShot().
- * @property {string} systemPrompt
+ * @property {string|null} [systemPrompt] — The system prompt. null/undefined
+ *   sends NO system message (required by the Hy-MT2 translation role, whose
+ *   official contract is a single user message).
  * @property {Array<IMessage>} messages
  * @property {number} [retry]
- * @property {boolean} [thinking]
- * @property {string} [thinkingLevel]
+ * @property {boolean|string} [thinking] — Thinking mode; for the hy-mt
+ *   template dialect also "no_think" | "low" | "high".
+ * @property {string} [thinkingLevel] — reasoning_effort level.
+ * @property {"qwen"|"hy-mt"} [thinkingTemplate] — Chat-template dialect for
+ *   the thinking parameters (default: "qwen").
+ * @property {EndpointOverride} [endpoint] — Per-call endpoint override
+ *   (defaults to the global AI_* settings).
+ * @property {number} [temperature] — Per-call temperature (default: AI_TEMPERATURE).
+ * @property {{topP?: number, topK?: number, minP?: number, repetitionPenalty?: number, presencePenalty?: number}} [sampling]
+ *   Per-call sampling parameters merged into the request body.
  * @property {string} [label]
  */
 
@@ -247,13 +267,51 @@
  * @property {Function} wiki_extract
  */
 
+// ─── Translation stage (translate / verify-translate / retranslate / polish) ─
+
+/**
+ * @typedef {Object} TranslationStateEntry
+ * One chapter's entry in a volume's translation-state.json (per-chapter
+ * idempotency + source/reference/draft staleness invalidation).
+ * @property {string} sourceHash — sha256 of the chapter source content.
+ * @property {string} contextHash — sha256 of the injected references (glossary + style rules + background).
+ * @property {string} draftHash — sha256 of the current draft file content.
+ * @property {boolean} retranslated — A retranslate pass has run for the findings.
+ * @property {string|null} findingsHash — sha256 of the findings the last retranslate used.
+ * @property {string|null} polishedDraftHash — sha256 of the draft the last polish pass polished (null = unpolished).
+ */
+
+/**
+ * @typedef {Object} VerificationEntry
+ * One chapter's entry in a volume's translation-verification.json sidecar.
+ * @property {string} sourceHash — sha256 of the chapter source at verification time.
+ * @property {string} draftHash — sha256 of the draft that was verified.
+ * @property {number|null} score — 0–100 (null = unparseable verdict = FAIL, fail-closed).
+ * @property {boolean} pass — score !== null && score >= VERIFY_PASSING_SCORE.
+ * @property {string} findings — The verifier's findings text (retranslate's input).
+ * @property {string} verifiedAt — ISO timestamp.
+ */
+
+/**
+ * @typedef {Object} VolumeReferences
+ * The reference artifacts the translation stage injects into its prompts
+ * (loadVolumeReferences in utils/translate.js).
+ * @property {string} glossaryText — Raw glossary.md content ("" when absent).
+ * @property {Array<{term: string, rendering: string, section: string}>} terms — Parsed glossary terms.
+ * @property {string[]} terminologyLines — `"term" translates to "rendering"` lines for the Hy-MT2 prompt.
+ * @property {string} styleRules — The style guide's Policy Summary (or truncated fallback).
+ * @property {string} background — Volume wiki + POV map (truncated) — plot context.
+ * @property {string} voiceNotes — Character voice reference (truncated) — for the polish pass.
+ * @property {string} contextHash — sha256 of (glossary + styleRules + background); the idempotency key.
+ */
+
 // ─── Pipeline hooks (utils/hooks.js) ─────────────────────────────────────────
 
 /**
  * @typedef {Object} HookContext
  * The context describing a pipeline hook invocation (also the source of the
  * AI_CLIENT_* env vars injected into shell hooks). See utils/hooks.js.
- * @property {string} task - The step name (glossary / character-voice / style-guide / jump-in-wiki / consistency-audit / pipeline).
+ * @property {string} task - The step name (glossary / character-voice / style-guide / jump-in-wiki / consistency-audit / translate / verify-translate / retranslate / polish / pipeline).
  * @property {"before"|"after"} phase - Which side of the step.
  * @property {string} seriesDir - Absolute SERIES_LOCATION ("" when unset).
  * @property {string} seriesName - The SERIES_NAME.
@@ -292,6 +350,7 @@ module.exports = {
   CharacterVoiceVolumeCtx: true,
   StyleGuideVolumeCtx: true,
   IMessage: true,
+  EndpointOverride: true,
   RunOneShotCfg: true,
   CreateAgentHandleCfg: true,
   AgentHandle: true,
@@ -299,6 +358,9 @@ module.exports = {
   FetchResult: true,
   WikiTools: true,
   ResearchNote: true,
+  TranslationStateEntry: true,
+  VerificationEntry: true,
+  VolumeReferences: true,
   HookContext: true,
 };
 

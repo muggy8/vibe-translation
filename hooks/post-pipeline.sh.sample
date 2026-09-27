@@ -1,5 +1,5 @@
 #!/usr/bin/sh
-# Sample: AFTER hook for the WHOLE default run (fires once, after all four
+# Sample: AFTER hook for the WHOLE default run (fires once, after all ten
 # steps). $AI_CLIENT_TASK_SUCCEEDED is "0" if any step failed.
 #
 # Enable: cp hooks/post-pipeline.sh.sample hooks/post-pipeline.sh && chmod +x hooks/post-pipeline.sh

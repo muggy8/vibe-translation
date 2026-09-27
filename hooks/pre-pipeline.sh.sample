@@ -1,5 +1,5 @@
 #!/usr/bin/sh
-# Sample: BEFORE hook for the WHOLE default run (fires once, before all four
+# Sample: BEFORE hook for the WHOLE default run (fires once, before all ten
 # steps). Use this instead of per-step hooks if you want ONE branch for the
 # entire pipeline rather than one branch per task.
 #

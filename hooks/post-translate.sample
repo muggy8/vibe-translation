@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# post-translate.sample — AFTER the translate task. No model switch needed
+# here: the NEXT stage's pre-hook (pre-verify-translate) starts the verify
+# model. Keep it as a log marker (or a notification hook).
+echo "[post-translate] translate stage finished (exit ${AI_CLIENT_TASK_SUCCEEDED:-?})."

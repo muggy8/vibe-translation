@@ -66,6 +66,17 @@ test-series/**/character-voice-new.json
 test-series/**/style-guide-new.json
 test-series/**/chapters.json
 test-series/**/translation-brief.md
+# Translation stage outputs (translate / verify-translate / retranslate / polish)
+test-series/**/translation.md
+test-series/**/translation-ch*.md
+test-series/**/translation-whole.md
+test-series/**/polished-ch*.md
+test-series/**/polished-whole.md
+test-series/**/translation-state.json
+test-series/**/translation-verification.json
+test-series/**/translation-verification.md
+test-series/**/translation-qa.md
+test-series/**/polish-qa.md
 test-series/glossary.md
 test-series/character-voice.md
 test-series/style-guide.md

@@ -1,16 +1,21 @@
 /**
  * gulpfile.js — Gulp task registration for the ai-client.
  *
- * The "jump-in-wiki", "glossary", "character-voice", "style-guide" and
+ * The "jump-in-wiki", "glossary", "character-voice", "style-guide",
  * "consistency-audit" task logic lives in jump-in-wiki.js, glossary.js,
- * character-voice.js, style-guide.js and consistency-audit.js respectively;
- * this file only wires the tasks up to Gulp.
+ * character-voice.js, style-guide.js and consistency-audit.js; the
+ * translation stage ("translate", "verify-translate", "retranslate",
+ * "polish") lives in translate.js, verify-translate.js, retranslate.js and
+ * polish.js. This file only wires the tasks up to Gulp.
  *
  * Each step is wrapped with withHooks() so an optional per-machine hook
  * (hooks/pre-<task> / hooks/post-<task>, git-style — see hooks/README.md)
  * can run before and after it. With no hooks/ directory the pipeline runs
- * exactly as before (hooks are a no-op). The default (all-five) run is
- * additionally wrapped as the "pipeline" pseudo-step (pre-/post-pipeline).
+ * exactly as before (hooks are a no-op). On local multi-model setups the
+ * translation steps' hooks are what start/stop the model containers (the
+ * tasks only check the endpoint via a /v1/models sanity call). The default
+ * (all-ten) run is additionally wrapped as the "pipeline" pseudo-step
+ * (pre-/post-pipeline).
  *
  * Usage:
  *   npx gulp jump-in-wiki             # run the full task
@@ -23,14 +28,20 @@
  *   npx gulp style-guide              # build the style guide
  *   npx gulp consistency-audit        # final cross-artifact consistency audit
  *   npx gulp consistency-audit --force  # re-audit even if the report is fresh
+ *   npx gulp translate                # translate all volumes (Hy-MT2, per chapter)
+ *   npx gulp verify-translate         # source-anchored verification (Qwen, per chapter)
+ *   npx gulp retranslate              # retranslate the FAILED chapters (Hy-MT2)
+ *   npx gulp polish                   # final polish pass (Qwen, per chapter)
  *   npx gulp <task> --chunked         # force the chapter-by-chapter fallback for
  *                                     # multi-chapter epub volumes (the default is
  *                                     # whole-installment processing; the fallback
  *                                     # also triggers automatically when the whole
  *                                     # text exceeds SOURCE_CHUNK_THRESHOLD_CHARS)
- *   (default task)                     # all five in order:
+ *   (default task)                     # all ten in order:
  *                                     # glossary -> character-voice -> style-guide ->
- *                                     # jump-in-wiki -> consistency-audit
+ *                                     # jump-in-wiki -> consistency-audit ->
+ *                                     # translate -> verify-translate -> retranslate
+ *                                     # -> verify-translate -> polish
  *                                     # (a failing step aborts the run by default;
  *                                     # ON_TASK_ERROR=continue in .env lets the
  *                                     # remaining steps run for un-monitored runs)
@@ -42,6 +53,10 @@ const { glossary } = require("./glossary");
 const { characterVoice } = require("./character-voice");
 const { styleGuide } = require("./style-guide");
 const { consistencyAudit } = require("./consistency-audit");
+const { translate } = require("./translate");
+const { verifyTranslate } = require("./verify-translate");
+const { retranslate } = require("./retranslate");
+const { polish } = require("./polish");
 const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
 
 // Wrap each step so its optional per-machine hooks fire around it. The task
@@ -52,9 +67,16 @@ const characterVoiceTask = withHooks("character-voice", characterVoice);
 const styleGuideTask = withHooks("style-guide", styleGuide);
 const jumpInWikiTask = withHooks("jump-in-wiki", jumpInWiki);
 const consistencyAuditTask = withHooks("consistency-audit", consistencyAudit);
+const translateTask = withHooks("translate", translate);
+const verifyTranslateTask = withHooks("verify-translate", verifyTranslate);
+const retranslateTask = withHooks("retranslate", retranslate);
+const polishTask = withHooks("polish", polish);
 
 /**
- * The five pipeline steps in run order (step name + hooked task function).
+ * The ten pipeline steps in run order (step name + hooked task function).
+ * verify-translate runs twice: once after the drafts, once after the
+ * retranslate pass re-scored the fixed chapters (the second run only re-checks
+ * the chapters whose draft changed — the rest are idempotent skips).
  * @type {Array<{name: string, run: Function}>}
  */
 const PIPELINE_STEPS = [
@@ -63,6 +85,14 @@ const PIPELINE_STEPS = [
   { name: "style-guide", run: styleGuideTask },
   { name: "jump-in-wiki", run: jumpInWikiTask },
   { name: "consistency-audit", run: consistencyAuditTask },
+  // Translation stage (multi-model: translate/retranslate on the Hy-MT2
+  // endpoint, verify/polish on the Qwen endpoint — see the TRANSLATE_,
+  // VERIFY_, and EDIT_ env prefixes).
+  { name: "translate", run: translateTask },
+  { name: "verify-translate", run: verifyTranslateTask },
+  { name: "retranslate", run: retranslateTask },
+  { name: "verify-translate", run: verifyTranslateTask },
+  { name: "polish", run: polishTask },
 ];
 
 /**
@@ -113,5 +143,9 @@ exports.glossary = glossaryTask;
 exports["character-voice"] = characterVoiceTask;
 exports["style-guide"] = styleGuideTask;
 exports["consistency-audit"] = consistencyAuditTask;
-// The whole default run also fires pre-pipeline / post-pipeline around all five.
+exports.translate = translateTask;
+exports["verify-translate"] = verifyTranslateTask;
+exports.retranslate = retranslateTask;
+exports.polish = polishTask;
+// The whole default run also fires pre-pipeline / post-pipeline around all ten.
 exports.default = withHooks(PIPELINE_TASK, runPipeline);

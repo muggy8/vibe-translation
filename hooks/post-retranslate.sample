@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# post-retranslate.sample — AFTER the retranslate task. No model switch
+# needed: the pipeline's second verify-translate pass switches back.
+echo "[post-retranslate] retranslate stage finished."

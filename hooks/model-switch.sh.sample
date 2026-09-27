@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# model-switch.sh.sample — start the llama.cpp container of the given compose
+# directory on the shared model port (or no-op when that container is ALREADY
+# the one serving it). Copy this file to hooks/model-switch.sh, run
+# `chmod +x hooks/model-switch.sh`, and call it from the pre-<task> hooks
+# (see pre-translate.sample etc.) — the per-machine hooks are gitignored.
+#
+# WHY: the local model containers all share ONE host port (9200) and all
+# advertise the same alias ("local"), so only one can serve at a time and the
+# ai-client cannot tell which model is loaded. The hook is the single place
+# that knows the container<->model mapping for this machine: it stops the
+# current port owner (if it belongs to a different compose project) and
+# starts the requested one, then polls /health until it is ready.
+#
+# Usage: model-switch.sh <compose-dir>
+# Env overrides:
+#   MODEL_SWITCH_PORT     host port (default: 9200)
+#   MODEL_SWITCH_TIMEOUT  seconds to wait for /health (default: 900 — a
+#                         27B/30B model can take minutes to load)
+set -euo pipefail
+
+COMPOSE_DIR="${1:?usage: model-switch.sh <compose-dir>}"
+PORT="${MODEL_SWITCH_PORT:-9200}"
+TIMEOUT="${MODEL_SWITCH_TIMEOUT:-900}"
+BASE_URL="http://localhost:${PORT}"
+
+if [ ! -d "$COMPOSE_DIR" ]; then
+  echo "[model-switch] compose dir not found: $COMPOSE_DIR" >&2
+  exit 1
+fi
+if [ ! -f "$COMPOSE_DIR/docker-compose.yml" ]; then
+  echo "[model-switch] no docker-compose.yml in $COMPOSE_DIR" >&2
+  exit 1
+fi
+
+# The container currently publishing the port (if any).
+current="$(docker ps --filter "publish=${PORT}" --format '{{.ID}}' | head -n1 || true)"
+if [ -n "$current" ]; then
+  # Idempotency: the state file records which compose dir this hook last
+  # started. (The compose PROJECT label is NOT usable here — compose
+  # sanitizes the project name, so "Qwen3.8-27b-beellama" becomes
+  # "qwen38-27b-beellama" and a name comparison would never match.)
+  state_file="$(cd "$(dirname "$0")" && pwd)/.model-switch-state"
+  target_abs="$(cd "$COMPOSE_DIR" && pwd)"
+  recorded_dir="$(sed -n '1p' "$state_file" 2>/dev/null || true)"
+  if [ -n "$recorded_dir" ] && [ "$recorded_dir" = "$target_abs" ]; then
+    echo "[model-switch] $(basename "$COMPOSE_DIR") already serves port ${PORT} — nothing to do."
+    exit 0
+  fi
+  echo "[model-switch] stopping current port-${PORT} container (last started: ${recorded_dir:-unknown — started manually?})…"
+  docker stop -t 30 "$current" >/dev/null
+  # Wait for the port to free.
+  for _ in $(seq 1 60); do
+    if [ -z "$(docker ps --filter "publish=${PORT}" --format '{{.ID}}' | head -n1)" ]; then
+      break
+    fi
+    sleep 1
+  done
+fi
+
+echo "[model-switch] starting $(basename "$COMPOSE_DIR") on port ${PORT}…"
+(cd "$COMPOSE_DIR" && docker compose up -d)
+state_file="$(cd "$(dirname "$0")" && pwd)/.model-switch-state"
+echo "$(cd "$COMPOSE_DIR" && pwd)" > "$state_file"
+
+echo "[model-switch] waiting up to ${TIMEOUT}s for ${BASE_URL}/health…"
+deadline=$(( $(date +%s) + TIMEOUT ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if curl -sf --max-time 5 "${BASE_URL}/health" >/dev/null 2>&1; then
+    echo "[model-switch] ${BASE_URL} is healthy — $(basename "$COMPOSE_DIR") is serving."
+    exit 0
+  fi
+  sleep 5
+done
+echo "[model-switch] ERROR: ${BASE_URL} not healthy within ${TIMEOUT}s." >&2
+exit 1

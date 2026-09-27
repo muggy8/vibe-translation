@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# post-polish.sample — AFTER the polish task (last model stage of the
+# pipeline). Leave the model running (it is usually the one you want up) or
+# stop it to free VRAM:
+#   docker ps --filter "publish=9200" --format '{{.ID}}' | xargs -r docker stop
+echo "[post-polish] polish stage finished — translation pipeline done."

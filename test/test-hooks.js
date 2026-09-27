@@ -41,7 +41,17 @@ function cleanup() {
 
 assert.deepStrictEqual(
   TASKS,
-  ["glossary", "character-voice", "style-guide", "jump-in-wiki"]
+  [
+    "glossary",
+    "character-voice",
+    "style-guide",
+    "jump-in-wiki",
+    "consistency-audit",
+    "translate",
+    "verify-translate",
+    "retranslate",
+    "polish",
+  ]
 );
 assert.strictEqual(PIPELINE_TASK, "pipeline");
 assert.strictEqual(HOOKS_DIR_ENV, "AI_CLIENT_HOOKS_DIR");
