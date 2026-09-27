@@ -274,17 +274,29 @@ function isAcceptedState(state) {
  * without re-calling the AI.
  *
  * Format:
- *   { "results": [72, 85, 61, ...], "lastCheckedAt": "2026-08-28T..." }
+ *   { "results": [72, 85, 61, ...], "lastCheckedAt": "2026-08-28T...",
+ *     "sourceFingerprint": "<sha256 of the source file at last run>" }
+ *
+ * The optional sourceFingerprint (passed via `extra`) lets the skip-check
+ * detect a changed source file: when it no longer matches the source's
+ * current hash, the persisted acceptance state no longer applies to the
+ * artifacts on disk (they were built from the old source) and the volume
+ * must be regenerated (see isSourceStale).
  *
  * @param {string} filePath - Absolute path to write the state file to.
  * @param {number[]} scores - The current rolling window scores (0–100).
+ * @param {{sourceFingerprint?: string}} [extra] - Extra persisted fields
+ *   (currently: the source file's sha256).
  */
-async function saveRollingState(filePath, scores) {
+async function saveRollingState(filePath, scores, extra = {}) {
   const fs = require("fs").promises;
   const data = {
     results: scores,
     lastCheckedAt: new Date().toISOString(),
   };
+  if (typeof extra.sourceFingerprint === "string" && extra.sourceFingerprint) {
+    data.sourceFingerprint = extra.sourceFingerprint;
+  }
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
 }
 
@@ -311,11 +323,52 @@ async function loadRollingState(filePath) {
       (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100
     );
     if (!valid) return null;
-    return { results: data.results };
+    return {
+      results: data.results,
+      // Persisted by saveRollingState (absent in pre-fingerprint state
+      // files — undefined keeps the skip-check behaving exactly as before).
+      sourceFingerprint:
+        typeof data.sourceFingerprint === "string" && data.sourceFingerprint
+          ? data.sourceFingerprint
+          : undefined,
+    };
   } catch {
     // File missing, unreadable, or JSON parse error — degrade safely.
     return null;
   }
+}
+
+/**
+ * Decide whether a volume's source file has changed since its artifacts were
+ * last accepted — the staleness guard for the idempotency skip-checks.
+ *
+ * When true, the persisted rolling state (and the artifacts it covers) were
+ * produced from a DIFFERENT source file: a re-release, errata fix, or
+ * corrected edition would otherwise be silently skipped and every later
+ * volume would carry the stale snapshot forward. The skip-checks must then
+ * treat the volume as "not skipped" (regenerating it also sets the
+ * cumulative tasks' regeneratedAny cascade, so downstream volumes are
+ * rebuilt on the fresh artifact).
+ *
+ * Fail-open: a missing fingerprint on either side (pre-fingerprint state
+ * files, or a bundle without one) means "unknown" — the check reports
+ * false so pre-existing runs keep their current behavior.
+ *
+ * @param {{ results: number[], sourceFingerprint?: string } | null} state -
+ *   The state returned by loadRollingState.
+ * @param {{ sourceFingerprint?: string } | null} bundle - The resolved
+ *   SourceBundle (utils/source.js sets sourceFingerprint to the source
+ *   file's sha256).
+ * @returns {boolean} True when both fingerprints are present and differ.
+ */
+function isSourceStale(state, bundle) {
+  if (!state || typeof state.sourceFingerprint !== "string" || !state.sourceFingerprint) {
+    return false;
+  }
+  if (!bundle || typeof bundle.sourceFingerprint !== "string" || !bundle.sourceFingerprint) {
+    return false;
+  }
+  return state.sourceFingerprint !== bundle.sourceFingerprint;
 }
 
 module.exports = {
@@ -335,6 +388,7 @@ module.exports = {
   computeRollingAverage,
   meetsAcceptanceCriteria,
   isAcceptedState,
+  isSourceStale,
   saveRollingState,
   loadRollingState,
 };

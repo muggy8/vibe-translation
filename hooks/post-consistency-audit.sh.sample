@@ -1,0 +1,17 @@
+#!/usr/bin/sh
+# Sample: AFTER hook for the consistency-audit step (git-style, per-step model).
+# Runs even when the task failed ($AI_CLIENT_TASK_SUCCEEDED is "0" then).
+#
+# Enable: cp hooks/post-consistency-audit.sh.sample hooks/post-consistency-audit.sh && chmod +x hooks/post-consistency-audit.sh
+set -eu
+cd "$AI_CLIENT_SERIES_DIR"
+
+if [ "$AI_CLIENT_TASK_SUCCEEDED" = "1" ]; then
+  git add .
+  git commit -m "completed consistency-audit ($AI_CLIENT_SERIES_NAME)" || true
+  git checkout main
+  git merge consistency-audit
+  git push
+else
+  echo "consistency-audit FAILED on $(hostname); branch left in place for inspection." >&2
+fi

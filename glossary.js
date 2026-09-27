@@ -55,7 +55,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 const {
   resolveSourceBundle,
@@ -185,6 +185,55 @@ function truncateGlossary(content) {
   return truncated;
 }
 
+// ─── Malformed-tool-call guard ──────────────────────────────────────────────
+
+/**
+ * Detect the "model emitted tool-call syntax as plain text" failure mode.
+ *
+ * Observed live (Qwen via an OpenAI-compatible endpoint): the model sometimes
+ * emits its tool calls as Qwen-native text — a `tool_call` wrapper around the
+ * tool name, e.g. `tool_call <function=readFile>…` or `tool_call <listFiles>…`
+ * — in the content field instead of using the API-level tool_calls protocol.
+ * The harness only executes real tool calls, so such a turn performs no work
+ * at all, yet it looks like an ordinary (short) chat reply, so the stale-file
+ * write check and the acceptance loop would silently mask it and burn every
+ * validation iteration. (Same detector as character-voice.js / style-guide.js
+ * — AGENTS.md gotcha 18.)
+ *
+ * @param {Object|null} result - The result object returned by an agent sendTurn.
+ * @returns {boolean} True when the turn made no real tool calls and its text
+ *   contains tool-call markers (the malformed-tool-call signature).
+ */
+function emittedToolCallAsText(result) {
+  if (!result) return false;
+  if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) return false;
+  const text = typeof result.text === "string" ? result.text : "";
+  return text.includes("tool_call") || text.includes("<function=");
+}
+
+/**
+ * Fail loudly when an agent turn made no real tool calls because the model
+ * emitted tool-call syntax as plain text (see emittedToolCallAsText). Throws a
+ * diagnostic error instead of letting the stale-file write check mask the
+ * no-op turn.
+ *
+ * @param {Object|null} result - The result object returned by an agent sendTurn.
+ * @param {string} who - Who the agent was (for the error message).
+ * @param {string} volumeLabel - The volume label (for the error message).
+ * @returns {void}
+ */
+function assertRealToolCalls(result, who, volumeLabel) {
+  if (!emittedToolCallAsText(result)) return;
+  throw new Error(
+    `Volume ${volumeLabel}: ${who} emitted tool-call syntax as plain text ` +
+      `("tool_call" / <function=…>) instead of using the tool-calling API, so no ` +
+      `file tools ran — nothing was read or written. See the agent transcript in ` +
+      `.logs/ for the exact turn. This is an intermittent model/endpoint issue ` +
+      `with OpenAI tool_calls (the smoke test 'npm run smoke fs' can pass even ` +
+      `when it happens). Re-run the task; if it persists, check the endpoint.`
+  );
+}
+
 // ─── Parallel research helpers ──────────────────────────────────────────────
 
 /**
@@ -270,10 +319,11 @@ async function researchOneTerm(ctx, term, index, seg = null) {
     maxSteps: 15, // 2 wiki_search + 1 wiki_extract + 1 editFile + overhead
   });
   try {
-    await agent.sendTurn(
+    const researchResult = await agent.sendTurn(
       buildPerTermResearchPrompt(ctx, term, index, seg),
       { label: `glossary-research-term-${ctx.values.INSTALLMENT_NUMBER}-${term.term.slice(0, 20)}` }
     );
+    assertRealToolCalls(researchResult, `the researcher agent for "${term.term}"`, ctx.values.INSTALLMENT_NUMBER);
   } finally {
     await agent.close();
   }
@@ -727,6 +777,13 @@ async function glossary() {
       if (state) {
         const avg = computeRollingAverage(state.results);
         skip = isAcceptedState(state);
+        if (skip && isSourceStale(state, bundle)) {
+          skip = false;
+          console.log(
+            `Volume ${values.INSTALLMENT_NUMBER}: the source file changed since ` +
+              `the last run (fingerprint mismatch) — regenerating instead of skipping.`
+          );
+        }
         if (skip) {
           console.log(
             `Volume ${values.INSTALLMENT_NUMBER}: rolling-state ` +
@@ -738,6 +795,9 @@ async function glossary() {
       // state === null → skip stays false (fail-open)
     }
     if (skip) {
+      // The coverage report is deterministic (no AI) — refresh it even on a
+      // skip so a source change is visible without a full regeneration.
+      await writeGlossaryCoverageReport(ctx);
       console.log(
         `Volume ${values.INSTALLMENT_NUMBER}: glossary already exists and passed. Skipping.`
       );
@@ -748,6 +808,10 @@ async function glossary() {
     regeneratedAny = true;
 
     await runVolumeAgent(ctx);
+
+    // Deterministic term-coverage audit of the finished glossary (no AI) —
+    // also the per-volume "terms used here" index for the translation stage.
+    await writeGlossaryCoverageReport(ctx);
     } catch (err) {
       // Volume-level error isolation (ON_VOLUME_ERROR): "skip" records the
       // failure and continues with the next volume (an un-monitored run must
@@ -994,6 +1058,7 @@ async function runChunkedVolumeAgent(ctx) {
     console.log(`Removed the stale file "${strayGlossary}" (leftover from a previous run).`);
   }
 
+  const allChunkedTerms = [];
   for (let si = 0; si < bundle.segments.length; si++) {
     const segment = bundle.segments[si];
     // 1. Extract this chapter's new terms (one-shot). The cumulative reference
@@ -1023,6 +1088,7 @@ async function runChunkedVolumeAgent(ctx) {
           `chapter ${segment.id} (${err.message}). Continuing without research.`
       );
     }
+    allChunkedTerms.push(...terms);
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: extracted ${terms.length} new term(s) from chapter ${segment.id}.`
     );
@@ -1050,6 +1116,21 @@ async function runChunkedVolumeAgent(ctx) {
       `Volume ${values.INSTALLMENT_NUMBER}: amending the glossary with chapter ${segment.id} (author agent)...`
     );
     await generateGlossary(ctx, terms, researchEnabled && terms.length > 0, segment, si);
+  }
+
+  // Persist the volume's new-term extraction (all chapters) so the
+  // translation handoff (utils/handoff.js) can render a "what's new in this
+  // volume" section without re-calling the AI.
+  try {
+    await fs.writeFile(
+      path.join(volumeDir, "glossary-new-terms.json"),
+      JSON.stringify(allChunkedTerms, null, 2) + "\n",
+      "utf8"
+    );
+  } catch (err) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: could not persist glossary-new-terms.json (${err.message}) — continuing.`
+    );
   }
 
   // QA loop: per-chapter validation partials → findings merge → acceptance.
@@ -1093,6 +1174,7 @@ async function runChunkedQaLoop(ctx) {
           buildGlossarySegmentValidatorPrompt(ctx, segment, si),
           { label: `glossary-validate-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
         );
+        assertRealToolCalls(validateResult, `the validator agent (chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
         await assertWroteWithFallback(
           partialFile,
           `the validator agent (chapter ${segment.id})`,
@@ -1117,6 +1199,7 @@ async function runChunkedQaLoop(ctx) {
         buildGlossaryFindingsMergePrompt(ctx),
         { label: `glossary-validate-merge-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
+      assertRealToolCalls(mergeResult, "the findings-merge agent", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(validationOutputFile, "the findings-merge agent", mergeResult?.text);
     } finally {
       await merger.close();
@@ -1129,7 +1212,9 @@ async function runChunkedQaLoop(ctx) {
       if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) recentRollingScores.shift();
     }
     const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-    await saveRollingState(stateFilePath, recentRollingScores);
+    await saveRollingState(stateFilePath, recentRollingScores, {
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
 
     if (meetsAcceptanceCriteria(recentRollingScores)) {
       const avg = computeRollingAverage(recentRollingScores);
@@ -1157,6 +1242,7 @@ async function runChunkedQaLoop(ctx) {
           buildGlossarySegmentFeedbackPrompt(ctx, segment, si),
           { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
         );
+        assertRealToolCalls(feedbackResult, `the author agent (feedback pass, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
         await assertWroteWithFallback(
           glossaryOutputFile,
           `the author agent (feedback pass, chapter ${segment.id})`,
@@ -1236,6 +1322,20 @@ async function runVolumeAgent(ctx) {
   console.log(
     `Volume ${values.INSTALLMENT_NUMBER}: extracted ${terms.length} new term(s).`
   );
+  // Persist the volume's new-term extraction so the translation handoff
+  // (utils/handoff.js) can render a "what's new in this volume" section
+  // without re-calling the AI.
+  try {
+    await fs.writeFile(
+      path.join(volumeDir, "glossary-new-terms.json"),
+      JSON.stringify(terms, null, 2) + "\n",
+      "utf8"
+    );
+  } catch (err) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: could not persist glossary-new-terms.json (${err.message}) — continuing.`
+    );
+  }
 
   // File tools gated to this volume's folder (reads are allowed anywhere,
   // so the agents can also read the volume source and the previous volume).
@@ -1357,6 +1457,7 @@ async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, 
       buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg, si),
       { label: `glossary-amend-${values.INSTALLMENT_NUMBER}${labelSuffix}` }
     );
+    assertRealToolCalls(amendResult, `the author agent (amend${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
     const fallbackUsed = await assertWroteWithFallback(
       glossaryOutputFile,
       "the author agent",
@@ -1382,6 +1483,7 @@ async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, 
         recoveryPrompt,
         { label: `glossary-recovery-${values.INSTALLMENT_NUMBER}` }
       );
+      assertRealToolCalls(recoveryResult, "the author agent (recovery)", values.INSTALLMENT_NUMBER);
       // Overwrite with the recovery output (may be the same content, now via writeFile).
       await assertWroteWithFallback(
         glossaryOutputFile,
@@ -1442,6 +1544,7 @@ async function runQaLoop(ctx) {
         buildGlossaryValidatorTurnPrompt(ctx),
         { label: `glossary-validate-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
+      assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(
         validationOutputFile,
         "the validator agent",
@@ -1462,6 +1565,7 @@ async function runQaLoop(ctx) {
           recoveryPrompt,
           { label: `glossary-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
         );
+        assertRealToolCalls(validateRecoveryResult, "the validator agent (recovery)", values.INSTALLMENT_NUMBER);
         await assertWroteWithFallback(
           validationOutputFile,
           "the validator agent (recovery)",
@@ -1488,7 +1592,9 @@ async function runQaLoop(ctx) {
     // Persist the rolling window to disk so that a re-run can recover the
     // exact acceptance state without re-calling the AI.
     const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-    await saveRollingState(stateFilePath, recentRollingScores);
+    await saveRollingState(stateFilePath, recentRollingScores, {
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
 
     // Check the acceptance criterion: if we have enough samples and the
     // window meets it, accept and stop (skip feedback).
@@ -1520,6 +1626,7 @@ async function runQaLoop(ctx) {
         buildGlossaryFeedbackTurnPrompt(ctx),
         { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
+      assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
       const feedbackFallbackUsed = await assertWroteWithFallback(
         glossaryOutputFile,
         "the author agent (feedback pass)",
@@ -1540,6 +1647,7 @@ async function runQaLoop(ctx) {
           recoveryPrompt,
           { label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
         );
+        assertRealToolCalls(feedbackRecoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
         await assertWroteWithFallback(
           glossaryOutputFile,
           "the author agent (feedback recovery)",
@@ -1568,12 +1676,207 @@ async function runQaLoop(ctx) {
   }
 }
 
+// ─── Deterministic term-coverage audit ──────────────────────────────────────
+// The glossary validator checks completeness with judgment (an LLM); this
+// audit adds the deterministic half — exact occurrence counts of every
+// glossary term in this volume's source text — and doubles as the
+// per-volume "terms used here" index the translation stage needs (the
+// cumulative glossary grows; a translator of volume N only needs the terms
+// volume N actually uses).
+
+/**
+ * Parse the source-language terms out of a glossary Markdown file.
+ *
+ * Walks the table rows and keeps the FIRST column, tracking the `## `
+ * section each row belongs to. For each maximal run of consecutive table
+ * rows, the first row (header) and the second row (separator, e.g.
+ * `|---|---|---|`) are skipped. Emphasis-wrapped cells are normalized.
+ *
+ * @param {string} markdown - The glossary file content.
+ * @returns {Array<{term: string, section: string}>} One entry per term row,
+ *   in file order.
+ */
+function parseGlossaryTableTerms(markdown) {
+  if (!markdown || typeof markdown !== "string") return [];
+  const entries = [];
+  let section = "";
+  let tableRows = [];
+  const flushTable = () => {
+    // Row 0 = header, row 1 = separator — data starts at row 2.
+    for (let ri = 2; ri < tableRows.length; ri++) {
+      const cells = tableRows[ri]
+        .split("|")
+        .map((c) => c.trim())
+        .filter((c) => c !== "");
+      if (cells.length === 0) continue;
+      let term = cells[0].trim();
+      term = term.replace(/^`+|`+$/g, "").trim();
+      term = term.replace(/^\*+|\*+$/g, "").trim();
+      term = term.replace(/^_+|_+$/g, "").trim();
+      if (!term) continue;
+      if (/^:?-{3,}:?$/.test(term)) continue; // stray separator
+      if (/^\[.*\]$/.test(term)) continue; // unrendered template placeholder
+      entries.push({ term, section });
+    }
+    tableRows = [];
+  };
+  for (const rawLine of markdown.split("\n")) {
+    const line = rawLine.trim();
+    const heading = line.match(/^##\s+(.+)$/);
+    if (heading) {
+      flushTable();
+      section = heading[1].replace(/\*/g, "").trim();
+      continue;
+    }
+    if (line.startsWith("|")) {
+      tableRows.push(line);
+      continue;
+    }
+    flushTable();
+  }
+  flushTable();
+  return entries;
+}
+
+/**
+ * Count (non-overlapping) occurrences of a term in a source text.
+ *
+ * Substring matching is the correct semantics for Japanese (no word
+ * boundaries) and works for any script; glossary terms are proper nouns, so
+ * the few false positives from shorter embedded terms are acceptable for a
+ * coverage audit.
+ *
+ * @param {string} sourceText - The whole-volume source text.
+ * @param {string} term - The source-language term to count.
+ * @returns {number} The occurrence count.
+ */
+function countTermOccurrences(sourceText, term) {
+  if (!sourceText || !term || typeof sourceText !== "string" || typeof term !== "string") {
+    return 0;
+  }
+  let count = 0;
+  let idx = sourceText.indexOf(term);
+  while (idx !== -1) {
+    count++;
+    idx = sourceText.indexOf(term, idx + Math.max(1, term.length));
+  }
+  return count;
+}
+
+/**
+ * Build the glossary coverage report (pure — testable without the filesystem).
+ *
+ * @param {{seriesName: string, installmentNumber: string, entries: Array<{term: string, section: string}>, sourceText: string}} p
+ * @returns {string} The Markdown report.
+ */
+function buildGlossaryCoverageReportMarkdown({ seriesName, installmentNumber, entries, sourceText }) {
+  const rows = [];
+  const zeroTerms = [];
+  for (const e of entries) {
+    const count = countTermOccurrences(sourceText, e.term);
+    rows.push(`| ${e.term} | ${e.section || "—"} | ${count} |`);
+    if (count === 0) zeroTerms.push(e);
+  }
+  const lines = [];
+  lines.push(`# Glossary Coverage — ${seriesName}, Volume ${installmentNumber}`);
+  lines.push("");
+  lines.push(
+    "_Deterministic audit: each glossary term's occurrence count in this volume's source text " +
+      "(substring match — the correct semantics for Japanese). Generated by the glossary task; no AI involved. " +
+      "A zero-occurrence term is a candidate for a hallucinated entry or a term this volume no longer uses; " +
+      "the AI validator's completeness check (terms present in the source but missing from the glossary) is " +
+      "the complementary, judgment-based half of this audit._"
+  );
+  lines.push("");
+  lines.push(`## Term occurrences (${entries.length} glossary terms)`);
+  lines.push("");
+  lines.push("| Term | Section | Occurrences |");
+  lines.push("|---|---|---|");
+  if (rows.length === 0) {
+    lines.push("| (no terms parsed from the glossary) | — | — |");
+  } else {
+    lines.push(...rows);
+  }
+  lines.push("");
+  lines.push("## Terms with zero occurrences");
+  lines.push("");
+  if (zeroTerms.length === 0) {
+    lines.push("(none — every glossary term appears in this volume's source)");
+  } else {
+    for (const e of zeroTerms) lines.push(`- ${e.term} (${e.section || "—"})`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+/**
+ * Write the deterministic term-coverage report for one volume
+ * (glossary-coverage.md) — no AI call. Runs after the glossary is accepted
+ * (and on the skip path, to keep the report fresh when the source changes).
+ *
+ * Best-effort by design: this audit is supplementary, so a failure is logged
+ * as a warning and never fails an already-accepted volume.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context (must include bundle,
+ *   glossaryOutputFile, values).
+ * @returns {Promise<void>}
+ */
+async function writeGlossaryCoverageReport(ctx) {
+  const { values, volumeDir, bundle, glossaryOutputFile } = ctx;
+  const reportFile = path.join(volumeDir, "glossary-coverage.md");
+  const jsonFile = path.join(volumeDir, "glossary-coverage.json");
+  try {
+    const glossaryContent = await fs.readFile(glossaryOutputFile, "utf-8");
+    const sourceText = await fs.readFile(bundle.wholePath, "utf-8");
+    const entries = parseGlossaryTableTerms(glossaryContent);
+    const report = buildGlossaryCoverageReportMarkdown({
+      seriesName: values.SOURCE_NAME,
+      installmentNumber: values.INSTALLMENT_NUMBER,
+      entries,
+      sourceText,
+    });
+    await fs.writeFile(reportFile, report, "utf-8");
+    // Machine-readable sidecar (same data as the Markdown table) — the
+    // translation stage can load it for per-term "used in this volume" lookups
+    // without parsing Markdown.
+    await fs.writeFile(
+      jsonFile,
+      JSON.stringify(
+        {
+          seriesName: values.SOURCE_NAME,
+          volume: values.INSTALLMENT_NUMBER,
+          terms: entries.map((e) => ({
+            term: e.term,
+            section: e.section || null,
+            occurrences: countTermOccurrences(sourceText, e.term),
+          })),
+        },
+        null,
+        2
+      ) + "\n",
+      "utf-8"
+    );
+    const zero = entries.filter((e) => countTermOccurrences(sourceText, e.term) === 0).length;
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: glossary coverage report written ` +
+        `(${entries.length} terms, ${zero} with zero occurrences) → ${reportFile} + ${path.basename(jsonFile)}`
+    );
+  } catch (err) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: could not write the glossary coverage report ` +
+        `(${err.message}) — continuing.`
+    );
+  }
+}
+
 // ─── Export for use as a module ─────────────────────────────────────────────
 
 module.exports = {
   glossary,
   parseTerms,
   truncateGlossary,
+  emittedToolCallAsText,
+  assertRealToolCalls,
   buildPerTermResearchPrompt,
   researchOneTerm,
   researchBatch,
@@ -1588,4 +1891,8 @@ module.exports = {
   appendResearchSkeleton,
   runChunkedVolumeAgent,
   runChunkedQaLoop,
+  parseGlossaryTableTerms,
+  countTermOccurrences,
+  buildGlossaryCoverageReportMarkdown,
+  writeGlossaryCoverageReport,
 };

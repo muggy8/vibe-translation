@@ -1,0 +1,17 @@
+#!/usr/bin/sh
+# Sample: AFTER hook for the glossary step (git-style, per-step model).
+# Runs even when the task failed ($AI_CLIENT_TASK_SUCCEEDED is "0" then).
+#
+# Enable: cp hooks/post-glossary.sh.sample hooks/post-glossary.sh && chmod +x hooks/post-glossary.sh
+set -eu
+cd "$AI_CLIENT_SERIES_DIR"
+
+if [ "$AI_CLIENT_TASK_SUCCEEDED" = "1" ]; then
+  git add .
+  git commit -m "completed glossary ($AI_CLIENT_SERIES_NAME)" || true
+  git checkout main
+  git merge glossary
+  git push
+else
+  echo "glossary FAILED on $(hostname); branch left in place for inspection." >&2
+fi

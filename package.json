@@ -1,7 +1,7 @@
 {
   "name": "ai-client",
   "version": "2.0.0",
-  "description": "Agentic AI client (OpenHarness) for the glossary and jump-in-wiki workflows",
+  "description": "Agentic AI client (OpenHarness) for the glossary, character-voice, style-guide, jump-in-wiki and consistency-audit pre-translation workflows",
   "main": "harness.js",
   "scripts": {
     "start": "node harness.js",

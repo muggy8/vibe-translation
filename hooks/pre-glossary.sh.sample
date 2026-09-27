@@ -1,0 +1,16 @@
+#!/usr/bin/sh
+# Sample: BEFORE hook for the glossary step (git-style, per-step model).
+#
+# Enable: cp hooks/pre-glossary.sh.sample hooks/pre-glossary.sh && chmod +x hooks/pre-glossary.sh
+# (or create hooks/pre-glossary with these contents). This .sample never runs.
+#
+# Env: $AI_CLIENT_TASK $AI_CLIENT_PHASE $AI_CLIENT_SERIES_DIR $AI_CLIENT_SERIES_NAME
+#       $AI_CLIENT_DRY_RUN $AI_CLIENT_FORCE $AI_CLIENT_CHUNKED $AI_CLIENT_VOLUME
+# Exit non-zero to ABORT the step (the task will not run). See hooks/README.md.
+set -eu
+cd "$AI_CLIENT_SERIES_DIR"
+
+# Start from a clean main and branch for this step.
+git checkout main
+git pull
+git checkout -b glossary main

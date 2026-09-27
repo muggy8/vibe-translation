@@ -9,7 +9,9 @@ An agentic AI client (v2.0.0, CommonJS, Node ≥ 22.19) that processes a light-n
 - `glossary` task → a canonical target-language glossary (per-volume snapshots + a final copy at the series root)
 - `character-voice` task → a cumulative character voice reference (speech quirks, POV markers, narration types) and per-volume POV maps
 - `style-guide` task → a cumulative style guide (house-style policies for rendering source-language constructs in the target language)
-- `jump-in-wiki` task → a per-volume `wiki.md` plus a "living" `shared-wiki.md`
+- `jump-in-wiki` task → a per-volume `wiki.md` plus a "living" `shared-wiki.md` (newest copy at the series root)
+- `consistency-audit` task → a final cross-artifact audit (`consistency-report.md`, PASS/FAIL sign-off before translation)
+- plus deterministic translation-handoff artifacts per volume: `chapters.json` + `translation-brief.md` (and the persisted extraction JSONs / glossary coverage report)
 
 It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@openharness/core`. Tool-calling agents read the sources and write the outputs themselves through sandboxed file tools.
 
@@ -21,7 +23,8 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `npx gulp character-voice` | Run the character voice reference task (all volumes) |
 | `npx gulp style-guide` | Run the style guide task (all volumes) |
 | `npx gulp jump-in-wiki` | Run the wiki task |
-| `npx gulp` (default) | All four in order: glossary → character-voice → style-guide → jump-in-wiki |
+| `npx gulp consistency-audit` | Run the final cross-artifact consistency audit (writes `consistency-report.md`) |
+| `npx gulp` (default) | All five in order: glossary → character-voice → style-guide → jump-in-wiki → consistency-audit |
 | `... --dry-run` | No AI calls; dump the exact prompts to `.dry-run/<task>-NN.md` |
 | `... --force` | Regenerate even if outputs already exist |
 | `... --volume NN` | Process a single volume (e.g. `--volume 01`) |
@@ -34,24 +37,26 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 
 | Path | Role |
 |---|---|
-| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and score-based acceptance config (`ACCEPTANCE_WINDOW_SIZE`, `ACCEPTANCE_MIN_SAMPLES`, `ACCEPTANCE_PASSING_SCORE`, `ACCEPTANCE_STRATEGY`, `ACCEPTANCE_BEST_MIN_PASSES`, `computeRollingAverage`, `meetsAcceptanceCriteria`, `isAcceptedState`). All four task modules import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window of scores to disk (see §3). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). Also provides the un-monitored run policies (`normalizePolicy`, `ON_VOLUME_ERROR`, `ON_MISSING_PREVIOUS`, `ON_QA_LIMIT`) and `validateRequiredEnv({ dryRun })` — the fail-fast check for missing required env vars (see §3 "Un-monitored run policies"). |
+| `configs/shared.js` | Shared constants extracted from task modules (`AGENT_TOOLS_NOTE`) and score-based acceptance config (`ACCEPTANCE_WINDOW_SIZE`, `ACCEPTANCE_MIN_SAMPLES`, `ACCEPTANCE_PASSING_SCORE`, `ACCEPTANCE_STRATEGY`, `ACCEPTANCE_BEST_MIN_PASSES`, `computeRollingAverage`, `meetsAcceptanceCriteria`, `isAcceptedState`). All five task modules import from here. Also provides `saveRollingState` / `loadRollingState` for persisting the rolling window of scores to disk (the state file also carries the run's `sourceFingerprint` — see §3 "Source-staleness detection") and `isSourceStale(state, bundle)` (fail-open when either side lacks a fingerprint). Also provides `RESEARCH_CONCURRENCY` — the number of parallel research agents (one per glossary term, batched). Also provides the un-monitored run policies (`normalizePolicy`, `ON_VOLUME_ERROR`, `ON_MISSING_PREVIOUS`, `ON_QA_LIMIT`) and `validateRequiredEnv({ dryRun })` — the fail-fast check for missing required env vars (see §3 "Un-monitored run policies"). |
 | `utils/fs.js` | Filesystem helpers: `fileExists`, `assertWrote`. |
 | `utils/prompt.js` | Prompt/verdict helpers: `transformUserPrompt`, `isPassingVerdict` (legacy binary verdict — kept for compatibility, no longer used in the acceptance path), `parseAcceptanceScore` (parses the 0–100 score from the acceptance one-shot reply; `null` = unparseable = failed check), `validatorMaxStepsFor`, `writePromptDump`. |
 | `utils/manifest.js` | JSON/manifest helpers: `extractJsonObject`, `installmentNumberFromDir`. |
-| `utils/source.js` | Source-bundle helpers: `resolveSourceBundle` (normalizes a volume's source into a `SourceBundle`; plain-text passes through as-is, `.epub` is extracted once and cached), `shouldProcessChunked` (decides whole-installment vs chapter-by-chapter fallback), `extractEpubToBundle` (jszip + cheerio; XHTML → Markdown, per-chapter files, interludes, epilogue, images), `assignSegmentIds`, `classifyTitle`, `xhtmlToMarkdown`, `sourceMaterialLine`, `sourceSegmentListLine`, `chapterSegmentNote`, `chapterContextBlock`, `isEpubPath`, `normalizeZipPath`. All four task modules resolve their source through `resolveSourceBundle` at the choke point. |
+| `utils/source.js` | Source-bundle helpers: `resolveSourceBundle` (normalizes a volume's source into a `SourceBundle`; plain-text passes through as-is, `.epub` is extracted once and cached; every bundle carries a `sourceFingerprint` — `sha256OfFile(originalPath)` for plain text, the cache `sha256` for epub — used by the source-staleness detection, see §3), `shouldProcessChunked` (decides whole-installment vs chapter-by-chapter fallback), `extractEpubToBundle` (jszip + cheerio; XHTML → Markdown, per-chapter files, interludes, epilogue, images), `assignSegmentIds`, `classifyTitle`, `xhtmlToMarkdown`, `sourceMaterialLine`, `sourceSegmentListLine`, `chapterSegmentNote`, `chapterContextBlock`, `isEpubPath`, `normalizeZipPath`, `sha256OfFile`. All five task modules resolve their source through `resolveSourceBundle` at the choke point. |
+| `utils/handoff.js` | Deterministic per-volume translation handoff (no AI): `buildChaptersJson` (chapter list from the bundle segments), `renderNewEntry`, `buildTranslationBriefMarkdown` (pure — the one-page brief: new terms/voices/style rules from the persisted extraction JSONs, chapter table, pointers to every per-volume + series-level reference artifact), `writeVolumeHandoff` (best-effort writer of `chapters.json` + `translation-brief.md`; called from jump-in-wiki.js on both the processed and skipped paths — a failure warns, never fails a volume). |
 | `utils/hooks.js` | Per-machine pipeline-hook runner (git-style, entirely optional). Discovers `hooks/pre-<task>` / `post-<task>` (and `pre-/post-pipeline`) and `exec`s each as an executable with `AI_CLIENT_*` env vars; skips when the file is absent, under `--dry-run`, or not executable. Applied via `withHooks()` in gulpfile.js. See §3 "Pipeline hooks" and `hooks/README.md`. |
 | `harness.js` | The AI layer: one-shot calls, agent handles, wiki tools, gated fs tools, provider plumbing, run logging, and the runaway-generation guard (aborts agent turns that produce excessive text without tool calls). Never bypass it to talk to the model. Logs every AI call to `.logs/<timestamp>/` — per-agent chat histories (system prompt, messages, assistant response, reasoning, tool calls) and one-shot call dumps — plus the summary log (greppable `CALL`/`RESULT`/`WARNING` lines). |
 | `research.js` | Client-side web research (Wikipedia Action API + optional Brave/Tavily/Serper). No LLM involved. |
 | `glossary.js` | Glossary task logic. |
 | `character-voice.js` | Character voice reference task logic — extracts speech quirks, POV markers, narration types, and produces a cumulative character voice reference and per-volume POV maps. |
 | `style-guide.js` | Style guide task logic — extracts style-relevant constructs (honorifics, pronouns, particles, internal-monologue markers, onomatopoeia, POV/scene markers, tense, punctuation, wordplay) and produces a cumulative style guide of rendering policies for the target language. |
-| `jump-in-wiki.js` | Wiki task logic **plus the shared helpers** |
-| `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. All four tasks read this manifest instead of guessing folder names. |
-| `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All four tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
+| `jump-in-wiki.js` | Wiki task logic **plus the shared helpers**. After all volumes: the last existing `shared-wiki.md` is copied to `SHARED_WIKI_OUTPUT_FILE` (default `<SERIES_LOCATION>/shared-wiki.md`); writes the per-volume translation handoff (`utils/handoff.js`) on both paths. |
+| `consistency-audit.js` | Final cross-artifact consistency audit (the pre-translation sign-off). An audit agent (gated fs tools, cwd = series root, writes confined to the root) reads the four series-root artifacts (`glossary.md`, `character-voice.md`, `style-guide.md`, `shared-wiki.md`) and writes `consistency-report.md` (PASS/FAIL verdict + severity-banded findings with quoted snippets). No QA loop. Idempotent: the report is skipped while it is newer than all four artifacts (`--force` re-audits). A FAIL verdict is logged loudly but does not fail the task — the report is the deliverable. |
+| `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. All five tasks read this manifest instead of guessing folder names. |
+| `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All five tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
 | `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `CharacterVoiceVolumeCtx`, `StyleGuideVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`, `HookContext`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
-| `gulpfile.js` | Task wiring plus the `ON_TASK_ERROR`-aware `runPipeline()` runner for the default all-four run (see §3 "Un-monitored run policies"). |
+| `gulpfile.js` | Task wiring plus the `ON_TASK_ERROR`-aware `runPipeline()` runner for the default all-five run (see §3 "Un-monitored run policies"). |
 | `hooks/` | Per-machine hook scripts (git-style; gitignored — only `README.md` + `*.sample` are tracked). Executable before/after hooks for each step and the whole run. See §3 "Pipeline hooks". |
-| `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Style guide: `style-guide-extract`, `style-guide` (compile), `style-guide-validator`, `style-guide-acceptance`, `style-guide-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. |
+| `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Style guide: `style-guide-extract`, `style-guide` (compile), `style-guide-validator`, `style-guide-acceptance`, `style-guide-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. Consistency audit: `consistency-audit`. |
 | `test/test-glossary-load.js` | Pure tests (`npm test`). |
 | `test/harness-smoke.js` | Live smoke test (`npm run smoke`). |
 | `test-series/` | Fixture series (`test_story(1)`, `test_story(2)`); generated outputs are gitignored. |
@@ -76,7 +81,7 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
 - Custom fetch built on **undici's own `fetch` + a no-timeout `Agent` from the same undici build** (all timeouts disabled — local servers can prefill for minutes); never mix the Agent with Node's *global* fetch — that crosses undici versions and throws `invalid onRequestStart method` on some Node builds (gotcha 19); merges thinking params into the request body (`chat_template_kwargs` for Qwen3-style models, `reasoning_effort` for levels); taps SSE/JSON responses for `reasoning_content` + first-token timing diagnostics.
 - Every call logs to stderr **and** `.logs/call-ai-<timestamp>.log` (CALL/RESULT lines: finish reason, content/reasoning sizes, token usage, TTFT, tok/s). Workflow logging goes through `harness.logLine`.
 
-### Shared workflow shape (all four tasks)
+### Shared workflow shape (all four volume tasks)
 
 1. Discover volume folders and source files via the translation-target manifest (`getTranslationTarget()`). An AI agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes the result to `<SERIES_LOCATION>/translation-target.json`. With `--dry-run` a deterministic fallback (the legacy convention) builds the manifest instead, so prompt previews stay fully offline.
 2. Fill `{{PLACEHOLDER}}`s in the user-prompt templates (`transformUserPrompt` — **strict**: throws on a missing value or any leftover placeholder).
@@ -96,7 +101,7 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
    is never touched by a feedback pass. **Fresh agent per feedback iteration**
    (no persistent session — each feedback turn starts with a clean context
    that includes the validation report and current glossary).
-4. **Idempotency**: a volume whose outputs already exist and pass acceptance is skipped (unless `--force`). The skip-check reads a persisted rolling-window state file (`*-rolling-state.json`) written alongside the validation report during the last run, recomputing the acceptance decision deterministically — no AI call needed. If the state file is missing or corrupt, the check falls back to regenerating (fail-open). A failed skip-check degrades to "not skipped" (fail-open, by design).
+4. **Idempotency**: a volume whose outputs already exist and pass acceptance is skipped (unless `--force`). The skip-check reads a persisted rolling-window state file (`*-rolling-state.json`) written alongside the validation report during the last run, recomputing the acceptance decision deterministically — no AI call needed. If the state file is missing or corrupt, the check falls back to regenerating (fail-open). A failed skip-check degrades to "not skipped" (fail-open, by design). **Source-staleness detection**: the state file also persists the `sourceFingerprint` of the source file the accepted output was built from (sha256 of the original plain-text file, or the epub extraction cache hash — `bundle.sourceFingerprint` from `utils/source.js`). On re-run, `isSourceStale(state, bundle)` compares the two: a changed source invalidates the skip and the volume regenerates (then the cumulative `regeneratedAny` cascade rebuilds all later volumes). Fail-open: a legacy state file without a fingerprint, or a bundle without one, keeps the current skip behavior — old runs are safe to re-run.
 
 **Un-monitored run policies** (front-loaded in `.env`, see §8): the pipeline is built to run un-monitored overnight / for multiple days, so the decisions that would otherwise need a human are env-driven (code defaults keep the safe "fail loudly" behavior):
 
@@ -104,7 +109,7 @@ Prompt files are agent-mode: the system prompt is appended with `AGENT_TOOLS_NOT
 - `ON_VOLUME_ERROR` (`abort` default / `skip`): when a volume's processing throws, the per-volume body of each task is wrapped in a try/catch — `skip` records the volume and continues with the next one (in the cumulative tasks the next volume then misses its previous artifact and is skipped in turn by `ON_MISSING_PREVIOUS=skip`, cascading to the end of the task).
 - `ON_MISSING_PREVIOUS` (`abort` default / `skip`): replaces the "process the earlier volume first" throw in the three cumulative tasks with an optional warn-and-skip.
 - `ON_QA_LIMIT` (`accept` default / `fail`): when the QA loop hits `QA_MAX_ITERATIONS` without a passing grade — accept the output as-is (legacy) or fail the volume.
-- `ON_TASK_ERROR` (`abort` default / `continue`): in the default all-four run, a failing step either stops the run (gulp `series` behavior) or the remaining steps still run and the run fails at the end with a summary of all failed steps (`runPipeline()` in gulpfile.js).
+- `ON_TASK_ERROR` (`abort` default / `continue`): in the default all-five run, a failing step either stops the run (gulp `series` behavior) or the remaining steps still run and the run fails at the end with a summary of all failed steps (`runPipeline()` in gulpfile.js).
 - `DISCOVERY_MAX_ATTEMPTS` (default 1): the discovery agent is retried with a fresh agent (10 s apart) when it produces an invalid manifest or references missing source files.
 
 ### Source bundle & chapter-by-chapter fallback (`utils/source.js`)
@@ -164,7 +169,9 @@ Per volume, in order — each volume's glossary is built on the previous one's:
 4. **QA loop**: a fresh validator agent per iteration (step cap **scaled to source size**: `max(40, 2·ceil(bytes/32KB) + 24)` — `validatorMaxStepsFor`) writes `glossary-validation.md` → acceptance one-shot → on FAIL a **fresh author agent** per iteration applies the feedback (no persistent session).
 5. After all volumes: the **last** volume's `glossary.md` is copied to `GLOSSARY_OUTPUT_FILE` (default `<SERIES_LOCATION>/glossary.md`). Skipped for `--volume` runs (a single volume's snapshot would be stale).
 
-Artifacts per volume folder: `glossary.md` (snapshot), `glossary-research.md`, `glossary-validation.md`.
+The extraction step also persists `glossary-new-terms.json` (the new-terms snapshot for the translation handoff), and after the QA loop a **deterministic coverage audit** (no AI) parses the glossary table and writes `glossary-coverage.md` + `glossary-coverage.json` (machine-readable sidecar) — per-term occurrence counts in the volume source (substring matching, the correct semantics for Japanese) plus the zero-occurrence terms (hallucinated-entry candidates; the AI validator's completeness check is the complementary judgment-based half).
+
+Artifacts per volume folder: `glossary.md` (snapshot), `glossary-new-terms.json` (extraction snapshot), `glossary-research.md`, `glossary-validation.md`, `glossary-coverage.md` + `glossary-coverage.json` (deterministic coverage audit).
 
 **Cumulative invariant:** regenerating any volume sets `regeneratedAny` → **all later volumes are regenerated too** (their glossaries would otherwise build on a stale base). Do not "fix" this by making per-volume idempotency independent.
 
@@ -175,9 +182,11 @@ Per volume:
 1. **Generate** `wiki.md` + `shared-wiki.md` (context: the previous volume's `wiki.md` + `shared-wiki.md`):
     - an author agent (per-volume session, `maxSteps 40`). Stubs are pre-created for both files (a stronger name anchor than "create a new file", and a crashed run leaves identifiable stubs).
       Stale classic-named files (`jump-in-wiki-NN.md`, `jump-in-wiki-shared.md`) are deleted up front so agents can't audit garbage.
+      When the glossary task has already written the volume's `glossary.md`, the author/validator/feedback prompts offer it as a **read-only canonical reference** so the shared wiki's "Glossary" section uses canonical renderings instead of model memory (drift guard).
 2. **QA loop**: a validator agent writes `jump-in-wiki-validation-NN.md` (size-scaled step cap) → acceptance one-shot scores the wiki 0–100 → unless the rolling window of scores meets the criterion, the same author session applies the feedback.
 3. **Two-tier idempotency**: if `wiki.md` + `shared-wiki.md` exist → skip generation, go straight to validation; if a validation report exists and passes acceptance → skip the whole volume.
-4. End-of-run summary counts the volumes that hit the iteration limit.
+4. **Handoff**: after the volume is settled (processed *or* skipped), the deterministic per-volume translation handoff is written (`chapters.json` + `translation-brief.md`, `utils/handoff.js` — best-effort, never fails the volume).
+5. After all volumes: the **last existing** `<volume folder>/shared-wiki.md` is copied to `SHARED_WIKI_OUTPUT_FILE` (default `<SERIES_LOCATION>/shared-wiki.md`), mirroring the other root copies. Skipped for `--volume` runs (a single volume's snapshot would not be the series state). End-of-run summary counts the volumes that hit the iteration limit.
 
 ## 6. Pipeline C: character-voice (`character-voice.js`)
 
@@ -192,7 +201,7 @@ Per volume, in order — each volume's reference builds on the previous one's:
 3. **QA loop**: a fresh validator agent per iteration writes `character-voice-validation.md` → acceptance one-shot scores the reference 0–100 → unless the rolling window of scores meets the criterion, a fresh author agent applies feedback (`character-voice-feedback.md`). Same score-based acceptance criterion as the other pipelines (the state file is saved on every iteration, including the accepting one, so accepted volumes are skipped on re-run).
 4. After all volumes: the last volume's `character-voice.md` is copied to `VOICE_OUTPUT_FILE` (default `<SERIES_LOCATION>/character-voice.md`). Skipped for `--volume` runs.
 
-Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-map.md` (per-volume), `character-voice-validation.md` (validation report).
+Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-map.md` (per-volume), `character-voice-new.json` (extraction snapshot for the handoff), `character-voice-validation.md` (validation report).
 
 **Cumulative invariant:** same as glossary — regenerating any volume sets `regeneratedAny` → all later volumes are regenerated too.
 
@@ -209,13 +218,51 @@ Per volume, in order — each volume's guide builds on the previous one's:
 3. **QA loop**: a fresh validator agent per iteration writes `style-guide-validation.md` (size-scaled step cap) → acceptance one-shot scores the guide 0–100 → unless the rolling window of scores meets the criterion, a fresh author agent applies the feedback (`style-guide-feedback.md`). Same score-based acceptance as the other pipelines (the state file is saved on every iteration, including the accepting one, so accepted volumes are skipped on re-run).
 4. After all volumes: the last volume's `style-guide.md` is copied to `STYLE_OUTPUT_FILE` (default `<SERIES_LOCATION>/style-guide.md`). Skipped for `--volume` runs.
 
-Artifacts per volume folder: `style-guide.md` (cumulative snapshot), `style-guide-validation.md` (validation report).
+Artifacts per volume folder: `style-guide.md` (cumulative snapshot), `style-guide-new.json` (extraction snapshot for the handoff), `style-guide-validation.md` (validation report).
 
 **Cumulative invariant:** same as glossary/character-voice — regenerating any volume sets `regeneratedAny` → all later volumes are regenerated too.
 
 **Key differences:** single output file (no second per-volume file); no research stage; rules must be *actionable* (a concrete rendering decision — keep / drop / translate / adapt — with context and exceptions; vague guidance is a validation finding); undecidable constructs go to an "Open Questions" section with their context rather than being guessed.
 
-## 8. Environment reference (`.env`)
+## 8. Pipeline E: consistency-audit + translation handoff (`consistency-audit.js`, `utils/handoff.js`)
+
+The final gate before translation. Runs after the four volume tasks in the
+default pipeline (and is also available standalone).
+
+**Consistency audit** — an audit agent (gated fs tools, `cwd` = the series
+root, writes confined to the root; the four artifacts are read-only) reads
+`glossary.md`, `character-voice.md`, `style-guide.md` and `shared-wiki.md`
+at the series root and writes `consistency-report.md`:
+
+- **PASS/FAIL verdict** — FAIL when any HIGH finding exists (or when fewer
+  than four artifacts were audited — a partial audit is not a sign-off).
+- **Severity-banded findings** (HIGH blocks translation / MEDIUM should fix /
+  LOW cosmetic) with verbatim quoted snippets from both sides of each
+  conflict, across: glossary ↔ shared-wiki Glossary section, glossary ↔ style
+  guide, character-voice ↔ wiki, style guide ↔ voice reference, plus
+  intra-artifact contradictions.
+
+No QA loop (it is a one-shot audit over the final state, not an
+iteratively-built artifact). **Idempotency**: the report is skipped while it
+is newer than all four artifacts (mtime check, no AI); regenerating any
+artifact invalidates it. `--force` re-audits. A missing artifact fails loudly
+(naming the task to run first). A **FAIL verdict is logged loudly but does
+not fail the task** — the report is the deliverable; a fixer re-runs the
+offending task and re-audits with `--force` before translation.
+
+**Translation handoff** (deterministic, no AI) — per volume, written by the
+jump-in-wiki task on both the processed and skipped paths:
+
+- `chapters.json` — the machine-readable chapter list (segment id, file,
+  title, char count, reading order) that the translation stage names its
+  outputs by.
+- `translation-brief.md` — a one-page brief: what is **new** in this volume
+  (the persisted `glossary-new-terms.json` / `character-voice-new.json` /
+  `style-guide-new.json` extraction snapshots), the chapter table, and
+  pointers to every per-volume + series-level reference artifact (missing
+  ones struck through, so the brief doubles as a completeness check).
+
+## 9. Environment reference (`.env`)
 
 ### AI provider (`AI_*`)
 
@@ -281,7 +328,7 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 | `ON_VOLUME_ERROR` | `abort` | When a volume's processing fails: `abort` stops the task; `skip` logs the error and continues with the next volume |
 | `ON_MISSING_PREVIOUS` | `abort` | When a cumulative task finds the previous volume's artifact missing: `abort` fails loudly; `skip` warns and skips the volume (later volumes cascade the same way) |
 | `ON_QA_LIMIT` | `accept` | When the QA loop hits `QA_MAX_ITERATIONS` without a passing grade: `accept` keeps the output as-is; `fail` treats the volume as failed (then subject to `ON_VOLUME_ERROR`) |
-| `ON_TASK_ERROR` | `abort` | Default all-four run: `abort` stops at the first failing step; `continue` runs the remaining steps, then fails the run with a summary |
+| `ON_TASK_ERROR` | `abort` | Default all-five run: `abort` stops at the first failing step; `continue` runs the remaining steps, then fails the run with a summary |
 | `DISCOVERY_MAX_ATTEMPTS` | `1` | Discovery-agent attempts before failing the task (fresh agent each attempt, 10 s apart; per-attempt endpoint retries still apply via `AI_RETRY`) |
 
 ### Output locations (`*_OUTPUT_FILE`)
@@ -291,6 +338,7 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 | `GLOSSARY_OUTPUT_FILE` | `<SERIES_LOCATION>/glossary.md` | Final glossary location |
 | `VOICE_OUTPUT_FILE` | `<SERIES_LOCATION>/character-voice.md` | Final character voice reference location |
 | `STYLE_OUTPUT_FILE` | `<SERIES_LOCATION>/style-guide.md` | Final style guide location |
+| `SHARED_WIKI_OUTPUT_FILE` | `<SERIES_LOCATION>/shared-wiki.md` | Where the newest per-volume `shared-wiki.md` is copied after the jump-in-wiki task (the series-level living wiki) |
 
 ### Research (`RESEARCH_*`, `WIKI_*`, `SEARCH_*`)
 
@@ -306,14 +354,14 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 
 **Current local setup** (the committed `.env`): local Qwen at `AI_BASE_URL=http://localhost:9200/v1` with `AI_MODEL=local`, `AI_MAX_TOKENS=262144`, `AI_TEMPERATURE=0.6`, `AI_RETRY=2`, `AGENT_CONTEXT_WINDOW=262144`, `QA_MAX_ITERATIONS=5`, `ACCEPTANCE_WINDOW_SIZE=5`, `ACCEPTANCE_MIN_SAMPLES=3`, `ACCEPTANCE_PASSING_SCORE=69`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, thinking on at `xhigh` (defaults), series = `test-series` (the `test_story` fixture), JP→EN. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
 
-## 9. Gotchas (hard-won — read before changing behavior)
+## 10. Gotchas (hard-won — read before changing behavior)
 
 1. **`AI_THINKING_LEVEL` tuning is per-series.** Reasoning token burn varies dramatically across series — a series with heavy technical jargon may need "xhigh" while a simpler narrative may run fine on "medium". Start with "xhigh" (the default), monitor `.logs/call-ai-*.log` for reasoning content sizes, and tune down to "medium" or "low" if the reasoning spend is excessive relative to content output. Set `AI_THINKING=false` to disable entirely.
 2. **Never let a stage persist empty output.** `runOneShot` throws on empty by design; agent stages are guarded by `assertWrote` (missing/empty file → hard error pointing at `.logs/`). If you add a stage, add both guarantees.
 3. **Do not touch the agent-mode prompt safety nets** (the stray-file cleanups): each was added after a live failure (wrong file names, stale strays being audited, marker-format conflicts). The pure tests pin their behavior — run `npm test` after touching any prompt or file name.
 4. **Validator step caps scale with source size** (`validatorMaxStepsFor`): a fixed cap of 40 ran out on the 521KB volume-01 source before the validator wrote its report.
 5. **The glossary is cumulative** — see the §4 invariant (`regeneratedAny`).
-6. **Skip-checks are deterministic** (reads a persisted `*-rolling-state.json` file storing the rolling window of scores). If the state file is missing or uses the legacy boolean format (pre-score-based era), `loadRollingState` returns `null` and the check falls back to regenerating/re-validating the volume once (fail-open) — so pre-existing runs are safe to re-run.
+6. **Skip-checks are deterministic** (reads a persisted `*-rolling-state.json` file storing the rolling window of scores, and the run's `sourceFingerprint`). If the state file is missing or uses the legacy boolean format (pre-score-based era), `loadRollingState` returns `null` and the check falls back to regenerating/re-validating the volume once (fail-open) — so pre-existing runs are safe to re-run. State files from before source-staleness detection have no `sourceFingerprint`; `isSourceStale` is fail-open on that (the volume keeps skipping) — the first run after the upgrade re-fingerprints on the next regeneration.
 7. **Acceptance parsing is intentionally strict**: `parseAcceptanceScore` only accepts a 0–100 integer (bare, `N/100`, or `N out of 100`); anything else (prose verdicts, >100, no number) is `null` and the check counts as a **failure** (fail-closed — the feedback loop gets another shot). The legacy `isPassingVerdict` is kept exported for compatibility but no longer used in the acceptance path.
 8. **The fs write gate confines writes to the volume folder**; reads are allowed anywhere (agents need the previous volume). `deleteFile` is always denied — the *workflow* deletes stale strays, never the agent.
 9. **Logging is per-run with full chat histories and real-time streaming:** Each process run creates a directory under `.logs/<ISO-timestamp>/` containing:
@@ -332,12 +380,12 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 15. **Character voice reference is cumulative:** same `regeneratedAny` invariant as the glossary — if any volume is regenerated, all later volumes are regenerated too. The `character-voice.md` carries forward all previous character entries unchanged.
 16. **POV marker conventions:** Japanese LNs use `※`, `☆`, `◇`, `◆`, `【】`, `（）` as POV markers. The extract prompt recognizes these and classifies narration types (first-person-internal, free-indirect, third-person-omniscient, dialogue-only). Free indirect discourse — 3rd-person narration that adopts a character's voice — is the hardest pattern to detect reliably and is the most common validation finding.
 17. **Runaway-generation guard (`AGENT_TEXT_GUARD_CHARS`):** the harness aborts an agent turn when it produces more than `AGENT_TEXT_GUARD_CHARS` (default 30,000) characters of text with fewer than 3 tool calls. This catches models that emit malformed tool-call text (e.g. Qwen-native `<tool_call>` tags in the content field) instead of using the API-level `tool_calls` protocol. Observed live: a local Qwen3 model generated 962 KB of repeated `listFiles(path='.'); readFile(...)` text without a single valid tool call, burning tokens for over an hour. The guard aborts the underlying fetch via an `AbortController` signal and throws a descriptive error. The threshold is tunable via the env var; lower it if you see false positives with large legitimate outputs, raise it if you see the guard not triggering fast enough.
-18. **Fail-loudly guard for small malformed tool calls (`assertRealToolCalls` in `character-voice.js`):** the 30K runaway guard above only fires on *large* text output. A local Qwen endpoint also intermittently emits *small* malformed tool calls — a few dozen chars of `tool_call` / `<function=…>` text with zero real `tool_calls` — so `npm run smoke fs` can pass while a workflow turn does nothing (no reads, no writes). `character-voice.js` now calls `assertRealToolCalls(result, who, volume)` after every agent `sendTurn` in the compile/validate/feedback stages: when a turn made zero real tool calls but its text contains `tool_call` / `<function=`, it throws a diagnostic error (pointing at `.logs/` and the smoke test) instead of letting `assertWroteWithFallback` pass on a stale file and the acceptance loop burn all iterations. The pure detector `emittedToolCallAsText` is exported and unit-tested. `style-guide.js` ships the identical guard (every agent `sendTurn` in compile/validate/feedback is checked). **`glossary.js` and `jump-in-wiki.js` still have the same latent exposure and should get the identical guard.**
+18. **Fail-loudly guard for small malformed tool calls (`assertRealToolCalls` in `character-voice.js`):** the 30K runaway guard above only fires on *large* text output. A local Qwen endpoint also intermittently emits *small* malformed tool calls — a few dozen chars of `tool_call` / `<function=…>` text with zero real `tool_calls` — so `npm run smoke fs` can pass while a workflow turn does nothing (no reads, no writes). `character-voice.js` now calls `assertRealToolCalls(result, who, volume)` after every agent `sendTurn` in the compile/validate/feedback stages: when a turn made zero real tool calls but its text contains `tool_call` / `<function=`, it throws a diagnostic error (pointing at `.logs/` and the smoke test) instead of letting `assertWroteWithFallback` pass on a stale file and the acceptance loop burn all iterations. The pure detector `emittedToolCallAsText` is exported and unit-tested. `style-guide.js` ships the identical guard (every agent `sendTurn` in compile/validate/feedback is checked), and `glossary.js` (research/author/validator/feedback/merge turns), `jump-in-wiki.js` (section author, merge, validator, findings-merge, feedback turns) and `consistency-audit.js` (the audit turn) carry the same guard — all five task modules are covered.
 19. **Never hand the npm undici Agent to Node's global fetch (`makeProviderFetch` in `harness.js`).** The project's `undici` dependency (v8) is a *different build* from Node's bundled undici (which powers the global `fetch`). Passing `noTimeoutAgent` to the global `fetch` mixes request-handler protocols: on Node builds whose bundled undici is older, the dispatch throws `InvalidArgumentError: invalid onRequestStart method` (`UND_ERR_INVALID_ARG`) before any bytes are sent. This is Node-version-dependent, so identical code + `node_modules` can work on one machine (e.g. Windows Node) and fail on another (Linux Node 22) — observed live right after a Windows→Linux migration. The fix pattern: dispatch through undici's *own* `fetch` (same build as the Agent), and normalize `Headers` instances to plain objects first (undici's webidl converter would silently convert a foreign Headers instance to an empty record, dropping auth/content-type).
 20. **Never sort epub bundle segments by filename — iterate `bundle.segments`.** Interlude (and epilogue) files are named `<base>-chN.K.md` where N is the chapter that existed immediately before the segment and K restarts at 1 for each chapter (`ch1.md`, `ch1.1.md`, `ch2.md`, `ch2.1.md`, `ch2.2.md`, `ch3.md`…). A filename sort misorders `chN.md` vs `chN.K.md` (a plain string sort puts `chN.1.md` *before* `chN.md` because `1` < `m`). The `SourceBundle.segments` array is the single source of truth for reading order (set by `assignSegmentIds` during extraction). Related: the epub extraction is cached in `<base>-bundle.meta.json` (keyed on the epub's mtime/size plus a `schema` version — renaming the id scheme bumps `BUNDLE_SCHEMA_VERSION` and forces re-extraction, removing the stale old-named segment files); `--force` re-extracts, and a deleted/stale cache file just triggers re-extraction (fail-open).
 21. **Un-monitored run policies change where failures surface — read the summary, not just the last log line.** With the un-monitored values in `.env` (`ON_VOLUME_ERROR=skip`, `ON_MISSING_PREVIOUS=skip`, `ON_TASK_ERROR=continue`), a broken volume no longer aborts its task or the pipeline: the task logs `[skip] Volume NN (…) failed: …`, keeps going (in the cumulative tasks the skip cascades through the remaining volumes via the missing-previous check), and the pipeline finishes with a `N of M volume(s) failed` / `Pipeline finished with N failed step(s)` summary that still fails the run (non-zero exit). The final series-root copy uses the **last existing** snapshot, so a partially failed run publishes the last good volume's artifact rather than nothing. Recovery is a plain re-run: idempotent skip-checks make it cheap, and the failed/skipped volumes are picked up. Code defaults are the opposite (fail loudly at the first problem) — keep them that way so interactive runs stay safe, and don't "fix" the cascade by making per-volume idempotency independent of the previous volume's artifact.
 
-## 10. Conventions
+## 11. Conventions
 
 - **JSDoc on every function** (params + returns), with provenance comments where a behavior exists because of a live incident ("observed live: …"). New code without JSDoc is a review blocker. Use named types from `types.js` (e.g. `{GlossaryVolumeCtx}` instead of `{Object}`) — the type annotations enable IDE cross-references across files.
 - **Update AGENTS.md after changes.** If your work adds, removes, or significantly modifies files, functions, or conventions, update this document to reflect the new state. Agents reading AGENTS.md should be able to rely on it as a current map of the codebase — not a stale one.

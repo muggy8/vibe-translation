@@ -57,6 +57,9 @@
  * @property {string|null} imagesDir    — The images/ folder (epub bundles with images).
  * @property {number} wholeChars        — Character count of the whole-volume text.
  * @property {boolean} cacheHit         — True when a cached epub bundle was reused.
+ * @property {string|null} sourceFingerprint — sha256 of the source file (set by
+ *   resolveSourceBundle); the skip-checks compare it against the fingerprint
+ *   persisted in the last run's rolling state (isSourceStale).
  */
 
 // ─── Workflow volume contexts ────────────────────────────────────────────────
@@ -250,7 +253,7 @@
  * @typedef {Object} HookContext
  * The context describing a pipeline hook invocation (also the source of the
  * AI_CLIENT_* env vars injected into shell hooks). See utils/hooks.js.
- * @property {string} task - The step name (glossary / character-voice / style-guide / jump-in-wiki / pipeline).
+ * @property {string} task - The step name (glossary / character-voice / style-guide / jump-in-wiki / consistency-audit / pipeline).
  * @property {"before"|"after"} phase - Which side of the step.
  * @property {string} seriesDir - Absolute SERIES_LOCATION ("" when unset).
  * @property {string} seriesName - The SERIES_NAME.

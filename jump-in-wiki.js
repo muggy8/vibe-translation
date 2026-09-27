@@ -11,7 +11,10 @@
  *        user-prompts/jump-in-wiki.md):
  *        - agent: an author agent (per-volume session) reads the source and
  *          previous wikis with file tools and writes both files directly
- *          (no marker-based output parsing).
+ *          (no marker-based output parsing). When the glossary task has
+ *          already written <volume folder>/glossary.md, it is offered as a
+ *          read-only reference so the shared wiki's "Glossary" section uses
+ *          canonical renderings.
  *     2. Repeats the following until the score-based acceptance criterion
  *        is met or the iteration cap (QA_MAX_ITERATIONS, default 10)
  *        is reached:
@@ -32,6 +35,12 @@
  *           (system-prompts/jump-in-wiki-feedback.md and
  *           user-prompts/jump-in-wiki-feedback.md) to correct the wiki
  *           (the same author session), then repeat from (a).
+ *     3. Write the deterministic per-volume translation handoff
+ *        (chapters.json + translation-brief.md, utils/handoff.js).
+ *   After all volumes: the last existing <volume folder>/shared-wiki.md is
+ *   copied to SHARED_WIKI_OUTPUT_FILE (default
+ *   <SERIES_LOCATION>/shared-wiki.md), mirroring the glossary / character-voice
+ *   / style-guide root copies. Skipped for --volume runs.
  *
  * Idempotent: a volume whose wiki + shared wiki already exist and pass the
  * acceptance check (from a previous run's validation report) is skipped
@@ -50,8 +59,9 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
+const { writeVolumeHandoff } = require("./utils/handoff");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
 const {
@@ -146,6 +156,55 @@ function knownVolumeFileNames(ctx) {
   ]);
 }
 
+// ─── Malformed-tool-call guard ──────────────────────────────────────────────
+
+/**
+ * Detect the "model emitted tool-call syntax as plain text" failure mode.
+ *
+ * Observed live (Qwen via an OpenAI-compatible endpoint): the model sometimes
+ * emits its tool calls as Qwen-native text — a `tool_call` wrapper around the
+ * tool name, e.g. `tool_call <function=readFile>…` or `tool_call <listFiles>…`
+ * — in the content field instead of using the API-level tool_calls protocol.
+ * The harness only executes real tool calls, so such a turn performs no work
+ * at all, yet it looks like an ordinary (short) chat reply, so the stale-file
+ * write check and the acceptance loop would silently mask it and burn every
+ * validation iteration. (Same detector as character-voice.js / style-guide.js
+ * — AGENTS.md gotcha 18.)
+ *
+ * @param {Object|null} result - The result object returned by an agent sendTurn.
+ * @returns {boolean} True when the turn made no real tool calls and its text
+ *   contains tool-call markers (the malformed-tool-call signature).
+ */
+function emittedToolCallAsText(result) {
+  if (!result) return false;
+  if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) return false;
+  const text = typeof result.text === "string" ? result.text : "";
+  return text.includes("tool_call") || text.includes("<function=");
+}
+
+/**
+ * Fail loudly when an agent turn made no real tool calls because the model
+ * emitted tool-call syntax as plain text (see emittedToolCallAsText). Throws a
+ * diagnostic error instead of letting the stale-file write check mask the
+ * no-op turn.
+ *
+ * @param {Object|null} result - The result object returned by an agent sendTurn.
+ * @param {string} who - Who the agent was (for the error message).
+ * @param {string} volumeLabel - The volume label (for the error message).
+ * @returns {void}
+ */
+function assertRealToolCalls(result, who, volumeLabel) {
+  if (!emittedToolCallAsText(result)) return;
+  throw new Error(
+    `Volume ${volumeLabel}: ${who} emitted tool-call syntax as plain text ` +
+      `("tool_call" / <function=…>) instead of using the tool-calling API, so no ` +
+      `file tools ran — nothing was read or written. See the agent transcript in ` +
+      `.logs/ for the exact turn. This is an intermittent model/endpoint issue ` +
+      `with OpenAI tool_calls (the smoke test 'npm run smoke fs' can pass even ` +
+      `when it happens). Re-run the task; if it persists, check the endpoint.`
+  );
+}
+
 // ─── Agent-mode prompt builders ─────────────────────────────────────────────
 // The exact prompts the agent-mode stages send are built here (not inline in
 // the run loops) so --dry-run can dump them and the tests can assert on them
@@ -193,6 +252,9 @@ function buildWikiAuthorTurnPrompt(ctx) {
     `Materials (read with readFile before writing anything):\n` +
     `${sourceLine}\n` +
     previousWikiLines +
+    (ctx.glossaryFile
+      ? `\n- The canonical glossary: "glossary.md" (same folder) — for the shared wiki's "Glossary" section, use these canonical target-language renderings (read-only reference)`
+      : "") +
     `\n\n` +
     `Write the two output files in your working folder:\n` +
     `- "wiki.md" — the volume wiki (complete contents, writeFile)\n` +
@@ -259,6 +321,9 @@ function buildWikiFeedbackTurnPrompt(ctx) {
     `- The current volume wiki to correct: "wiki.md" (same folder)\n` +
     `- The current shared wiki to correct: "shared-wiki.md" (same folder)\n` +
     previousSharedLine +
+    (ctx.glossaryFile
+      ? `- The canonical glossary: "glossary.md" (same folder) — if the shared wiki's "Glossary" section drifts from it, correct the shared wiki to match (read-only reference)\n`
+      : "") +
     `\n` +
     `Apply the report's findings and write the corrected files back: "wiki.md" and ` +
     `"shared-wiki.md" using writeFile (complete contents, overwrite). Use editFile only for ` +
@@ -328,6 +393,9 @@ function buildWikiMergeTurnPrompt(ctx) {
     sectionList +
     `\n- The current shared wiki: "shared-wiki.md" (same folder)\n` +
     previousWikiLines +
+    (ctx.glossaryFile
+      ? `\n- The canonical glossary: "glossary.md" (same folder) — for the shared wiki's "Glossary" section, use these canonical target-language renderings (read-only reference)\n`
+      : "") +
     `\n\n` +
     `Write the two output files in your working folder:\n` +
     `- "wiki.md" — the complete volume wiki, assembled from the chapter sections in ` +
@@ -625,6 +693,13 @@ async function jumpInWiki() {
       wikiAndSharedWikiExists,
     };
 
+    // The canonical glossary snapshot (written by the glossary task into the
+    // same volume folder) is offered to the wiki agents as a read-only
+    // reference so the shared wiki's "Glossary" section uses canonical
+    // renderings instead of model memory. Absent before the first run.
+    const glossarySnapshotFile = path.join(volumeDir, "glossary.md");
+    ctx.glossaryFile = (await fileExists(glossarySnapshotFile)) ? glossarySnapshotFile : null;
+
     if (dryRun) {
       const sections = [
         { title: "AGENT — author system prompt", prompt: buildWikiAuthorSystemPrompt(ctx) },
@@ -675,6 +750,17 @@ async function jumpInWiki() {
       if (state) {
         const avg = computeRollingAverage(state.results);
         currentVolumeHasAlreadyBeenProcessed = isAcceptedState(state);
+        if (currentVolumeHasAlreadyBeenProcessed && isSourceStale(state, bundle)) {
+          currentVolumeHasAlreadyBeenProcessed = false;
+          // A changed source invalidates the tier-1 skip as well: the wiki
+          // on disk was written from the old source, so it must be
+          // regenerated, not re-validated in place.
+          ctx.wikiAndSharedWikiExists = false;
+          console.log(
+            `volume ${values.INSTALLMENT_NUMBER}: the source file changed since ` +
+              `the last run (fingerprint mismatch) — regenerating instead of skipping.`
+          );
+        }
         if (currentVolumeHasAlreadyBeenProcessed) {
           console.log(
             `volume ${values.INSTALLMENT_NUMBER}: rolling-state ` +
@@ -688,10 +774,35 @@ async function jumpInWiki() {
 
     if (currentVolumeHasAlreadyBeenProcessed) {
       console.log('the current volume has already been processed by a previous run. skipping the current volume.')
+      // Keep the deterministic handoff artifacts fresh (no AI call).
+      await writeVolumeHandoff({
+        seriesDir,
+        seriesName: process.env.SERIES_NAME,
+        volume,
+        volumeDir,
+        bundle,
+        installmentNumber: values.INSTALLMENT_NUMBER,
+        sourceLanguage: process.env.TRANSLATION_SOURCE_LANGUAGE || "Japanese",
+        targetLanguage: process.env.TRANSLATION_TARGET_LANGUAGE || "English",
+      });
       continue;
     }
 
     await runVolumeAgent(ctx);
+
+    // Deterministic per-volume handoff for the translation stage: chapters.json
+    // + translation-brief.md (no AI call; best-effort — a failure here must not
+    // fail an already-accepted wiki).
+    await writeVolumeHandoff({
+      seriesDir,
+      seriesName: process.env.SERIES_NAME,
+      volume,
+      volumeDir,
+      bundle,
+      installmentNumber: values.INSTALLMENT_NUMBER,
+      sourceLanguage: process.env.TRANSLATION_SOURCE_LANGUAGE || "Japanese",
+      targetLanguage: process.env.TRANSLATION_TARGET_LANGUAGE || "English",
+    });
 
     if (ctx.limitReached) {
       limitReachedCount++;
@@ -725,6 +836,32 @@ async function jumpInWiki() {
       `validation iteration limit (${maxValidationIterations}). Consider increasing ` +
       `QA_MAX_ITERATIONS if this is unexpected.`
     );
+  }
+
+  // Copy the last existing shared wiki to the series root (symmetry with the
+  // glossary / character-voice / style-guide root copies): a translator or
+  // downstream tool starting the next volume reads ONE file instead of having
+  // to find the newest volume folder. Skipped for --volume runs (a
+  // single volume's snapshot would not be the series-current state).
+  if (volumeArg) {
+    console.log("\n--volume: skipping the series-root shared-wiki copy.");
+  } else {
+    const finalSharedWikiFile =
+      process.env.SHARED_WIKI_OUTPUT_FILE || path.join(seriesDir, "shared-wiki.md");
+    let lastSharedWiki = null;
+    for (let i = sortedFolderWithSourceMaterial.length - 1; i >= 0; i--) {
+      const candidate = path.join(seriesDir, sortedFolderWithSourceMaterial[i], "shared-wiki.md");
+      if (await fileExists(candidate)) {
+        lastSharedWiki = candidate;
+        break;
+      }
+    }
+    if (lastSharedWiki) {
+      await fs.copyFile(lastSharedWiki, finalSharedWikiFile);
+      console.log(`\nCopied the final shared wiki to: ${finalSharedWikiFile}`);
+    } else {
+      console.log("\nNo shared wiki snapshots found; nothing to copy to the series root.");
+    }
   }
 }
 
@@ -788,6 +925,7 @@ async function runChunkedVolumeAgent(ctx) {
         buildWikiSectionTurnPrompt(ctx, segment, si),
         { label: `jump-in-wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}` }
       );
+      assertRealToolCalls(sectionResult, `the section author agent (chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(sectionFile, "the section author agent", sectionResult?.text);
     } finally {
       await sectionAuthor.close();
@@ -822,6 +960,7 @@ async function runChunkedVolumeAgent(ctx) {
     const mergeResult = await merger.sendTurn(buildWikiMergeTurnPrompt(ctx), {
       label: `jump-in-wiki-merge-${values.INSTALLMENT_NUMBER}`,
     });
+    assertRealToolCalls(mergeResult, "the merge agent", values.INSTALLMENT_NUMBER);
     const mergeFallbackUsed = await assertWroteWithFallback(
       [wikiOutputFile, sharedWikiOutputFile],
       "the merge agent",
@@ -835,6 +974,7 @@ async function runChunkedVolumeAgent(ctx) {
       const recoveryResult = await merger.sendTurn(recoveryPrompt, {
         label: `jump-in-wiki-merge-recovery-${values.INSTALLMENT_NUMBER}`,
       });
+      assertRealToolCalls(recoveryResult, "the merge agent (recovery)", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(
         [wikiOutputFile, sharedWikiOutputFile],
         "the merge agent (recovery)",
@@ -889,6 +1029,7 @@ async function runChunkedQaLoop(ctx) {
           buildWikiSegmentValidatorPrompt(ctx, segment, si),
           { label: `jump-in-wiki-validate-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
         );
+        assertRealToolCalls(validateResult, `the validator agent (chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
         await assertWroteWithFallback(
           partialFile,
           `the validator agent (chapter ${segment.id})`,
@@ -913,6 +1054,7 @@ async function runChunkedQaLoop(ctx) {
         buildWikiFindingsMergePrompt(ctx),
         { label: `jump-in-wiki-validate-merge-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
+      assertRealToolCalls(mergeResult, "the findings-merge agent", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(validationOutputFile, "the findings-merge agent", mergeResult?.text);
     } finally {
       await merger.close();
@@ -942,7 +1084,9 @@ async function runChunkedQaLoop(ctx) {
       recentRollingScores.push(score);
       if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) recentRollingScores.shift();
     }
-    await saveRollingState(validationOutputFile.replace(".md", "-rolling-state.json"), recentRollingScores);
+    await saveRollingState(validationOutputFile.replace(".md", "-rolling-state.json"), recentRollingScores, {
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
 
     if (meetsAcceptanceCriteria(recentRollingScores)) {
       const avg = computeRollingAverage(recentRollingScores);
@@ -970,6 +1114,7 @@ async function runChunkedQaLoop(ctx) {
           buildWikiSegmentFeedbackPrompt(ctx, segment, si),
           { label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
         );
+        assertRealToolCalls(feedbackResult, `the author agent (feedback pass, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
         await assertWroteWithFallback(
           [wikiOutputFile, sharedWikiOutputFile],
           `the author agent (feedback pass, chapter ${segment.id})`,
@@ -1078,6 +1223,7 @@ async function runVolumeAgent(ctx) {
       const wikiGenResult = await author.sendTurn(buildWikiAuthorTurnPrompt(ctx), {
         label: `jump-in-wiki-generate-${values.INSTALLMENT_NUMBER}`,
       });
+      assertRealToolCalls(wikiGenResult, "the author agent", values.INSTALLMENT_NUMBER);
       const wikiFallbackUsed = await assertWroteWithFallback(
         [wikiOutputFile, sharedWikiOutputFile],
         "the author agent",
@@ -1105,6 +1251,7 @@ async function runVolumeAgent(ctx) {
           wikiRecoveryPrompt,
           { label: `jump-in-wiki-recovery-${values.INSTALLMENT_NUMBER}` }
         );
+        assertRealToolCalls(wikiRecoveryResult, "the author agent (recovery)", values.INSTALLMENT_NUMBER);
         // Overwrite with the recovery output (may be the same content, now via writeFile).
         await assertWroteWithFallback(
           [wikiOutputFile, sharedWikiOutputFile],
@@ -1167,6 +1314,7 @@ async function runQaLoop(ctx, author) {
         buildWikiValidatorTurnPrompt(ctx),
         { label: `jump-in-wiki-validate-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
+      assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(
         validationOutputFile,
         "the validator agent",
@@ -1187,6 +1335,7 @@ async function runQaLoop(ctx, author) {
           recoveryPrompt,
           { label: `jump-in-wiki-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
         );
+        assertRealToolCalls(validateRecoveryResult, "the validator agent (recovery)", values.INSTALLMENT_NUMBER);
         await assertWroteWithFallback(
           validationOutputFile,
           "the validator agent (recovery)",
@@ -1234,7 +1383,9 @@ async function runQaLoop(ctx, author) {
     // Persist the rolling window to disk so that a re-run can recover the
     // exact acceptance state without re-calling the AI.
     const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-    await saveRollingState(stateFilePath, recentRollingScores);
+    await saveRollingState(stateFilePath, recentRollingScores, {
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
 
     // Check the acceptance criterion: if we have enough samples and the
     // window meets it, accept and stop (skip feedback).
@@ -1255,6 +1406,7 @@ async function runQaLoop(ctx, author) {
       buildWikiFeedbackTurnPrompt(ctx),
       { label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
     );
+    assertRealToolCalls(wikiFeedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
     const wikiFeedbackFallbackUsed = await assertWroteWithFallback(
       [wikiOutputFile, sharedWikiOutputFile],
       "the author agent (feedback pass)",
@@ -1277,6 +1429,7 @@ async function runQaLoop(ctx, author) {
         wikiFeedbackRecoveryPrompt,
         { label: `jump-in-wiki-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
+      assertRealToolCalls(wikiFeedbackRecoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(
         [wikiOutputFile, sharedWikiOutputFile],
         "the author agent (feedback recovery)",
@@ -1312,6 +1465,8 @@ module.exports = {
   parseAcceptanceScore,
   validatorMaxStepsFor,
   writePromptDump,
+  emittedToolCallAsText,
+  assertRealToolCalls,
   buildWikiAuthorSystemPrompt,
   buildWikiValidatorSystemPrompt,
   buildWikiAuthorTurnPrompt,

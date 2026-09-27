@@ -59,9 +59,18 @@ test-series/**/pov-map.md
 test-series/**/character-voice-validation.md
 test-series/**/style-guide.md
 test-series/**/style-guide-validation.md
+test-series/**/glossary-coverage.md
+test-series/**/glossary-coverage.json
+test-series/**/glossary-new-terms.json
+test-series/**/character-voice-new.json
+test-series/**/style-guide-new.json
+test-series/**/chapters.json
+test-series/**/translation-brief.md
 test-series/glossary.md
 test-series/character-voice.md
 test-series/style-guide.md
+test-series/shared-wiki.md
+test-series/consistency-report.md
 
 # Rolling-window acceptance state (persisted by QA loop, read by skip-check)
 *-rolling-state.json

@@ -32,7 +32,7 @@ require("./types");
 const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 const {
   resolveSourceBundle,
@@ -412,6 +412,10 @@ async function characterVoice() {
       if (state) {
         const avg = computeRollingAverage(state.results);
         skip = isAcceptedState(state);
+        if (skip && isSourceStale(state, bundle)) {
+          skip = false;
+          console.log(`Volume ${values.INSTALLMENT_NUMBER}: the source file changed since the last run (fingerprint mismatch) — regenerating instead of skipping.`);
+        }
         if (skip) { console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling-state (${state.results.length} checks, avg ${avg.toFixed(1)}/100) meets the criterion. Skipping.`); }
       }
     }
@@ -610,7 +614,9 @@ async function runQaLoop(ctx) {
       // skip-check sees the final state (previously it was only saved after
       // a feedback pass, which meant accepted volumes were never skipped).
       const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-      await saveRollingState(stateFilePath, recentRollingScores);
+      await saveRollingState(stateFilePath, recentRollingScores, {
+        sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+      });
       if (meetsAcceptanceCriteria(recentRollingScores)) {
         const avg = computeRollingAverage(recentRollingScores);
         console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 (${recentRollingScores.length} checks) meets the passing score ${ACCEPTANCE_PASSING_SCORE}. Accepted.`);
@@ -694,6 +700,7 @@ async function runChunkedVolume(ctx) {
   // (createGatedFsTools is async and must be awaited — see runVolume).
   const fsGate = await harness.createGatedFsTools({ cwd: ctx.volumeDir, allowedDirs: [ctx.volumeDir] });
   ctx.fsGate = fsGate;
+  const chunkedExtractions = [];
   for (let si = 0; si < bundle.segments.length; si++) {
     const segment = bundle.segments[si];
     let extractionOutput = "";
@@ -703,12 +710,28 @@ async function runChunkedVolume(ctx) {
       console.error(`Volume ${values.INSTALLMENT_NUMBER}: extraction failed for chapter ${segment.id}: ${err.message}. Check .logs/ for details.`);
       throw err;
     }
+    // Accumulate the parsed entries so the whole volume's "new" results are
+    // persisted once (see the write after the loop).
+    try {
+      chunkedExtractions.push(...parseVoiceQuirks(extractionOutput));
+    } catch {
+      // Unparseable chapter output — runCompile falls back to the raw text;
+      // nothing structured to persist for this chapter.
+    }
     try {
       await runCompile(ctx, extractionOutput, segment, si);
     } catch (err) {
       console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed for chapter ${segment.id}: ${err.message}. Check .logs/ for details.`);
       throw err;
     }
+  }
+  // Persist the volume's extraction results (the new quirks/POV entries) so
+  // the translation handoff (utils/handoff.js) can render a "what's new in
+  // this volume" section without re-calling the AI.
+  try {
+    await fs.writeFile(path.join(ctx.volumeDir, "character-voice-new.json"), JSON.stringify(chunkedExtractions, null, 2) + "\n", "utf8");
+  } catch (err) {
+    console.warn(`Volume ${values.INSTALLMENT_NUMBER}: could not persist character-voice-new.json (${err.message}) — continuing.`);
   }
   await runChunkedQaLoop(ctx);
 }
@@ -759,7 +782,9 @@ async function runChunkedQaLoop(ctx) {
       if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) recentRollingScores.shift();
     }
     const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-    await saveRollingState(stateFilePath, recentRollingScores);
+    await saveRollingState(stateFilePath, recentRollingScores, {
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
     if (meetsAcceptanceCriteria(recentRollingScores)) {
       const avg = computeRollingAverage(recentRollingScores);
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 (${recentRollingScores.length} checks) meets the passing score ${ACCEPTANCE_PASSING_SCORE}. Accepted.`);
@@ -810,6 +835,14 @@ async function runVolume(ctx) {
   }
   let extractionOutput = "";
   try { extractionOutput = await runExtract(ctx); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: extraction failed: ${err.message}. Check .logs/ for details.`); throw err; }
+  // Persist the volume's extraction results (the new quirks/POV entries) so
+  // the translation handoff (utils/handoff.js) can render a "what's new in
+  // this volume" section without re-calling the AI.
+  try {
+    await fs.writeFile(path.join(ctx.volumeDir, "character-voice-new.json"), JSON.stringify(parseVoiceQuirks(extractionOutput), null, 2) + "\n", "utf8");
+  } catch (err) {
+    console.warn(`Volume ${values.INSTALLMENT_NUMBER}: could not persist character-voice-new.json (${err.message}) — continuing.`);
+  }
   // Create fsGate BEFORE runCompile so the author agent has file tools.
   // createGatedFsTools is async — it must be awaited, otherwise fsGate is a
   // Promise and ctx.fsGate.tools/approve are undefined, so the agents are

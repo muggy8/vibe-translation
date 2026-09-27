@@ -677,4 +677,199 @@ assert.throws(
   "the message aggregates every missing variable"
 );
 
-console.log("All tests passed.");
+// ─── isSourceStale / sourceFingerprint (configs/shared) ─────────────────────
+// Source-staleness detection: a persisted rolling state carries the source
+// fingerprint of the run that produced the accepted output. A changed source
+// (different fingerprint) invalidates the skip — but every "unknown" side is
+// fail-open (legacy state files without a fingerprint keep skipping).
+const { isSourceStale } = require("../configs/shared");
+assert.strictEqual(isSourceStale({ sourceFingerprint: "a" }, { sourceFingerprint: "a" }), false, "same fingerprint: fresh");
+assert.strictEqual(isSourceStale({ sourceFingerprint: "a" }, { sourceFingerprint: "b" }), true, "different fingerprint: stale");
+assert.strictEqual(isSourceStale({ sourceFingerprint: "a" }, { sourceFingerprint: undefined }), false, "bundle without fingerprint: fail-open");
+assert.strictEqual(isSourceStale({ sourceFingerprint: "a" }, {}), false, "empty bundle: fail-open");
+assert.strictEqual(isSourceStale({}, { sourceFingerprint: "x" }), false, "legacy state (no fingerprint): fail-open");
+assert.strictEqual(isSourceStale(null, { sourceFingerprint: "x" }), false, "missing state: fail-open");
+assert.strictEqual(isSourceStale({ sourceFingerprint: "a" }, null), false, "missing bundle: fail-open");
+
+// ─── glossary coverage (glossary.js, deterministic) ──────────────────────────
+const {
+  parseGlossaryTableTerms,
+  countTermOccurrences,
+  buildGlossaryCoverageReportMarkdown,
+  emittedToolCallAsText: glossaryEmittedToolCallAsText,
+} = require("../glossary");
+const coverageGlossary = [
+  "# Glossary — Test, Volume 01",
+  "## Characters",
+  "| Source | Rendering | Type |",
+  "|---|---|---|",
+  "| ソラ・ハルカ | Sora Haruka | character |",
+  "| `魔法学園` | Magic Academy | place |",
+  "",
+  "## Items",
+  "| Item | Rendering | Type |",
+  "|---|---|---|",
+  "| 魔法学園 | Magic Academy | place |",
+].join("\n");
+const coverageEntries = parseGlossaryTableTerms(coverageGlossary);
+assert.deepStrictEqual(
+  coverageEntries.map((e) => [e.term, e.section]),
+  [["ソラ・ハルカ", "Characters"], ["魔法学園", "Characters"], ["魔法学園", "Items"]],
+  "parseGlossaryTableTerms: first cell per row, section tracked, backticks stripped"
+);
+assert.deepStrictEqual(parseGlossaryTableTerms(""), []);
+assert.deepStrictEqual(parseGlossaryTableTerms("no tables here\n|"), []);
+assert.strictEqual(countTermOccurrences("ソラ・ハルカは言った。ソラが笑った。", "ソラ・ハルカ"), 1);
+assert.strictEqual(countTermOccurrences("学園学園学園", "学園"), 3);
+assert.strictEqual(countTermOccurrences("なにもない", "ソラ・ハルカ"), 0);
+assert.strictEqual(countTermOccurrences("x", ""), 0, "empty term: zero occurrences");
+const coverageReport = buildGlossaryCoverageReportMarkdown({
+  seriesName: "Test",
+  installmentNumber: "01",
+  entries: coverageEntries,
+  sourceText: "ソラ・ハルカは魔法学園に向かう。",
+});
+assert.ok(coverageReport.includes("# Glossary Coverage — Test, Volume 01"));
+assert.ok(coverageReport.includes("| ソラ・ハルカ | Characters | 1 |"));
+assert.ok(coverageReport.includes("(none — every glossary term appears in this volume's source)"));
+const coverageReportZero = buildGlossaryCoverageReportMarkdown({
+  seriesName: "Test",
+  installmentNumber: "01",
+  entries: coverageEntries,
+  sourceText: "なにもない",
+});
+assert.ok(coverageReportZero.includes("- ソラ・ハルカ (Characters)"));
+assert.ok(coverageReportZero.includes("- 魔法学園 (Items)"));
+assert.ok(
+  buildGlossaryCoverageReportMarkdown({ seriesName: "T", installmentNumber: "01", entries: [], sourceText: "x" }).includes(
+    "(no terms parsed from the glossary)"
+  ),
+  "empty entries: placeholder row"
+);
+
+// ─── malformed-tool-call guards (all task modules) ──────────────────────────
+// The fail-loudly guard for small malformed tool calls (a local Qwen endpoint
+// intermittently emits a few dozen chars of "tool_call" / "<function=…" text
+// with zero real tool_calls). Ported to every task module — pin the behavior.
+const { emittedToolCallAsText: wikiEmittedToolCallAsText } = require("../jump-in-wiki");
+const {
+  emittedToolCallAsText: auditEmittedToolCallAsText,
+  assertRealToolCalls: auditAssertRealToolCalls,
+  buildAuditTurnPrompt,
+} = require("../consistency-audit");
+for (const [name, fn] of [
+  ["glossary", glossaryEmittedToolCallAsText],
+  ["wiki", wikiEmittedToolCallAsText],
+  ["audit", auditEmittedToolCallAsText],
+]) {
+  assert.strictEqual(fn({ text: "tool_call <function=readFile>", toolCalls: [] }), true, `${name}: tool_call text with no real calls is flagged`);
+  assert.strictEqual(fn({ text: "tool_call", toolCalls: [{ name: "readFile" }] }), false, `${name}: real tool calls are not flagged`);
+  assert.strictEqual(fn({ text: "I wrote the file.", toolCalls: [] }), false, `${name}: ordinary reply not flagged`);
+  assert.strictEqual(fn(null), false, `${name}: null result not flagged`);
+}
+assert.throws(
+  () => auditAssertRealToolCalls({ text: "<function=readFile>", toolCalls: [] }, "the audit agent"),
+  /emitted tool-call syntax as plain text/,
+  "assertRealToolCalls throws a diagnostic error"
+);
+assert.doesNotThrow(() => auditAssertRealToolCalls({ text: "tool_call", toolCalls: [{ name: "x" }] }, "the audit agent"));
+assert.strictEqual(
+  buildAuditTurnPrompt({ userPrompt: "Series {{SOURCE_NAME}} has {{VOLUME_COUNT}} volumes.", values: { SOURCE_NAME: "Test", VOLUME_COUNT: "17" } }),
+  "Series Test has 17 volumes.",
+  "buildAuditTurnPrompt fills placeholders"
+);
+assert.throws(
+  () => buildAuditTurnPrompt({ userPrompt: "{{SOURCE_NAME}}", values: { SOURCE_NAME: "" } }),
+  /Missing value for placeholder/,
+  "buildAuditTurnPrompt is strict (empty value)"
+);
+assert.throws(
+  () => buildAuditTurnPrompt({ userPrompt: "{{SOURCE_NAME}}", values: {} }),
+  /Unfilled placeholder left in user prompt/,
+  "buildAuditTurnPrompt is strict (unfilled placeholder)"
+);
+
+// ─── translation handoff (utils/handoff.js) ──────────────────────────────────
+const { buildChaptersJson, renderNewEntry, buildTranslationBriefMarkdown } = require("../utils/handoff");
+const handoffBundle = {
+  segments: [
+    { id: "ch0", file: "t-whole.md", title: "Prologue", chars: 123 },
+    { id: "ch1", file: "t-ch1.md", title: "Chapter 1", chars: 456 },
+    { id: "ch1.1", file: "t-ch1.1.md", title: "Interlude", chars: 78 },
+  ],
+};
+assert.deepStrictEqual(buildChaptersJson(handoffBundle)[2], { id: "ch1.1", file: "t-ch1.1.md", title: "Interlude", chars: 78 });
+assert.deepStrictEqual(buildChaptersJson({ segments: [] }), []);
+assert.strictEqual(renderNewEntry({ term: "ソラ", type: "character" }), "- ソラ (character)");
+assert.strictEqual(renderNewEntry({ type: "voice", character: "ソラ", quirkType: "sentenceEnding", description: "formal" }), "- ソラ — sentenceEnding: formal");
+assert.strictEqual(renderNewEntry({ type: "pov", description: "ch3 is first-person" }), "- [pov] ch3 is first-person");
+assert.strictEqual(renderNewEntry({ category: "honorific", pattern: "〜さん", description: "keep" }), "- [honorific] 〜さん — keep");
+assert.ok(renderNewEntry(null).startsWith("- "));
+assert.ok(renderNewEntry({ weird: true }).startsWith("- "));
+const brief = buildTranslationBriefMarkdown({
+  seriesName: "Test",
+  installmentNumber: "01",
+  sourceLanguage: "Japanese",
+  targetLanguage: "English",
+  chapters: buildChaptersJson(handoffBundle),
+  newTerms: [{ term: "ソラ", type: "character" }],
+  newQuirks: [],
+  newStyle: null,
+  presentVolumeFiles: ["glossary.md", "wiki.md"],
+  presentSeriesFiles: ["glossary.md"],
+});
+assert.ok(brief.includes("# Translation Brief — Test, Volume 01"));
+assert.ok(brief.includes("### New glossary terms (1)"));
+assert.ok(brief.includes("| ch1.1 | Interlude | 78 | t-ch1.1.md |"));
+assert.ok(brief.includes("- **glossary.md**"));
+assert.ok(brief.includes("~~pov-map.md~~"), "missing volume artifact: struck through");
+assert.ok(brief.includes("~~shared-wiki.md~~"), "missing series artifact: struck through");
+assert.ok(
+  buildTranslationBriefMarkdown({
+    seriesName: "T", installmentNumber: "01", sourceLanguage: "J", targetLanguage: "E",
+    chapters: [], newTerms: [], newQuirks: null, newStyle: null,
+    presentVolumeFiles: [], presentSeriesFiles: [],
+  }).includes("(no persisted extraction data"),
+  "all-empty extraction: fallback note"
+);
+
+// ─── wiki author turn: canonical glossary reference ──────────────────────────
+// When the glossary task has already written the per-volume glossary.md, the
+// wiki agent prompts offer it as a read-only reference for the shared wiki's
+// Glossary section (drift guard). Absent before the first run.
+const wikiWithGlossary = buildWikiAuthorTurnPrompt({ ...wikiCtx, glossaryFile: "glossary.md" });
+assert.ok(wikiWithGlossary.includes('The canonical glossary: "glossary.md"'), "wiki author turn names the canonical glossary when present");
+assert.ok(!wikiAuthorTurn.includes("The canonical glossary"), "wiki author turn (no glossary yet): no reference line");
+
+// ─── async tail: fingerprint round-trip through the state file ───────────────
+(async () => {
+  const { saveRollingState, loadRollingState } = require("../configs/shared");
+  const fsSync = require("fs");
+  const os = require("os");
+  const tmpDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "rolling-"));
+  const stateFile = path.join(tmpDir, "state.json");
+  try {
+    await saveRollingState(stateFile, [80, 90, 95], { sourceFingerprint: "abc" });
+    const state = await loadRollingState(stateFile);
+    assert.deepStrictEqual(state.results, [80, 90, 95]);
+    assert.strictEqual(state.sourceFingerprint, "abc", "save/load round-trips the fingerprint");
+    assert.strictEqual(isSourceStale(state, { sourceFingerprint: "abc" }), false);
+    assert.strictEqual(isSourceStale(state, { sourceFingerprint: "other" }), true);
+    // legacy file (no fingerprint) loads and stays fail-open
+    const legacyFile = path.join(tmpDir, "legacy.json");
+    fsSync.writeFileSync(legacyFile, JSON.stringify({ results: [80, 90, 95] }));
+    const legacy = await loadRollingState(legacyFile);
+    assert.strictEqual(legacy.sourceFingerprint, undefined);
+    assert.strictEqual(isSourceStale(legacy, { sourceFingerprint: "x" }), false);
+    // corrupt file: loadRollingState returns null (fail-open)
+    const corruptFile = path.join(tmpDir, "corrupt.json");
+    fsSync.writeFileSync(corruptFile, "{not json");
+    assert.strictEqual(await loadRollingState(corruptFile), null);
+  } finally {
+    fsSync.rmSync(tmpDir, { recursive: true, force: true });
+  }
+  console.log("All tests passed.");
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

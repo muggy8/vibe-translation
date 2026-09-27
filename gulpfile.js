@@ -1,14 +1,15 @@
 /**
  * gulpfile.js — Gulp task registration for the ai-client.
  *
- * The "jump-in-wiki", "glossary", "character-voice" and "style-guide" task
- * logic lives in jump-in-wiki.js, glossary.js, character-voice.js and
- * style-guide.js respectively; this file only wires the tasks up to Gulp.
+ * The "jump-in-wiki", "glossary", "character-voice", "style-guide" and
+ * "consistency-audit" task logic lives in jump-in-wiki.js, glossary.js,
+ * character-voice.js, style-guide.js and consistency-audit.js respectively;
+ * this file only wires the tasks up to Gulp.
  *
  * Each step is wrapped with withHooks() so an optional per-machine hook
  * (hooks/pre-<task> / hooks/post-<task>, git-style — see hooks/README.md)
  * can run before and after it. With no hooks/ directory the pipeline runs
- * exactly as before (hooks are a no-op). The default (all-four) run is
+ * exactly as before (hooks are a no-op). The default (all-five) run is
  * additionally wrapped as the "pipeline" pseudo-step (pre-/post-pipeline).
  *
  * Usage:
@@ -20,13 +21,16 @@
  *   npx gulp glossary --force         # regenerate even if the glossary exists
  *   npx gulp character-voice          # build the character voice reference
  *   npx gulp style-guide              # build the style guide
+ *   npx gulp consistency-audit        # final cross-artifact consistency audit
+ *   npx gulp consistency-audit --force  # re-audit even if the report is fresh
  *   npx gulp <task> --chunked         # force the chapter-by-chapter fallback for
  *                                     # multi-chapter epub volumes (the default is
  *                                     # whole-installment processing; the fallback
  *                                     # also triggers automatically when the whole
  *                                     # text exceeds SOURCE_CHUNK_THRESHOLD_CHARS)
- *   (default task)                     # all four in order:
- *                                     # glossary -> character-voice -> style-guide -> jump-in-wiki
+ *   (default task)                     # all five in order:
+ *                                     # glossary -> character-voice -> style-guide ->
+ *                                     # jump-in-wiki -> consistency-audit
  *                                     # (a failing step aborts the run by default;
  *                                     # ON_TASK_ERROR=continue in .env lets the
  *                                     # remaining steps run for un-monitored runs)
@@ -37,6 +41,7 @@ const { jumpInWiki } = require("./jump-in-wiki");
 const { glossary } = require("./glossary");
 const { characterVoice } = require("./character-voice");
 const { styleGuide } = require("./style-guide");
+const { consistencyAudit } = require("./consistency-audit");
 const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
 
 // Wrap each step so its optional per-machine hooks fire around it. The task
@@ -46,9 +51,10 @@ const glossaryTask = withHooks("glossary", glossary);
 const characterVoiceTask = withHooks("character-voice", characterVoice);
 const styleGuideTask = withHooks("style-guide", styleGuide);
 const jumpInWikiTask = withHooks("jump-in-wiki", jumpInWiki);
+const consistencyAuditTask = withHooks("consistency-audit", consistencyAudit);
 
 /**
- * The four pipeline steps in run order (step name + hooked task function).
+ * The five pipeline steps in run order (step name + hooked task function).
  * @type {Array<{name: string, run: Function}>}
  */
 const PIPELINE_STEPS = [
@@ -56,6 +62,7 @@ const PIPELINE_STEPS = [
   { name: "character-voice", run: characterVoiceTask },
   { name: "style-guide", run: styleGuideTask },
   { name: "jump-in-wiki", run: jumpInWikiTask },
+  { name: "consistency-audit", run: consistencyAuditTask },
 ];
 
 /**
@@ -105,5 +112,6 @@ exports["jump-in-wiki"] = jumpInWikiTask;
 exports.glossary = glossaryTask;
 exports["character-voice"] = characterVoiceTask;
 exports["style-guide"] = styleGuideTask;
-// The whole default run also fires pre-pipeline / post-pipeline around all four.
+exports["consistency-audit"] = consistencyAuditTask;
+// The whole default run also fires pre-pipeline / post-pipeline around all five.
 exports.default = withHooks(PIPELINE_TASK, runPipeline);

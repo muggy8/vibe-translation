@@ -29,6 +29,7 @@ Default: `<project root>/hooks/`. Override the directory with the
 | before / after `character-voice` | `pre-character-voice` / `post-character-voice` (or `.sh` / `.js`) |
 | before / after `style-guide` | `pre-style-guide` / `post-style-guide` (or `.sh` / `.js`) |
 | before / after `jump-in-wiki` | `pre-jump-in-wiki` / `post-jump-in-wiki` (or `.sh` / `.js`) |
+| before / after `consistency-audit` | `pre-consistency-audit` / `post-consistency-audit` (or `.sh` / `.js`) |
 | around the whole default run | `pre-pipeline` / `post-pipeline` (or `.sh` / `.js`) |
 
 A hook file must be **executable** (`chmod +x`) and start with a **shebang**

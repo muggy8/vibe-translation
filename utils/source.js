@@ -715,6 +715,11 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
       imagesDir: null,
       wholeChars: st.size,
       cacheHit: false,
+      // Content hash of the source file — the artifact skip-checks compare it
+      // against the fingerprint persisted in the last run's rolling state so
+      // a re-released / errata-fixed source invalidates the stale artifacts
+      // (see isSourceStale in configs/shared.js).
+      sourceFingerprint: await sha256OfFile(originalPath),
     };
   }
 
@@ -816,6 +821,9 @@ function materializeBundle(meta, { originalPath, volumeDir, cacheHit }) {
     imagesDir: (meta.images || []).length > 0 ? path.join(volumeDir, "images") : null,
     wholeChars: meta.wholeChars || 0,
     cacheHit,
+    // The cache meta records the epub's sha256 (see resolveSourceBundle) —
+    // the same value the artifact skip-checks compare against.
+    sourceFingerprint: meta.sha256 || null,
   };
 }
 
@@ -911,6 +919,7 @@ module.exports = {
   normalizeZipPath,
   extractEpubToBundle,
   resolveSourceBundle,
+  sha256OfFile,
   sourceMaterialLine,
   sourceSegmentListLine,
   chapterSegmentNote,
