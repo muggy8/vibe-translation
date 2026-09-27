@@ -14,6 +14,11 @@ process.env.ACCEPTANCE_PASSING_SCORE = "70";
 process.env.ACCEPTANCE_STRATEGY = "average";
 process.env.ACCEPTANCE_BEST_MIN_PASSES = "3";
 process.env.ACCEPTANCE_MIN_SAMPLES = "3";
+// Pin the un-monitored run policies so the policy tests below are
+// deterministic regardless of the local .env.
+process.env.ON_VOLUME_ERROR = "skip";
+process.env.ON_MISSING_PREVIOUS = "skip";
+process.env.ON_QA_LIMIT = "accept";
 
 const {
   parseTerms,
@@ -626,5 +631,50 @@ assert.strictEqual(shouldProcessChunked(chunkBundle, { thresholdChars: 100 }), t
 assert.strictEqual(shouldProcessChunked(chunkBundle, { thresholdChars: 10000 }), false, "stays whole below the threshold");
 assert.strictEqual(shouldProcessChunked(chunkBundle, { thresholdChars: 10000, forceChunked: true }), true, "--chunked forces the fallback");
 assert.strictEqual(shouldProcessChunked({ format: "text", segments: [], wholeChars: 999999 }, {}), false, "text sources are never chunked");
+
+// ─── Un-monitored run policies (configs/shared.js) ──────────────────────────
+const {
+  normalizePolicy,
+  validateRequiredEnv,
+  ON_VOLUME_ERROR,
+  ON_MISSING_PREVIOUS,
+  ON_QA_LIMIT,
+} = require("../configs/shared");
+
+// normalizePolicy: case/whitespace-insensitive; unknown/empty values fall
+// back to the default (a typo in .env must not crash the run).
+assert.strictEqual(normalizePolicy("SKIP", ["abort", "skip"], "abort"), "skip");
+assert.strictEqual(normalizePolicy(" skip ", ["abort", "skip"], "abort"), "skip");
+assert.strictEqual(normalizePolicy("abort", ["abort", "skip"], "skip"), "abort");
+assert.strictEqual(normalizePolicy("", ["abort", "skip"], "abort"), "abort");
+assert.strictEqual(normalizePolicy(undefined, ["abort", "skip"], "abort"), "abort");
+assert.strictEqual(normalizePolicy("nonsense", ["abort", "skip"], "abort"), "abort", "unknown value falls back to the default");
+assert.strictEqual(normalizePolicy("Accept", ["accept", "fail"], "fail"), "accept");
+
+// The exported constants reflect the pinned env values (set above the requires).
+assert.strictEqual(ON_VOLUME_ERROR, "skip");
+assert.strictEqual(ON_MISSING_PREVIOUS, "skip");
+assert.strictEqual(ON_QA_LIMIT, "accept");
+
+// validateRequiredEnv: aggregated fail-fast for missing required vars.
+process.env.SERIES_LOCATION = "/tmp/series";
+process.env.SERIES_NAME = "test_series";
+process.env.AI_API_KEY = "test-key";
+assert.doesNotThrow(() => validateRequiredEnv(), "all vars set: passes");
+assert.doesNotThrow(() => validateRequiredEnv({ dryRun: true }), "dry-run: passes");
+
+delete process.env.AI_API_KEY;
+assert.doesNotThrow(() => validateRequiredEnv({ dryRun: true }), "dry-run does not require AI_API_KEY");
+assert.throws(() => validateRequiredEnv(), /AI_API_KEY/, "live run requires AI_API_KEY");
+
+delete process.env.SERIES_NAME;
+assert.throws(() => validateRequiredEnv({ dryRun: true }), /SERIES_NAME/, "SERIES_NAME is always required");
+
+delete process.env.SERIES_LOCATION;
+assert.throws(
+  () => validateRequiredEnv({ dryRun: true }),
+  /SERIES_LOCATION.*SERIES_NAME/,
+  "the message aggregates every missing variable"
+);
 
 console.log("All tests passed.");

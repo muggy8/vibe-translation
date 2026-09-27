@@ -50,7 +50,7 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
@@ -458,9 +458,10 @@ async function jumpInWiki() {
   if (!seriesDir) {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
   }
-  if (!process.env.SERIES_NAME) {
-    throw new Error("SERIES_NAME is not set. Please set it in .env.");
-  }
+  // Fail fast (before any AI call) if required env vars are missing — the
+  // aggregated message names every missing variable (SERIES_NAME, and
+  // AI_API_KEY when not --dry-run).
+  validateRequiredEnv({ dryRun });
 
   // Discover the volumes with the AI-driven translation-target manifest (see
   // get-translation-target.js). It yields, in reading order, each volume's
@@ -504,8 +505,10 @@ async function jumpInWiki() {
   const acceptanceTemplate = await fs.readFile(acceptanceUserPromptTemplateFile, "utf-8");
 
   let limitReachedCount = 0;
+  const failedVolumes = [];
 
   for (const folderName of volumes) {
+    try {
     const i = sortedFolderWithSourceMaterial.indexOf(folderName);
     const volume = volumeByFolder.get(folderName);
     const volumeDir = path.join(seriesDir, folderName);
@@ -693,8 +696,29 @@ async function jumpInWiki() {
     if (ctx.limitReached) {
       limitReachedCount++;
     }
+    } catch (err) {
+      // Volume-level error isolation (ON_VOLUME_ERROR): "skip" records the
+      // failure and continues with the next volume (an un-monitored run must
+      // not die on one broken volume); "abort" (default) rethrows and fails
+      // the task as before.
+      if (ON_VOLUME_ERROR !== "skip") throw err;
+      failedVolumes.push({ folder: folderName, error: err });
+      const entry = volumeByFolder.get(folderName);
+      console.error(
+        `[skip] Volume ${entry ? entry.installmentNumber : folderName} ` +
+          `(${folderName}) failed: ${err.message} — continuing with the next ` +
+          `volume (ON_VOLUME_ERROR=skip).`
+      );
+    }
   }
 
+  if (failedVolumes.length > 0) {
+    console.error(
+      `\n${failedVolumes.length} of ${volumes.length} volume(s) failed: ` +
+        `${failedVolumes.map((v) => `${v.folder} (${v.error.message})`).join("; ")}. ` +
+        `Re-run the task (idempotent) to pick them up.`
+    );
+  }
   if (limitReachedCount > 0) {
     console.log(
       `\n${limitReachedCount} of ${sortedFolderWithSourceMaterial.length} volume(s) reached the ` +
@@ -962,6 +986,12 @@ async function runChunkedQaLoop(ctx) {
         `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
           `without a passing grade. The last feedback pass is unvalidated; re-run the task to validate it.`
       );
+      if (ON_QA_LIMIT === "fail") {
+        throw new Error(
+          `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
+            `without a passing grade (ON_QA_LIMIT=fail).`
+        );
+      }
       break;
     }
   }
@@ -1261,6 +1291,12 @@ async function runQaLoop(ctx, author) {
         `(${maxValidationIterations}) without a passing grade. The last feedback pass is ` +
         `unvalidated; re-run the task to validate it.`
       );
+      if (ON_QA_LIMIT === "fail") {
+        throw new Error(
+          `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
+            `without a passing grade (ON_QA_LIMIT=fail).`
+        );
+      }
       break;
     }
   }

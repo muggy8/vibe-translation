@@ -32,7 +32,7 @@ require("./types");
 const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 const {
   resolveSourceBundle,
@@ -287,6 +287,7 @@ async function characterVoice() {
   const volumeArg = process.argv.includes("--volume")
     ? process.argv[process.argv.indexOf("--volume") + 1] : null;
   console.log("character-voice task starting...");
+  validateRequiredEnv({ dryRun });
   const manifest = await getTranslationTarget({ force, dryRun });
   // Use the module-level seriesDir (SERIES_LOCATION) — NOT manifest.seriesLocation.
   // That field is provenance metadata from the machine that generated the
@@ -302,7 +303,9 @@ async function characterVoice() {
   const volumes = volumeArg ? sorted.filter((f) => f===volumeArg) : sorted;
   if (volumes.length===0) { console.log("No volumes found. Exiting."); return; }
   let regeneratedAny = false;
+  const failedVolumes = [];
   for (const folderName of volumes) {
+    try {
     // Index into the FULL sorted list (not the filtered one) so --volume runs
     // still resolve the correct manifest entry and previous volume.
     const i = sorted.indexOf(folderName);
@@ -343,10 +346,18 @@ async function characterVoice() {
               `(${previousVoiceRefFile}) does not exist yet — a live run would stop ` +
               `here. Continuing the prompt preview.`
           );
+        } else if (ON_MISSING_PREVIOUS === "skip") {
+          console.log(
+            `Volume ${values.INSTALLMENT_NUMBER}: previous character voice reference not found ` +
+              `(${previousVoiceRefFile}) — skipping this volume ` +
+              `(ON_MISSING_PREVIOUS=skip).`
+          );
+          continue;
         } else {
           throw new Error(
             `Previous character voice reference not found: ${previousVoiceRefFile}. ` +
-              `Process the earlier volume first (or re-run without --force).`
+              `Process the earlier volume first (or re-run without --force), ` +
+              `or set ON_MISSING_PREVIOUS=skip to skip this volume.`
           );
         }
       }
@@ -407,6 +418,27 @@ async function characterVoice() {
     if (skip) { console.log(`Volume ${values.INSTALLMENT_NUMBER}: voice reference and POV map already exist and passed. Skipping.`); continue; }
     regeneratedAny = true;
     await runVolume(ctx);
+    } catch (err) {
+      // Volume-level error isolation (ON_VOLUME_ERROR): "skip" records the
+      // failure and continues with the next volume (an un-monitored run must
+      // not die on one broken volume); "abort" (default) rethrows and fails
+      // the task as before.
+      if (ON_VOLUME_ERROR !== "skip") throw err;
+      failedVolumes.push({ folder: folderName, error: err });
+      const entry = volumeByFolder.get(folderName);
+      console.error(
+        `[skip] Volume ${entry ? entry.installmentNumber : folderName} ` +
+          `(${folderName}) failed: ${err.message} — continuing with the next ` +
+          `volume (ON_VOLUME_ERROR=skip).`
+      );
+    }
+  }
+  if (failedVolumes.length > 0) {
+    console.error(
+      `\n${failedVolumes.length} of ${volumes.length} volume(s) failed: ` +
+        `${failedVolumes.map((v) => `${v.folder} (${v.error.message})`).join("; ")}. ` +
+        `Re-run the task (idempotent) to pick them up.`
+    );
   }
   if (volumeArg) { console.log("\n--volume: skipping the series-root copy."); }
   else {
@@ -589,6 +621,12 @@ async function runQaLoop(ctx) {
       if (iteration === maxValidationIterations) {
         ctx.limitReached = true;
         console.log(`Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`);
+        if (ON_QA_LIMIT === "fail") {
+          throw new Error(
+            `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
+              `without a passing grade (ON_QA_LIMIT=fail).`
+          );
+        }
       }
     } finally { await validator.close(); }
   }
@@ -747,6 +785,12 @@ async function runChunkedQaLoop(ctx) {
     if (iteration === maxValidationIterations) {
       ctx.limitReached = true;
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`);
+      if (ON_QA_LIMIT === "fail") {
+        throw new Error(
+          `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
+            `without a passing grade (ON_QA_LIMIT=fail).`
+        );
+      }
       break;
     }
   }

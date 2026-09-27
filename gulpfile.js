@@ -27,9 +27,12 @@
  *                                     # text exceeds SOURCE_CHUNK_THRESHOLD_CHARS)
  *   (default task)                     # all four in order:
  *                                     # glossary -> character-voice -> style-guide -> jump-in-wiki
+ *                                     # (a failing step aborts the run by default;
+ *                                     # ON_TASK_ERROR=continue in .env lets the
+ *                                     # remaining steps run for un-monitored runs)
  */
 
-const { series } = require("gulp");
+require("dotenv").config();
 const { jumpInWiki } = require("./jump-in-wiki");
 const { glossary } = require("./glossary");
 const { characterVoice } = require("./character-voice");
@@ -44,12 +47,63 @@ const characterVoiceTask = withHooks("character-voice", characterVoice);
 const styleGuideTask = withHooks("style-guide", styleGuide);
 const jumpInWikiTask = withHooks("jump-in-wiki", jumpInWiki);
 
+/**
+ * The four pipeline steps in run order (step name + hooked task function).
+ * @type {Array<{name: string, run: Function}>}
+ */
+const PIPELINE_STEPS = [
+  { name: "glossary", run: glossaryTask },
+  { name: "character-voice", run: characterVoiceTask },
+  { name: "style-guide", run: styleGuideTask },
+  { name: "jump-in-wiki", run: jumpInWikiTask },
+];
+
+/**
+ * Run the default pipeline with the ON_TASK_ERROR policy (front-loaded in
+ * .env for un-monitored runs):
+ *   - "abort" (default): legacy gulp series() behavior — the first failing
+ *     step stops the run.
+ *   - "continue": a failing step is logged and the remaining steps still run
+ *     (a glossary hiccup must not prevent the wiki for a 17-volume overnight
+ *     run); once every step has been attempted, the run fails with a summary
+ *     of all failed steps so `npx gulp` exits non-zero.
+ * Each step's own before/after hooks still fire (they are part of the wrapped
+ * task functions).
+ *
+ * @returns {Promise<void>}
+ */
+async function runPipeline() {
+  const onTaskError = String(process.env.ON_TASK_ERROR || "abort")
+    .trim()
+    .toLowerCase();
+  const failures = [];
+  for (const step of PIPELINE_STEPS) {
+    try {
+      await step.run();
+    } catch (err) {
+      failures.push({ name: step.name, error: err });
+      if (onTaskError !== "continue") throw err;
+      console.error(
+        `[pipeline] ${step.name} failed: ${err.message} — continuing with ` +
+          `the remaining steps (ON_TASK_ERROR=continue).`
+      );
+    }
+  }
+  if (failures.length > 0) {
+    const summary = failures
+      .map((f) => `${f.name} (${f.error.message})`)
+      .join("; ");
+    throw new Error(
+      `Pipeline finished with ${failures.length} failed step(s): ${summary}. ` +
+        `See .logs/ for details; re-run the pipeline (idempotent) to pick up ` +
+        `the failed steps.`
+    );
+  }
+}
+
 exports["jump-in-wiki"] = jumpInWikiTask;
 exports.glossary = glossaryTask;
 exports["character-voice"] = characterVoiceTask;
 exports["style-guide"] = styleGuideTask;
 // The whole default run also fires pre-pipeline / post-pipeline around all four.
-exports.default = withHooks(
-  PIPELINE_TASK,
-  series(glossaryTask, characterVoiceTask, styleGuideTask, jumpInWikiTask)
-);
+exports.default = withHooks(PIPELINE_TASK, runPipeline);

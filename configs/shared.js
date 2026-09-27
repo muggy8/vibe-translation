@@ -117,6 +117,107 @@ const ACCEPTANCE_BEST_MIN_PASSES = Math.max(
   parseInt(process.env.ACCEPTANCE_BEST_MIN_PASSES, 10) || 3
 );
 
+// ── Un-monitored run policies ────────────────────────────────────────────────
+// These knobs front-load the decisions that would otherwise require a human
+// during a long (un-monitored) run: when a volume fails, when the previous
+// volume's artifact is missing, and when the QA loop hits its iteration limit.
+// Every default reproduces the pre-knob behavior (fail loudly) so the pipeline
+// stays safe for interactive use; set the "un-monitored" values in .env to let
+// a run keep going overnight and pick up the skipped work on a cheap re-run
+// (idempotent skip-checks make re-runs cheap).
+
+/**
+ * Normalize a policy-style env var value to one of the allowed values.
+ * Unknown/empty values fall back to the default (never throws, so a typo in
+ * .env degrades to the safe default instead of crashing the run).
+ *
+ * @param {string | undefined} raw - The raw env value.
+ * @param {string[]} allowed - The accepted values (compared case-insensitively).
+ * @param {string} defaultValue - The value used when `raw` is absent/unknown.
+ * @returns {string} One of `allowed` (or `defaultValue` when it is not).
+ */
+function normalizePolicy(raw, allowed, defaultValue) {
+  const v = String(raw ?? "").trim().toLowerCase();
+  if (v === "") return defaultValue;
+  return allowed.includes(v) ? v : defaultValue;
+}
+
+/**
+ * What to do when a volume's processing throws (glossary / character-voice /
+ * style-guide / jump-in-wiki).
+ * - "abort" (default): the task fails on the first broken volume (legacy).
+ * - "skip": log the error, record the volume, and continue with the next one.
+ *   In the cumulative tasks the next volume then misses its previous
+ *   artifact and is skipped in turn (ON_MISSING_PREVIOUS=skip), so a broken
+ *   volume ends that task at that point while the rest of the pipeline
+ *   (other tasks, ON_TASK_ERROR) can still run.
+ *
+ * @type {"abort"|"skip"}
+ */
+const ON_VOLUME_ERROR = normalizePolicy(
+  process.env.ON_VOLUME_ERROR,
+  ["abort", "skip"],
+  "abort"
+);
+
+/**
+ * What to do when a cumulative task finds the previous volume's artifact
+ * (glossary.md / character-voice.md / style-guide.md) missing — e.g. because
+ * the previous volume failed or was skipped (ON_VOLUME_ERROR=skip) or was
+ * never processed.
+ * - "abort" (default): throw with a "process the earlier volume first"
+ *   message (legacy behavior).
+ * - "skip": warn and skip this volume (the rest of the task then cascades
+ *   the same way until a volume whose previous artifact exists).
+ *
+ * @type {"abort"|"skip"}
+ */
+const ON_MISSING_PREVIOUS = normalizePolicy(
+  process.env.ON_MISSING_PREVIOUS,
+  ["abort", "skip"],
+  "abort"
+);
+
+/**
+ * What to do when a volume's QA loop hits QA_MAX_ITERATIONS without the
+ * rolling window meeting the acceptance criterion.
+ * - "accept" (default): keep the output as-is and continue (legacy — the
+ *   "re-run to validate it" hint stays in the log line).
+ * - "fail": throw, so the volume is treated as failed (then subject to
+ *   ON_VOLUME_ERROR).
+ *
+ * @type {"accept"|"fail"}
+ */
+const ON_QA_LIMIT = normalizePolicy(
+  process.env.ON_QA_LIMIT,
+  ["accept", "fail"],
+  "accept"
+);
+
+/**
+ * Fail fast (before any AI call) when a required environment variable is
+ * missing, with a single message naming every missing variable. Called at the
+ * top of each gulp task so a misconfigured .env is caught at run start, not
+ * hours in. `dryRun` skips the AI_API_KEY check because --dry-run makes no
+ * AI calls.
+ *
+ * @param {{dryRun?: boolean}} [opts]
+ * @param {boolean} [opts.dryRun] - True when running with --dry-run.
+ * @throws {Error} Naming every missing required variable.
+ */
+function validateRequiredEnv({ dryRun = false } = {}) {
+  const missing = [];
+  if (!process.env.SERIES_LOCATION) missing.push("SERIES_LOCATION");
+  if (!process.env.SERIES_NAME) missing.push("SERIES_NAME");
+  if (!dryRun && !process.env.AI_API_KEY) missing.push("AI_API_KEY");
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required environment variable(s): ${missing.join(", ")}. ` +
+        `Set them in .env before running the pipeline.`
+    );
+  }
+}
+
 /**
  * Compute the rolling average score from an array of numeric acceptance
  * scores (0–100). Returns 0 if the array is empty.
@@ -225,6 +326,12 @@ module.exports = {
   ACCEPTANCE_PASSING_SCORE,
   ACCEPTANCE_STRATEGY,
   ACCEPTANCE_BEST_MIN_PASSES,
+  // Un-monitored run policies (see the section above).
+  normalizePolicy,
+  ON_VOLUME_ERROR,
+  ON_MISSING_PREVIOUS,
+  ON_QA_LIMIT,
+  validateRequiredEnv,
   computeRollingAverage,
   meetsAcceptanceCriteria,
   isAcceptedState,

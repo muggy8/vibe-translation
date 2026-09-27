@@ -55,7 +55,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
 const {
   resolveSourceBundle,
@@ -494,9 +494,10 @@ async function glossary() {
   if (!seriesDir) {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
   }
-  if (!process.env.SERIES_NAME) {
-    throw new Error("SERIES_NAME is not set. Please set it in .env.");
-  }
+  // Fail fast (before any AI call) if required env vars are missing — the
+  // aggregated message names every missing variable (SERIES_NAME, and
+  // AI_API_KEY when not --dry-run).
+  validateRequiredEnv({ dryRun });
 
   // Load the system prompts.
   const termsSystemPrompt = await fs.readFile(termsSystemPromptFile, "utf-8");
@@ -549,8 +550,10 @@ async function glossary() {
   // Once any volume is regenerated, all later volumes must be regenerated too
   // (each volume's glossary is built on the previous one's).
   let regeneratedAny = false;
+  const failedVolumes = [];
 
   for (const folderName of volumes) {
+    try {
     const i = sorted.indexOf(folderName);
     const volume = volumeByFolder.get(folderName);
     const volumeDir = path.join(seriesDir, folderName);
@@ -599,10 +602,18 @@ async function glossary() {
               `(${previousGlossaryFile}) does not exist yet — a live run would stop ` +
               `here. Continuing the prompt preview.`
           );
+        } else if (ON_MISSING_PREVIOUS === "skip") {
+          console.log(
+            `Volume ${values.INSTALLMENT_NUMBER}: previous glossary not found ` +
+              `(${previousGlossaryFile}) — skipping this volume ` +
+              `(ON_MISSING_PREVIOUS=skip).`
+          );
+          continue;
         } else {
           throw new Error(
             `Previous glossary not found: ${previousGlossaryFile}. ` +
-              `Process the earlier volume first (or re-run without --force).`
+              `Process the earlier volume first (or re-run without --force), ` +
+              `or set ON_MISSING_PREVIOUS=skip to skip this volume.`
           );
         }
       }
@@ -737,6 +748,28 @@ async function glossary() {
     regeneratedAny = true;
 
     await runVolumeAgent(ctx);
+    } catch (err) {
+      // Volume-level error isolation (ON_VOLUME_ERROR): "skip" records the
+      // failure and continues with the next volume (an un-monitored run must
+      // not die on one broken volume); "abort" (default) rethrows and fails
+      // the task as before.
+      if (ON_VOLUME_ERROR !== "skip") throw err;
+      failedVolumes.push({ folder: folderName, error: err });
+      const entry = volumeByFolder.get(folderName);
+      console.error(
+        `[skip] Volume ${entry ? entry.installmentNumber : folderName} ` +
+          `(${folderName}) failed: ${err.message} — continuing with the next ` +
+          `volume (ON_VOLUME_ERROR=skip).`
+      );
+    }
+  }
+
+  if (failedVolumes.length > 0) {
+    console.error(
+      `\n${failedVolumes.length} of ${volumes.length} volume(s) failed: ` +
+        `${failedVolumes.map((v) => `${v.folder} (${v.error.message})`).join("; ")}. ` +
+        `Re-run the task (idempotent) to pick them up.`
+    );
   }
 
   // Copy the last volume's glossary to the series root for easy access
@@ -1140,6 +1173,12 @@ async function runChunkedQaLoop(ctx) {
         `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
           `without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`
       );
+      if (ON_QA_LIMIT === "fail") {
+        throw new Error(
+          `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
+            `without a passing grade (ON_QA_LIMIT=fail).`
+        );
+      }
       break;
     }
   }
@@ -1512,11 +1551,18 @@ async function runQaLoop(ctx) {
     }
 
     if (iteration === maxValidationIterations) {
+      ctx.limitReached = true;
       console.log(
         `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
           `without a passing grade. The last feedback pass is unvalidated; ` +
           `re-run to validate it.`
       );
+      if (ON_QA_LIMIT === "fail") {
+        throw new Error(
+          `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
+            `without a passing grade (ON_QA_LIMIT=fail).`
+        );
+      }
       break;
     }
   }

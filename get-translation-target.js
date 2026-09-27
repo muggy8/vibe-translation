@@ -71,6 +71,23 @@ const MANIFEST_FILE_NAME = "translation-target.json";
 const DISCOVERY_BASE_STEPS = 40;
 
 /**
+ * Maximum number of discovery-agent attempts before the task fails. Each
+ * attempt is a fresh agent (runDiscoveryAgent deletes the previous attempt's
+ * manifest file first), so a single bad agent run (invalid manifest, or
+ * referencing missing source files — non-deterministic model output) does not
+ * have to halt an un-monitored run: the next attempt gets a clean slate.
+ * Transient endpoint hiccups are already retried inside each attempt via
+ * AI_RETRY. Read from .env, defaulting to 1 (legacy: single attempt).
+ */
+const DISCOVERY_MAX_ATTEMPTS = Math.max(
+  1,
+  parseInt(process.env.DISCOVERY_MAX_ATTEMPTS, 10) || 1
+);
+
+/** Delay between discovery attempts, in ms. */
+const DISCOVERY_RETRY_DELAY_MS = 10000;
+
+/**
  * System prompt for the discovery agent. It is mode-agnostic and states only
  * the invariants: find the volumes, find each volume's source text, number and
  * order them, and emit exact JSON. The concrete series details and the output
@@ -459,17 +476,49 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
     }
   }
 
-  // Generate (or regenerate) with the agent.
-  const manifest = await runDiscoveryAgent(seriesDir, {
-    seriesName,
-    sourceLanguage,
-    targetLanguage,
-  });
-  validateManifest(manifest);
-  if (!(await manifestSourcesExist(seriesDir, manifest))) {
+  // Generate (or regenerate) with the agent. Each attempt is validated before
+  // it counts as a success; failures (invalid manifest, missing source files)
+  // are retried with a fresh agent up to DISCOVERY_MAX_ATTEMPTS so one bad
+  // agent run does not halt an un-monitored run.
+  let manifest = null;
+  let lastError = null;
+  for (let attempt = 1; attempt <= DISCOVERY_MAX_ATTEMPTS; attempt++) {
+    try {
+      const candidate = await runDiscoveryAgent(seriesDir, {
+        seriesName,
+        sourceLanguage,
+        targetLanguage,
+      });
+      validateManifest(candidate);
+      if (!(await manifestSourcesExist(seriesDir, candidate))) {
+        throw new Error(
+          `The discovery agent produced a manifest that references source ` +
+            `files that do not exist (inspect ${manifestPath}).`
+        );
+      }
+      manifest = candidate;
+      break;
+    } catch (err) {
+      lastError = err;
+      harness.logLine(
+        `[get-translation-target] discovery attempt ${attempt}/` +
+          `${DISCOVERY_MAX_ATTEMPTS} failed: ${err.message}`
+      );
+      if (attempt < DISCOVERY_MAX_ATTEMPTS) {
+        harness.logLine(
+          `[get-translation-target] retrying discovery in ` +
+            `${DISCOVERY_RETRY_DELAY_MS / 1000}s...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, DISCOVERY_RETRY_DELAY_MS));
+      }
+    }
+  }
+  if (!manifest) {
     throw new Error(
-      `The discovery agent produced a manifest that references source files that ` +
-        `do not exist. Inspect ${manifestPath} and re-run with --force.`
+      `Discovery failed after ${DISCOVERY_MAX_ATTEMPTS} attempt(s): ` +
+        `${lastError ? lastError.message : "unknown error"} Inspect ` +
+        `${manifestPath} and the run log under .logs/, then re-run with ` +
+        `--force.`
     );
   }
 
