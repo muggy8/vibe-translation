@@ -28,6 +28,9 @@ const {
   roleEndpoint,
   qaLoopDecision,
   qaMaxRounds,
+  stripContinuityOverlap,
+  runWithConcurrency,
+  stageConcurrency,
 } = require("../utils/translate");
 
 // ─── sha256 ───────────────────────────────────────────────────────────────────
@@ -403,6 +406,118 @@ const stateFile = path.join(tmp, "translation-state.json");
   // Wrong shape: fail-open empty state.
   fs.writeFileSync(stateFile, '{"foo": 1}', "utf8");
   assert.deepStrictEqual(await loadTranslationState(stateFile), { schema: 1, chapters: {} });
+
+  // ─── stripContinuityOverlap ─────────────────────────────────────────────────
+  {
+    const prev = "The sword hummed as she lifted it, and the battle that followed would decide everything.";
+    const repeated = prev + " And then the battle began.";
+    // A full repeat of the previous tail is stripped (with leading space).
+    assert.strictEqual(stripContinuityOverlap(prev, repeated), "And then the battle began.");
+    // No overlap: unchanged.
+    assert.strictEqual(
+      stripContinuityOverlap(prev, "A totally different start to the story."),
+      "A totally different start to the story."
+    );
+    // Overlap shorter than minOverlap is kept (coincidental short matches).
+    assert.strictEqual(stripContinuityOverlap("abc", "abc def"), "abc def");
+    // Empty inputs.
+    assert.strictEqual(stripContinuityOverlap("", "text"), "text");
+    assert.strictEqual(stripContinuityOverlap("prev", ""), "");
+    // A re-phrase that shares only part of the tail is NEVER mangled.
+    const nearMiss = prev.slice(0, -20) + "DIFFERENT ENDING OF THE SENTENCE.";
+    assert.strictEqual(stripContinuityOverlap(prev, nearMiss), nearMiss);
+  }
+
+  // ─── runWithConcurrency ─────────────────────────────────────────────────────
+  {
+    const items = [1, 2, 3, 4, 5];
+    // Order preservation + the limit is respected.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const results = await runWithConcurrency(items, 2, async (item, idx) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 10 * (item % 3) + 1));
+      inFlight -= 1;
+      return idx * 10 + item;
+    });
+    assert.deepStrictEqual(results, [1, 12, 23, 34, 45]); // idx * 10 + item, in input order
+    assert.ok(maxInFlight <= 2, `maxInFlight ${maxInFlight} exceeded the limit of 2`);
+    assert.ok(maxInFlight >= 2, "expected at least 2 in flight (5 items, limit 2)");
+
+    // limit 1 = exactly the old serial behaviour.
+    let serialInFlight = 0;
+    let serialMax = 0;
+    await runWithConcurrency(items, 1, async () => {
+      serialInFlight += 1;
+      serialMax = Math.max(serialMax, serialInFlight);
+      await new Promise((r) => setTimeout(r, 1));
+      serialInFlight -= 1;
+    });
+    assert.strictEqual(serialMax, 1);
+
+    // Error: the first error is rethrown; no further items are started.
+    const seen = [];
+    await assert.rejects(
+      runWithConcurrency(items, 2, async (item) => {
+        seen.push(item);
+        if (item === 2) throw new Error("boom");
+        await new Promise((r) => setTimeout(r, 5));
+      }),
+      /boom/
+    );
+    assert.ok(!seen.includes(3) && !seen.includes(4) && !seen.includes(5),
+      `items past the failure were started: ${JSON.stringify(seen)}`);
+
+    // Empty items: resolves with no work.
+    assert.deepStrictEqual(await runWithConcurrency([], 3, async () => { throw new Error("no"); }), []);
+  }
+
+  // ─── stageConcurrency ───────────────────────────────────────────────────────
+  {
+    delete process.env.VERIFY_CONCURRENCY;
+    assert.strictEqual(stageConcurrency("VERIFY"), 1); // default: serial
+    process.env.VERIFY_CONCURRENCY = "4";
+    assert.strictEqual(stageConcurrency("VERIFY"), 4);
+    process.env.VERIFY_CONCURRENCY = "0";
+    assert.strictEqual(stageConcurrency("VERIFY"), 1); // floored at 1
+    process.env.VERIFY_CONCURRENCY = "abc";
+    assert.strictEqual(stageConcurrency("VERIFY"), 1); // invalid → default
+    delete process.env.VERIFY_CONCURRENCY;
+  }
+
+  // ─── assertWroteWithFallback contract (the recovery-turn gate) ──────────────
+  {
+    const { assertWroteWithFallback } = require("../utils/fs");
+    const fbDir = path.join(tmp, "fb");
+    fs.mkdirSync(fbDir, { recursive: true });
+    const okFile = path.join(fbDir, "ok.md");
+    fs.writeFileSync(okFile, "already written\n", "utf8");
+    // File exists → false (the caller must NOT send a recovery turn).
+    assert.strictEqual(await assertWroteWithFallback(okFile, "the test agent", "chat reply"), false);
+    assert.strictEqual(fs.readFileSync(okFile, "utf8"), "already written\n"); // untouched
+
+    // File missing + content → true, and the file is written from the content.
+    const missingFile = path.join(fbDir, "missing.md");
+    assert.strictEqual(
+      await assertWroteWithFallback(missingFile, "the test agent", "recovered content"),
+      true
+    );
+    assert.strictEqual(fs.readFileSync(missingFile, "utf8"), "recovered content");
+
+    // File missing + no content → true (recovery still needed), nothing written.
+    const noContentFile = path.join(fbDir, "nocontent.md");
+    assert.strictEqual(await assertWroteWithFallback(noContentFile, "the test agent", ""), true);
+    assert.ok(!fs.existsSync(noContentFile));
+
+    // Multiple files: all present → false; one missing → true (and written).
+    const a = path.join(fbDir, "a.md");
+    const b = path.join(fbDir, "b.md");
+    fs.writeFileSync(a, "a\n", "utf8");
+    assert.strictEqual(await assertWroteWithFallback([a, b], "the test agent", "content"), true);
+    assert.strictEqual(fs.readFileSync(b, "utf8"), "content");
+    assert.strictEqual(await assertWroteWithFallback([a, b], "the test agent", "content"), false);
+  }
 
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log("test-translate: all checks passed.");

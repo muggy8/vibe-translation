@@ -56,7 +56,7 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
+const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
 const {
   resolveSourceBundle,
   shouldProcessChunked,
@@ -853,6 +853,7 @@ async function glossary() {
     }
     if (lastGlossary) {
       await fs.copyFile(lastGlossary, finalGlossaryFile);
+      await writeProvenanceSidecar(finalGlossaryFile, lastGlossary);
       console.log(`\nCopied the final glossary to: ${finalGlossaryFile}`);
     } else {
       console.log("\nNo glossary snapshots found; nothing to copy to the series root.");
@@ -1545,15 +1546,16 @@ async function runQaLoop(ctx) {
         { label: `glossary-validate-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
       assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(
+      const validateFallbackUsed = await assertWroteWithFallback(
         validationOutputFile,
         "the validator agent",
         validateResult?.text
       );
 
-      // Recovery turn: if the validator replied in chat instead of writeFile,
-      // send a second turn asking it to write the report using writeFile.
-      if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+      // Recovery turn: ONLY when the report was actually missing after the
+      // fallback (the model replied in chat instead of writeFile, or produced
+      // no output) — never over a file the agent already wrote correctly.
+      if (validateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
         const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
         const recoveryPrompt = hasContent
           ? `You were asked to write the validation report to "glossary-validation.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +

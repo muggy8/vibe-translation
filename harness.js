@@ -546,6 +546,28 @@ function envRetry() {
 }
 
 /**
+ * Idle deadline for a single model call, in ms, from AI_CALL_DEADLINE_MS.
+ *
+ * All fetch timeouts are disabled (local servers can prefill for minutes), so
+ * without this a dead endpoint (OOM-killed container, dropped connection)
+ * hangs the run FOREVER — fatal for the un-monitored overnight runs this
+ * pipeline is built for. This is an IDLE timeout, not a total-time limit:
+ * it resets on every streamed event, so a healthy long call (huge prefill,
+ * long multi-step agent turn) is never aborted, while a hung connection
+ * (no events at all) is aborted after this many milliseconds of silence.
+ *
+ * 0 / invalid = disabled. Unset = the 60 min default above.
+ *
+ * @returns {number} The idle deadline in ms (0 = disabled).
+ */
+function envCallDeadlineMs() {
+  const raw = process.env.AI_CALL_DEADLINE_MS;
+  if (raw === undefined || raw === "") return 3600000;
+  const n = parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+/**
  * Thinking mode (AI_THINKING env, default ON).
  */
 function envThinking() {
@@ -868,7 +890,10 @@ function summarizeInput(input) {
  *     ends with result "error", or a descriptive error when the runaway
  *     generation guard trips.
  */
-async function consumeEvents(events, { label, tapsRef, logContext, signal }) {
+async function consumeEvents(
+  events,
+  { label, tapsRef, logContext, signal, idleDeadlineMs = 0, onIdleExpire = null }
+) {
   const result = {
     text: "",
     reasoning: "",
@@ -934,9 +959,30 @@ async function consumeEvents(events, { label, tapsRef, logContext, signal }) {
   }
 
   let guardTripped = false;
+
+  // Idle deadline (AI_CALL_DEADLINE_MS): when no event arrives for this long,
+  // call onIdleExpire() — the caller aborts the underlying signal, which
+  // errors the stream and unblocks the for-await below. The timer is reset
+  // on every event (an IDLE timeout, not a total-time limit), so a healthy
+  // long call (huge prefill, long multi-step agent turn) is never aborted
+  // while a hung connection (no events at all) is aborted after the
+  // deadline — without this, a dead local container would hang the run
+  // forever (all fetch timeouts are disabled).
+  let idleTimer = null;
+  const armIdleDeadline = () => {
+    if (!idleDeadlineMs || idleDeadlineMs <= 0 || !onIdleExpire) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      onIdleExpire();
+    }, idleDeadlineMs);
+  };
+  armIdleDeadline();
+
   try {
     for await (const event of events) {
       if (guardTripped) break;
+      armIdleDeadline();
       switch (event.type) {
         case "text.delta":
           result.text += event.text;
@@ -1018,6 +1064,13 @@ async function consumeEvents(events, { label, tapsRef, logContext, signal }) {
     // A guard-triggered abort surfaces as an AbortError from the stream;
     // swallow it and fall through to the descriptive guard error below.
     if (!guardTripped) throw err;
+  } finally {
+    // Clear the idle-deadline timer on every exit path (success, guard
+    // trip, stream error) so it can never fire after the call finished.
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
   }
 
   // Flush any remaining buffered log content and close the file descriptor.
@@ -1197,11 +1250,32 @@ async function runOneShot({
     const chat = new core.Conversation({ runner });
 
     let result;
+    // Idle deadline (AI_CALL_DEADLINE_MS): aborts this attempt when the
+    // endpoint makes no progress for this long — the only wall-clock bound
+    // on a model call (all fetch timeouts are disabled for local servers).
+    const idleMs = envCallDeadlineMs();
+    const idleCtrl = new AbortController();
     try {
       // Build logContext for streaming logs.
       const logContext = { type: "one-shot", label };
-      result = await consumeEvents(chat.send(apiMessages), { label, tapsRef, logContext });
+      result = await consumeEvents(
+        chat.send(apiMessages, { signal: idleCtrl.signal }),
+        {
+          label,
+          tapsRef,
+          logContext,
+          idleDeadlineMs: idleMs,
+          onIdleExpire: () => idleCtrl.abort(),
+        }
+      );
     } catch (streamError) {
+      if (idleCtrl.signal.aborted) {
+        throw new Error(
+          `${label}: the call made no progress for ${Math.round(idleMs / 60000)} min ` +
+            `and was aborted (AI_CALL_DEADLINE_MS=${idleMs}). The endpoint is likely ` +
+            `hung or the model container died — check .logs/ and re-run.`
+        );
+      }
       // The streaming path failed (API error, parse error, a server that
       // does not actually stream, ...). Fall back to one non-streaming
       // call, mirroring the old call-ai.js behaviour. If the fallback also
@@ -1216,6 +1290,10 @@ async function runOneShot({
         tapsRef: fallbackTapsRef,
         endpoint,
       });
+      // The non-streaming fallback has no events to reset the idle timer,
+      // so the same deadline applies as a plain (total) timeout.
+      const fbCtrl = new AbortController();
+      const fbTimer = idleMs > 0 ? setTimeout(() => fbCtrl.abort(), idleMs) : null;
       try {
         const completion = await generateText({
           model: fallbackModel,
@@ -1223,6 +1301,7 @@ async function runOneShot({
           messages: apiMessages,
           temperature: temperatureValue,
           maxOutputTokens: maxTokens,
+          abortSignal: fbCtrl.signal,
         });
         await fallbackTapsRef.current.jsonReasoningReady?.catch(() => {});
         result = {
@@ -1241,7 +1320,16 @@ async function runOneShot({
           firstTokenTime: null,
         };
       } catch {
+        if (fbCtrl.signal.aborted) {
+          throw new Error(
+            `${label}: the call made no progress for ${Math.round(idleMs / 60000)} min ` +
+              `and was aborted (AI_CALL_DEADLINE_MS=${idleMs}). The endpoint is likely ` +
+              `hung or the model container died — check .logs/ and re-run.`
+          );
+        }
         throw streamError;
+      } finally {
+        if (fbTimer) clearTimeout(fbTimer);
       }
     }
 
@@ -1349,14 +1437,39 @@ async function createAgentHandle({
       logLine(`[call-ai] CALL system="${systemPreview}" agent=${label} (turn)`);
       // Build logContext for streaming logs.
       const logContext = { type: "agent", agentName: name, turnNumber, label };
-      // AbortController for the runaway-generation guard: consumeEvents
-      // calls signal.abort() when the model produces excessive text without
-      // tool calls, which cancels the underlying fetch via session.send.
+      // AbortController for the runaway-generation guard AND the idle
+      // deadline: consumeEvents calls signal.abort() when the model produces
+      // excessive text without tool calls, and after AI_CALL_DEADLINE_MS of
+      // silence — both cancel the underlying fetch via session.send.
       const abortCtrl = new AbortController();
-      const result = await consumeEvents(
-        session.send(input, { signal: abortCtrl.signal }),
-        { label, tapsRef, logContext, signal: abortCtrl.signal }
-      );
+      let idleFired = false;
+      const idleMs = envCallDeadlineMs();
+      let result;
+      try {
+        result = await consumeEvents(
+          session.send(input, { signal: abortCtrl.signal }),
+          {
+            label,
+            tapsRef,
+            logContext,
+            signal: abortCtrl.signal,
+            idleDeadlineMs: idleMs,
+            onIdleExpire: () => {
+              idleFired = true;
+              abortCtrl.abort();
+            },
+          }
+        );
+      } catch (err) {
+        if (idleFired) {
+          throw new Error(
+            `${label}: the agent turn made no progress for ${Math.round(idleMs / 60000)} min ` +
+              `and was aborted (AI_CALL_DEADLINE_MS=${idleMs}). The endpoint is likely ` +
+              `hung or the model container died — check .logs/ and re-run.`
+          );
+        }
+        throw err;
+      }
       logResultLine(result, label);
       if (result.result === "max_steps") {
         logLine(
@@ -1445,6 +1558,14 @@ async function assertModelServing({
     throw new Error(`${label}: model endpoint ${url} returned a non-JSON body.`);
   }
   const ids = (payload?.data || []).map((m) => m?.id).filter(Boolean);
+  // Audit the raw /v1/models answer in the run log: on local multi-model
+  // setups every container advertises the same alias ("local"), so this is
+  // the only trace of WHICH models the endpoint actually lists when a stage
+  // runs (and of a hook that forgot to switch the container).
+  logLine(
+    `[endpoint] ${label}: ${base} /v1/models lists [${ids.join(", ") || "(none)"}] ` +
+      `(expected model: "${expected || "(any)"}")`
+  );
   if (!expected) return; // no expected model configured — reachability only
   if (!ids.includes(expected)) {
     throw new Error(

@@ -60,7 +60,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
+const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
 const { writeVolumeHandoff } = require("./utils/handoff");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
@@ -858,6 +858,7 @@ async function jumpInWiki() {
     }
     if (lastSharedWiki) {
       await fs.copyFile(lastSharedWiki, finalSharedWikiFile);
+      await writeProvenanceSidecar(finalSharedWikiFile, lastSharedWiki);
       console.log(`\nCopied the final shared wiki to: ${finalSharedWikiFile}`);
     } else {
       console.log("\nNo shared wiki snapshots found; nothing to copy to the series root.");
@@ -1315,15 +1316,15 @@ async function runQaLoop(ctx, author) {
         { label: `jump-in-wiki-validate-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
       assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(
+      const wikiValidateFallbackUsed = await assertWroteWithFallback(
         validationOutputFile,
         "the validator agent",
         validateResult?.text
       );
 
-      // Recovery turn: if the validator replied in chat instead of writeFile,
-      // send a second turn asking it to write the report using writeFile.
-      if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+      // Recovery turn: ONLY when the report was actually missing after the
+      // fallback — never over a file the agent already wrote correctly.
+      if (wikiValidateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
         const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
         const recoveryPrompt = hasContent
           ? `You were asked to write the validation report to "jump-in-wiki-validation-NN.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +

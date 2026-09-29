@@ -41,7 +41,7 @@ const { ON_VOLUME_ERROR, validateRequiredEnv } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { resolveSourceBundle } = require("./utils/source");
 const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("./utils/prompt");
-const { sha256, roleEndpoint, loadVolumeReferences } = require("./utils/translate");
+const { sha256, roleEndpoint, loadVolumeReferences, runWithConcurrency, stageConcurrency } = require("./utils/translate");
 const { chapterArtifactNames } = require("./translate");
 
 // ─── Paths & config ──────────────────────────────────────────────────────────
@@ -57,6 +57,9 @@ const VERIFICATION_REPORT = "translation-verification.md";
 
 /** Verification is default-ON (it is the QA chain with retranslate). */
 const verifyEnabled = process.env.VERIFY_TRANSLATE_ENABLED !== "false";
+/** Chapter concurrency within a volume (opt-in; default 1 = serial — the
+ *  local hardware runs one inference at a time). */
+const verifyConcurrency = stageConcurrency("VERIFY");
 /** Score (0–100) at or above which a chapter passes verification. */
 const passingScore = Math.min(100, Math.max(0, parseInt(process.env.VERIFY_PASSING_SCORE, 10) || 70));
 /** The verify model's thinking level (Qwen3-style dialect). */
@@ -130,7 +133,10 @@ async function processVerifyVolume(ctx) {
   let failed = 0;
   let noDraft = 0;
 
-  for (const seg of bundle.segments) {
+  // Chapters are INDEPENDENT (each is verified against its own source +
+  // draft), so they can run in parallel when VERIFY_CONCURRENCY > 1. Rows are
+  // stored by index to keep the report in reading order.
+  await runWithConcurrency(bundle.segments, verifyConcurrency, async (seg, idx) => {
     const { draftFile } = chapterArtifactNames(seg.id);
     const chapterPath = path.join(volumeDir, seg.file);
     const draftPath = path.join(volumeDir, draftFile);
@@ -139,8 +145,8 @@ async function processVerifyVolume(ctx) {
         `  Volume ${volume.installmentNumber} ${seg.id}: no draft (${draftFile}) — run the translate task first.`
       );
       noDraft += 1;
-      rows.push({ id: seg.id, title: seg.title, status: "no draft (run translate first)", score: null, pass: null });
-      continue;
+      rows[idx] = { id: seg.id, title: seg.title, status: "no draft (run translate first)", score: null, pass: null };
+      return;
     }
     const sourceText = await fs.readFile(chapterPath, "utf8");
     const draft = await fs.readFile(draftPath, "utf8");
@@ -159,15 +165,15 @@ async function processVerifyVolume(ctx) {
       skipped += 1;
       if (entry.pass) passed += 1;
       else failed += 1;
-      rows.push({
+      rows[idx] = {
         id: seg.id,
         title: seg.title,
         status: "skipped (up to date)",
         score: entry.score,
         pass: entry.pass,
         findings: entry.findings,
-      });
-      continue;
+      };
+      return;
     }
 
     const values = {
@@ -198,7 +204,7 @@ async function processVerifyVolume(ctx) {
         ]
       );
       console.log(`  Volume ${volume.installmentNumber} ${seg.id}: --dry-run prompt dump → ${file}`);
-      continue;
+      return;
     }
 
     console.log(
@@ -234,8 +240,8 @@ async function processVerifyVolume(ctx) {
     console.log(
       `  Volume ${volume.installmentNumber} ${seg.id}: score ${score === null ? "n/a (unparseable — FAIL)" : score + "/100"} → ${pass ? "PASS" : "FAIL"}.`
     );
-    rows.push({ id: seg.id, title: seg.title, status: "verified", score, pass, findings });
-  }
+    rows[idx] = { id: seg.id, title: seg.title, status: "verified", score, pass, findings };
+  });
 
   await fs.writeFile(
     path.join(volumeDir, VERIFICATION_REPORT),
@@ -353,8 +359,10 @@ async function verifyTranslate() {
   }
 
   console.log(
-    `[verify-translate] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl}; ` +
-      `passing score ${passingScore}; thinking=${verifyThinking ? verifyThinkingLevel : "off"}.`
+    `[verify-translate] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl} ` +
+      `(model from ${endpoint.modelSource}, base from ${endpoint.baseUrlSource}); ` +
+      `passing score ${passingScore}; thinking=${verifyThinking ? verifyThinkingLevel : "off"}; ` +
+      `concurrency=${verifyConcurrency}.`
   );
 
   const failedVolumes = [];

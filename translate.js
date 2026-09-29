@@ -65,6 +65,7 @@ const {
   saveTranslationState,
   roleEndpoint,
   loadVolumeReferences,
+  stripContinuityOverlap,
 } = require("./utils/translate");
 
 // ─── Paths & config ──────────────────────────────────────────────────────────
@@ -177,6 +178,10 @@ async function processTranslateVolume(ctx) {
   // chapter's first part).
   let prevChapterTail = "";
 
+  // Chapters are processed SEQUENTIALLY on purpose: each chapter's prompt
+  // carries the previous chapter's ending (prevChapterTail) as continuity
+  // context, so chapter N+1 depends on chapter N's output. (The independent
+  // tasks — verify / retranslate / polish — use runWithConcurrency instead.)
   for (const seg of bundle.segments) {
     const { draftFile, polishedFile } = chapterArtifactNames(seg.id);
     const chapterPath = path.join(volumeDir, seg.file);
@@ -277,8 +282,12 @@ async function processTranslateVolume(ctx) {
             `Check the run log: .logs/`
         );
       }
-      partTexts.push(clean);
-      continuity = tailOf(clean, continuityChars);
+      // Continuity dedup: when the model repeats the previous part's ending
+      // (the continuity tail it was given) at the start of its reply, strip
+      // the duplicated prefix so the merged draft has no repeated passage.
+      const deduped = i > 0 ? stripContinuityOverlap(partTexts[i - 1], clean) : clean;
+      partTexts.push(deduped);
+      continuity = tailOf(deduped, continuityChars);
     }
     const draft = partTexts.join("\n\n");
 
@@ -501,7 +510,8 @@ async function translate() {
   }
 
   console.log(
-    `[translate] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl}; ` +
+    `[translate] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl} ` +
+      `(model from ${endpoint.modelSource}, base from ${endpoint.baseUrlSource}); ` +
       `thinking=${thinkingMode}; chunk=${chunkChars} chars; continuity=${continuityChars} chars.`
   );
 

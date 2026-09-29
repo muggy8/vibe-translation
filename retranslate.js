@@ -56,6 +56,9 @@ const {
   saveTranslationState,
   roleEndpoint,
   loadVolumeReferences,
+  stripContinuityOverlap,
+  runWithConcurrency,
+  stageConcurrency,
 } = require("./utils/translate");
 const {
   chapterArtifactNames,
@@ -76,6 +79,9 @@ const translateTemplateFile = path.join(clientDir, "user-prompts", "translate.md
 
 /** Verification is default-ON — retranslate is its correction pass. */
 const verifyEnabled = process.env.VERIFY_TRANSLATE_ENABLED !== "false";
+/** Chapter concurrency within a volume (opt-in; default 1 = serial — the
+ *  local hardware runs one inference at a time). */
+const retranslateConcurrency = stageConcurrency("RETRANSLATE");
 /** Findings injected into the retranslate prompt (bounded — they are a
  *  numbered correction task, not a document to re-read). */
 const RETRANSLATE_FINDINGS_CHARS = 3000;
@@ -111,7 +117,10 @@ async function processRetranslateVolume(ctx) {
   let skipped = 0;
   let none = 0;
 
-  for (const seg of bundle.segments) {
+  // Chapters are INDEPENDENT here (each is retranslated from its own source
+  // + findings — no cross-chapter chaining), so they can run in parallel
+  // when RETRANSLATE_CONCURRENCY > 1.
+  await runWithConcurrency(bundle.segments, retranslateConcurrency, async (seg) => {
     const { draftFile, polishedFile } = chapterArtifactNames(seg.id);
     const chapterPath = path.join(volumeDir, seg.file);
     const draftPath = path.join(volumeDir, draftFile);
@@ -120,18 +129,18 @@ async function processRetranslateVolume(ctx) {
     // Nothing to do for this chapter: no verification, or it passed.
     if (!vEntry || typeof vEntry.pass !== "boolean") {
       none += 1;
-      continue;
+      return;
     }
     if (vEntry.pass) {
       skipped += 1;
-      continue;
+      return;
     }
 
     // The verification must cover the CURRENT draft — a stale entry means
     // the draft changed since (re-verify first, don't guess).
     if (!(await fileExists(draftPath))) {
       none += 1;
-      continue;
+      return;
     }
     const sourceText = await fs.readFile(chapterPath, "utf8");
     const draft = await fs.readFile(draftPath, "utf8");
@@ -143,7 +152,7 @@ async function processRetranslateVolume(ctx) {
           `skipping (run verify-translate first).`
       );
       none += 1;
-      continue;
+      return;
     }
 
     const findings = (vEntry.findings || "").slice(0, RETRANSLATE_FINDINGS_CHARS);
@@ -159,7 +168,7 @@ async function processRetranslateVolume(ctx) {
         `  Volume ${volume.installmentNumber} ${seg.id}: already retranslated for these findings — skipping.`
       );
       skipped += 1;
-      continue;
+      return;
     }
 
     const findingsTask =
@@ -199,7 +208,7 @@ async function processRetranslateVolume(ctx) {
         ]
       );
       console.log(`  Volume ${volume.installmentNumber} ${seg.id}: --dry-run prompt dump → ${file}`);
-      continue;
+      return;
     }
 
     const partTexts = [];
@@ -240,8 +249,12 @@ async function processRetranslateVolume(ctx) {
             `part ${i + 1}. Check .logs/ and re-run.`
         );
       }
-      partTexts.push(cleanPart);
-      continuity = tailOf(cleanPart, continuityChars);
+      // Continuity dedup (same backstop as the translate stage): when the
+      // model repeats the previous part's ending at the start of its reply,
+      // strip the duplicated prefix from the merged draft.
+      const deduped = i > 0 ? stripContinuityOverlap(partTexts[i - 1], cleanPart) : cleanPart;
+      partTexts.push(deduped);
+      continuity = tailOf(deduped, continuityChars);
     }
     const clean = partTexts.join("\n\n");
     const qa = checkTranslationQa({ sourceText, draftText: clean, terms: refs.terms });
@@ -269,7 +282,7 @@ async function processRetranslateVolume(ctx) {
     if (qa.warnings.length > 0) {
       console.warn(`  Volume ${volume.installmentNumber} ${seg.id}: QA warning: ${qa.warnings.join("; ")}`);
     }
-  }
+  });
 
   // Re-merge the volume (drafts changed; the stale polished files were dropped).
   const mergedText = await mergeVolumeTranslationFiles(volumeDir, bundle, state);
@@ -340,8 +353,9 @@ async function retranslate() {
   }
 
   console.log(
-    `[retranslate] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl}; ` +
-      `thinking=${thinkingMode}.`
+    `[retranslate] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl} ` +
+      `(model from ${endpoint.modelSource}, base from ${endpoint.baseUrlSource}); ` +
+      `thinking=${thinkingMode}; concurrency=${retranslateConcurrency}.`
   );
 
   const failedVolumes = [];

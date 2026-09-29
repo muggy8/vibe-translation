@@ -63,6 +63,8 @@ const {
   saveTranslationState,
   roleEndpoint,
   loadVolumeReferences,
+  runWithConcurrency,
+  stageConcurrency,
 } = require("./utils/translate");
 const { chapterArtifactNames, mergeVolumeTranslationFiles } = require("./translate");
 const { glossaryBlock, loadVerificationSidecar, findingsOf } = require("./verify-translate");
@@ -104,6 +106,9 @@ const polishMaxRounds = (() => {
 /** Findings injected into the re-polish prompt — keep them bounded (a
  *  numbered correction task, not a document to re-read). */
 const POLISH_FINDINGS_MAX_CHARS = 3000;
+/** Chapter concurrency within a volume (opt-in; default 1 = serial — the
+ *  local hardware runs one inference at a time). */
+const polishConcurrency = stageConcurrency("POLISH");
 
 // ─── Per-volume processing ──────────────────────────────────────────────────
 
@@ -147,7 +152,10 @@ async function processPolishVolume(ctx) {
   let rejected = 0;
   let noDraft = 0;
 
-  for (const seg of bundle.segments) {
+  // Chapters are INDEPENDENT (each is polished from its own draft +
+  // references), so they can run in parallel when POLISH_CONCURRENCY > 1.
+  // Rows are stored by index to keep the report in reading order.
+  await runWithConcurrency(bundle.segments, polishConcurrency, async (seg, idx) => {
     const { draftFile, polishedFile } = chapterArtifactNames(seg.id);
     const chapterPath = path.join(volumeDir, seg.file);
     const draftPath = path.join(volumeDir, draftFile);
@@ -155,8 +163,8 @@ async function processPolishVolume(ctx) {
     if (!(await fileExists(draftPath))) {
       console.warn(`  Volume ${volume.installmentNumber} ${seg.id}: no draft — run translate first.`);
       noDraft += 1;
-      rows.push({ id: seg.id, title: seg.title, status: "no draft", ok: true, score: null, warnings: [] });
-      continue;
+      rows[idx] = { id: seg.id, title: seg.title, status: "no draft", ok: true, score: null, warnings: [] };
+      return;
     }
     const sourceText = await fs.readFile(chapterPath, "utf8");
     const draft = await fs.readFile(draftPath, "utf8");
@@ -173,8 +181,8 @@ async function processPolishVolume(ctx) {
     if (upToDate) {
       console.log(`  Volume ${volume.installmentNumber} ${seg.id}: polish up to date — skipping.`);
       skipped += 1;
-      rows.push({ id: seg.id, title: seg.title, status: "skipped (up to date)", ok: true, score: null, warnings: [] });
-      continue;
+      rows[idx] = { id: seg.id, title: seg.title, status: "skipped (up to date)", ok: true, score: null, warnings: [] };
+      return;
     }
 
     // A polished file produced from the CURRENT draft but never drift-verified
@@ -235,7 +243,7 @@ async function processPolishVolume(ctx) {
         entries
       );
       console.log(`  Volume ${volume.installmentNumber} ${seg.id}: --dry-run prompt dump → ${file}`);
-      continue;
+      return;
     }
 
     // The guard + drift-check loop: up to polishMaxRounds attempts per
@@ -392,7 +400,7 @@ async function processPolishVolume(ctx) {
         "utf8"
       );
       polished += 1;
-      rows.push({
+      rows[idx] = {
         id: seg.id,
         title: seg.title,
         status: `polished (attempt ${attempts}, drift ${
@@ -401,13 +409,13 @@ async function processPolishVolume(ctx) {
         ok: lastQa ? lastQa.ok : true,
         score: lastScore,
         warnings: lastQa ? lastQa.warnings : [],
-      });
+      };
       if (lastQa && lastQa.warnings.length > 0) {
         console.warn(
           `  Volume ${volume.installmentNumber} ${seg.id}: QA warning: ${lastQa.warnings.join("; ")}`
         );
       }
-      continue;
+      return;
     }
 
     // Rejected: the draft is kept. Drop any polished file for the current
@@ -446,15 +454,15 @@ async function processPolishVolume(ctx) {
       `  Volume ${volume.installmentNumber} ${seg.id}: polish REJECTED after ${attempts} attempt(s) — ` +
         `keeping the draft (findings saved; the next run re-polishes with them, or use --force for a fresh attempt).`
     );
-    rows.push({
+    rows[idx] = {
       id: seg.id,
       title: seg.title,
       status: `polish rejected after ${attempts} attempt(s) — draft kept`,
       ok: true,
       score: lastScore,
       warnings: lastQa ? lastQa.warnings : [],
-    });
-  }
+    };
+  });
 
   // Re-merge the volume (the polished text wins now).
   const mergedText = await mergeVolumeTranslationFiles(volumeDir, bundle, state);
@@ -541,10 +549,11 @@ async function polish() {
   }
 
   console.log(
-    `[polish] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl}; ` +
+    `[polish] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl} ` +
+      `(model from ${endpoint.modelSource}, base from ${endpoint.baseUrlSource}); ` +
       `thinking=${polishThinking ? polishThinkingLevel : "off"}; ` +
       `drift inspector ${polishVerifyEnabled ? `ON (PASS ≥ ${polishVerifyPassingScore}/100)` : "OFF (deterministic guard only)"}; ` +
-      `max ${polishMaxRounds} attempt(s)/chapter.`
+      `max ${polishMaxRounds} attempt(s)/chapter; concurrency=${polishConcurrency}.`
   );
 
   const failedVolumes = [];

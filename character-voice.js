@@ -33,7 +33,7 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback } = require("./utils/fs");
+const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
 const {
   resolveSourceBundle,
   shouldProcessChunked,
@@ -452,7 +452,7 @@ async function characterVoice() {
       const candidate = path.join(seriesDir, sorted[i], "character-voice.md");
       if (await fileExists(candidate)) { lastVoice = candidate; break; }
     }
-    if (lastVoice) { await fs.copyFile(lastVoice, finalVoiceFile); console.log(`\nCopied the final character voice reference to: ${finalVoiceFile}`); }
+    if (lastVoice) { await fs.copyFile(lastVoice, finalVoiceFile); await writeProvenanceSidecar(finalVoiceFile, lastVoice); console.log(`\nCopied the final character voice reference to: ${finalVoiceFile}`); }
     else { console.log("\nNo character voice snapshots found; nothing to copy."); }
   }
 }
@@ -562,8 +562,10 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
   try {
     const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults, seg, si), { label: `character-voice-compile-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
     assertRealToolCalls(compileResult, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
-    await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, compileResult?.text);
-    if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+    const compileFallbackUsed = await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, compileResult?.text);
+    // Recovery turn: ONLY when a file was actually missing after the fallback —
+    // never over files the agent already wrote correctly.
+    if (compileFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = compileResult?.text && compileResult.text.trim().length > 0;
       const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now with the exact same content.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
       const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `character-voice-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
@@ -590,8 +592,10 @@ async function runQaLoop(ctx) {
     try {
       const validateResult = await validator.sendTurn(buildValidatorTurnPrompt(ctx), { label: `character-voice-validate-${values.INSTALLMENT_NUMBER}-${iteration}` });
       assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(validationOutputFile, "the validator agent", validateResult?.text);
-      if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+      const validateFallbackUsed = await assertWroteWithFallback(validationOutputFile, "the validator agent", validateResult?.text);
+      // Recovery turn: ONLY when the report was actually missing after the
+      // fallback — never over a file the agent already wrote correctly.
+      if (validateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
         const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
         const recoveryPrompt = hasContent ? `You were asked to write "character-voice-validation.md" using writeFile, but you replied in chat. Please rewrite the report using writeFile now with the same content.` : `You produced no output. Please write the validation report to "character-voice-validation.md" using writeFile now.`;
         const recoveryResult = await validator.sendTurn(recoveryPrompt, { label: `character-voice-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` });
@@ -648,8 +652,10 @@ async function runFeedback(ctx) {
   try {
     const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx), { label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}` });
     assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
-    await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)", feedbackResult?.text);
-    if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+    const feedbackFallbackUsed = await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)", feedbackResult?.text);
+    // Recovery turn: ONLY when a file was actually missing after the fallback —
+    // never over files the agent already wrote correctly.
+    if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
       const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
       const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}` });
@@ -758,8 +764,10 @@ async function runChunkedQaLoop(ctx) {
       try {
         const validateResult = await validator.sendTurn(buildValidatorTurnPrompt(ctx, segment, si), { label: `character-voice-validate-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` });
         assertRealToolCalls(validateResult, `the validator agent (chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(partialFile, `the validator agent (chapter ${segment.id})`, validateResult?.text);
-        if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+        const validateFallbackUsed = await assertWroteWithFallback(partialFile, `the validator agent (chapter ${segment.id})`, validateResult?.text);
+        // Recovery turn: ONLY when the partial was actually missing after the
+        // fallback — never over a file the agent already wrote correctly.
+        if (validateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
           const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
           const recoveryPrompt = hasContent ? `You were asked to write the validation report to "${path.basename(partialFile)}" using writeFile, but you replied with the content in your chat message instead. Please rewrite the complete report using writeFile now.` : `You produced no output. Please read the materials and write the complete validation report to "${path.basename(partialFile)}" using writeFile now.`;
           const recoveryResult = await validator.sendTurn(recoveryPrompt, { label: `character-voice-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` });
@@ -797,8 +805,10 @@ async function runChunkedQaLoop(ctx) {
       try {
         const feedbackResult = await feedbackAuthor.sendTurn(buildFeedbackTurnPrompt(ctx, segment, si), { label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` });
         assertRealToolCalls(feedbackResult, `the author agent (feedback pass, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (feedback pass, chapter ${segment.id})`, feedbackResult?.text);
-        if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+        const feedbackFallbackUsed = await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (feedback pass, chapter ${segment.id})`, feedbackResult?.text);
+        // Recovery turn: ONLY when a file was actually missing after the
+        // fallback — never over files the agent already wrote correctly.
+        if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
           const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
           const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
           const recoveryResult = await feedbackAuthor.sendTurn(recoveryPrompt, { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` });

@@ -520,6 +520,101 @@ function qaMaxRounds() {
   return Number.isFinite(parsed) ? Math.max(1, parsed) : 3;
 }
 
+// ─── Part-continuity & concurrency helpers ──────────────────────────────────
+
+/**
+ * Strip the prefix of `nextPart` that duplicates the tail of `prevPart`.
+ *
+ * When a chapter part is translated with the previous part's ending as
+ * continuity context, the model sometimes REPEATS that ending at the start
+ * of its reply (continuation behaviour), which would leave a duplicated
+ * passage in the merged draft. This is the deterministic backstop: if the
+ * new part starts with at least minOverlap characters that exactly match
+ * the end of the previous part, that overlap is cut from the new part.
+ * Only exact matches are stripped (never fuzzy) — anything else is left to
+ * the QA checks, so a legitimate re-phrase can never be mangled.
+ *
+ * @param {string} prevPart - The previous part's (cleaned) text.
+ * @param {string} nextPart - The new part's (cleaned) text.
+ * @param {number} [minOverlap=50] - Minimum duplicated characters for a
+ *   strip to happen (shorter coincidental matches are kept).
+ * @returns {string} The new part with the duplicated prefix removed.
+ */
+function stripContinuityOverlap(prevPart, nextPart, minOverlap = 50) {
+  if (!prevPart || !nextPart) return nextPart || "";
+  const prev = prevPart.replace(/\s+$/, "");
+  const next = nextPart;
+  const maxLen = Math.min(prev.length, next.length, 4000);
+  for (let len = maxLen; len >= minOverlap; len--) {
+    if (next.startsWith(prev.slice(-len))) {
+      return next.slice(len).replace(/^\s+/, "");
+    }
+  }
+  return next;
+}
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight (a bounded worker
+ * pool). `fn(item, index)` receives the item's index, so callers can store
+ * results in input order regardless of completion order.
+ *
+ * Used by the per-chapter loops of the translation stage's INDEPENDENT
+ * tasks (verify / retranslate / polish). `limit` 1 is the default — the
+ * local hardware runs one inference at a time, so concurrency is opt-in —
+ * and with limit 1 the behaviour is exactly the old serial loop. When fn
+ * rejects, no further items are started (already-running ones finish), and
+ * the first error is rethrown.
+ *
+ * @param {Array<*>} items - The items to process.
+ * @param {number} limit - Max concurrent fn calls (minimum 1).
+ * @param {(item: *, index: number) => Promise<*>} fn - The per-item work.
+ * @returns {Promise<Array<*>} The fn results in input order.
+ */
+async function runWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  let firstError = null;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length || 1)) },
+    async () => {
+      for (;;) {
+        if (firstError) return;
+        const i = next;
+        next += 1;
+        if (i >= items.length) return;
+        try {
+          results[i] = await fn(items[i], i);
+        } catch (err) {
+          if (!firstError) firstError = err;
+          return;
+        }
+      }
+    }
+  );
+  await Promise.all(workers);
+  if (firstError) throw firstError;
+  return results;
+}
+
+/**
+ * Per-stage chapter concurrency knob: `<PREFIX>_CONCURRENCY`
+ * (VERIFY_CONCURRENCY / RETRANSLATE_CONCURRENCY / POLISH_CONCURRENCY) —
+ * the number of chapters processed in parallel within one volume.
+ * Defaults to 1 (serial) because the local hardware runs one inference at
+ * a time; raise it when the endpoint can serve parallel requests.
+ *
+ * The `translate` task deliberately stays serial: each chapter's prompt
+ * carries the previous chapter's ending as continuity context, so its
+ * chapters are chained and cannot run in parallel.
+ *
+ * @param {"VERIFY"|"RETRANSLATE"|"POLISH"} prefix - The env prefix.
+ * @returns {number} The concurrency limit (minimum 1).
+ */
+function stageConcurrency(prefix) {
+  const n = parseInt(process.env[`${prefix}_CONCURRENCY`], 10);
+  return Number.isInteger(n) && n >= 1 ? n : 1;
+}
+
 module.exports = {
   sha256,
   splitChapter,
@@ -540,6 +635,9 @@ module.exports = {
   loadVolumeReferences,
   qaLoopDecision,
   qaMaxRounds,
+  stripContinuityOverlap,
+  runWithConcurrency,
+  stageConcurrency,
 };
 
 // ─── Role endpoint & volume references (shared by the four tasks) ───────────
@@ -553,10 +651,25 @@ module.exports = {
  * @returns {{baseUrl: string, apiKey: string|undefined, model: string}}
  */
 function roleEndpoint(prefix) {
+  const baseUrl =
+    process.env[`${prefix}_BASE_URL`] || process.env.AI_BASE_URL || "https://api.openai.com/v1";
+  const model = process.env[`${prefix}_MODEL`] || process.env.AI_MODEL || "local";
   return {
-    baseUrl: process.env[`${prefix}_BASE_URL`] || process.env.AI_BASE_URL || "https://api.openai.com/v1",
+    baseUrl,
+    // Which env var the value came from — logged at stage start so a run's
+    // log shows whether a role used its own endpoint or fell back to AI_*.
+    baseUrlSource: process.env[`${prefix}_BASE_URL`]
+      ? `${prefix}_BASE_URL`
+      : process.env.AI_BASE_URL
+        ? "AI_BASE_URL (fallback)"
+        : "(built-in default)",
     apiKey: process.env[`${prefix}_API_KEY`] || process.env.AI_API_KEY,
-    model: process.env[`${prefix}_MODEL`] || process.env.AI_MODEL || "local",
+    model,
+    modelSource: process.env[`${prefix}_MODEL`]
+      ? `${prefix}_MODEL`
+      : process.env.AI_MODEL
+        ? "AI_MODEL (fallback)"
+        : "(built-in default)",
   };
 }
 
@@ -580,8 +693,9 @@ function roleEndpoint(prefix) {
  *
  * @param {string} volumeDir - Absolute path to the volume folder.
  * @returns {Promise<{glossaryText: string, terms: Array<{term: string, rendering: string, section: string}>, terminologyLines: string[], styleRules: string, background: string, voiceNotes: string, contextHash: string}>}
- *   `contextHash` is the sha256 of (glossary + styleRules + background) —
- *   the idempotency key: regenerating any of these invalidates the drafts.
+ *   `contextHash` is the sha256 of (glossary + styleRules + background +
+ *   voiceNotes) — the idempotency key: regenerating any of these
+ *   invalidates the drafts.
  */
 async function loadVolumeReferences(volumeDir) {
   const read = async (name) => {
@@ -626,7 +740,7 @@ async function loadVolumeReferences(volumeDir) {
     : "";
   const background = [sharedPart, wikiPart, povPart].filter(Boolean).join("\n\n");
   const voiceNotes = voiceText.trim().slice(0, 4000);
-  const contextHash = sha256(`${glossaryText}\n---\n${styleRules}\n---\n${background}`);
+  const contextHash = sha256(`${glossaryText}\n---\n${styleRules}\n---\n${background}\n---\n${voiceNotes}`);
   return {
     glossaryText,
     terms,

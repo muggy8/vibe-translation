@@ -42,7 +42,7 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
-const { fileExists, assertWroteWithFallback } = require("./utils/fs");
+const { fileExists, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
 const {
   resolveSourceBundle,
   shouldProcessChunked,
@@ -442,7 +442,7 @@ async function styleGuide() {
       const candidate = path.join(seriesDir, sorted[i], "style-guide.md");
       if (await fileExists(candidate)) { lastStyle = candidate; break; }
     }
-    if (lastStyle) { await fs.copyFile(lastStyle, finalStyleFile); console.log(`\nCopied the final style guide to: ${finalStyleFile}`); }
+    if (lastStyle) { await fs.copyFile(lastStyle, finalStyleFile); await writeProvenanceSidecar(finalStyleFile, lastStyle); console.log(`\nCopied the final style guide to: ${finalStyleFile}`); }
     else { console.log("\nNo style guide snapshots found; nothing to copy."); }
   }
 }
@@ -553,8 +553,10 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
   try {
     const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults, seg, si), { label: `style-guide-compile-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
     assertRealToolCalls(compileResult, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
-    await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, compileResult?.text);
-    if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+    const compileFallbackUsed = await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, compileResult?.text);
+    // Recovery turn: ONLY when the file was actually missing after the
+    // fallback — never over a file the agent already wrote correctly.
+    if (compileFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = compileResult?.text && compileResult.text.trim().length > 0;
       const recoveryPrompt = hasContent ? `You were asked to write "style-guide.md" using writeFile, but you replied in chat. Please rewrite the file using writeFile now with the exact same content.` : `You produced no output. Please read the materials and write "style-guide.md" using writeFile now.`;
       const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `style-guide-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
@@ -582,8 +584,10 @@ async function runQaLoop(ctx) {
     try {
       const validateResult = await validator.sendTurn(buildValidatorTurnPrompt(ctx), { label: `style-guide-validate-${values.INSTALLMENT_NUMBER}-${iteration}` });
       assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(validationOutputFile, "the validator agent", validateResult?.text);
-      if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+      const validateFallbackUsed = await assertWroteWithFallback(validationOutputFile, "the validator agent", validateResult?.text);
+      // Recovery turn: ONLY when the report was actually missing after the
+      // fallback — never over a file the agent already wrote correctly.
+      if (validateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
         const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
         const recoveryPrompt = hasContent ? `You were asked to write "style-guide-validation.md" using writeFile, but you replied in chat. Please rewrite the report using writeFile now with the same content.` : `You produced no output. Please write the validation report to "style-guide-validation.md" using writeFile now.`;
         const recoveryResult = await validator.sendTurn(recoveryPrompt, { label: `style-guide-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` });
@@ -645,8 +649,10 @@ async function runFeedback(ctx, seg = null, si = null) {
   try {
     const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx, seg, si), { label: `style-guide-feedback-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
     assertRealToolCalls(feedbackResult, `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
-    await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`, feedbackResult?.text);
-    if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+    const feedbackFallbackUsed = await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`, feedbackResult?.text);
+    // Recovery turn: ONLY when the file was actually missing after the
+    // fallback — never over a file the agent already wrote correctly.
+    if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
       const recoveryPrompt = hasContent ? `You were asked to write "style-guide.md" using writeFile, but you replied in chat. Please rewrite the file using writeFile now.` : `You produced no output. Please read the materials and write "style-guide.md" using writeFile now.`;
       const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `style-guide-feedback-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
@@ -754,8 +760,10 @@ async function runChunkedQaLoop(ctx) {
       try {
         const validateResult = await validator.sendTurn(buildValidatorTurnPrompt(ctx, segment, si), { label: `style-guide-validate-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` });
         assertRealToolCalls(validateResult, `the validator agent (chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(partialFile, `the validator agent (chapter ${segment.id})`, validateResult?.text);
-        if (process.env.AGENT_RECOVERY_ENABLED !== "false") {
+        const validateFallbackUsed = await assertWroteWithFallback(partialFile, `the validator agent (chapter ${segment.id})`, validateResult?.text);
+        // Recovery turn: ONLY when the partial was actually missing after the
+        // fallback — never over a file the agent already wrote correctly.
+        if (validateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
           const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
           const recoveryPrompt = hasContent ? `You were asked to write the validation report to "${path.basename(partialFile)}" using writeFile, but you replied with the content in your chat message instead. Please rewrite the complete report using writeFile now.` : `You produced no output. Please read the materials and write the complete validation report to "${path.basename(partialFile)}" using writeFile now.`;
           const recoveryResult = await validator.sendTurn(recoveryPrompt, { label: `style-guide-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` });
