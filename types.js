@@ -279,6 +279,23 @@
  * @property {boolean} retranslated — A retranslate pass has run for the findings.
  * @property {string|null} findingsHash — sha256 of the findings the last retranslate used.
  * @property {string|null} polishedDraftHash — sha256 of the draft the last polish pass polished (null = unpolished).
+ * @property {string|null} polishVerifiedDraftHash — sha256 of the draft the source-aware drift inspector approved (null = unverified).
+ * @property {number|null} polishScore — Last drift-inspector score (0–100; null = unparseable, or inspector disabled).
+ * @property {string|null} polishFindings — The last rejected attempt's findings (seeds the next run's re-polish).
+ * @property {string|null} polishFindingsHash — sha256 of polishFindings (null when none).
+ */
+
+/**
+ * @typedef {Object} PolishVerificationEntry
+ * One chapter's entry in a volume's polish-verification.json sidecar (the
+ * source-aware drift inspector's verdict — the polish pass's semantic QA;
+ * the polisher itself sees no source text).
+ * @property {string} sourceHash — sha256 of the chapter source at check time.
+ * @property {string} draftHash — sha256 of the draft the polished text was produced from.
+ * @property {number|null} score — 0–100 (null = unparseable verdict = FAIL, fail-closed; or inspector disabled).
+ * @property {boolean} pass — score !== null && score >= POLISH_VERIFY_PASSING_SCORE (true when the inspector is disabled and the deterministic guard passed).
+ * @property {string} findings — The inspector's findings text (the re-polish's input).
+ * @property {string} verifiedAt — ISO timestamp.
  */
 
 /**

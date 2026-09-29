@@ -58,19 +58,19 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `jump-in-wiki.js` | Wiki task logic **plus the shared helpers**. After all volumes: the last existing `shared-wiki.md` is copied to `SHARED_WIKI_OUTPUT_FILE` (default `<SERIES_LOCATION>/shared-wiki.md`); writes the per-volume translation handoff (`utils/handoff.js`) on both paths. |
 | `consistency-audit.js` | Final cross-artifact consistency audit (the pre-translation sign-off). An audit agent (gated fs tools, cwd = series root, writes confined to the root) reads the four series-root artifacts (`glossary.md`, `character-voice.md`, `style-guide.md`, `shared-wiki.md`) and writes `consistency-report.md` (PASS/FAIL verdict + severity-banded findings with quoted snippets). No QA loop. Idempotent: the report is skipped while it is newer than all four artifacts (`--force` re-audits). A FAIL verdict is logged loudly but does not fail the task — the report is the deliverable. |
 | `translate.js` | Translation task (first stage of the multi-model chain; §8.5). Per volume, per chapter (in `bundle.segments` order): skip when the draft + `translation-state.json` cover the current source/reference hashes, split oversized chapters (`TRANSLATE_CHUNK_CHARS`), translate each part via `runOneShot` on the `TRANSLATE_*` endpoint — **no system prompt** (Hy-MT2's single-user-message contract), official sampling, `no_think` by default — with the previous part's ending as continuity context, deterministic QA (`checkTranslationQa`), per-chapter state persistence, and the merged `translation.md` + `translation-qa.md`. Also exports `chapterArtifactNames` / `mergeVolumeTranslationFiles` shared by the other three tasks. |
-| `verify-translate.js` | Verification task (§8.5). Per chapter with a draft: one-shot source-anchored check on the `VERIFY_*` endpoint (Qwen) → 0–100 score (fail-closed: unparseable = FAIL) + severity-banded findings → `translation-verification.json` sidecar + `translation-verification.md` report. PASS = score ≥ `VERIFY_PASSING_SCORE` (default 70). `VERIFY_TRANSLATE_ENABLED=false` makes it a no-op. Exports `loadVerificationSidecar` (read by retranslate) and `glossaryBlock` (read by polish); returns the aggregated run summary (`failed` — read by the `translate-qa` loop). |
+| `verify-translate.js` | Verification task (§8.5). Per chapter with a draft: one-shot source-anchored check on the `VERIFY_*` endpoint (Qwen) → 0–100 score (fail-closed: unparseable = FAIL) + severity-banded findings → `translation-verification.json` sidecar + `translation-verification.md` report. PASS = score ≥ `VERIFY_PASSING_SCORE` (default 70). `VERIFY_TRANSLATE_ENABLED=false` makes it a no-op. Exports `loadVerificationSidecar` (read by retranslate), `glossaryBlock` + `findingsOf` (read by polish); returns the aggregated run summary (`failed` — read by the `translate-qa` loop). |
 | `retranslate.js` | Correction task (§8.5). Per chapter that FAILED verification (and whose sidecar entry still covers the current source + draft): a fresh Hy-MT2 pass with the verification findings injected as a numbered "fix these" task in the official prompt — the bad draft is **deliberately not** fed back (re-reading a bad translation anchors the model to its errors). Same part-by-part splitting as `translate` (the findings are injected into every part). Overwrites the draft, updates the state (invalidating any earlier polish), re-merges `translation.md`. Runs only when verification is enabled; returns the aggregated run summary (`retranslated` — the `translate-qa` loop's stall guard). |
 | `translate-qa.js` | The batched translation QA loop (§8.5) — one gulp task that mirrors the pre-production "translate → validate → apply → re-validate …" loop: up to `TRANSLATE_QA_MAX_ROUNDS` rounds of [verify batch (Qwen) → retranslate batch (Hy-MT2)], stopping when every chapter passes, a round retranslates nothing (stalled), or the round cap is hit. Batched because the local model containers share one port: each half-round is a whole single-model task run invoked through `withHooks()` (the per-batch model-switch hooks fire at every boundary). Owns no prompt/model logic — the stop-decision is the pure `qaLoopDecision` in `utils/translate.js`. |
-| `polish.js` | Final pass (§8.5). Per chapter: one-shot polish on the `EDIT_*` endpoint (Qwen, thinking on) → **deterministic regression guard**: if the polished text fails the QA the draft passed, or loses glossary coverage the draft had, the polish is rejected and the draft kept (chapter left unpolished, retried next run). Writes `polished-<id>.md`, records `polishedDraftHash` in the state, re-merges `translation.md` (polished text wins). |
-| `utils/translate.js` | Pure translation-stage helpers shared by the four tasks: `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `buildTranslationTaskLines` / `buildTranslationPrompt` (the official Hy-MT2 single-user-message shape), `cjkRatio`, `countOccurrences`, `checkTranslationQa` (hard fails: empty draft, CJK ratio > 5%; warnings: CJK > 0.5%, length ratio outside 0.6–2.5, missing glossary renderings), `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `loadTranslationState` / `saveTranslationState` (fail-open), `roleEndpoint` (`<PREFIX>_BASE_URL`/`_API_KEY`/`_MODEL` with `AI_*` fallback), `loadVolumeReferences` (glossary terms, style rules, wiki + POV-map background, voice notes, and the `contextHash` idempotency key), `qaLoopDecision` (the translate-qa loop's pure stop-decision: all-pass / round-limit / stalled) and `qaMaxRounds` (the `TRANSLATE_QA_MAX_ROUNDS` cap). |
+| `polish.js` | Final pass (§8.5). Per chapter, up to `POLISH_QA_MAX_ROUNDS` (default 3) attempts: one-shot polish on the `EDIT_*` endpoint (Qwen, thinking on) — **the polisher sees NO source text** (surface cleanup of already-verified text) → deterministic regression guard → **source-aware drift inspector** (one-shot on the same endpoint; scores whether the polished text preserves the verified draft's meaning, using the source as ground truth; 0–100, PASS ≥ `POLISH_VERIFY_PASSING_SCORE` 70, fail-closed). A FAIL re-polishes with the findings injected as a numbered "fix these" task (the retranslate pattern); on exhaustion the draft is kept and the findings persist in the state (the next run re-polishes with them; `--force` = a fresh attempt). Writes `polished-<id>.md` + `polish-verification.json`, records `polishedDraftHash` + `polishVerifiedDraftHash` in the state, re-merges `translation.md` (polished text wins). |
+| `utils/translate.js` | Pure translation-stage helpers shared by the four tasks: `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `buildTranslationTaskLines` / `buildTranslationPrompt` (the official Hy-MT2 single-user-message shape), `cjkRatio`, `countOccurrences`, `checkTranslationQa` (hard fails: empty draft, CJK ratio > 5%; warnings: CJK > 0.5%, length ratio outside 0.6–2.5, missing glossary renderings), `buildPolishGuardFindings` (the polish loop's correction tasks synthesized from a failed guard check), `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `loadTranslationState` / `saveTranslationState` (fail-open), `roleEndpoint` (`<PREFIX>_BASE_URL`/`_API_KEY`/`_MODEL` with `AI_*` fallback), `loadVolumeReferences` (glossary terms, style rules, wiki + POV-map background, voice notes, and the `contextHash` idempotency key), `qaLoopDecision` (the translate-qa loop's pure stop-decision: all-pass / round-limit / stalled) and `qaMaxRounds` (the `TRANSLATE_QA_MAX_ROUNDS` cap). |
 | `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. All ten tasks read this manifest instead of guessing folder names. |
 | `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All ten tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
 | `types.js` | JSDoc type definitions shared across modules. Defines named typedefs (`TranslationTargetManifest`, `GlossaryVolumeCtx`, `WikiVolumeCtx`, `CharacterVoiceVolumeCtx`, `StyleGuideVolumeCtx`, `IMessage`, `RunOneShotCfg`, `CreateAgentHandleCfg`, `AgentHandle`, `Taps`, `FetchResult`, `WikiTools`, `ResearchNote`, `HookContext`) that replace generic `{Object}` annotations in `@param`/`@returns` tags. Imported via `require("./types")` in every core module for IDE cross-reference resolution. Pure JSDoc — zero runtime side effects. |
 | `gulpfile.js` | Task wiring plus the `ON_TASK_ERROR`-aware `runPipeline()` runner for the default run (see §3 "Un-monitored run policies"). |
 | `hooks/` | Per-machine hook scripts (git-style; gitignored — only `README.md` + `*.sample` are tracked). Executable before/after hooks for each step and the whole run. See §3 "Pipeline hooks". |
-| `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Style guide: `style-guide-extract`, `style-guide` (compile), `style-guide-validator`, `style-guide-acceptance`, `style-guide-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. Consistency audit: `consistency-audit`. Translation stage: `translate` (user only — the official Hy-MT2 single-user-message prompt, **no system prompt file**), `verify-translate` (system + user — source-anchored 0–100 scoring rubric), `polish` (system + user — final proofreading pass). |
+| `system-prompts/`, `user-prompts/` | Per-stage prompt pairs. Glossary: `glossary-terms`, `glossary` (amend), `glossary-validator`, `glossary-acceptance`, `glossary-feedback`. Character voice: `character-voice-extract`, `character-voice` (compile), `character-voice-validator`, `character-voice-acceptance`, `character-voice-feedback`. Style guide: `style-guide-extract`, `style-guide` (compile), `style-guide-validator`, `style-guide-acceptance`, `style-guide-feedback`. Wiki: `jump-in-wiki`, `-validator`, `-acceptance`, `-feedback`. Consistency audit: `consistency-audit`. Translation stage: `translate` (user only — the official Hy-MT2 single-user-message prompt, **no system prompt file**), `verify-translate` (system + user — source-anchored 0–100 scoring rubric), `polish` (system + user — final proofreading pass, **no source text**), `polish-verify` (system + user — source-aware drift check of the polish pass: does the polished text preserve the verified draft's meaning?). |
 | `test/test-glossary-load.js` | Pure tests (`npm test`). |
-| `test/test-translate.js` | Pure tests for the translation-stage helpers (`utils/translate.js`): `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `checkTranslationQa`, `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `roleEndpoint`, `qaLoopDecision`, `qaMaxRounds`. |
+| `test/test-translate.js` | Pure tests for the translation-stage helpers (`utils/translate.js`): `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `checkTranslationQa`, `buildPolishGuardFindings`, `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `roleEndpoint`, `qaLoopDecision`, `qaMaxRounds`. |
 | `test/test-hooks.js` | Pure tests for the hook runner (`utils/hooks.js`), including the `TASKS` list (all ten tasks + pipeline). |
 | `test/harness-smoke.js` | Live smoke test (`npm run smoke`). |
 | `test-series/` | Fixture series (`test_story(1)`, `test_story(2)`); generated outputs are gitignored. |
@@ -302,7 +302,7 @@ endpoints:
 |---|---|---|---|
 | 1 | `translate` | Hy-MT2-30B-A3B (`TRANSLATE_*`) | Fresh translation per chapter, official single-user-message prompt (no system prompt), official sampling (temp 0.7 / top_p 1.0 / top_k -1 / rep-pen 1.0), `no_think` by default |
 | 2 | `translate-qa` (round N) | verify: Qwen3.8-27B (`VERIFY_*`) · retranslate: Hy-MT2 (`TRANSLATE_*`) | The batched QA loop (see the design notes below). Each round: a **verify batch** — source-anchored 0–100 score + severity-banded findings per chapter (against source + glossary + style rules + **story background** — shared wiki / volume wiki / POV map; the source outranks the wiki, wiki-only findings cap at MEDIUM); PASS ≥ `VERIFY_PASSING_SCORE` (70); unparseable = FAIL (fail-closed) — then a **retranslate batch** — a fresh pass over every FAIL chapter, the findings injected as a numbered "fix these" task; the bad draft is **not** fed back. Rounds repeat until every chapter passes (round N+1's verify only re-scores the chapters round N retranslated — idempotent skips for the rest) |
-| 3 | `polish` | Qwen (`EDIT_*`) | Final proofreading pass (thinking on) with a deterministic regression guard (runs on whatever drafts exist — including round-cap FAILs) |
+| 3 | `polish` | Qwen (`EDIT_*`) | Final proofreading pass (thinking on) — **the polisher sees NO source text** (surface cleanup of already-verified text). Gated by a deterministic regression guard plus a **source-aware drift inspector** (one-shot, same endpoint): up to `POLISH_QA_MAX_ROUNDS` (default 3) attempts per chapter, a FAIL re-polishes with the inspector's findings injected; on exhaustion the draft is kept (runs on whatever drafts exist — including round-cap FAILs) |
 
 **Design notes:**
 
@@ -338,8 +338,11 @@ endpoints:
   `sourceHash` (the chapter's source text), `contextHash` (sha256 of glossary
   + style rules + shared-wiki/volume-wiki/POV background — regenerating any
   reference invalidates every draft), `draftHash`, `retranslated`,
-  `findingsHash`, and
-  `polishedDraftHash`. A changed source, a re-run of the glossary/style/wiki
+  `findingsHash`, `polishedDraftHash`, plus `polishVerifiedDraftHash` /
+  `polishScore` / `polishFindings` / `polishFindingsHash` (the drift
+  inspector's verdict + retry feedback — a chapter is polish-up-to-date only
+  when `polishVerifiedDraftHash === draftHash`). A changed source, a re-run of
+  the glossary/style/wiki
   tasks, or a retranslate (which bumps `draftHash` and clears
   `polishedDraftHash`) makes the dependent steps re-run on the next pass.
 - **Story background injection** — `loadVolumeReferences` (utils/translate.js)
@@ -351,8 +354,10 @@ endpoints:
   verify-translate prompt's [Story Background] section (a 5th audit
   dimension: consistency with established facts, with the source text as
   ground truth — a wiki-only finding is capped at MEDIUM so a stale wiki
-  cannot fail a correct translation). `polish` deliberately gets no
-  background (its role is surface cleanup of already-verified text).
+  cannot fail a correct translation). `polish` deliberately gets no source
+  text and no background (its role is surface cleanup of already-verified
+  text — the source-free prompt keeps the polisher from re-translating; the
+  source-aware drift inspector is the semantic backstop, see below).
 - **Chapter splitting** — a chapter longer than `TRANSLATE_CHUNK_CHARS`
   (default 24000) is split by `splitChapter` (paragraph-aware) and the parts
   are translated in order — both in `translate` and in `retranslate`; each
@@ -367,8 +372,28 @@ endpoints:
   (+ `translation-verification.json` sidecar), `polish-qa.md` (polish).
 - **Polish regression guard** — the polished text is only accepted when it
   passes the QA the draft passed **and** keeps the draft's glossary coverage;
-  otherwise it is rejected, the draft is kept, and the chapter is left
-  unpolished (retried on the next run).
+  a guard failure becomes a numbered correction task for the next attempt
+  (the deterministic half of the polish QA).
+- **Polish drift inspector** — the deterministic guard is lexical (it cannot
+  catch a meaning shift), so a source-aware AI inspector closes the semantic
+  gap: a one-shot on the **same `EDIT_*` endpoint** (no model switch on the
+  shared-port local setup) scores whether the polished text preserves the
+  verified draft's meaning, using the source as ground truth. It is
+  **diff-focused** — it audits the polish pass's changes against the draft,
+  not the translation (the draft's own problems are not findings; surface
+  improvements are not findings). PASS ≥ `POLISH_VERIFY_PASSING_SCORE` (70);
+  unparseable = FAIL (fail-closed). The per-chapter loop: polish → guard →
+  drift check; a FAIL re-polishes with the findings injected as a numbered
+  "fix these" task (the retranslate pattern), up to `POLISH_QA_MAX_ROUNDS`
+  (default 3) attempts; on exhaustion the polished text is rejected, the
+  draft is kept (any polished file is dropped so the merge publishes the
+  draft), and the last findings persist in the state — the next run
+  re-polishes with them, and `--force` gives a fresh stochastic attempt. A
+  polished chapter is "up to date" only when
+  `polishVerifiedDraftHash === draftHash`; legacy polish state (no verified
+  hash, pre-inspector runs) gets its existing polished text inspected on the
+  first run after the upgrade instead of re-polished. `POLISH_VERIFY_ENABLED=false`
+  gates the pass on the deterministic guard only.
 - **Merge** — after every step, `mergeVolumeTranslationFiles` rewrites the
   volume's `translation.md` from the per-chapter files: the
   `polished-<id>.md` text wins when the state shows it was produced from the
@@ -383,7 +408,8 @@ endpoints:
 **Artifacts per volume folder:** `translation-<id>.md` (draft per chapter),
 `polished-<id>.md` (when the polish pass was accepted), `translation.md`
 (the merged volume), `translation-qa.md`, `translation-verification.json` +
-`translation-verification.md`, `polish-qa.md`, `translation-state.json`.
+`translation-verification.md`, `polish-qa.md` + `polish-verification.json`
+(the drift inspector's verdicts), `translation-state.json`.
 All gitignored (generated output).
 
 ## 9. Environment reference (`.env`)
@@ -439,6 +465,10 @@ setups the per-machine pre-hooks switch the model container per stage
 | `EDIT_BASE_URL` / `EDIT_API_KEY` / `EDIT_MODEL` | `AI_*` | Endpoint for `polish` (Qwen) |
 | `EDIT_TEMPERATURE` | `0.6` | Polish sampling temperature |
 | `EDIT_THINKING` / `EDIT_THINKING_LEVEL` | `true` / `medium` | Qwen3-style thinking for the polish pass (it runs last — it benefits from deliberation) |
+| `POLISH_VERIFY_ENABLED` | `true` | `false` gates the polish pass on the deterministic regression guard only (no AI drift inspector) |
+| `POLISH_VERIFY_PASSING_SCORE` | `70` | Score (0–100) at or above which a polished text passes the drift inspector |
+| `POLISH_VERIFY_TEMPERATURE` | `0.2` | Drift-inspector sampling temperature (a judgment call — low, like `VERIFY_TEMPERATURE`) |
+| `POLISH_QA_MAX_ROUNDS` | `3` | Max [polish + drift check] attempts per chapter (a FAIL re-polishes with the findings injected) |
 
 ### Source bundle (`SOURCE_*`)
 
@@ -535,6 +565,7 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 21. **Un-monitored run policies change where failures surface — read the summary, not just the last log line.** With the un-monitored values in `.env` (`ON_VOLUME_ERROR=skip`, `ON_MISSING_PREVIOUS=skip`, `ON_TASK_ERROR=continue`), a broken volume no longer aborts its task or the pipeline: the task logs `[skip] Volume NN (…) failed: …`, keeps going (in the cumulative tasks the skip cascades through the remaining volumes via the missing-previous check), and the pipeline finishes with a `N of M volume(s) failed` / `Pipeline finished with N failed step(s)` summary that still fails the run (non-zero exit). The final series-root copy uses the **last existing** snapshot, so a partially failed run publishes the last good volume's artifact rather than nothing. Recovery is a plain re-run: idempotent skip-checks make it cheap, and the failed/skipped volumes are picked up. Code defaults are the opposite (fail loudly at the first problem) — keep them that way so interactive runs stay safe, and don't "fix" the cascade by making per-volume idempotency independent of the previous volume's artifact.
 22. **The translation stage's model switching lives in the hooks — not in the task code.** Every local model container (Hy-MT2, Qwen3.8-27B, …) advertises the **same model alias** (`local`) and shares **one host port** (9200), so the ai-client cannot tell the models apart by name — `TRANSLATE_MODEL` / `VERIFY_MODEL` / `EDIT_MODEL` are all `local`. The per-machine pre-hooks (`hooks/pre-<task>.sh` → `model-switch.sh <compose dir>`) stop the current port owner, start the stage's container, and poll `/health` until the model is loaded. Consequences: (a) never add Docker/container logic to the task modules — the `/v1/models` check (`assertModelServing`) is the only endpoint contact; (b) running a translation task standalone on the wrong model fails loudly at the sanity check only if the model id differs — with identical aliases it translates with whatever happens to be up, so on local setups always run the tasks via the hooked pipeline (or the per-task gulp tasks, which fire the hooks); (c) `model-switch.sh` is idempotent via `hooks/.model-switch-state` (the compose dir it last started — the compose PROJECT label is *not* usable: compose sanitizes project names, so `Qwen3.8-27b-beellama` becomes `qwen38-27b-beellama` and never matches a dir-name comparison); a container started manually (no state file) is treated as "unknown" and swapped; (d) the `translate-qa` loop re-fires these batch hooks on every round (up to two switches per round) — a repeat switch is a no-op via the state file, so a round that ends on the model the next round needs costs nothing.
 23. **The translate-qa loop stops on "stalled" — a stuck chapter is not retried on a plain re-run.** The retranslate task skips a chapter when it was already retranslated for byte-identical findings (`findingsHash` match — cross-run idempotency). In the loop, when a retranslate batch therefore applies nothing (`retranslated === 0`), the loop stops ("stalled") instead of burning identical model calls round after round. Consequence: a chapter whose verification keeps failing with identical findings keeps its latest draft; a plain re-run is cheap (one verify batch of skips + stall) and `npx gulp translate-qa --force` (bypasses the skip) gives it a fresh stochastic attempt (Hy-MT2 runs at temp 0.7, so a retry can succeed). The round cap (`TRANSLATE_QA_MAX_ROUNDS`) is the backstop for oscillating findings (different text each round) — it bounds the worst case at N verify batches + N−1 retranslate batches per pipeline run, and still-FAIL chapters keep their latest draft (polish still runs on them; the verification report records the FAIL).
+24. **The polisher sees no source text — the drift inspector is the semantic backstop.** The polish prompt is deliberately source-free: a source-seeing polisher re-opens unverified re-translation by a non-translation model (the polisher is Qwen, not the designated Hy-MT2 translator) — exactly the gap the verify loop exists to close. So the source-aware drift inspector (which DOES see the source, auditing the polished text against the verified draft) is the only thing standing between a polish pass and a silent meaning change. Don't hand the source back to the polisher prompt to "improve" accuracy — fix fidelity upstream (translate / verify-translate / retranslate); polish is surface cleanup, and its QA (guard + inspector) is what may see the source.
 
 ## 11. Conventions
 
@@ -542,5 +573,5 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 - **Update AGENTS.md after changes.** If your work adds, removes, or significantly modifies files, functions, or conventions, update this document to reflect the new state. Agents reading AGENTS.md should be able to rely on it as a current map of the codebase — not a stale one.
 - Errors **fail loudly** with actionable messages (pointing at files, `.env` keys, or `.logs/`).
 - Prompt files stay mode-agnostic; mode-specific text is appended in code (`AGENT_TOOLS_NOTE`), never forked into separate prompt files.
-- Tests: pure logic in `test/test-glossary-load.js`, `test/test-translate.js` (translation-stage helpers), and `test/test-hooks.js` (hook runner) — all plain `assert`, no framework (keep it that way); live behavior in `test/harness-smoke.js`.
+- Tests: pure logic in `test/test-glossary-load.js`, `test/test-translate.js` (translation-stage helpers, incl. the polish guard-findings builder), and `test/test-hooks.js` (hook runner) — all plain `assert`, no framework (keep it that way); live behavior in `test/harness-smoke.js`.
 - Dependencies: AI SDK v6 + `@openharness/core` v0.7 + `jszip`/`cheerio` (epub extraction in `utils/source.js`); keep CommonJS, no new frameworks.

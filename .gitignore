@@ -77,6 +77,7 @@ test-series/**/translation-verification.json
 test-series/**/translation-verification.md
 test-series/**/translation-qa.md
 test-series/**/polish-qa.md
+test-series/**/polish-verification.json
 test-series/glossary.md
 test-series/character-voice.md
 test-series/style-guide.md

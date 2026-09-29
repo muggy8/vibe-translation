@@ -336,6 +336,29 @@ function checkTranslationQa({ sourceText, draftText, terms = [] }) {
   return { ok: errors.length === 0, cjk, lengthRatio, missingTerms, warnings, errors };
 }
 
+/**
+ * Synthesize a numbered "fix these" findings list from a deterministic QA
+ * result — the polish loop's feedback when the regression guard rejects a
+ * polished text (the guard's errors/warnings become correction tasks for
+ * the next polish attempt, mirroring the way retranslate injects the
+ * verifier's findings).
+ *
+ * @param {{errors?: string[], warnings?: string[], missingTerms?: Array<{term: string, rendering: string}>}} qa
+ *   A checkTranslationQa() result for the POLISHED text.
+ * @returns {string} The findings text ("(no deterministic findings)" when the
+ *   result is clean — callers only use this for failed checks).
+ */
+function buildPolishGuardFindings(qa) {
+  const lines = [];
+  for (const e of qa.errors || []) lines.push(`- [HIGH] ${e}`);
+  for (const t of qa.missingTerms || []) {
+    lines.push(`- [HIGH] glossary rendering missing from the polished text: "${t.term}" → "${t.rendering}"`);
+  }
+  for (const w of qa.warnings || []) lines.push(`- [MEDIUM] ${w}`);
+  if (lines.length === 0) return "(no deterministic findings)";
+  return lines.join("\n");
+}
+
 // ─── Merging ────────────────────────────────────────────────────────────────
 
 /**
@@ -507,6 +530,7 @@ module.exports = {
   cjkRatio,
   countOccurrences,
   checkTranslationQa,
+  buildPolishGuardFindings,
   mergeVolumeTranslation,
   stripMarkdownFence,
   tailOf,

@@ -426,6 +426,7 @@ module.exports = {
   loadVerificationSidecar,
   buildVerificationReportMarkdown,
   glossaryBlock,
+  findingsOf,
   VERIFICATION_FILE,
   VERIFICATION_REPORT,
   passingScore,

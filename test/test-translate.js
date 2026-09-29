@@ -19,6 +19,7 @@ const {
   cjkRatio,
   countOccurrences,
   checkTranslationQa,
+  buildPolishGuardFindings,
   mergeVolumeTranslation,
   stripMarkdownFence,
   tailOf,
@@ -219,6 +220,33 @@ assert.strictEqual(sha256("a"), sha256("a"));
   const short = checkTranslationQa({ sourceText: source, draftText: "Yes.", terms });
   assert.strictEqual(short.ok, true);
   assert.ok(short.warnings.some((w) => w.includes("length ratio")));
+}
+
+// ─── buildPolishGuardFindings ─────────────────────────────────────────────────
+
+{
+  // Clean result: the fallback marker (callers only use this for failures).
+  assert.strictEqual(
+    buildPolishGuardFindings({ errors: [], warnings: [], missingTerms: [] }),
+    "(no deterministic findings)"
+  );
+
+  // Missing fields: fail-open, same fallback.
+  assert.strictEqual(buildPolishGuardFindings({}), "(no deterministic findings)");
+
+  // Guard rejection: errors + missing terms become HIGH correction tasks,
+  // warnings become MEDIUM — the numbered list the re-polish prompt receives.
+  const findings = buildPolishGuardFindings({
+    errors: ["CJK ratio 6.0% — the draft still looks like source text"],
+    warnings: ["length ratio 0.40 outside the 0.6–2.5 band"],
+    missingTerms: [{ term: "黒鋼", rendering: "Kurogane" }],
+  });
+  const lines = findings.split("\n");
+  assert.strictEqual(lines.length, 3, findings);
+  assert.ok(lines[0].startsWith("- [HIGH] CJK ratio 6.0%"), lines[0]);
+  assert.ok(lines[1].includes('"黒鋼" → "Kurogane"'), lines[1]);
+  assert.ok(lines[1].startsWith("- [HIGH]"), lines[1]);
+  assert.ok(lines[2].startsWith("- [MEDIUM] length ratio 0.40"), lines[2]);
 }
 
 // ─── mergeVolumeTranslation ───────────────────────────────────────────────────
