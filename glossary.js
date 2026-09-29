@@ -53,10 +53,11 @@ const fs = require("fs").promises;
 const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
-const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
+const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
+const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
   shouldProcessChunked,
@@ -863,7 +864,9 @@ async function glossary() {
 
 /**
  * Shared acceptance check: always a tool-less single-shot call.
- * The model scores the audited output 0–100 (100 = perfect, 0 = atrocious);
+ * The model sees the glossary ITSELF plus its validation report (the
+ * report is a guide, not the source of truth) and scores it 0–100
+ * (100 = perfect, 0 = atrocious) as a JSON reply {score, band, note};
  * the score — not a binary verdict — is what the rolling window tracks.
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
@@ -872,17 +875,18 @@ async function glossary() {
  *   no valid score could be extracted (treated as a failed check).
  */
 async function acceptanceCheck(ctx, iteration) {
-  const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt } = ctx;
+  const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt, glossaryOutputFile } = ctx;
   const acceptanceOutput = await harness.runOneShot({
     systemPrompt: acceptanceSystemPrompt,
     messages: [
+      { file: glossaryOutputFile, name: "glossary.md" },
       { file: validationOutputFile, name: "glossary-validation.md" },
       { text: acceptancePrompt },
     ],
     label: `glossary-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
   });
-  const score = parseAcceptanceScore(acceptanceOutput);
-  if (score === null) {
+  const reply = parseAcceptanceReply(acceptanceOutput);
+  if (reply === null) {
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in ` +
         `response (got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). ` +
@@ -890,11 +894,13 @@ async function acceptanceCheck(ctx, iteration) {
     );
   } else {
     console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${score}/100 ` +
-        `(passing score: ${ACCEPTANCE_PASSING_SCORE})`
+      `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${reply.score}/100` +
+        (reply.band ? ` (band: ${reply.band})` : "") +
+        (reply.note ? ` — ${reply.note}` : "") +
+        ` (passing score: ${ACCEPTANCE_PASSING_SCORE})`
     );
   }
-  return score;
+  return reply ? reply.score : null;
 }
 
 /**
@@ -1506,32 +1512,21 @@ async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, 
  * score-based acceptance check (0–100, see configs/shared.js) ->
  * feedback applied by a fresh author agent (no persistent session — each
  * feedback pass starts with a clean context that includes the validation
- * report and current glossary).
+ * report and current glossary). Runs the shared loop from utils/qa-loop.js
+ * with the glossary-specific pieces supplied here.
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (must include ctx.fsGate).
  */
 async function runQaLoop(ctx) {
-  const {
-    values,
-    volumeDir,
-    sourceFile,
-    glossaryOutputFile,
+  const { values, volumeDir, sourceFile, validationOutputFile, fsGate } = ctx;
+  const result = await runSharedQaLoop({
+    volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+    maxIterations: maxValidationIterations,
+    onQaLimit: ON_QA_LIMIT,
     validationOutputFile,
-  } = ctx;
-  const fsGate = ctx.fsGate;
-  // Rolling window of recent acceptance scores (0–100). A score of `null`
-  // (unparseable acceptance response) counts as a failed check (fail-closed)
-  // and is not stored in the window.
-  const recentRollingScores = [];
-
-  for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: validation iteration ` +
-        `${iteration}/${maxValidationIterations}...`
-    );
-
-    // Validate with an independent validator agent (fresh per iteration).
-    const validator = await harness.createAgentHandle({
+    stateFile: validationOutputFile.replace(".md", "-rolling-state.json"),
+    sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    createValidatorAgent: async (iteration) => harness.createAgentHandle({
       name: `validator-${values.INSTALLMENT_NUMBER}-${iteration}`,
       systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE,
       tools: fsGate.tools,
@@ -1539,142 +1534,82 @@ async function runQaLoop(ctx) {
       cwd: volumeDir,
       // scaled to the source size (see validatorMaxStepsFor)
       maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size),
-    });
-    try {
-      const validateResult = await validator.sendTurn(
-        buildGlossaryValidatorTurnPrompt(ctx),
-        { label: `glossary-validate-${values.INSTALLMENT_NUMBER}-${iteration}` }
+    }),
+    buildValidatorTurn: (iteration) => buildGlossaryValidatorTurnPrompt(ctx),
+    validatorLabel: (iteration) => `glossary-validate-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    validatorRecoveryLabel: (iteration) => `glossary-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    validatorRecoveryPrompt: (hasContent) => hasContent
+      ? `You were asked to write the validation report to "glossary-validation.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+        `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
+        `Please rewrite the complete validation report to "glossary-validation.md" using writeFile now. Use the exact same content you generated in your previous message.`
+      : `You were asked to write the validation report to "glossary-validation.md" using writeFile, but you produced no output.\n\n` +
+        `Please read the source materials and write the complete validation report to "glossary-validation.md" using writeFile now.`,
+    assertRealToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
+    acceptanceCheck: (iteration) => acceptanceCheck(ctx, iteration),
+    feedbackLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: applying validation feedback (fresh author agent)...`,
+    runFeedback: (iteration) => runGlossaryFeedback(ctx, iteration),
+    limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`,
+  });
+  ctx.limitReached = result.limitReached;
+  return result;
+}
+
+/**
+ * The glossary feedback stage (called by the shared QA loop in
+ * utils/qa-loop.js): a fresh author agent applies the validation report to
+ * the glossary. The feedback prompt is self-contained: it includes the
+ * validation report and the current glossary so the agent has all context
+ * it needs.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context (must include ctx.fsGate).
+ * @param {number} iteration - The current QA iteration (agent name + labels).
+ */
+async function runGlossaryFeedback(ctx, iteration) {
+  const { values, volumeDir, glossaryOutputFile } = ctx;
+
+  const feedbackAuthor = await harness.createAgentHandle({
+    name: `feedback-author-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
+    tools: ctx.fsGate.tools,
+    approve: ctx.fsGate.approve,
+    cwd: volumeDir,
+    maxSteps: 40,
+  });
+  try {
+    const feedbackResult = await feedbackAuthor.sendTurn(
+      buildGlossaryFeedbackTurnPrompt(ctx),
+      { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
+    );
+    assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
+    const feedbackFallbackUsed = await assertWroteWithFallback(
+      glossaryOutputFile,
+      "the author agent (feedback pass)",
+      feedbackResult?.text
+    );
+
+    // Recovery turn for feedback pass: if the model produced no output,
+    // re-send the full feedback task.
+    if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
+      const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
+      const recoveryPrompt = hasContent
+        ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+          `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
+          `Please rewrite the complete glossary to "glossary.md" using writeFile now. Use the exact same content you generated in your previous message.`
+        : `You were asked to write the complete glossary to "glossary.md" using writeFile, but you produced no output.\n\n` +
+          `Please read the source materials and the validation report and write the corrected glossary to "glossary.md" using writeFile now.`;
+      const feedbackRecoveryResult = await feedbackAuthor.sendTurn(
+        recoveryPrompt,
+        { label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
       );
-      assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
-      const validateFallbackUsed = await assertWroteWithFallback(
-        validationOutputFile,
-        "the validator agent",
-        validateResult?.text
-      );
-
-      // Recovery turn: ONLY when the report was actually missing after the
-      // fallback (the model replied in chat instead of writeFile, or produced
-      // no output) — never over a file the agent already wrote correctly.
-      if (validateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-        const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
-        const recoveryPrompt = hasContent
-          ? `You were asked to write the validation report to "glossary-validation.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
-            `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
-            `Please rewrite the complete validation report to "glossary-validation.md" using writeFile now. Use the exact same content you generated in your previous message.`
-          : `You were asked to write the validation report to "glossary-validation.md" using writeFile, but you produced no output.\n\n` +
-            `Please read the source materials and write the complete validation report to "glossary-validation.md" using writeFile now.`;
-        const validateRecoveryResult = await validator.sendTurn(
-          recoveryPrompt,
-          { label: `glossary-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
-        );
-        assertRealToolCalls(validateRecoveryResult, "the validator agent (recovery)", values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(
-          validationOutputFile,
-          "the validator agent (recovery)",
-          validateRecoveryResult?.text
-        );
-      }
-    } finally {
-      await validator.close();
-    }
-
-    // Acceptance check (always one-shot, tool-less) — the model scores the
-    // glossary 0–100.
-    const score = await acceptanceCheck(ctx, iteration);
-
-    // Record the score in the rolling window (null = unparseable, already
-    // logged as a failure; not stored).
-    if (score !== null) {
-      recentRollingScores.push(score);
-      if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) {
-        recentRollingScores.shift();
-      }
-    }
-
-    // Persist the rolling window to disk so that a re-run can recover the
-    // exact acceptance state without re-calling the AI.
-    const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-    await saveRollingState(stateFilePath, recentRollingScores, {
-      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-    });
-
-    // Check the acceptance criterion: if we have enough samples and the
-    // window meets it, accept and stop (skip feedback).
-    if (meetsAcceptanceCriteria(recentRollingScores)) {
-      const avg = computeRollingAverage(recentRollingScores);
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 ` +
-          `(${recentRollingScores.length} checks) meets the passing score ` +
-          `${ACCEPTANCE_PASSING_SCORE}. Accepted.`
-      );
-      break;
-    }
-
-    // Apply the feedback with a fresh author agent (no persistent session).
-    // The feedback prompt is self-contained: it includes the validation report
-    // and the current glossary so the agent has all context it needs.
-    console.log(`Volume ${values.INSTALLMENT_NUMBER}: applying validation feedback (fresh author agent)...`);
-
-    const feedbackAuthor = await harness.createAgentHandle({
-      name: `feedback-author-${values.INSTALLMENT_NUMBER}-${iteration}`,
-      systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
-      tools: ctx.fsGate.tools,
-      approve: ctx.fsGate.approve,
-      cwd: volumeDir,
-      maxSteps: 40,
-    });
-    try {
-      const feedbackResult = await feedbackAuthor.sendTurn(
-        buildGlossaryFeedbackTurnPrompt(ctx),
-        { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
-      );
-      assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
-      const feedbackFallbackUsed = await assertWroteWithFallback(
+      assertRealToolCalls(feedbackRecoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
+      await assertWroteWithFallback(
         glossaryOutputFile,
-        "the author agent (feedback pass)",
-        feedbackResult?.text
+        "the author agent (feedback recovery)",
+        feedbackRecoveryResult?.text
       );
-
-      // Recovery turn for feedback pass: if the model produced no output,
-      // re-send the full feedback task.
-      if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-        const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-        const recoveryPrompt = hasContent
-          ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
-            `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
-            `Please rewrite the complete glossary to "glossary.md" using writeFile now. Use the exact same content you generated in your previous message.`
-          : `You were asked to write the complete glossary to "glossary.md" using writeFile, but you produced no output.\n\n` +
-            `Please read the source materials and the validation report and write the corrected glossary to "glossary.md" using writeFile now.`;
-        const feedbackRecoveryResult = await feedbackAuthor.sendTurn(
-          recoveryPrompt,
-          { label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
-        );
-        assertRealToolCalls(feedbackRecoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(
-          glossaryOutputFile,
-          "the author agent (feedback recovery)",
-          feedbackRecoveryResult?.text
-        );
-      }
-    } finally {
-      await feedbackAuthor.close();
     }
-
-    if (iteration === maxValidationIterations) {
-      ctx.limitReached = true;
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
-          `without a passing grade. The last feedback pass is unvalidated; ` +
-          `re-run to validate it.`
-      );
-      if (ON_QA_LIMIT === "fail") {
-        throw new Error(
-          `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
-            `without a passing grade (ON_QA_LIMIT=fail).`
-        );
-      }
-      break;
-    }
+  } finally {
+    await feedbackAuthor.close();
   }
 }
 
@@ -1893,6 +1828,7 @@ module.exports = {
   appendResearchSkeleton,
   runChunkedVolumeAgent,
   runChunkedQaLoop,
+  runGlossaryFeedback,
   parseGlossaryTableTerms,
   countTermOccurrences,
   buildGlossaryCoverageReportMarkdown,

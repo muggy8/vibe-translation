@@ -42,6 +42,7 @@ const {
   buildWikiValidatorTurnPrompt,
   buildWikiFeedbackTurnPrompt,
 } = require("../jump-in-wiki");
+const { parseAcceptanceReply } = require("../utils/prompt");
 const {
   extractJsonObject,
   validateManifest,
@@ -173,6 +174,61 @@ assert.strictEqual(bestStrategyCheck([100, 100]), false);
 // the average would pass.
 assert.strictEqual(bestStrategyCheck([95, 45, 45, 45, 45]), false);
 assert.strictEqual(bestStrategyCheck([80, 80, 60, 60, 60]), false);
+
+// ─── parseAcceptanceReply (JSON contract + legacy fallback) ────────────────
+// The JSON contract the acceptance prompts now require.
+assert.deepStrictEqual(
+  parseAcceptanceReply('{"score": 88, "band": "Pass", "note": "Solid glossary."}'),
+  { score: 88, band: "Pass", note: "Solid glossary." }
+);
+// Tolerates fences + surrounding prose (extractJsonObject).
+assert.deepStrictEqual(
+  parseAcceptanceReply('Here is the verdict:\n```json\n{"score": 71, "band": "Pass with minor edits", "note": "nits"}\n```\nDone.'),
+  { score: 71, band: "Pass with minor edits", note: "nits" }
+);
+// Out-of-range JSON score → invalid JSON contract → legacy parse also
+// rejects it (first standalone integer is >100) → null (fail-closed).
+assert.strictEqual(parseAcceptanceReply('{"score": 105, "band": "Pass"}'), null);
+// Missing / non-integer score key → legacy fallback.
+assert.strictEqual(parseAcceptanceReply('{"band": "Pass"}'), null);
+// Legacy integer replies still count (an old-format reply never fails a run).
+assert.deepStrictEqual(parseAcceptanceReply("85"), { score: 85, band: null, note: null });
+assert.deepStrictEqual(parseAcceptanceReply("Score: 72/100"), { score: 72, band: null, note: null });
+// Unparseable → null (fail-closed).
+assert.strictEqual(parseAcceptanceReply("no score here"), null);
+assert.strictEqual(parseAcceptanceReply(""), null);
+assert.strictEqual(parseAcceptanceReply(undefined), null);
+
+// ─── meetsAcceptanceCriteria (current defaults: window 2 / min 2) ──────────
+// The window/min-sample defaults are read at module load; exercise them in a
+// spawned process with the window/min-sample overrides blanked (empty string
+// → parseInt NaN → the code defaults apply).
+function defaultCriteriaCheck(scores) {
+  const script =
+    `const { meetsAcceptanceCriteria } = require(${JSON.stringify(sharedConfigPath)});` +
+    `console.log(String(meetsAcceptanceCriteria(${JSON.stringify(scores)})));`;
+  const out = execFileSync(process.execPath, ["-e", script], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ACCEPTANCE_STRATEGY: "average",
+      ACCEPTANCE_PASSING_SCORE: "70",
+      ACCEPTANCE_WINDOW_SIZE: "",
+      ACCEPTANCE_MIN_SAMPLES: "",
+    },
+  });
+  return out.trim() === "true";
+}
+// One check is not enough (min samples 2); two fresh passes decide.
+assert.strictEqual(defaultCriteriaCheck([100]), false);
+assert.strictEqual(defaultCriteriaCheck([100, 100]), true);
+assert.strictEqual(defaultCriteriaCheck([90, 55]), true); // avg 72.5
+assert.strictEqual(defaultCriteriaCheck([90, 50]), true); // avg 70 (boundary inclusive)
+assert.strictEqual(defaultCriteriaCheck([89, 50]), false); // avg 69.5
+// A legacy 5-score state file is evaluated as a whole under the new default
+// (a volume accepted under the old rule keeps skipping — no re-validation).
+assert.strictEqual(defaultCriteriaCheck([95, 45, 45, 45, 45]), false);
+assert.strictEqual(defaultCriteriaCheck([80, 75, 65, 90, 90]), true);
 
 // ─── installmentNumberFromDir ───────────────────────────────────────────────
 assert.strictEqual(installmentNumberFromDir("Series(1)"), "01");

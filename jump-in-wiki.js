@@ -61,8 +61,9 @@ const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
+const { runSharedQaLoop } = require("./utils/qa-loop");
 const { writeVolumeHandoff } = require("./utils/handoff");
-const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
+const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir } = require("./utils/manifest");
 const {
   resolveSourceBundle,
@@ -1061,28 +1062,33 @@ async function runChunkedQaLoop(ctx) {
       await merger.close();
     }
 
-    // Acceptance (unchanged: tool-less one-shot over the standard report).
+    // Acceptance: tool-less one-shot over the wiki artifacts + standard report.
     const acceptanceOutput = await harness.runOneShot({
       systemPrompt: ctx.acceptanceSystemPrompt,
       messages: [
+        { file: ctx.wikiOutputFile, name: "wiki.md" },
+        { file: ctx.sharedWikiOutputFile, name: "shared-wiki.md" },
         { file: validationOutputFile, name: path.basename(validationOutputFile) },
         { text: ctx.acceptanceUserPrompt },
       ],
       label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
     });
-    const score = parseAcceptanceScore(acceptanceOutput);
-    if (score === null) {
+    const reply = parseAcceptanceReply(acceptanceOutput);
+    if (reply === null) {
       console.log(
         `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response ` +
           `(got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`
       );
     } else {
       console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${score}/100 (passing score: ${ACCEPTANCE_PASSING_SCORE})`
+        `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${reply.score}/100` +
+          (reply.band ? ` (band: ${reply.band})` : "") +
+          (reply.note ? ` — ${reply.note}` : "") +
+          ` (passing score: ${ACCEPTANCE_PASSING_SCORE})`
       );
     }
-    if (score !== null) {
-      recentRollingScores.push(score);
+    if (reply) {
+      recentRollingScores.push(reply.score);
       if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) recentRollingScores.shift();
     }
     await saveRollingState(validationOutputFile.replace(".md", "-rolling-state.json"), recentRollingScores, {
@@ -1271,37 +1277,27 @@ async function runVolumeAgent(ctx) {
 /**
  * QA loop: independent validator agent (fresh per iteration) ->
  * score-based acceptance check (0–100, see configs/shared.js) -> feedback
- * applied by the same author session that generated the wiki.
+ * applied by the same author session that generated the wiki. Runs the
+ * shared loop from utils/qa-loop.js with the wiki-specific pieces supplied
+ * here (the wiki keeps its author session for the feedback pass, unlike the
+ * other tasks' fresh-agent-per-iteration feedback).
  *
  * @param {WikiVolumeCtx} ctx - The volume context (must include ctx.fsGate).
  * @param {AgentHandle} author - The author agent handle (keeps its session).
  */
 async function runQaLoop(ctx, author) {
-  const {
-    values,
-    volumeDir,
-    sourceFile,
-    wikiOutputFile,
-    sharedWikiOutputFile,
+  const { values, volumeDir, sourceFile, validationOutputFile, fsGate } = ctx;
+  const result = await runSharedQaLoop({
+    volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+    iterationLogLine: (iteration) => `Validation iteration ${iteration}/${maxValidationIterations}...`,
+    validatorLogLine: () => "Calling the AI for validation (validator agent)...",
+    acceptanceLogLine: () => "Calling the AI for the acceptance check...",
+    maxIterations: maxValidationIterations,
+    onQaLimit: ON_QA_LIMIT,
     validationOutputFile,
-  } = ctx;
-  const fsGate = ctx.fsGate;
-
-  const validationFileName = `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md`;
-  // Rolling window of recent acceptance scores (0–100). A score of `null`
-  // (unparseable acceptance response) counts as a failed check (fail-closed)
-  // and is not stored in the window.
-  const recentRollingScores = [];
-
-  for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
-    console.log(`Validation iteration ${iteration}/${maxValidationIterations}...`);
-
-    /**
-     * the logic for validating the generated wiki (independent agent)
-     */
-    console.log("Calling the AI for validation (validator agent)...");
-
-    const validator = await harness.createAgentHandle({
+    stateFile: validationOutputFile.replace(".md", "-rolling-state.json"),
+    sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    createValidatorAgent: async (iteration) => harness.createAgentHandle({
       name: `wiki-validator-${values.INSTALLMENT_NUMBER}-${iteration}`,
       systemPrompt: buildWikiValidatorSystemPrompt(ctx),
       tools: fsGate.tools,
@@ -1309,150 +1305,111 @@ async function runQaLoop(ctx, author) {
       cwd: volumeDir,
       // scaled to the source size (see validatorMaxStepsFor)
       maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size),
-    });
-    try {
-      const validateResult = await validator.sendTurn(
-        buildWikiValidatorTurnPrompt(ctx),
-        { label: `jump-in-wiki-validate-${values.INSTALLMENT_NUMBER}-${iteration}` }
-      );
-      assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
-      const wikiValidateFallbackUsed = await assertWroteWithFallback(
-        validationOutputFile,
-        "the validator agent",
-        validateResult?.text
-      );
+    }),
+    buildValidatorTurn: (iteration) => buildWikiValidatorTurnPrompt(ctx),
+    validatorLabel: (iteration) => `jump-in-wiki-validate-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    validatorRecoveryLabel: (iteration) => `jump-in-wiki-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    validatorRecoveryPrompt: (hasContent) => hasContent
+      ? `You were asked to write the validation report to "jump-in-wiki-validation-NN.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+        `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
+        `Please rewrite the complete validation report using writeFile now. Use the exact same content you generated in your previous message.`
+      : `You were asked to write the validation report using writeFile, but you produced no output.\n\n` +
+        `Please read the source materials and write the complete validation report using writeFile now.`,
+    assertRealToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
+    acceptanceCheck: (iteration) => wikiAcceptanceCheck(ctx, iteration),
+    feedbackLogLine: () => "Calling the AI to apply the validation feedback (author agent)...",
+    runFeedback: (iteration) => runWikiFeedback(ctx, author, iteration),
+    limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade. The last feedback pass is unvalidated; re-run the task to validate it.`,
+  });
+  ctx.limitReached = result.limitReached;
+  return result;
+}
 
-      // Recovery turn: ONLY when the report was actually missing after the
-      // fallback — never over a file the agent already wrote correctly.
-      if (wikiValidateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-        const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
-        const recoveryPrompt = hasContent
-          ? `You were asked to write the validation report to "jump-in-wiki-validation-NN.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
-            `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
-            `Please rewrite the complete validation report using writeFile now. Use the exact same content you generated in your previous message.`
-          : `You were asked to write the validation report using writeFile, but you produced no output.\n\n` +
-            `Please read the source materials and write the complete validation report using writeFile now.`;
-        const validateRecoveryResult = await validator.sendTurn(
-          recoveryPrompt,
-          { label: `jump-in-wiki-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
-        );
-        assertRealToolCalls(validateRecoveryResult, "the validator agent (recovery)", values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(
-          validationOutputFile,
-          "the validator agent (recovery)",
-          validateRecoveryResult?.text
-        );
-      }
-    } finally {
-      await validator.close();
-    }
-
-    // the logic for checking whether the validated wiki is acceptable
-    // (always one-shot, tool-less)
-    console.log("Calling the AI for the acceptance check...");
-
-    const acceptanceOutput = await harness.runOneShot({
-      systemPrompt: ctx.acceptanceSystemPrompt,
-      messages: [
-        { file: validationOutputFile, name: validationFileName },
-        { text: ctx.acceptanceUserPrompt },
-      ],
-      label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
-    });
-    const score = parseAcceptanceScore(acceptanceOutput);
-    if (score === null) {
-      console.log(
-        `Acceptance check: no valid score in response ` +
-          `(got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). ` +
-          `Counting this check as a failure.`
-      );
-    } else {
-      console.log(
-        `Acceptance check: score ${score}/100 (passing score: ${ACCEPTANCE_PASSING_SCORE})`
-      );
-    }
-
-    // Record the score in the rolling window (null = unparseable, already
-    // logged as a failure; not stored).
-    if (score !== null) {
-      recentRollingScores.push(score);
-      if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) {
-        recentRollingScores.shift();
-      }
-    }
-
-    // Persist the rolling window to disk so that a re-run can recover the
-    // exact acceptance state without re-calling the AI.
-    const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-    await saveRollingState(stateFilePath, recentRollingScores, {
-      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-    });
-
-    // Check the acceptance criterion: if we have enough samples and the
-    // window meets it, accept and stop (skip feedback).
-    if (meetsAcceptanceCriteria(recentRollingScores)) {
-      const avg = computeRollingAverage(recentRollingScores);
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 ` +
-          `(${recentRollingScores.length} checks) meets the passing score ` +
-          `${ACCEPTANCE_PASSING_SCORE}. Accepted.`
-      );
-      break;
-    }
-
-    // the logic for applying the validation feedback (same author session)
-    console.log("Calling the AI to apply the validation feedback (author agent)...");
-
-    const wikiFeedbackResult = await author.sendTurn(
-      buildWikiFeedbackTurnPrompt(ctx),
-      { label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
+/**
+ * The wiki acceptance check (called by the shared QA loop in
+ * utils/qa-loop.js): a tool-less one-shot over the wiki artifacts + the
+ * standard validation report; the model scores 0–100 as a JSON reply.
+ *
+ * @param {WikiVolumeCtx} ctx - The volume context.
+ * @param {number} iteration - The current QA iteration (for the log label).
+ * @returns {Promise<number|null>} The parsed score, or `null` when no valid
+ *   score could be extracted (treated as a failed check).
+ */
+async function wikiAcceptanceCheck(ctx, iteration) {
+  const { values, validationOutputFile } = ctx;
+  const acceptanceOutput = await harness.runOneShot({
+    systemPrompt: ctx.acceptanceSystemPrompt,
+    messages: [
+      { file: ctx.wikiOutputFile, name: "wiki.md" },
+      { file: ctx.sharedWikiOutputFile, name: "shared-wiki.md" },
+      { file: validationOutputFile, name: path.basename(validationOutputFile) },
+      { text: ctx.acceptanceUserPrompt },
+    ],
+    label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
+  });
+  const reply = parseAcceptanceReply(acceptanceOutput);
+  if (reply === null) {
+    console.log(
+      `Acceptance check: no valid score in response ` +
+        `(got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). ` +
+        `Counting this check as a failure.`
     );
-    assertRealToolCalls(wikiFeedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
-    const wikiFeedbackFallbackUsed = await assertWroteWithFallback(
+  } else {
+    console.log(
+      `Acceptance check: score ${reply.score}/100` +
+        (reply.band ? ` (band: ${reply.band})` : "") +
+        (reply.note ? ` — ${reply.note}` : "") +
+        ` (passing score: ${ACCEPTANCE_PASSING_SCORE})`
+    );
+  }
+  return reply ? reply.score : null;
+}
+
+/**
+ * The wiki feedback stage (called by the shared QA loop in
+ * utils/qa-loop.js): the SAME author session that generated the wiki applies
+ * the validation report (the wiki task reuses its session; the other tasks
+ * use a fresh author agent per feedback pass).
+ *
+ * @param {WikiVolumeCtx} ctx - The volume context.
+ * @param {AgentHandle} author - The author agent handle (keeps its session).
+ * @param {number} iteration - The current QA iteration (for the labels).
+ */
+async function runWikiFeedback(ctx, author, iteration) {
+  const { values, wikiOutputFile, sharedWikiOutputFile } = ctx;
+  const wikiFeedbackResult = await author.sendTurn(
+    buildWikiFeedbackTurnPrompt(ctx),
+    { label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
+  );
+  assertRealToolCalls(wikiFeedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
+  const wikiFeedbackFallbackUsed = await assertWroteWithFallback(
+    [wikiOutputFile, sharedWikiOutputFile],
+    "the author agent (feedback pass)",
+    wikiFeedbackResult?.text
+  );
+
+  // Recovery turn for feedback pass: if the model produced no output,
+  // re-send the full feedback task.
+  if (wikiFeedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
+    const wikiFeedbackHasContent = wikiFeedbackResult?.text && wikiFeedbackResult.text.trim().length > 0;
+    const wikiFeedbackRecoveryPrompt = wikiFeedbackHasContent
+      ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+        `Both files have been temporarily written from your chat reply, but they must be written properly using writeFile. ` +
+        `Please rewrite both files using writeFile now. Use the exact same content you generated in your previous message: ` +
+        `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`
+      : `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you produced no output.\n\n` +
+        `Please read the source materials and the validation report and write both files using writeFile now: ` +
+        `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`;
+    const wikiFeedbackRecoveryResult = await author.sendTurn(
+      wikiFeedbackRecoveryPrompt,
+      { label: `jump-in-wiki-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
+    );
+    assertRealToolCalls(wikiFeedbackRecoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
+    await assertWroteWithFallback(
       [wikiOutputFile, sharedWikiOutputFile],
-      "the author agent (feedback pass)",
-      wikiFeedbackResult?.text
+      "the author agent (feedback recovery)",
+      wikiFeedbackRecoveryResult?.text
     );
-
-    // Recovery turn for feedback pass: if the model produced no output,
-    // re-send the full feedback task.
-    if (wikiFeedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-      const wikiFeedbackHasContent = wikiFeedbackResult?.text && wikiFeedbackResult.text.trim().length > 0;
-      const wikiFeedbackRecoveryPrompt = wikiFeedbackHasContent
-        ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
-          `Both files have been temporarily written from your chat reply, but they must be written properly using writeFile. ` +
-          `Please rewrite both files using writeFile now. Use the exact same content you generated in your previous message: ` +
-          `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`
-        : `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you produced no output.\n\n` +
-          `Please read the source materials and the validation report and write both files using writeFile now: ` +
-          `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`;
-      const wikiFeedbackRecoveryResult = await author.sendTurn(
-        wikiFeedbackRecoveryPrompt,
-        { label: `jump-in-wiki-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
-      );
-      assertRealToolCalls(wikiFeedbackRecoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(
-        [wikiOutputFile, sharedWikiOutputFile],
-        "the author agent (feedback recovery)",
-        wikiFeedbackRecoveryResult?.text
-      );
-    }
-
-    if (iteration === maxValidationIterations) {
-      ctx.limitReached = true;
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
-        `(${maxValidationIterations}) without a passing grade. The last feedback pass is ` +
-        `unvalidated; re-run the task to validate it.`
-      );
-      if (ON_QA_LIMIT === "fail") {
-        throw new Error(
-          `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
-            `without a passing grade (ON_QA_LIMIT=fail).`
-        );
-      }
-      break;
-    }
   }
 }
 

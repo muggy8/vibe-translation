@@ -20,8 +20,14 @@
  * and still keeps the report (the report IS the deliverable — a fixer re-runs
  * the offending task(s), then `--force` re-audits).
  *
- * Idempotent: if consistency-report.md is newer than all four artifacts it is
- * skipped (unless --force). If an artifact is missing the task fails loudly
+ * Idempotent: after each audit a provenance sidecar
+ * (consistency-report.md.provenance.json) records the sha256 of all four
+ * artifacts. The report is skipped while all four fingerprints still match —
+ * a fingerprint check, not a timestamp check, so a restored/touched artifact
+ * (old mtime, backup copy) can never trick a stale report into passing.
+ * Reports from before the sidecar existed fall back to the legacy
+ * "report newer than all artifacts" mtime check (unless --force).
+ * If an artifact is missing the task fails loudly
  * (name the task to run) — an audit over fewer than four artifacts is not a
  * sign-off.
  *
@@ -40,6 +46,7 @@ const { transformUserPrompt, writePromptDump } = require("./utils/prompt");
 const { AGENT_TOOLS_NOTE, validateRequiredEnv } = require("./configs/shared");
 const { fileExists, assertWrote } = require("./utils/fs");
 const { getTranslationTarget } = require("./get-translation-target");
+const { sha256OfFile } = require("./utils/source");
 
 const clientDir = __dirname;
 const seriesDir = process.env.SERIES_LOCATION;
@@ -56,6 +63,8 @@ const AUDIT_ARTIFACTS = [
   ["shared-wiki.md", "the shared wiki"],
 ];
 const REPORT_FILE = "consistency-report.md";
+/** The audit provenance sidecar, next to the report (fingerprint of the four audited artifacts). */
+const PROVENANCE_FILE = `${REPORT_FILE}.provenance.json`;
 const MAX_STEPS = 40;
 
 /**
@@ -103,6 +112,89 @@ function assertRealToolCalls(result, who) {
  */
 function buildAuditTurnPrompt(p) {
   return transformUserPrompt(p.userPrompt, p.values);
+}
+
+/**
+ * Hash the four audited artifacts (deterministic, no AI). Called AFTER the
+ * audit agent runs, so the fingerprints describe the state the report signs
+ * off (the artifacts are read-only to the agent; if it violated that, the
+ * post-audit hash still matches what is on disk when the skip-check runs).
+ *
+ * @param {string} seriesDir - The SERIES_LOCATION directory.
+ * @returns {Promise<Object<string, string>>} Artifact file name → sha256.
+ */
+async function hashAuditArtifacts(seriesDir) {
+  const hashes = {};
+  for (const [file] of AUDIT_ARTIFACTS) {
+    hashes[file] = await sha256OfFile(path.join(seriesDir, file));
+  }
+  return hashes;
+}
+
+/**
+ * Write the audit provenance sidecar next to the report (best-effort — a
+ * failure warns but never fails the task, same contract as
+ * writeProvenanceSidecar in utils/fs.js: the report is the deliverable).
+ *
+ * @param {string} reportFile - Absolute path of consistency-report.md.
+ * @param {Object<string, string>} artifactHashes - Artifact name → sha256.
+ * @returns {Promise<void>}
+ */
+async function writeAuditProvenance(reportFile, artifactHashes) {
+  try {
+    const sidecar = {
+      report: path.basename(reportFile),
+      auditedAt: new Date().toISOString(),
+      artifactHashes,
+    };
+    await fs.writeFile(
+      `${reportFile}.provenance.json`,
+      JSON.stringify(sidecar, null, 2) + "\n",
+      "utf8"
+    );
+  } catch (err) {
+    console.warn(
+      `[provenance] could not write the audit sidecar for ${reportFile} (${err.message}) — continuing.`
+    );
+  }
+}
+
+/**
+ * Load the audit provenance sidecar. Returns null when it is missing or
+ * corrupt (fail-open: the caller falls back to the legacy mtime check, so a
+ * broken sidecar never blocks a run — worst case it re-audits).
+ *
+ * @param {string} reportFile - Absolute path of consistency-report.md.
+ * @returns {Promise<Object|null>} The sidecar ({artifactHashes, ...}) or null.
+ */
+async function loadAuditProvenance(reportFile) {
+  try {
+    const raw = await fs.readFile(`${reportFile}.provenance.json`, "utf8");
+    const sidecar = JSON.parse(raw);
+    if (!sidecar || typeof sidecar.artifactHashes !== "object" || sidecar.artifactHashes === null) {
+      return null;
+    }
+    return sidecar;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pure: does the sidecar's fingerprint match the current artifacts EXACTLY?
+ * (Every one of the four artifacts must be present in the sidecar with an
+ * identical hash — a missing entry counts as a mismatch.)
+ *
+ * @param {Object|null} sidecar - The provenance sidecar (or null).
+ * @param {Object<string, string>} currentHashes - Current artifact name → sha256.
+ * @returns {boolean} True when all four fingerprints match.
+ */
+function provenanceMatches(sidecar, currentHashes) {
+  if (!sidecar) return false;
+  for (const [file] of AUDIT_ARTIFACTS) {
+    if (sidecar.artifactHashes[file] !== currentHashes[file]) return false;
+  }
+  return true;
 }
 
 /**
@@ -157,29 +249,49 @@ async function consistencyAudit() {
     );
   }
 
-  // Idempotency: the report is valid as long as it is not older than any
-  // artifact it audited (an artifact regenerated after the audit invalidates
-  // it). Deterministic mtime check — no AI call.
+  // Idempotency: the report is valid while its provenance sidecar still
+  // fingerprints the four artifacts EXACTLY (a content check — a restored /
+  // touched artifact with an old mtime can never pass it). Reports from
+  // before the sidecar existed (or with a corrupt one) fall back to the
+  // legacy "report newer than all artifacts" mtime check. No AI call.
   if (!force && (await fileExists(reportFile))) {
-    const reportMtime = (await fs.stat(reportFile)).mtimeMs;
-    const staleInputs = (
-      await Promise.all(
-        AUDIT_ARTIFACTS.map(async ([file]) => {
-          const st = await fs.stat(path.join(seriesDir, file));
-          return st.mtimeMs > reportMtime ? file : null;
-        })
-      )
-    ).filter(Boolean);
-    if (staleInputs.length === 0) {
+    const currentHashes = await hashAuditArtifacts(seriesDir);
+    const sidecar = await loadAuditProvenance(reportFile);
+    if (sidecar) {
+      if (provenanceMatches(sidecar, currentHashes)) {
+        console.log(
+          `consistency-report.md fingerprints all four artifacts — skipping ` +
+            `(use --force to re-audit).`
+        );
+        return;
+      }
+      const stale = AUDIT_ARTIFACTS.filter(
+        ([file]) => sidecar.artifactHashes[file] !== currentHashes[file]
+      ).map(([file]) => file);
       console.log(
-        `consistency-report.md is newer than all four artifacts — skipping ` +
-          `(use --force to re-audit).`
+        `consistency-report.md is stale (changed artifact(s): ${stale.join(", ")}) — re-auditing.`
       );
-      return;
+    } else {
+      const reportMtime = (await fs.stat(reportFile)).mtimeMs;
+      const staleInputs = (
+        await Promise.all(
+          AUDIT_ARTIFACTS.map(async ([file]) => {
+            const st = await fs.stat(path.join(seriesDir, file));
+            return st.mtimeMs > reportMtime ? file : null;
+          })
+        )
+      ).filter(Boolean);
+      if (staleInputs.length === 0) {
+        console.log(
+          `consistency-report.md is newer than all four artifacts (no provenance sidecar — legacy check) — skipping ` +
+            `(use --force to re-audit).`
+        );
+        return;
+      }
+      console.log(
+        `consistency-report.md is stale (newer artifact(s): ${staleInputs.join(", ")}) — re-auditing.`
+      );
     }
-    console.log(
-      `consistency-report.md is stale (newer artifact(s): ${staleInputs.join(", ")}) — re-auditing.`
-    );
   }
 
   // Gated fs tools: cwd + writes confined to the series root (where the
@@ -201,6 +313,11 @@ async function consistencyAudit() {
   } finally {
     await auditor.close();
   }
+
+  // Record the fingerprints of the state this report signs off, so the next
+  // run can skip deterministically (best-effort — a failure only means the
+  // next run falls back to the legacy mtime check).
+  await writeAuditProvenance(reportFile, await hashAuditArtifacts(seriesDir));
 
   // Log the verdict (the report is the deliverable — a FAIL is logged loudly
   // but does not fail the task: the artifacts stay on disk and a fixer re-runs
@@ -227,6 +344,11 @@ module.exports = {
   emittedToolCallAsText,
   assertRealToolCalls,
   buildAuditTurnPrompt,
+  hashAuditArtifacts,
+  writeAuditProvenance,
+  loadAuditProvenance,
+  provenanceMatches,
   AUDIT_ARTIFACTS,
   REPORT_FILE,
+  PROVENANCE_FILE,
 };

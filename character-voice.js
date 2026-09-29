@@ -30,10 +30,11 @@ const fs = require("fs").promises;
 const path = require("path");
 require("./types");
 const harness = require("./harness");
-const { transformUserPrompt, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
+const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
+const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
   shouldProcessChunked,
@@ -284,8 +285,11 @@ async function characterVoice() {
   // (the default is whole-installment processing; the fallback also triggers
   // automatically when the whole text exceeds SOURCE_CHUNK_THRESHOLD_CHARS).
   const chunkedArg = process.argv.includes("--chunked");
-  const volumeArg = process.argv.includes("--volume")
-    ? process.argv[process.argv.indexOf("--volume") + 1] : null;
+  const volumeArg =
+    (process.argv.find((a) => a.startsWith("--volume=")) || "").replace("--volume=", "") ||
+    (process.argv.includes("--volume")
+      ? process.argv[process.argv.indexOf("--volume") + 1]
+      : null);
   console.log("character-voice task starting...");
   validateRequiredEnv({ dryRun });
   const manifest = await getTranslationTarget({ force, dryRun });
@@ -300,8 +304,20 @@ async function characterVoice() {
     return parseInt(a.match(/\((\d+)\)/)?.[1]||"999",10) - parseInt(b.match(/\((\d+)\)/)?.[1]||"999",10);
   });
   const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
-  const volumes = volumeArg ? sorted.filter((f) => f===volumeArg) : sorted;
-  if (volumes.length===0) { console.log("No volumes found. Exiting."); return; }
+  // Match "--volume 01" against the installment number (same convention as
+  // glossary.js / jump-in-wiki.js); an exact folder name also works. A no-match
+  // fails loudly (a silent exit would masquerade as a successful no-op in an
+  // un-monitored run).
+  const volumes = volumeArg
+    ? sorted.filter((f) => {
+        if (f === volumeArg) return true;
+        const m = f.match(/\((\d+)\)\s*$/);
+        return m && m[1].padStart(2, "0") === String(parseInt(volumeArg, 10)).padStart(2, "0");
+      })
+    : sorted;
+  if (volumes.length === 0) {
+    throw new Error(`No volume folder matching --volume ${volumeArg} (volume folders: ${sorted.join(", ")}).`);
+  }
   let regeneratedAny = false;
   const failedVolumes = [];
   for (const folderName of volumes) {
@@ -577,69 +593,35 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
 }
 
 /**
- * QA loop: validator -> acceptance -> feedback.
+ * QA loop: validator -> acceptance -> feedback (the shared loop in
+ * utils/qa-loop.js — this wrapper supplies the character-voice-specific
+ * pieces: validator naming/prompts, the acceptance check, the feedback
+ * stage, and the log lines).
  * @param {CharacterVoiceVolumeCtx} ctx
  */
 async function runQaLoop(ctx) {
   const { values, volumeDir, sourceFile, validationOutputFile, fsGate } = ctx;
-  // Rolling window of recent acceptance scores (0–100). A score of `null`
-  // (unparseable acceptance response) counts as a failed check (fail-closed)
-  // and is not stored in the window.
-  const recentRollingScores = [];
-  for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
-    console.log(`Volume ${values.INSTALLMENT_NUMBER}: validation iteration ${iteration}/${maxValidationIterations}...`);
-    const validator = await harness.createAgentHandle({ name: `validator-voice-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size) });
-    try {
-      const validateResult = await validator.sendTurn(buildValidatorTurnPrompt(ctx), { label: `character-voice-validate-${values.INSTALLMENT_NUMBER}-${iteration}` });
-      assertRealToolCalls(validateResult, "the validator agent", values.INSTALLMENT_NUMBER);
-      const validateFallbackUsed = await assertWroteWithFallback(validationOutputFile, "the validator agent", validateResult?.text);
-      // Recovery turn: ONLY when the report was actually missing after the
-      // fallback — never over a file the agent already wrote correctly.
-      if (validateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-        const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
-        const recoveryPrompt = hasContent ? `You were asked to write "character-voice-validation.md" using writeFile, but you replied in chat. Please rewrite the report using writeFile now with the same content.` : `You produced no output. Please write the validation report to "character-voice-validation.md" using writeFile now.`;
-        const recoveryResult = await validator.sendTurn(recoveryPrompt, { label: `character-voice-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` });
-        assertRealToolCalls(recoveryResult, "the validator agent (recovery)", values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(validationOutputFile, "the validator agent (recovery)", recoveryResult?.text);
-      }
-      console.log("Calling the AI for the acceptance check...");
-      const score = await acceptanceCheck(ctx, iteration);
-      // Record the score in the rolling window (null = unparseable, already
-      // logged as a failure; not stored).
-      if (score !== null) {
-        recentRollingScores.push(score);
-        if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) {
-          recentRollingScores.shift();
-        }
-      }
-      // Persist the rolling window to disk so that a re-run can recover the
-      // exact acceptance state without re-calling the AI. Saved on every
-      // iteration — including the accepting one — so the idempotency
-      // skip-check sees the final state (previously it was only saved after
-      // a feedback pass, which meant accepted volumes were never skipped).
-      const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-      await saveRollingState(stateFilePath, recentRollingScores, {
-        sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-      });
-      if (meetsAcceptanceCriteria(recentRollingScores)) {
-        const avg = computeRollingAverage(recentRollingScores);
-        console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 (${recentRollingScores.length} checks) meets the passing score ${ACCEPTANCE_PASSING_SCORE}. Accepted.`);
-        break;
-      }
-      console.log("Calling the AI to apply the validation feedback (author agent)...");
-      await runFeedback(ctx);
-      if (iteration === maxValidationIterations) {
-        ctx.limitReached = true;
-        console.log(`Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`);
-        if (ON_QA_LIMIT === "fail") {
-          throw new Error(
-            `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
-              `without a passing grade (ON_QA_LIMIT=fail).`
-          );
-        }
-      }
-    } finally { await validator.close(); }
-  }
+  const result = await runSharedQaLoop({
+    volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+    maxIterations: maxValidationIterations,
+    onQaLimit: ON_QA_LIMIT,
+    validationOutputFile,
+    stateFile: validationOutputFile.replace(".md", "-rolling-state.json"),
+    sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    createValidatorAgent: async (iteration) => harness.createAgentHandle({ name: `validator-voice-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size) }),
+    buildValidatorTurn: (iteration) => buildValidatorTurnPrompt(ctx),
+    validatorLabel: (iteration) => `character-voice-validate-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    validatorRecoveryLabel: (iteration) => `character-voice-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    validatorRecoveryPrompt: (hasContent) => hasContent ? `You were asked to write "character-voice-validation.md" using writeFile, but you replied in chat. Please rewrite the report using writeFile now with the same content.` : `You produced no output. Please write the validation report to "character-voice-validation.md" using writeFile now.`,
+    assertRealToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
+    acceptanceLogLine: () => "Calling the AI for the acceptance check...",
+    acceptanceCheck: (iteration) => acceptanceCheck(ctx, iteration),
+    feedbackLogLine: () => "Calling the AI to apply the validation feedback (author agent)...",
+    runFeedback: (iteration) => runFeedback(ctx),
+    limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`,
+  });
+  ctx.limitReached = result.limitReached;
+  return result;
 }
 
 /**
@@ -675,15 +657,15 @@ async function runFeedback(ctx) {
  *   when no valid score could be extracted (treated as a failed check).
  */
 async function acceptanceCheck(ctx, iteration) {
-  const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt } = ctx;
-  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: validationOutputFile, name: "character-voice-validation.md" }, { text: acceptancePrompt }], label: `character-voice-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
-  const score = parseAcceptanceScore(acceptanceOutput);
-  if (score === null) {
+  const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt, voiceOutputFile, povOutputFile } = ctx;
+  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: voiceOutputFile, name: "character-voice.md" }, { file: povOutputFile, name: "pov-map.md" }, { file: validationOutputFile, name: "character-voice-validation.md" }, { text: acceptancePrompt }], label: `character-voice-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
+  const reply = parseAcceptanceReply(acceptanceOutput);
+  if (reply === null) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response (got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`);
   } else {
-    console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${score}/100 (passing score: ${ACCEPTANCE_PASSING_SCORE})`);
+    console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${reply.score}/100` + (reply.band ? ` (band: ${reply.band})` : "") + (reply.note ? ` — ${reply.note}` : "") + ` (passing score: ${ACCEPTANCE_PASSING_SCORE})`);
   }
-  return score;
+  return reply ? reply.score : null;
 }
 
 /**
@@ -865,4 +847,4 @@ async function runVolume(ctx) {
 }
 
 // Export
-module.exports = { characterVoice, parseVoiceQuirks, truncateVoiceRef, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildVoiceFindingsMergePrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runExtract, runCompile, runQaLoop, runChunkedVolume, runChunkedQaLoop, acceptanceCheck };
+module.exports = { characterVoice, parseVoiceQuirks, truncateVoiceRef, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildVoiceFindingsMergePrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runVolume, runExtract, runCompile, runQaLoop, runChunkedVolume, runChunkedQaLoop, acceptanceCheck };

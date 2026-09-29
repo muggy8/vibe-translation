@@ -31,39 +31,46 @@ You have file tools: readFile, listFiles, grep, writeFile, and editFile.
 
 /**
  * Number of parallel research agents to run simultaneously (one per term).
- * Set to 1 for sequential processing (old behavior). Useful to tune to your
- * local server's capacity. Read from .env, defaulting to 3.
+ * Default 1 (sequential): the local inference server runs one request at a
+ * time, and sequential research also avoids concurrent editFile calls on the
+ * shared glossary-research.md (the fs edit is a non-atomic read-modify-write,
+ * so parallel agents could clobber each other's notes). Raise only when the
+ * endpoint genuinely serves parallel requests. Read from .env.
  *
  * @type {number}
  */
 const RESEARCH_CONCURRENCY = Math.max(
   1,
-  parseInt(process.env.RESEARCH_CONCURRENCY, 10) || 3
+  parseInt(process.env.RESEARCH_CONCURRENCY, 10) || 1
 );
 
 // ── Rolling average validation config ────────────────────────────────────────
 
 /**
  * Number of recent acceptance checks to keep in the rolling window.
- * Read from .env, defaulting to 5.
+ * Default 2: the writer rewrites the artifact every iteration, so older
+ * scores describe artifact states that no longer exist — the window's only
+ * real job is smoothing the grader's score-to-score variance, and two fresh
+ * passes are enough for that while avoiding wasted validator runs.
+ * Read from .env.
  *
  * @type {number}
  */
 const ACCEPTANCE_WINDOW_SIZE = Math.max(
   2,
-  parseInt(process.env.ACCEPTANCE_WINDOW_SIZE, 10) || 5
+  parseInt(process.env.ACCEPTANCE_WINDOW_SIZE, 10) || 2
 );
 
 /**
- * Minimum number of acceptance checks before the rolling average can
- * trigger acceptance. Must be less than ACCEPTANCE_WINDOW_SIZE.
- * Read from .env, defaulting to 3.
+ * Minimum number of acceptance checks before the criterion can trigger
+ * acceptance. Must not exceed ACCEPTANCE_WINDOW_SIZE. Default 2 (accept
+ * after two consecutive fresh checks meet the criterion). Read from .env.
  *
  * @type {number}
  */
 const ACCEPTANCE_MIN_SAMPLES = Math.max(
   1,
-  parseInt(process.env.ACCEPTANCE_MIN_SAMPLES, 10) || 3
+  parseInt(process.env.ACCEPTANCE_MIN_SAMPLES, 10) || 2
 );
 
 /**

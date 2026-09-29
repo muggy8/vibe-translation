@@ -7,6 +7,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { extractJsonObject } = require("./manifest");
 
 function transformUserPrompt(template, values) {
   let result = template;
@@ -76,6 +77,40 @@ function validatorMaxStepsFor(sourceSizeBytes) {
   return Math.max(40, chunks * 2 + 24);
 }
 
+/**
+ * Parse the acceptance one-shot reply under the JSON contract: the prompts
+ * ask for a single JSON object {"score": 0-100, "band": "...", "note": "..."}.
+ *
+ * Tries the JSON object first (markdown fences and surrounding prose are
+ * tolerated by extractJsonObject); when no valid JSON score is present it
+ * falls back to the legacy integer extraction (parseAcceptanceScore), so an
+ * old-style "85" reply still counts instead of failing the run.
+ *
+ * @param {string} output - Raw output of the acceptance one-shot call.
+ * @returns {{score: number, band: string|null, note: string|null} | null}
+ *   The parsed reply, or `null` when no valid score could be extracted at
+ *   all (callers treat `null` as a failed check — fail-closed).
+ */
+function parseAcceptanceReply(output) {
+  if (typeof output === "string" && output.trim() !== "") {
+    try {
+      const obj = extractJsonObject(output);
+      if (obj && typeof obj === "object" && Number.isInteger(obj.score) && obj.score >= 0 && obj.score <= 100) {
+        return {
+          score: obj.score,
+          band: typeof obj.band === "string" ? obj.band : null,
+          note: typeof obj.note === "string" ? obj.note : null,
+        };
+      }
+    } catch {
+      // No parseable JSON object — fall through to the legacy integer parse.
+    }
+  }
+  const score = parseAcceptanceScore(output);
+  if (score === null) return null;
+  return { score, band: null, note: null };
+}
+
 async function writePromptDump(task, installmentNumber, mode, sections) {
   const clientDir = path.resolve(__dirname, "..");
   const dir = path.join(clientDir, ".dry-run");
@@ -86,4 +121,4 @@ async function writePromptDump(task, installmentNumber, mode, sections) {
   return file;
 }
 
-module.exports = { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, validatorMaxStepsFor, writePromptDump };
+module.exports = { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump };
