@@ -297,6 +297,8 @@ function countOccurrences(text, term) {
  * Hard failures (ok=false — the chapter must be retranslated):
  *   - the draft is empty (runOneShot already guards this, kept as defense)
  *   - CJK ratio > 5% (the model echoed the source instead of translating)
+ *   - length ratio < 0.4 (the draft is grossly short — a truncated response;
+ *     the runOneShot finish_reason="length" guard is the primary detector)
  * Warnings (reported, do not fail):
  *   - CJK ratio > 0.5% (stray untranslated fragments)
  *   - length ratio outside 0.6–2.5 (English is usually longer than
@@ -318,7 +320,14 @@ function checkTranslationQa({ sourceText, draftText, terms = [] }) {
   if (!draft) errors.push("draft is empty");
   if (cjk > 0.05) errors.push(`CJK ratio ${(cjk * 100).toFixed(1)}% — the draft still looks like source text`);
   else if (cjk > 0.005) warnings.push(`residual CJK ratio ${(cjk * 100).toFixed(2)}% — check for untranslated fragments`);
-  if (Number.isFinite(lengthRatio) && (lengthRatio < 0.6 || lengthRatio > 2.5)) {
+  // Truncation backstop: a draft under 40% of the source length is almost
+  // certainly cut off (a JP→EN translation is normally the same length or
+  // longer by character count). The runOneShot finish_reason="length" guard
+  // is the primary truncation detector; this catches the case where the finish
+  // reason is unavailable but the draft is still grossly short.
+  if (src.length > 0 && Number.isFinite(lengthRatio) && lengthRatio < 0.4) {
+    errors.push(`draft is only ${(lengthRatio * 100).toFixed(0)}% of the source length — it looks truncated`);
+  } else if (Number.isFinite(lengthRatio) && (lengthRatio < 0.6 || lengthRatio > 2.5)) {
     warnings.push(`length ratio ${lengthRatio.toFixed(2)} outside the 0.6–2.5 band`);
   }
   const missingTerms = [];

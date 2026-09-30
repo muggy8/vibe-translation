@@ -219,10 +219,17 @@ assert.strictEqual(sha256("a"), sha256("a"));
   // Empty draft: hard failure.
   assert.strictEqual(checkTranslationQa({ sourceText: source, draftText: "", terms }).ok, false);
 
-  // Absurdly short draft: length-ratio warning (not a failure).
-  const short = checkTranslationQa({ sourceText: source, draftText: "Yes.", terms });
-  assert.strictEqual(short.ok, true);
-  assert.ok(short.warnings.some((w) => w.includes("length ratio")));
+  // Short-but-plausible draft (length ratio in the 0.4–0.6 band): a warning,
+  // still ok (a compact but complete rendering).
+  const shortWarn = checkTranslationQa({ sourceText: source, draftText: "Sora looked.", terms });
+  assert.strictEqual(shortWarn.ok, true);
+  assert.ok(shortWarn.warnings.some((w) => w.includes("length ratio")));
+
+  // Grossly short draft (under 40% of the source length): a truncated response
+  // is a hard failure (#1), not just a warning.
+  const truncated = checkTranslationQa({ sourceText: source, draftText: "Yes.", terms });
+  assert.strictEqual(truncated.ok, false);
+  assert.ok(truncated.errors.some((e) => e.includes("truncated")));
 }
 
 // ─── buildPolishGuardFindings ─────────────────────────────────────────────────

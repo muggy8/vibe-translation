@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# pre-polish-audit.sample — BEFORE the polish task's cross-model final-audit
+# sub-phase (the batched flash-next audit of the Phase A guard-gated candidates
+# — a DIFFERENT model than the Qwen polisher). Copy to
+# hooks/pre-polish-audit.sh, chmod +x, and point it at YOUR flash-next
+# container's compose dir. Idempotent: no-op when flash-next already serves the
+# port. Fired only around each flash-next audit batch — never per chapter.
+set -euo pipefail
+exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/Qwen3.8-flash-next

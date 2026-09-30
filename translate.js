@@ -174,6 +174,10 @@ async function processTranslateVolume(ctx) {
   const qaRows = [];
   let translated = 0;
   let skipped = 0;
+  // Chapters whose model call or deterministic QA failed — isolated per
+  // chapter (the draft is not written, so a re-run retries them) rather than
+  // aborting the whole volume.
+  let failed = 0;
   // The previous chapter's ending (feeds the continuity context of the next
   // chapter's first part).
   let prevChapterTail = "";
@@ -241,7 +245,13 @@ async function processTranslateVolume(ctx) {
     }
 
     // Translate the chapter part by part (oversized chapters are split; each
-    // part continues the previous one).
+    // part continues the previous one). A per-chapter try/catch isolates
+    // failures: a bad chapter (truncated/empty model output, or a
+    // deterministic-QA hard fail) is marked FAILED and the loop moves on
+    // instead of aborting the whole volume — the draft is simply not written,
+    // so a re-run retries it. prevChapterTail keeps the last good chapter's
+    // ending for the next chapter's continuity context.
+    try {
     const parts = splitChapter(sourceText, chunkChars);
     const partTexts = [];
     let continuity = prevChapterTail;
@@ -322,6 +332,22 @@ async function processTranslateVolume(ctx) {
     if (qa.warnings.length > 0) {
       console.warn(`  Volume ${volume.installmentNumber} ${seg.id}: QA warning: ${qa.warnings.join("; ")}`);
     }
+    } catch (err) {
+      failed += 1;
+      console.error(
+        `  Volume ${volume.installmentNumber} ${seg.id}: FAILED — ${err.message} The draft was NOT ` +
+          `written, so the chapter will be retried on re-run (no state entry was saved).`
+      );
+      qaRows.push({
+        id: seg.id,
+        title: seg.title,
+        status: `failed — ${err.message}`,
+        ok: false,
+        cjk: 0,
+        lengthRatio: 0,
+        warnings: [],
+      });
+    }
   }
 
   // Merge the volume's chapters (the polished text wins when it was produced
@@ -336,7 +362,7 @@ async function processTranslateVolume(ctx) {
     buildQaReportMarkdown(volume, qaRows),
     "utf8"
   );
-  return { translated, skipped, qa: qaRows };
+  return { translated, skipped, failed, qa: qaRows };
 }
 
 /**
@@ -518,6 +544,7 @@ async function translate() {
   const failedVolumes = [];
   let totalTranslated = 0;
   let totalSkipped = 0;
+  let totalFailed = 0;
 
   for (const folderName of volumes) {
     const volume = volumeByFolder.get(folderName);
@@ -539,9 +566,12 @@ async function translate() {
       });
       totalTranslated += result.translated;
       totalSkipped += result.skipped;
+      totalFailed += result.failed;
       console.log(
         `[translate] Volume ${volume.installmentNumber}: ${result.translated} translated, ` +
-          `${result.skipped} skipped.`
+          `${result.skipped} skipped` +
+          (result.failed > 0 ? `, ${result.failed} FAILED` : "") +
+          "."
       );
     } catch (err) {
       if (ON_VOLUME_ERROR === "skip") {
@@ -557,6 +587,7 @@ async function translate() {
 
   console.log(
     `[translate] Done: ${totalTranslated} chapter(s) translated, ${totalSkipped} skipped` +
+      (totalFailed > 0 ? `, ${totalFailed} chapter(s) FAILED` : "") +
       (failedVolumes.length > 0 ? `, ${failedVolumes.length} volume(s) FAILED: ${failedVolumes.join(", ")}` : "") +
       "."
   );
@@ -564,6 +595,12 @@ async function translate() {
     throw new Error(
       `${failedVolumes.length} of ${volumes.length} volume(s) failed: ${failedVolumes.join(", ")} ` +
         `(ON_VOLUME_ERROR=skip — the failed volumes can be picked up on a re-run).`
+    );
+  }
+  if (totalFailed > 0) {
+    throw new Error(
+      `${totalFailed} chapter(s) failed (model call or deterministic QA) and were left untranslated — ` +
+        `re-run the translate task to retry them (idempotent skips keep it cheap).`
     );
   }
 }

@@ -1338,6 +1338,21 @@ async function runOneShot({
     // Log full call details (system prompt, messages, response).
     writeOneShotLog(label, systemPrompt, messages, result.text, result, modelId);
 
+    // Truncation guard: a response cut off at the output token limit
+    // (finish_reason="length") is a TRUNCATED answer, never a complete one —
+    // persisting it would corrupt the artifact (a half-chapter, a broken JSON
+    // extraction, …). Retrying is pointless (the limit is deterministic), so
+    // fail loudly instead. The deterministic QA length floor in
+    // utils/translate.js is the backstop for the rare case where the finish
+    // reason is unavailable.
+    if (result.text && result.finishReason === "length") {
+      throw new Error(
+        `${label}: the model hit its output token limit (finish_reason=length) after ` +
+          `${result.text.length} chars — the response is TRUNCATED and was discarded. ` +
+          `Increase AI_MAX_TOKENS (currently ${maxTokens}) or shrink the input ` +
+          `(e.g. TRANSLATE_CHUNK_CHARS for translation) and re-run.`
+      );
+    }
     if (result.text) return result.text;
     if (remaining > 0) {
       remaining -= 1;

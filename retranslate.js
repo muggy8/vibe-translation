@@ -88,6 +88,42 @@ const RETRANSLATE_FINDINGS_CHARS = 3000;
 /** Same splitting/continuity budget as the translate stage. */
 const chunkChars = translateChunkChars();
 const continuityChars = translateContinuityChars();
+/** (#6) How many times a chapter may be retranslated against an IDENTICAL set
+ *  of verification findings before the stall guard skips it. Default 2 = the
+ *  single retranslate plus one extra fresh stochastic shot (the translator runs
+ *  at temp 0.7, so a repeat can succeed). Set 1 to restore retranslate-once. */
+const retranslateRetryBudget = Math.max(
+  1,
+  parseInt(process.env.TRANSLATE_QA_RETRY_BUDGET, 10) || 2
+);
+
+/**
+ * Read the previous chapter's current draft ending to seed this chapter's
+ * first-part continuity context (so a retranslated chapter still flows from
+ * the one before it — the first-pass translate stage chains chapters this way,
+ * and a standalone retranslate would otherwise leave a seam). Returns "" when
+ * there is no previous chapter or no draft on disk (both fine — the tail is a
+ * soft style cue, not a hard dependency).
+ *
+ * @param {{segments: Array<{id: string}>}} bundle
+ * @param {string} segId - The id of the chapter being retranslated.
+ * @param {string} volumeDir
+ * @param {number} chars - How many chars of the ending to keep.
+ * @returns {Promise<string>} The previous chapter's ending (or "").
+ */
+async function prevChapterContinuityTail(bundle, segId, volumeDir, chars) {
+  const idx = bundle.segments.findIndex((s) => s.id === segId);
+  if (idx <= 0 || chars <= 0) return "";
+  const { draftFile } = chapterArtifactNames(bundle.segments[idx - 1].id);
+  let prevDraft = "";
+  try {
+    prevDraft = await fs.readFile(path.join(volumeDir, draftFile), "utf8");
+  } catch {
+    prevDraft = "";
+  }
+  if (!prevDraft.trim()) return "";
+  return tailOf(prevDraft, chars);
+}
 
 // ─── Per-volume processing ──────────────────────────────────────────────────
 
@@ -157,15 +193,26 @@ async function processRetranslateVolume(ctx) {
 
     const findings = (vEntry.findings || "").slice(0, RETRANSLATE_FINDINGS_CHARS);
     const sEntry = state.chapters[seg.id] || {};
+    const findingsHashNow = sha256(vEntry.findings || "");
+    const sameFindings =
+      typeof sEntry.findingsHash === "string" && sEntry.findingsHash === findingsHashNow;
+    // (#6) Retry budget: a chapter may be retranslated up to
+    // `retranslateRetryBudget` times against an IDENTICAL set of verification
+    // findings before the stall guard skips it. The extra shots matter because
+    // the translator is stochastic (temp 0.7) — same findings ≠ same outcome.
+    // A DIFFERENT findings set resets the budget. Cross-run re-runs stay cheap:
+    // once the budget is spent on these findings, a plain re-run skips.
+    const attemptsUsed = sameFindings ? (sEntry.retranslateAttempts ?? 1) : 0;
     const alreadyDone =
       !force &&
       sEntry.retranslated === true &&
-      typeof sEntry.findingsHash === "string" &&
-      sEntry.findingsHash === sha256(vEntry.findings || "") &&
-      sEntry.sourceHash === sourceHash;
+      sEntry.sourceHash === sourceHash &&
+      sameFindings &&
+      attemptsUsed >= retranslateRetryBudget;
     if (alreadyDone) {
       console.log(
-        `  Volume ${volume.installmentNumber} ${seg.id}: already retranslated for these findings — skipping.`
+        `  Volume ${volume.installmentNumber} ${seg.id}: already retranslated for these findings ` +
+          `(${attemptsUsed}×, budget ${retranslateRetryBudget}) — skipping.`
       );
       skipped += 1;
       return;
@@ -212,14 +259,16 @@ async function processRetranslateVolume(ctx) {
     }
 
     const partTexts = [];
-    let continuity = "";
+    // (#7) Seed the first part's continuity from the previous chapter's
+    // CURRENT draft ending (the translate stage chains chapters this way).
+    let continuity = await prevChapterContinuityTail(bundle, seg.id, volumeDir, continuityChars);
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
       const tasks = buildTranslationTaskLines({
         terminologyLines: refs.terminologyLines,
         background: refs.background,
         styleRules: refs.styleRules,
-        continuityText: i === 0 ? undefined : continuity,
+        continuityText: continuity || undefined,
         findingsText: findingsTask,
         targetLanguage,
       });
@@ -273,7 +322,11 @@ async function processRetranslateVolume(ctx) {
       // skip-checks elsewhere compare against the on-disk file.
       draftHash: sha256(clean + "\n"),
       retranslated: true,
-      findingsHash: sha256(vEntry.findings || ""),
+      findingsHash: findingsHashNow,
+      // (#6) How many times this chapter has been retranslated against THIS
+      // findings set (resets when the findings change) — the stall guard's
+      // retry budget.
+      retranslateAttempts: (sameFindings ? (sEntry.retranslateAttempts ?? 1) : 0) + 1,
       polishedDraftHash: null,
     };
     await fs.rm(path.join(volumeDir, polishedFile), { force: true });

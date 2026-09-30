@@ -59,10 +59,10 @@ It talks to any **OpenAI-compatible endpoint** through the Vercel AI SDK + `@ope
 | `jump-in-wiki.js` | Wiki task logic **plus the shared helpers**. After all volumes: the last existing `shared-wiki.md` is copied to `SHARED_WIKI_OUTPUT_FILE` (default `<SERIES_LOCATION>/shared-wiki.md`); writes the per-volume translation handoff (`utils/handoff.js`) on both paths. |
 | `consistency-audit.js` | Final cross-artifact consistency audit (the pre-translation sign-off). An audit agent (gated fs tools, cwd = series root, writes confined to the root) reads the four series-root artifacts (`glossary.md`, `character-voice.md`, `style-guide.md`, `shared-wiki.md`) and writes `consistency-report.md` (PASS/FAIL verdict + severity-banded findings with quoted snippets). No QA loop. Idempotent: content-based — the report also writes a `consistency-report.md.provenance.json` sidecar carrying the sha256 fingerprint of each of the four audited artifacts; the report is skipped while all four fingerprints still match the current files (regenerating any artifact invalidates it). A missing or corrupt sidecar falls back to the legacy mtime check (report newer than all four artifacts). `--force` re-audits. A FAIL verdict is logged loudly but does not fail the task — the report is the deliverable. |
 | `translate.js` | Translation task (first stage of the multi-model chain; §8.5). Per volume, per chapter (in `bundle.segments` order): skip when the draft + `translation-state.json` cover the current source/reference hashes, split oversized chapters (`TRANSLATE_CHUNK_CHARS`), translate each part via `runOneShot` on the `TRANSLATE_*` endpoint — **no system prompt** (Hy-MT2's single-user-message contract), official sampling, `no_think` by default — with the previous part's ending as continuity context, deterministic QA (`checkTranslationQa`), per-chapter state persistence, and the merged `translation.md` + `translation-qa.md`. Also exports `chapterArtifactNames` / `mergeVolumeTranslationFiles` shared by the other three tasks. |
-| `verify-translate.js` | Verification task (§8.5). Per chapter with a draft: one-shot source-anchored check on the `VERIFY_*` endpoint (Qwen) → 0–100 score (fail-closed: unparseable = FAIL) + severity-banded findings → `translation-verification.json` sidecar + `translation-verification.md` report. PASS = score ≥ `VERIFY_PASSING_SCORE` (default 70). `VERIFY_TRANSLATE_ENABLED=false` makes it a no-op. Exports `loadVerificationSidecar` (read by retranslate), `glossaryBlock` + `findingsOf` (read by polish); returns the aggregated run summary (`failed` — read by the `translate-qa` loop). |
+| `verify-translate.js` | Verification task (§8.5). Per chapter with a draft: one-shot source-anchored check on the `VERIFY_*` endpoint (Qwen) → 0–100 score (fail-closed: unparseable = FAIL) + severity-banded findings → `translation-verification.json` sidecar + `translation-verification.md` report. PASS = score ≥ `VERIFY_PASSING_SCORE` (default 70). **Borderline tiebreak (batched, cross-model):** after the Qwen verify pass, every chapter whose score lands within `±VERIFY_TIEBREAK_BAND` (default 5) of the passing score is re-scored by flash-next on the `AUDIT_*` endpoint (a DIFFERENT model — the `verify-flash` hook switches it in) and the two scores are **averaged** (one model switch for the whole batch, never interleaved with Qwen; unparseable flash-next score keeps the Qwen score — fail-open). `VERIFY_TRANSLATE_ENABLED=false` makes it a no-op. Exports `loadVerificationSidecar` (read by retranslate), `glossaryBlock` + `findingsOf` (read by polish); returns the aggregated run summary (`failed` — read by the `translate-qa` loop). |
 | `retranslate.js` | Correction task (§8.5). Per chapter that FAILED verification (and whose sidecar entry still covers the current source + draft): a fresh Hy-MT2 pass with the verification findings injected as a numbered "fix these" task in the official prompt — the bad draft is **deliberately not** fed back (re-reading a bad translation anchors the model to its errors). Same part-by-part splitting as `translate` (the findings are injected into every part). Overwrites the draft, updates the state (invalidating any earlier polish), re-merges `translation.md`. Runs only when verification is enabled; returns the aggregated run summary (`retranslated` — the `translate-qa` loop's stall guard). |
 | `translate-qa.js` | The batched translation QA loop (§8.5) — one gulp task that mirrors the pre-production "translate → validate → apply → re-validate …" loop: up to `TRANSLATE_QA_MAX_ROUNDS` rounds of [verify batch (Qwen) → retranslate batch (Hy-MT2)], stopping when every chapter passes, a round retranslates nothing (stalled), or the round cap is hit. Batched because the local model containers share one port: each half-round is a whole single-model task run invoked through `withHooks()` (the per-batch model-switch hooks fire at every boundary). Owns no prompt/model logic — the stop-decision is the pure `qaLoopDecision` in `utils/translate.js`. |
-| `polish.js` | Final pass (§8.5). Per chapter, up to `POLISH_QA_MAX_ROUNDS` (default 3) attempts: one-shot polish on the `EDIT_*` endpoint (Qwen, thinking on) — **the polisher sees NO source text** (surface cleanup of already-verified text) → deterministic regression guard → **source-aware drift inspector** (one-shot on the same endpoint; scores whether the polished text preserves the verified draft's meaning, using the source as ground truth; 0–100, PASS ≥ `POLISH_VERIFY_PASSING_SCORE` 70, fail-closed). A FAIL re-polishes with the findings injected as a numbered "fix these" task (the retranslate pattern); on exhaustion the draft is kept and the findings persist in the state (the next run re-polishes with them; `--force` = a fresh attempt). Writes `polished-<id>.md` + `polish-verification.json`, records `polishedDraftHash` + `polishVerifiedDraftHash` in the state, re-merges `translation.md` (polished text wins). |
+| `polish.js` | Final pass (§8.5). **Two-phase, batched, cross-model.** Phase A (per chapter, Qwen `EDIT_*`, thinking on): one-shot polish — **the polisher sees NO source text** (surface cleanup of already-verified text) → deterministic regression guard; a guard-gated candidate is written and queued. Phase B (batched, cross-model): a **flash-next final audit** on the `AUDIT_*` endpoint (a DIFFERENT model than the Qwen polisher — the `polish-audit` hook switches it in; the whole batch runs under one model, never interleaved with Qwen) scores each candidate on the source-aware drift rubric (0–100, PASS ≥ `POLISH_VERIFY_PASSING_SCORE` 70, fail-closed). A FAIL re-polishes via Qwen (the `polish` hook switches back) with the findings injected as a numbered "fix these" task (the retranslate pattern) and is re-audited next round; up to `POLISH_QA_MAX_ROUNDS` (default 3) rounds, on exhaustion the draft is kept (any polished file is dropped so the merge publishes it) and the findings persist (the next run re-audits with them; `--force` = a fresh attempt). Runs on whatever drafts exist (including round-cap FAILs). Writes `polished-<id>.md` + `polish-verification.json`, records `polishedDraftHash` + `polishVerifiedDraftHash` (set only when Phase B accepts) in the state, re-merges `translation.md` (polished text wins). |
 | `utils/translate.js` | Pure translation-stage helpers shared by the four tasks: `splitChapter`, `parseGlossaryTerms`, `extractStyleRules`, `buildTranslationTaskLines` / `buildTranslationPrompt` (the official Hy-MT2 single-user-message shape), `cjkRatio`, `countOccurrences`, `checkTranslationQa` (hard fails: empty draft, CJK ratio > 5%; warnings: CJK > 0.5%, length ratio outside 0.6–2.5, missing glossary renderings), `buildPolishGuardFindings` (the polish loop's correction tasks synthesized from a failed guard check), `mergeVolumeTranslation`, `stripMarkdownFence`, `tailOf`, `stripContinuityOverlap` (strips the previous part's ending if the model repeats it at the start of its reply — the deterministic dedup backstop for the continuity tail), `runWithConcurrency` (bounded worker pool for the per-chapter loops), `stageConcurrency` (the `<PREFIX>_CONCURRENCY` knob — VERIFY/RETRANSLATE/POLISH, default 1), `loadTranslationState` / `saveTranslationState` (fail-open), `roleEndpoint` (`<PREFIX>_BASE_URL`/`_API_KEY`/`_MODEL` with `AI_*` fallback; also reports `modelSource`/`baseUrlSource` for logging), `loadVolumeReferences` (glossary terms, style rules, wiki + POV-map background, voice notes, and the `contextHash` idempotency key), `qaLoopDecision` (the translate-qa loop's pure stop-decision: all-pass / round-limit / stalled) and `qaMaxRounds` (the `TRANSLATE_QA_MAX_ROUNDS` cap). |
 | `get-translation-target.js` | AI-driven translation-target discovery: a tool-calling agent lists the series directory, identifies which entries are volume folders, opens candidate files to confirm the actual source text (ignoring generated artifacts and images), and writes `<SERIES_LOCATION>/translation-target.json`. All ten tasks read this manifest instead of guessing folder names. |
 | `translation-target.json` | Generated manifest (see `get-translation-target.js`); lists each volume's folder, source file, installment number, and metadata. All ten tasks read it to resolve folders and source files. The live series dir always comes from `SERIES_LOCATION` (env), not from the manifest's `seriesLocation` field (provenance metadata — see gotcha 11). |
@@ -165,15 +165,22 @@ See `hooks/README.md` for the full contract and examples.
 - **Hook files** (first existing name wins) — `pre-<task>` / `post-<task>`
   (or `.sh` / `.js`) for `glossary`, `character-voice`, `style-guide`,
   `jump-in-wiki`, `consistency-audit`, `translate`, `verify-translate`,
-  `retranslate`, `translate-qa`, `polish`, plus `pre-pipeline` /
+  `retranslate`, `translate-qa`, `polish`, plus **sub-phase hooks**
+  `pre-verify-flash` (the verify borderline tiebreak batch) and
+  `pre-polish-audit` (the polish cross-model final-audit batch) — fired by the
+  tasks around their flash-next sub-phases (each is a single model switch,
+  never interleaved with the main stage) — and `pre-pipeline` /
   `post-pipeline` around the whole default run. Any executable with a
   shebang works. `pre-/post-translate-qa` wrap the WHOLE QA loop (a logical
   wrapper — they must not switch models).
 - **Model switching for the translation stage** — the translation stage uses
-  two different models, but on local setups the containers share one port, so
-  only one can serve at a time. The per-machine pre-hooks for the four
-  translation tasks are what start the right container (`model-switch.sh`,
-  `hooks/README.md` Example 4 — idempotent, `/health`-polled). The task code
+  several different models, but on local setups the containers share one port,
+  so only one can serve at a time. The per-machine pre-hooks for the translation
+  tasks are what start the right container (`model-switch.sh`,
+  `hooks/README.md` Example 4 — idempotent, `/health`-polled), including the
+  sub-phase hooks that switch in **flash-next** for the cross-model audits
+  (`pre-verify-flash.sh` for the verify tiebreak, `pre-polish-audit.sh` for the
+  polish final audit) before each flash-next batch. The task code
   contains no Docker logic; it only runs a `GET /v1/models` sanity check
   (`harness.assertModelServing`) before its first call. The `translate-qa`
   loop fires these batch hooks on every round (up to two switches per round;
@@ -315,8 +322,8 @@ endpoints:
 | Step | Task | Model (env) | What it does |
 |---|---|---|---|
 | 1 | `translate` | Hy-MT2-30B-A3B (`TRANSLATE_*`) | Fresh translation per chapter, official single-user-message prompt (no system prompt), official sampling (temp 0.7 / top_p 1.0 / top_k -1 / rep-pen 1.0), `no_think` by default |
-| 2 | `translate-qa` (round N) | verify: Qwen3.8-27B (`VERIFY_*`) · retranslate: Hy-MT2 (`TRANSLATE_*`) | The batched QA loop (see the design notes below). Each round: a **verify batch** — source-anchored 0–100 score + severity-banded findings per chapter (against source + glossary + style rules + **story background** — shared wiki / volume wiki / POV map; the source outranks the wiki, wiki-only findings cap at MEDIUM); PASS ≥ `VERIFY_PASSING_SCORE` (70); unparseable = FAIL (fail-closed) — then a **retranslate batch** — a fresh pass over every FAIL chapter, the findings injected as a numbered "fix these" task; the bad draft is **not** fed back. Rounds repeat until every chapter passes (round N+1's verify only re-scores the chapters round N retranslated — idempotent skips for the rest) |
-| 3 | `polish` | Qwen (`EDIT_*`) | Final proofreading pass (thinking on) — **the polisher sees NO source text** (surface cleanup of already-verified text). Gated by a deterministic regression guard plus a **source-aware drift inspector** (one-shot, same endpoint): up to `POLISH_QA_MAX_ROUNDS` (default 3) attempts per chapter, a FAIL re-polishes with the inspector's findings injected; on exhaustion the draft is kept (runs on whatever drafts exist — including round-cap FAILs) |
+| 2 | `translate-qa` (round N) | verify: Qwen3.8-27B (`VERIFY_*`) · retranslate: Hy-MT2 (`TRANSLATE_*`) | The batched QA loop (see the design notes below). Each round: a **verify batch** — source-anchored 0–100 score + severity-banded findings per chapter (against source + glossary + style rules + **story background** — shared wiki / volume wiki / POV map; the source outranks the wiki, wiki-only findings cap at MEDIUM); PASS ≥ `VERIFY_PASSING_SCORE` (70); unparseable = FAIL (fail-closed) — then a **batched flash-next tiebreak** re-scores every borderline chapter (within `±VERIFY_TIEBREAK_BAND` of the passing score) on the `AUDIT_*` endpoint and averages the two scores (one model switch, never interleaved with Qwen) — then a **retranslate batch** — a fresh pass over every FAIL chapter, the findings injected as a numbered "fix these" task; the bad draft is **not** fed back. Rounds repeat until every chapter passes (round N+1's verify only re-scores the chapters round N retranslated — idempotent skips for the rest) |
+| 3 | `polish` | polish: Qwen (`EDIT_*`) · final audit: flash-next (`AUDIT_*`) | **Two-phase, batched, cross-model.** Phase A (per chapter, Qwen): proofreading pass (thinking on) — **the polisher sees NO source text** — gated by the deterministic regression guard. Phase B (batched flash-next, a DIFFERENT model): a cross-model final audit scores each candidate on the source-aware drift rubric; a FAIL re-polishes via Qwen (findings injected) and is re-audited next round. Up to `POLISH_QA_MAX_ROUNDS` (default 3) rounds; on exhaustion the draft is kept (runs on whatever drafts exist — including round-cap FAILs) |
 
 **Design notes:**
 
@@ -404,26 +411,31 @@ endpoints:
   passes the QA the draft passed **and** keeps the draft's glossary coverage;
   a guard failure becomes a numbered correction task for the next attempt
   (the deterministic half of the polish QA).
-- **Polish drift inspector** — the deterministic guard is lexical (it cannot
-  catch a meaning shift), so a source-aware AI inspector closes the semantic
-  gap: a one-shot on the **same `EDIT_*` endpoint** (no model switch on the
-  shared-port local setup) scores whether the polished text preserves the
-  verified draft's meaning, using the source as ground truth. It is
-  **diff-focused** — it audits the polish pass's changes against the draft,
-  not the translation (the draft's own problems are not findings; surface
-  improvements are not findings). PASS ≥ `POLISH_VERIFY_PASSING_SCORE` (70);
-  unparseable = FAIL (fail-closed). The per-chapter loop: polish → guard →
-  drift check; a FAIL re-polishes with the findings injected as a numbered
-  "fix these" task (the retranslate pattern), up to `POLISH_QA_MAX_ROUNDS`
-  (default 3) attempts; on exhaustion the polished text is rejected, the
-  draft is kept (any polished file is dropped so the merge publishes the
-  draft), and the last findings persist in the state — the next run
-  re-polishes with them, and `--force` gives a fresh stochastic attempt. A
+- **Polish final audit (batched, cross-model)** — the deterministic guard is
+  lexical (it cannot catch a meaning shift), so a source-aware, **cross-model**
+  final audit closes the semantic gap. It is **two-phase and batched** (the
+  local containers share one port, so models are never interleaved per
+  chapter): Phase A polishes every chapter on Qwen (`EDIT_*`, NO source text)
+  and keeps only the candidates that pass the deterministic guard; Phase B
+  runs a **flash-next** audit on the `AUDIT_*` endpoint — a DIFFERENT model
+  than the Qwen polisher — over the whole candidate batch (one model switch,
+  the `polish-audit` hook), scoring each on the drift rubric (diff-focused:
+  the draft's own problems and surface improvements are not findings; the
+  source is ground truth). PASS ≥ `POLISH_VERIFY_PASSING_SCORE` (70);
+  unparseable = FAIL (fail-closed). A FAIL is re-polished via Qwen (the
+  `polish` hook switches back) with the findings injected as a numbered
+  "fix these" task (the retranslate pattern) and re-audited next round; up to
+  `POLISH_QA_MAX_ROUNDS` (default 3) rounds. On exhaustion the polished text
+  is rejected, the draft is kept (any polished file is dropped so the merge
+  publishes the draft), and the last findings persist in the state — the next
+  run re-audits with them, and `--force` gives a fresh stochastic attempt. A
   polished chapter is "up to date" only when
-  `polishVerifiedDraftHash === draftHash`; legacy polish state (no verified
-  hash, pre-inspector runs) gets its existing polished text inspected on the
-  first run after the upgrade instead of re-polished. `POLISH_VERIFY_ENABLED=false`
-  gates the pass on the deterministic guard only.
+  `polishVerifiedDraftHash === draftHash` (set by Phase B, not Phase A);
+  legacy polish state (no verified hash, pre-audit runs) gets its existing
+  polished text audited on the first run after the upgrade instead of
+  re-polished. `POLISH_VERIFY_ENABLED=false` gates the pass on the
+  deterministic guard only (Phase A candidates are accepted without the
+  cross-model audit).
 - **Merge** — after every step, `mergeVolumeTranslationFiles` rewrites the
   volume's `translation.md` from the per-chapter files: the
   `polished-<id>.md` text wins when the state shows it was produced from the
@@ -499,8 +511,14 @@ setups the per-machine pre-hooks switch the model container per stage
 | `POLISH_VERIFY_ENABLED` | `true` | `false` gates the polish pass on the deterministic regression guard only (no AI drift inspector) |
 | `POLISH_VERIFY_PASSING_SCORE` | `70` | Score (0–100) at or above which a polished text passes the drift inspector |
 | `POLISH_VERIFY_TEMPERATURE` | `0.2` | Drift-inspector sampling temperature (a judgment call — low, like `VERIFY_TEMPERATURE`) |
-| `POLISH_QA_MAX_ROUNDS` | `3` | Max [polish + drift check] attempts per chapter (a FAIL re-polishes with the findings injected) |
+| `POLISH_QA_MAX_ROUNDS` | `3` | Max polish rounds per chapter (a round = Phase A guard-gated candidate + Phase B cross-model audit; a FAIL re-polishes via Qwen and is re-audited next round) |
 | `VERIFY_CONCURRENCY` / `RETRANSLATE_CONCURRENCY` / `POLISH_CONCURRENCY` | `1` | Chapters processed in parallel per volume in the three independent tasks (opt-in — the local hardware runs one inference at a time). `translate` stays serial: its chapters are chained by the continuity tail. |
+| `VERIFY_TIEBREAK_ENABLED` | `true` | `false` skips the verify borderline tiebreak (always trust the single Qwen score) |
+| `VERIFY_TIEBREAK_BAND` | `5` | Chapters whose Qwen verify score lands within ±N of the passing score are re-scored by flash-next (cross-model) and the two scores averaged |
+| `AUDIT_BASE_URL` / `AUDIT_API_KEY` / `AUDIT_MODEL` | `AI_*` | Endpoint for the flash-next cross-model audits (verify tiebreak + polish final audit) — a DIFFERENT model than Qwen; on local setups the `verify-flash` / `polish-audit` hooks switch it in (the model alias is usually `local`) |
+| `AUDIT_TEMPERATURE` | `0.2` | Flash-next audit sampling temperature (a judgment call — low, like verification) |
+| `AUDIT_THINKING` / `AUDIT_THINKING_LEVEL` | `true` / `medium` | Qwen3-style thinking for the flash-next audits |
+| `VERIFY_FLASH_CONCURRENCY` | `1` | Chapters per flash-next batch processed in parallel (verify tiebreak + polish audit; opt-in — flash-next is slower) |
 
 ### Source bundle (`SOURCE_*`)
 
@@ -569,7 +587,7 @@ was copied from.
 | `WIKI_USER_AGENT` | built-in | Descriptive UA (Wikipedia requires one) |
 | `SEARCH_API` / `SEARCH_API_KEY` | off | Optional brave / tavily / serper backend |
 
-**Current local setup** (the committed `.env`): local Qwen at `AI_BASE_URL=http://localhost:9200/v1` with `AI_MODEL=local`, `AI_MAX_TOKENS=262144`, `AI_TEMPERATURE=0.6`, `AI_RETRY=2`, `AGENT_CONTEXT_WINDOW=262144`, `QA_MAX_ITERATIONS=5`, `ACCEPTANCE_WINDOW_SIZE=2`, `ACCEPTANCE_MIN_SAMPLES=2`, `ACCEPTANCE_PASSING_SCORE=69`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, `TRANSLATE_QA_MAX_ROUNDS=5`, thinking on at `xhigh` (defaults), series = `test-series` (the `test_story` fixture), JP→EN. The translation stage is configured for the local two-model setup: all three role endpoints (`TRANSLATE_*` / `VERIFY_*` / `EDIT_*`) point at the same `http://localhost:9200/v1` with `MODEL=local` — the per-machine hooks (`hooks/pre-translate.sh` → Hy-MT2, `hooks/pre-verify-translate.sh` / `pre-polish.sh` → Qwen, `hooks/pre-retranslate.sh` → Hy-MT2) switch the container per stage (the `translate-qa` loop re-fires the batch hooks on every round boundary; the state file makes a repeat switch a no-op), because every local container advertises the same `local` alias and shares the one port. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
+**Current local setup** (the committed `.env`): local Qwen at `AI_BASE_URL=http://localhost:9200/v1` with `AI_MODEL=local`, `AI_MAX_TOKENS=262144`, `AI_TEMPERATURE=0.6`, `AI_RETRY=2`, `AGENT_CONTEXT_WINDOW=262144`, `QA_MAX_ITERATIONS=5`, `ACCEPTANCE_WINDOW_SIZE=2`, `ACCEPTANCE_MIN_SAMPLES=2`, `ACCEPTANCE_PASSING_SCORE=69`, `ACCEPTANCE_STRATEGY=average`, `AGENT_TEXT_GUARD_CHARS=30000`, `TRANSLATE_QA_MAX_ROUNDS=5`, thinking on at `xhigh` (defaults), series = `test-series` (the `test_story` fixture), JP→EN. The translation stage is configured for the local two-model setup: all three role endpoints (`TRANSLATE_*` / `VERIFY_*` / `EDIT_*`) point at the same `http://localhost:9200/v1` with `MODEL=local` — the per-machine hooks (`hooks/pre-translate.sh` → Hy-MT2, `hooks/pre-verify-translate.sh` / `pre-polish.sh` → Qwen, `hooks/pre-retranslate.sh` → Hy-MT2) switch the container per stage, and the sub-phase hooks (`hooks/pre-verify-flash.sh` → the verify tiebreak, `hooks/pre-polish-audit.sh` → the polish final audit) switch in **flash-next** for the cross-model audits (`AUDIT_*` — same port, model alias `local`) (the `translate-qa` loop re-fires the batch hooks on every round boundary; the state file makes a repeat switch a no-op), because every local container advertises the same `local` alias and shares the one port. **It points at the test fixture, not the real 17 volumes** — check this before any "production" run.
 
 ## 10. Gotchas (hard-won — read before changing behavior)
 
@@ -621,6 +639,7 @@ was copied from.
 
 When communicating with the user, you should assume that the user is intelegent but not knowledgeable. Keep the following points in mind as you produce your final answer.
 - Avoid using advanced jargon and specialized terminolgy where possible.
+- Just because a term or jargon is used in the code doesn't mean the user udnerstands the meaning of those words.
 - Ask yourself "Would a general audiance software engineering influencer/educator use these terms?" If not, then you should probably avoid the use of the jargon in question.
 - Ask yourself "How likely would a term appear in a PhD research paper?" If the odds are high, it's probably best to avoid using the jargon in question.
 - When you are producing your final answer, instead of using specialized jargon, you can use analogies or metaphors instead.

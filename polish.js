@@ -68,6 +68,7 @@ const {
 } = require("./utils/translate");
 const { chapterArtifactNames, mergeVolumeTranslationFiles } = require("./translate");
 const { glossaryBlock, loadVerificationSidecar, findingsOf } = require("./verify-translate");
+const { withHooks } = require("./utils/hooks");
 
 // ─── Paths & config ──────────────────────────────────────────────────────────
 
@@ -110,7 +111,139 @@ const POLISH_FINDINGS_MAX_CHARS = 3000;
  *  local hardware runs one inference at a time). */
 const polishConcurrency = stageConcurrency("POLISH");
 
+/** (#3/#4) Flash-next cross-model final audit (Qwen3.8-flash-next — a
+ *  DIFFERENT model than the Qwen polisher; the pre-polish-audit hook switches
+ *  it in on shared-port local setups). The final semantic check (drift +
+ *  source) runs as a BATCHED cross-model pass, never interleaved per chapter. */
+const auditThinkingLevel = process.env.AUDIT_THINKING_LEVEL || "medium";
+const auditThinking = process.env.AUDIT_THINKING !== "false";
+const auditTemperature = parseFloat(process.env.AUDIT_TEMPERATURE ?? "0.2");
+/** (#3/#4) Flash-next audit batch concurrency (opt-in; default 1 — slower). */
+const flashConcurrency = stageConcurrency("VERIFY_FLASH");
+
 // ─── Per-volume processing ──────────────────────────────────────────────────
+
+/**
+ * (#3/#4) The batched flash-next final audit — a cross-model pass over a set
+ * of polished candidates. Each candidate is scored by flash-next (a DIFFERENT
+ * model than the Qwen polisher) on the source-aware drift rubric: does the
+ * polished text preserve the verified draft's meaning (and stay faithful to
+ * the source)? Returns one result per chapter. The caller wraps this in the
+ * polish-audit hook (on local setups: the switch to the flash-next container),
+ * so the whole batch runs under one model, never interleaved with Qwen.
+ *
+ * @param {{
+ *   volume: {installmentNumber: string}, volumeDir: string,
+ *   bundle: {segments: Array<{id: string, file: string}>},
+ *   refs: {terms: Array<{term: string, rendering: string}>, styleRules: string},
+ *   systemPrompt: string, template: string,
+ *   auditEndpoint: {baseUrl: string, apiKey?: string, model: string},
+ *   toAudit: Array<{id: string}>,
+ * }} ctx
+ * @returns {Promise<Array<{id: string, score: number|null, pass: boolean, findings: string}>>}
+ */
+async function runFlashAudit({ volume, volumeDir, bundle, refs, systemPrompt, template, auditEndpoint, toAudit }) {
+  await harness.assertModelServing({ ...auditEndpoint, label: "polish-audit stage" });
+  console.log(
+    `[polish-audit] cross-model final audit of ${toAudit.length} chapter(s) with ${auditEndpoint.model} ` +
+      `(PASS ≥ ${polishVerifyPassingScore}/100)…`
+  );
+  const results = [];
+  await runWithConcurrency(toAudit, flashConcurrency, async ({ id }) => {
+    const seg = bundle.segments.find((s) => s.id === id);
+    const { draftFile, polishedFile } = chapterArtifactNames(id);
+    const sourceText = await fs.readFile(path.join(volumeDir, seg.file), "utf8");
+    const draft = await fs.readFile(path.join(volumeDir, draftFile), "utf8");
+    const polished = await fs.readFile(path.join(volumeDir, polishedFile), "utf8");
+    const prompt = transformUserPrompt(template, {
+      SOURCE_TEXT: sourceText,
+      DRAFT_TEXT: draft,
+      POLISHED_TEXT: polished,
+      GLOSSARY: glossaryBlock(refs.terms),
+    });
+    const vResult = await harness.runOneShot({
+      systemPrompt,
+      messages: [{ text: prompt }],
+      endpoint: auditEndpoint,
+      temperature: Number.isFinite(auditTemperature) ? auditTemperature : 0.2,
+      thinking: auditThinking,
+      thinkingLevel: auditThinkingLevel,
+      label: `polish-audit-v${volume.installmentNumber}-${id}`,
+    });
+    const score = parseAcceptanceScore(vResult);
+    const pass = score !== null && score >= polishVerifyPassingScore;
+    results.push({ id, score, pass, findings: findingsOf(vResult) });
+    console.log(
+      `  Volume ${volume.installmentNumber} ${id}: flash-next audit ` +
+        `${score === null ? "n/a (unparseable — FAIL)" : score + "/100"} → ${pass ? "PASS" : "FAIL"}.`
+    );
+  });
+  return results;
+}
+
+/**
+ * (#3/#4) The batched Qwen re-polish — the correction pass over the candidates
+ * the flash-next audit failed. Each is re-polished by the Qwen edit model (NO
+ * source text — surface cleanup) with the audit's findings injected as a
+ * numbered "fix these" task (the retranslate pattern). The new candidate is
+ * written and marked pending the next audit round. The caller wraps this in the
+ * polish hook (on local setups: the switch back to the Qwen container).
+ *
+ * @param {{
+ *   volume: {installmentNumber: string}, volumeDir: string,
+ *   bundle: {segments: Array<{id: string, file: string}>},
+ *   refs: {terms: Array<{term: string, rendering: string}>, styleRules: string, voiceNotes: string, contextHash: string},
+ *   systemPrompt: string, template: string,
+ *   endpoint: {baseUrl: string, apiKey?: string, model: string},
+ *   state: {chapters: Object},
+ *   failed: Array<{id: string, findings: string, draftHash: string}>,
+ * }} ctx
+ * @returns {Promise<void>}
+ */
+async function runQwenRePolish({ volume, volumeDir, bundle, refs, systemPrompt, template, endpoint, state, failed }) {
+  console.log(
+    `[polish] re-polishing ${failed.length} chapter(s) with ${endpoint.model} (flash-next audit findings injected)…`
+  );
+  await runWithConcurrency(failed, polishConcurrency, async ({ id, findings, draftHash }) => {
+    const { draftFile, polishedFile } = chapterArtifactNames(id);
+    const draft = await fs.readFile(path.join(volumeDir, draftFile), "utf8");
+    const values = {
+      TRANSLATION_TEXT: draft,
+      GLOSSARY: glossaryBlock(refs.terms),
+      STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
+      VOICE_NOTES: refs.voiceNotes || "(none provided — run the character-voice task)",
+      POLISH_FINDINGS: findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none)",
+    };
+    const prompt = transformUserPrompt(template, values);
+    const result = await harness.runOneShot({
+      systemPrompt,
+      messages: [{ text: prompt }],
+      endpoint,
+      temperature: Number.isFinite(polishTemperature) ? polishTemperature : 0.6,
+      thinking: polishThinking,
+      thinkingLevel: polishThinkingLevel,
+      label: `polish-v${volume.installmentNumber}-${id}-audit-retry`,
+    });
+    const attemptText = stripMarkdownFence(result);
+    if (!attemptText) {
+      throw new Error(
+        `Volume ${volume.installmentNumber} ${id}: the model returned no content for the audit re-polish. ` +
+          `Check .logs/ and re-run.`
+      );
+    }
+    await fs.writeFile(path.join(volumeDir, polishedFile), attemptText + "\n", "utf8");
+    const e = state.chapters[id] || {};
+    state.chapters[id] = {
+      ...e,
+      polishedDraftHash: draftHash,
+      polishVerifiedDraftHash: null, // pending the next audit round
+      // Persist the audit findings that triggered this re-polish: if the run
+      // ends with the chapter still failing, they seed the next run's re-polish.
+      polishFindings: findings,
+      polishFindingsHash: findings ? sha256(findings) : null,
+    };
+  });
+}
 
 /**
  * Polish one volume's chapter drafts.
@@ -125,6 +258,7 @@ const polishConcurrency = stageConcurrency("POLISH");
  *   verifySystemPrompt: string|null,
  *   verifyTemplate: string|null,
  *   endpoint: {baseUrl: string, apiKey?: string, model: string},
+ *   auditEndpoint: {baseUrl: string, apiKey?: string, model: string}|null,
  *   dryRun: boolean,
  *   force: boolean,
  * }} ctx
@@ -141,6 +275,7 @@ async function processPolishVolume(ctx) {
     verifySystemPrompt,
     verifyTemplate,
     endpoint,
+    auditEndpoint,
     dryRun,
     force,
   } = ctx;
@@ -151,6 +286,9 @@ async function processPolishVolume(ctx) {
   let skipped = 0;
   let rejected = 0;
   let noDraft = 0;
+  // (#3/#4) Candidates Phase A produced (guard-gated) — queued for the batched
+  // cross-model final audit (Phase B) after all chapters are processed.
+  let auditPending = [];
 
   // Chapters are INDEPENDENT (each is polished from its own draft +
   // references), so they can run in parallel when POLISH_CONCURRENCY > 1.
@@ -246,224 +384,266 @@ async function processPolishVolume(ctx) {
       return;
     }
 
-    // The guard + drift-check loop: up to polishMaxRounds attempts per
-    // chapter. A FAIL re-polishes with the findings injected as a numbered
-    // "fix these" task (the retranslate pattern); on exhaustion the polished
-    // text is rejected, the draft is kept, and the last findings persist in
-    // the state (the next run re-polishes with them — --force re-polishes a
-    // fresh attempt).
+    // (#3/#4) Phase A — produce a guard-gated polish candidate (Qwen, NO
+    // source text). The deterministic regression guard is the only per-chapter
+    // gate now; the source-aware cross-model final audit is Phase B (a batched
+    // flash-next pass, after every candidate exists). A Phase B FAIL re-polishes
+    // here with the findings injected, so this loop is the re-polish step.
     let attemptText = hasExistingPolish ? (await fs.readFile(polishedPath, "utf8")) : null;
-    let accepted = false;
-    let acceptedText = null;
-    let lastScore = null;
-    let lastQa = null;
-    let attempts = 0;
 
-    for (let round = 1; round <= polishMaxRounds && !accepted; round++) {
-      attempts = round;
-
-      if (attemptText === null) {
-        // Fresh polish (attempt 1) or re-polish with the previous attempt's
-        // findings. The polisher sees NO source text — surface cleanup only.
-        const values = {
-          TRANSLATION_TEXT: draft,
-          GLOSSARY: glossaryBlock(refs.terms),
-          STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
-          VOICE_NOTES: refs.voiceNotes || "(none provided — run the character-voice task)",
-          POLISH_FINDINGS: findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none — first pass)",
-        };
-        const prompt = transformUserPrompt(template, values);
-        console.log(
-          `  Volume ${volume.installmentNumber} ${seg.id}: polishing draft (${draft.length} chars) ` +
-            `with ${endpoint.model}… (attempt ${round}/${polishMaxRounds})`
+    for (let round = 1; round <= polishMaxRounds && attemptText === null; round++) {
+      // Fresh polish (attempt 1) or re-polish with the previous attempt's
+      // findings. The polisher sees NO source text — surface cleanup.
+      const values = {
+        TRANSLATION_TEXT: draft,
+        GLOSSARY: glossaryBlock(refs.terms),
+        STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
+        VOICE_NOTES: refs.voiceNotes || "(none provided — run the character-voice task)",
+        POLISH_FINDINGS: findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none — first pass)",
+      };
+      const prompt = transformUserPrompt(template, values);
+      console.log(
+        `  Volume ${volume.installmentNumber} ${seg.id}: polishing draft (${draft.length} chars) ` +
+          `with ${endpoint.model}… (attempt ${round}/${polishMaxRounds})`
+      );
+      const result = await harness.runOneShot({
+        systemPrompt,
+        messages: [{ text: prompt }],
+        endpoint,
+        temperature: Number.isFinite(polishTemperature) ? polishTemperature : 0.6,
+        thinking: polishThinking,
+        thinkingLevel: polishThinkingLevel,
+        label: `polish-v${volume.installmentNumber}-${seg.id}${polishMaxRounds > 1 ? `-r${round}` : ""}`,
+      });
+      const text = stripMarkdownFence(result);
+      if (!text) {
+        throw new Error(
+          `Volume ${volume.installmentNumber} ${seg.id}: the model returned no content for the polish pass. ` +
+            `Check .logs/ and re-run.`
         );
-        const result = await harness.runOneShot({
-          systemPrompt,
-          messages: [{ text: prompt }],
-          endpoint,
-          temperature: Number.isFinite(polishTemperature) ? polishTemperature : 0.6,
-          thinking: polishThinking,
-          thinkingLevel: polishThinkingLevel,
-          label: `polish-v${volume.installmentNumber}-${seg.id}${polishMaxRounds > 1 ? `-r${round}` : ""}`,
-        });
-        attemptText = stripMarkdownFence(result);
-        if (!attemptText) {
-          throw new Error(
-            `Volume ${volume.installmentNumber} ${seg.id}: the model returned no content for the polish pass. ` +
-              `Check .logs/ and re-run.`
-          );
-        }
       }
-
       // Deterministic regression guard (free — no AI call): the polished text
       // must not make things WORSE than the draft.
       const qaDraft = checkTranslationQa({ sourceText, draftText: draft, terms: refs.terms });
-      const qaPolished = checkTranslationQa({ sourceText, draftText: attemptText, terms: refs.terms });
-      lastQa = qaPolished;
+      const qaPolished = checkTranslationQa({ sourceText, draftText: text, terms: refs.terms });
       const regressed =
         (!qaPolished.ok && qaDraft.ok) || qaPolished.missingTerms.length > qaDraft.missingTerms.length;
       if (regressed) {
         findings = buildPolishGuardFindings(qaPolished);
-        lastScore = null;
         console.warn(
           `  Volume ${volume.installmentNumber} ${seg.id}: attempt ${round} — deterministic guard rejected the ` +
             `polish (errors: ${qaPolished.errors.join("; ")}; missing terms ` +
             `${qaDraft.missingTerms.length} → ${qaPolished.missingTerms.length})` +
             (round < polishMaxRounds ? " — re-polishing with the findings." : ".")
         );
-        attemptText = null;
         continue;
       }
-
-      if (!polishVerifyEnabled) {
-        // Inspector disabled: the deterministic guard is the only gate.
-        accepted = true;
-        acceptedText = attemptText;
-        break;
-      }
-
-      // AI drift check (source-aware): the polish pass must not change the
-      // verified draft's meaning. Same endpoint as the polish call — no model
-      // switch on the shared-port local setup.
-      const vPrompt = transformUserPrompt(verifyTemplate, {
-        SOURCE_TEXT: sourceText,
-        DRAFT_TEXT: draft,
-        POLISHED_TEXT: attemptText,
-        GLOSSARY: glossaryBlock(refs.terms),
-      });
-      console.log(
-        `  Volume ${volume.installmentNumber} ${seg.id}: drift-checking the polished text ` +
-          `(${attemptText.length} chars) with ${endpoint.model}…`
-      );
-      const vResult = await harness.runOneShot({
-        systemPrompt: verifySystemPrompt,
-        messages: [{ text: vPrompt }],
-        endpoint,
-        temperature: Number.isFinite(polishVerifyTemperature) ? polishVerifyTemperature : 0.2,
-        thinking: polishThinking,
-        thinkingLevel: polishThinkingLevel,
-        label: `polish-verify-v${volume.installmentNumber}-${seg.id}${polishMaxRounds > 1 ? `-r${round}` : ""}`,
-      });
-      // Fail-closed: an unparseable score is a FAIL (the loop gets another shot).
-      const score = parseAcceptanceScore(vResult);
-      const pass = score !== null && score >= polishVerifyPassingScore;
-      lastScore = score;
-      if (pass) {
-        accepted = true;
-        acceptedText = attemptText;
-        console.log(
-          `  Volume ${volume.installmentNumber} ${seg.id}: drift check ${score}/100 → PASS (attempt ${round}).`
+      if (qaPolished.warnings.length > 0) {
+        console.warn(
+          `  Volume ${volume.installmentNumber} ${seg.id}: QA warning: ${qaPolished.warnings.join("; ")}`
         );
-        break;
       }
-      findings = findingsOf(vResult);
-      console.warn(
-        `  Volume ${volume.installmentNumber} ${seg.id}: drift check ` +
-          `${score === null ? "n/a (unparseable — FAIL)" : score + "/100"} → FAIL (attempt ${round})` +
-          (round < polishMaxRounds ? " — re-polishing with the findings." : ".")
-      );
-      attemptText = null;
+      attemptText = text;
     }
 
-    if (accepted) {
-      await fs.writeFile(polishedPath, acceptedText + "\n", "utf8");
-      // Write the FULL entry shape: when the state entry was missing (state
-      // file lost, pre-existing draft) the merge step still finds the
-      // polished text (it keys on draftHash) and the next run sees the
-      // chapter as up to date. draftHash is the hash of the draft content the
-      // polish pass just read (the polished file was produced from it);
-      // polishVerifiedDraftHash marks it as drift-checked.
+    if (attemptText === null) {
+      // Guard rejected every attempt — keep the draft; the findings persist for
+      // the next run (a re-run re-polishes with them; --force gives a fresh
+      // attempt).
+      await fs.rm(polishedPath, { force: true });
       state.chapters[seg.id] = {
+        ...sEntry,
         sourceHash: sEntry.sourceHash ?? sourceHash,
         contextHash: sEntry.contextHash ?? refs.contextHash,
         draftHash,
-        retranslated: sEntry.retranslated ?? false,
-        findingsHash: sEntry.findingsHash ?? null,
-        polishedDraftHash: draftHash,
-        polishVerifiedDraftHash: draftHash,
-        polishScore: lastScore,
-        polishFindings: null,
-        polishFindingsHash: null,
+        polishedDraftHash: null,
+        polishVerifiedDraftHash: null,
+        polishFindings: findings,
+        polishFindingsHash: findings ? sha256(findings) : null,
       };
-      sidecar.chapters[seg.id] = {
-        sourceHash,
-        draftHash,
-        score: lastScore,
-        pass: true,
-        findings: polishVerifyEnabled ? "(no findings)" : "(inspector disabled — deterministic guard only)",
-        verifiedAt: new Date().toISOString(),
-      };
+      rejected += 1;
+      console.warn(
+        `  Volume ${volume.installmentNumber} ${seg.id}: polish REJECTED after ${polishMaxRounds} attempt(s) — ` +
+          `keeping the draft (guard findings saved; the next run re-polishes with them).`
+      );
+      rows[idx] = { id: seg.id, title: seg.title, status: "guard-rejected (draft kept)", ok: true, score: null, warnings: [] };
+      return;
+    }
+
+    // A guard-gated candidate — write it and queue it for Phase B (the batched
+    // cross-model final audit). Not marked verified until Phase B accepts it.
+    await fs.writeFile(polishedPath, attemptText + "\n", "utf8");
+    state.chapters[seg.id] = {
+      ...sEntry,
+      sourceHash: sEntry.sourceHash ?? sourceHash,
+      contextHash: sEntry.contextHash ?? refs.contextHash,
+      draftHash,
+      polishedDraftHash: draftHash,
+      polishVerifiedDraftHash: null,
+      polishFindings: null,
+      polishFindingsHash: null,
+    };
+    auditPending.push({ id: seg.id, draftHash });
+  });
+
+  // Crash-safety: persist the Phase A state (candidates + guard findings)
+  // before the model switch to flash-next — a crash mid-Phase-B must not lose
+  // the guard-gated candidates.
+  await saveTranslationState(path.join(volumeDir, "translation-state.json"), state);
+
+  // (#3/#4) Phase B — the batched cross-model FINAL audit (flash-next). Runs
+  // AFTER every Phase A candidate exists, so the whole batch runs under one
+  // model (the polish-audit hook switches flash-next in on local setups) —
+  // never interleaved with the Qwen polisher. A FAIL re-polishes via Qwen (the
+  // polish hook switches it back) and is re-audited next round; after
+  // polishMaxRounds rounds a still-failing chapter keeps the DRAFT (any
+  // polished file is dropped so the merge publishes it) and its findings
+  // persist for the next run.
+  const polishAuditRounds = Math.max(1, polishMaxRounds);
+  for (let round = 1; round <= polishAuditRounds; round++) {
+    if (auditPending.length === 0) break;
+
+    if (!polishVerifyEnabled) {
+      // Inspector disabled: the deterministic guard was the only gate — accept
+      // every Phase A candidate as-is (no cross-model audit).
+      for (const c of auditPending) {
+        const s = state.chapters[c.id] || {};
+        state.chapters[c.id] = {
+          ...s,
+          polishedDraftHash: c.draftHash,
+          polishVerifiedDraftHash: c.draftHash,
+          polishScore: null,
+          polishFindings: null,
+          polishFindingsHash: null,
+        };
+        sidecar.chapters[c.id] = {
+          sourceHash: s.sourceHash,
+          draftHash: c.draftHash,
+          score: null,
+          pass: true,
+          findings: "(inspector disabled — deterministic guard only)",
+          verifiedAt: new Date().toISOString(),
+        };
+      }
       await saveTranslationState(path.join(volumeDir, "translation-state.json"), state);
       await fs.writeFile(
         path.join(volumeDir, POLISH_VERIFICATION_FILE),
         JSON.stringify(sidecar, null, 2) + "\n",
         "utf8"
       );
-      polished += 1;
-      rows[idx] = {
-        id: seg.id,
-        title: seg.title,
-        status: `polished (attempt ${attempts}, drift ${
-          polishVerifyEnabled ? (lastScore === null ? "n/a" : lastScore + "/100") : "off"
-        })`,
-        ok: lastQa ? lastQa.ok : true,
-        score: lastScore,
-        warnings: lastQa ? lastQa.warnings : [],
-      };
-      if (lastQa && lastQa.warnings.length > 0) {
-        console.warn(
-          `  Volume ${volume.installmentNumber} ${seg.id}: QA warning: ${lastQa.warnings.join("; ")}`
-        );
+      polished += auditPending.length;
+      for (const c of auditPending) {
+        const row = rows.find((r) => r.id === c.id);
+        if (row) row.status = "polished (guard only — inspector disabled)";
       }
-      return;
+      break;
     }
 
-    // Rejected: the draft is kept. Drop any polished file for the current
-    // draft (a legacy unverified one) so the merge publishes the DRAFT, and
-    // persist the last attempt's findings — the next run re-polishes with
-    // them as correction tasks (--force gives a fresh attempt).
-    await fs.rm(polishedPath, { force: true });
-    state.chapters[seg.id] = {
-      sourceHash: sEntry.sourceHash ?? sourceHash,
-      contextHash: sEntry.contextHash ?? refs.contextHash,
-      draftHash,
-      retranslated: sEntry.retranslated ?? false,
-      findingsHash: sEntry.findingsHash ?? null,
-      polishedDraftHash: null,
-      polishVerifiedDraftHash: null,
-      polishScore: lastScore,
-      polishFindings: findings,
-      polishFindingsHash: findings ? sha256(findings) : null,
-    };
-    sidecar.chapters[seg.id] = {
-      sourceHash,
-      draftHash,
-      score: lastScore,
-      pass: false,
-      findings,
-      verifiedAt: new Date().toISOString(),
-    };
+    // The batched flash-next audit (one model switch for the whole batch).
+    const auditPhase = withHooks("polish-audit", () =>
+      runFlashAudit({
+        volume,
+        volumeDir,
+        bundle,
+        refs,
+        systemPrompt: verifySystemPrompt,
+        template: verifyTemplate,
+        auditEndpoint,
+        toAudit: auditPending,
+      })
+    );
+    const auditResults = await auditPhase();
+    const byId = new Map(auditResults.map((a) => [a.id, a]));
+    const failed = [];
+    for (const c of auditPending) {
+      const a = byId.get(c.id);
+      const s = state.chapters[c.id] || {};
+      if (!a || !a.pass) {
+        failed.push({ id: c.id, draftHash: c.draftHash, findings: a ? a.findings : "(audit returned no result — re-audit)" });
+        sidecar.chapters[c.id] = {
+          sourceHash: s.sourceHash,
+          draftHash: c.draftHash,
+          score: a ? a.score : null,
+          pass: false,
+          findings: a ? a.findings : "(audit returned no result — re-audit)",
+          verifiedAt: new Date().toISOString(),
+        };
+        continue;
+      }
+      state.chapters[c.id] = {
+        ...s,
+        polishedDraftHash: c.draftHash,
+        polishVerifiedDraftHash: c.draftHash,
+        polishScore: a.score,
+        polishFindings: null,
+        polishFindingsHash: null,
+      };
+      sidecar.chapters[c.id] = {
+        sourceHash: s.sourceHash,
+        draftHash: c.draftHash,
+        score: a.score,
+        pass: true,
+        findings: "(no findings)",
+        verifiedAt: new Date().toISOString(),
+      };
+      polished += 1;
+      const row = rows.find((r) => r.id === c.id);
+      if (row) row.status = `polished (cross-model audit ${a.score === null ? "n/a" : a.score + "/100"})`;
+    }
     await saveTranslationState(path.join(volumeDir, "translation-state.json"), state);
     await fs.writeFile(
       path.join(volumeDir, POLISH_VERIFICATION_FILE),
       JSON.stringify(sidecar, null, 2) + "\n",
       "utf8"
     );
-    rejected += 1;
-    console.warn(
-      `  Volume ${volume.installmentNumber} ${seg.id}: polish REJECTED after ${attempts} attempt(s) — ` +
-        `keeping the draft (findings saved; the next run re-polishes with them, or use --force for a fresh attempt).`
-    );
-    rows[idx] = {
-      id: seg.id,
-      title: seg.title,
-      status: `polish rejected after ${attempts} attempt(s) — draft kept`,
-      ok: true,
-      score: lastScore,
-      warnings: lastQa ? lastQa.warnings : [],
-    };
-  });
+    if (failed.length === 0) {
+      auditPending = [];
+      break;
+    }
 
+    // Re-polish the failed candidates (Qwen — the polish hook switches back on
+    // local setups) with the audit findings injected; they re-enter the queue
+    // for the next round.
+    const rePolishPhase = withHooks("polish", () =>
+      runQwenRePolish({
+        volume,
+        volumeDir,
+        bundle,
+        refs,
+        systemPrompt,
+        template,
+        endpoint,
+        state,
+        failed,
+      })
+    );
+    await rePolishPhase();
+    await saveTranslationState(path.join(volumeDir, "translation-state.json"), state);
+    auditPending = failed.map((f) => ({ id: f.id, draftHash: f.draftHash }));
+  }
+
+  // After the audit loop: any still-pending candidate failed every round —
+  // keep the DRAFT (drop the polished file so the merge publishes the draft)
+  // and persist the findings (the next run re-audits/re-polishes with them).
+  for (const c of auditPending) {
+    const { polishedFile } = chapterArtifactNames(c.id);
+    await fs.rm(path.join(volumeDir, polishedFile), { force: true });
+    const s = state.chapters[c.id] || {};
+    state.chapters[c.id] = {
+      ...s,
+      polishedDraftHash: null,
+      polishVerifiedDraftHash: null,
+      polishFindings: s.polishFindings,
+      polishFindingsHash: s.polishFindingsHash,
+    };
+    rejected += 1;
+    const row = rows.find((r) => r.id === c.id);
+    if (row) row.status = `polish rejected after ${polishAuditRounds} audit round(s) — draft kept`;
+    console.warn(
+      `  Volume ${volume.installmentNumber} ${c.id}: polish REJECTED after ${polishAuditRounds} cross-model audit round(s) — ` +
+        `keeping the draft (findings saved; the next run re-audits with them, or use --force for a fresh attempt).`
+    );
+  }
   // Re-merge the volume (the polished text wins now).
   const mergedText = await mergeVolumeTranslationFiles(volumeDir, bundle, state);
   if (mergedText) {
@@ -510,6 +690,7 @@ async function polish() {
   validateRequiredEnv({ dryRun });
 
   const endpoint = roleEndpoint("EDIT");
+  const auditEndpoint = polishVerifyEnabled ? roleEndpoint("AUDIT") : null;
   if (!dryRun) {
     await harness.assertModelServing({ ...endpoint, label: "polish stage" });
   }
@@ -552,8 +733,8 @@ async function polish() {
     `[polish] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl} ` +
       `(model from ${endpoint.modelSource}, base from ${endpoint.baseUrlSource}); ` +
       `thinking=${polishThinking ? polishThinkingLevel : "off"}; ` +
-      `drift inspector ${polishVerifyEnabled ? `ON (PASS ≥ ${polishVerifyPassingScore}/100)` : "OFF (deterministic guard only)"}; ` +
-      `max ${polishMaxRounds} attempt(s)/chapter; concurrency=${polishConcurrency}.`
+      `final audit ${polishVerifyEnabled ? `ON (batched cross-model flash-next, PASS ≥ ${polishVerifyPassingScore}/100)` : "OFF (deterministic guard only)"}; ` +
+      `max ${polishMaxRounds} round(s)/chapter; concurrency=${polishConcurrency}.`
   );
 
   const failedVolumes = [];
@@ -576,6 +757,7 @@ async function polish() {
         verifySystemPrompt,
         verifyTemplate,
         endpoint,
+        auditEndpoint,
         dryRun,
         force,
       });

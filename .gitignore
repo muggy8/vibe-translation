@@ -47,42 +47,23 @@ yarn-error.log*
 !/hooks/README.md
 !/hooks/*.sample
 
-# Test fixture series: the generated outputs (the story sources stay tracked)
-test-series/**/wiki.md
-test-series/**/shared-wiki.md
-test-series/**/glossary.md
-test-series/**/glossary-research.md
-test-series/**/glossary-validation.md
-test-series/**/jump-in-wiki-validation-*.md
-test-series/**/character-voice.md
-test-series/**/pov-map.md
-test-series/**/character-voice-validation.md
-test-series/**/style-guide.md
-test-series/**/style-guide-validation.md
-test-series/**/glossary-coverage.md
-test-series/**/glossary-coverage.json
-test-series/**/glossary-new-terms.json
-test-series/**/character-voice-new.json
-test-series/**/style-guide-new.json
-test-series/**/chapters.json
-test-series/**/translation-brief.md
-# Translation stage outputs (translate / verify-translate / retranslate / polish)
-test-series/**/translation.md
-test-series/**/translation-ch*.md
-test-series/**/translation-whole.md
-test-series/**/polished-ch*.md
-test-series/**/polished-whole.md
-test-series/**/translation-state.json
-test-series/**/translation-verification.json
-test-series/**/translation-verification.md
-test-series/**/translation-qa.md
-test-series/**/polish-qa.md
-test-series/**/polish-verification.json
-test-series/glossary.md
-test-series/character-voice.md
-test-series/style-guide.md
-test-series/shared-wiki.md
-test-series/consistency-report.md
+# Test fixture series: ignore EVERYTHING under test-series/ except the two
+# source story files the tasks read. Every generated output (per-volume
+# artifacts, state, sidecars, epub bundles, series-root copies) is ignored —
+# the sources are the only inputs that matter for a fresh run. The re-include
+# dance is required because git cannot re-include a file whose parent
+# directory is excluded.
+test-series/*
+!test-series/test_story(1)/
+!test-series/test_story(2)/
+test-series/test_story(1)/*
+test-series/test_story(2)/*
+!test-series/test_story(1)/test_story(1).md
+!test-series/test_story(2)/test_story(2).md
+
+# Provenance sidecars (written next to each series-root artifact copy:
+# glossary / character-voice / style-guide / shared-wiki / consistency-report)
+*.provenance.json
 
 # Rolling-window acceptance state (persisted by QA loop, read by skip-check)
 *-rolling-state.json
@@ -93,7 +74,6 @@ test-series/consistency-report.md
 *-whole.md
 *-ch[0-9]*.md
 *-ch[0-9]*.[0-9]*.md
-test-series/**/images/
 
 # Epub source files (kept out of git; the bundle cache in the volume folder
 # is what the tasks read)
