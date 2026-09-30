@@ -35,7 +35,13 @@ Default: `<project root>/hooks/`. Override the directory with the
 | before / after `retranslate` | `pre-retranslate` / `post-retranslate` (or `.sh` / `.js`) |
 | before / after `translate-qa` (the QA loop as a whole) | `pre-translate-qa` / `post-translate-qa` (or `.sh` / `.js`) |
 | before / after `polish` | `pre-polish` / `post-polish` (or `.sh` / `.js`) |
+| before the verify **tiebreak** batch | `pre-verify-audit` (or `.sh` / `.js`) |
+| before the polish **final audit** batch | `pre-polish-audit` (or `.sh` / `.js`) |
 | around the whole default run | `pre-pipeline` / `post-pipeline` (or `.sh` / `.js`) |
+
+Hook names are **role labels** — the code asks for "the thing that audits this
+batch", never for a model. Which container answers a role is entirely your
+machine's business (see Example 4).
 
 A hook file must be **executable** (`chmod +x`) and start with a **shebang**
 (`#!/usr/bin/sh`, `#!/usr/bin/env node`, …). Present-but-not-executable files
@@ -116,38 +122,54 @@ A `post-<task>` hook can send an email using only what's on the machine — no
 ## Example 4 — switch the local model container per translation stage
 
 The translation stage (`translate` → `translate-qa` [verify ↔ retranslate
-loop] → `polish`) uses **two different models**. On a local setup the model
-containers share one host port, so only one can serve at a time — the
-per-machine hooks do the switching, and the task code never touches the
-containers (it only checks `GET /v1/models` before its first call, via
+loop] → `polish`) runs its steps against four **role endpoints** —
+`TRANSLATE_*`, `VERIFY_*`, `EDIT_*`, `AUDIT_*`. A role says *what job is being
+done*, never *which model does it*. On a local setup the model containers share
+one host port, so only one can serve at a time and the per-machine hooks decide
+which container answers each role; the task code never touches the containers
+(it only checks `GET /v1/models` before its first call, via
 `harness.assertModelServing`).
 
 `model-switch.sh` (copy of `model-switch.sh.sample`) starts the container of
 the compose dir you give it: if that container already serves the port it
 no-ops (idempotent — state file `hooks/.model-switch-state`), otherwise it
 stops the current port owner, `docker compose up -d` the target, and polls
-`/health` until the model is loaded. The pre-hooks just call it:
+`/health` until the model is loaded. The hooks just call it — the mapping below
+is one machine's opinion, and moving a role to a different container is a hook
+edit and nothing else:
 
-    # hooks/pre-translate.sh        (Hy-MT2 translates)
+    # hooks/pre-translate.sh        (TRANSLATE_* role)
     exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Hy-MT2
-    # hooks/pre-verify-translate.sh (Qwen verifies)
-    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Qwen3.8-27b
-    # hooks/pre-retranslate.sh      (Hy-MT2 again)
+    # hooks/pre-verify-translate.sh (VERIFY_* role)
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/verify-model
+    # hooks/pre-retranslate.sh      (TRANSLATE_* role again)
     exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Hy-MT2
-    # hooks/pre-polish.sh           (Qwen again)
-    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Qwen3.8-27b
+    # hooks/pre-polish.sh           (EDIT_* role)
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/verify-model
+    # hooks/pre-verify-audit.sh     (AUDIT_* role — the verify tiebreak batch)
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/audit-model
+    # hooks/pre-polish-audit.sh     (AUDIT_* role — the polish final audit batch)
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/audit-model
+    # hooks/post-polish.sh          (optional — end the run on your default model)
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/verify-model
 
-A full default run therefore makes at least 4 container switches
-(Hy-MT2 → Qwen → Hy-MT2 → Qwen → Qwen — the last two can be the same
-container already up, which the state file turns into a no-op). The
-`translate-qa` loop fires these batch hooks repeatedly — up to two switches
-per round (→Qwen before each verify batch, →Hy-MT2 before each retranslate
-batch) — and a repeat switch is a no-op when the right container already
-serves the port, so a round that ends on the model the next round needs
+The two cross-check batches (the verify tiebreak and the polish final audit)
+are the `AUDIT_*` role: pick a DIFFERENT model than the stage that produced the
+text, or the check is one model marking its own homework.
+
+A full default run therefore makes several container switches (translate →
+verify → retranslate → verify → polish → audit → …). The `translate-qa` loop
+fires these batch hooks repeatedly — up to two switches per round (→ the verify
+container before each verify batch, → the translate container before each
+retranslate batch) — and a repeat switch is a no-op when the right container
+already serves the port, so a round that ends on the model the next round needs
 costs nothing. The `pre-/post-translate-qa` hooks wrap the WHOLE loop and
 must not switch models. Note the local containers may all advertise the same
 model alias (e.g. `local`), which is exactly why the switching lives here —
-the ai-client cannot tell the models apart by name.
+the ai-client cannot tell the models apart by name. If you start a container by
+hand, `hooks/.model-switch-state` goes stale and the next hook for the dir it
+names skips a switch that is really needed — delete the file (or write it with
+the dir that actually owns the port) to re-sync.
 
 ## Disabling a hook
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # pre-polish-audit.sample — BEFORE the polish task's cross-model final-audit
-# sub-phase (the batched flash-next audit of the Phase A guard-gated candidates
-# — a DIFFERENT model than the Qwen polisher). Copy to
-# hooks/pre-polish-audit.sh, chmod +x, and point it at YOUR flash-next
-# container's compose dir. Idempotent: no-op when flash-next already serves the
-# port. Fired only around each flash-next audit batch — never per chapter.
+# sub-phase (the batched audit of the Phase A guard-gated candidates, scored on
+# a DIFFERENT endpoint than the polisher's): this machine's container for the
+# AUDIT_* role. Copy to hooks/pre-polish-audit.sh, chmod +x, and point it at
+# YOUR container for this role — choose a DIFFERENT model than the EDIT_*
+# role's, or the audit is one model grading itself. Idempotent: no-op when that
+# container already serves the port. Fired only around each audit batch — never
+# per chapter.
 set -euo pipefail
-exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/Qwen3.8-flash-next
+exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/<your-audit-model>

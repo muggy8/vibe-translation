@@ -10,7 +10,7 @@
  *        idempotency; --force re-polishes. A polished file from a
  *        pre-inspector run (no polishVerifiedDraftHash) is drift-checked
  *        instead of re-polished (one inspector call, no fresh pass).
- *     2. One-shot call to the edit model (Qwen3.8-27B via EDIT_* env):
+ *     2. One-shot call to the edit endpoint (EDIT_* env):
  *        current draft + glossary + style rules + character voice notes →
  *        the complete polished chapter (system-prompts/polish.md,
  *        user-prompts/polish.md). The polisher sees NO source text — its
@@ -111,26 +111,30 @@ const POLISH_FINDINGS_MAX_CHARS = 3000;
  *  local hardware runs one inference at a time). */
 const polishConcurrency = stageConcurrency("POLISH");
 
-/** (#3/#4) Flash-next cross-model final audit (Qwen3.8-flash-next — a
- *  DIFFERENT model than the Qwen polisher; the pre-polish-audit hook switches
- *  it in on shared-port local setups). The final semantic check (drift +
- *  source) runs as a BATCHED cross-model pass, never interleaved per chapter. */
+/** (#3/#4) The audit role — a SECOND endpoint (AUDIT_* env) that runs the
+ *  final cross-check. The task logic is identical whatever model serves it;
+ *  the pre-polish-audit hook decides which container answers on shared-port
+ *  local setups. Configure it to a DIFFERENT model than the polisher's, or the
+ *  cross-check grades the work with the same model twice. The final semantic
+ *  check (drift + source) runs as a BATCHED pass, never interleaved per
+ *  chapter. */
 const auditThinkingLevel = process.env.AUDIT_THINKING_LEVEL || "medium";
 const auditThinking = process.env.AUDIT_THINKING !== "false";
 const auditTemperature = parseFloat(process.env.AUDIT_TEMPERATURE ?? "0.2");
-/** (#3/#4) Flash-next audit batch concurrency (opt-in; default 1 — slower). */
-const flashConcurrency = stageConcurrency("VERIFY_FLASH");
+/** (#3/#4) Audit batch concurrency (opt-in; default 1). */
+const auditConcurrency = stageConcurrency("AUDIT");
 
 // ─── Per-volume processing ──────────────────────────────────────────────────
 
 /**
- * (#3/#4) The batched flash-next final audit — a cross-model pass over a set
- * of polished candidates. Each candidate is scored by flash-next (a DIFFERENT
- * model than the Qwen polisher) on the source-aware drift rubric: does the
- * polished text preserve the verified draft's meaning (and stay faithful to
- * the source)? Returns one result per chapter. The caller wraps this in the
- * polish-audit hook (on local setups: the switch to the flash-next container),
- * so the whole batch runs under one model, never interleaved with Qwen.
+ * (#3/#4) The batched final audit — a cross-check pass over a set of polished
+ * candidates. Each candidate is scored by the audit endpoint (a SECOND
+ * endpoint, distinct from the polisher's) on the source-aware drift rubric:
+ * does the polished text preserve the verified draft's meaning (and stay
+ * faithful to the source)? Returns one result per chapter. The caller wraps
+ * this in the polish-audit hook (on local setups: the switch to the audit
+ * container), so the whole batch runs under one endpoint, never interleaved
+ * with the polisher.
  *
  * @param {{
  *   volume: {installmentNumber: string}, volumeDir: string,
@@ -142,14 +146,14 @@ const flashConcurrency = stageConcurrency("VERIFY_FLASH");
  * }} ctx
  * @returns {Promise<Array<{id: string, score: number|null, pass: boolean, findings: string}>>}
  */
-async function runFlashAudit({ volume, volumeDir, bundle, refs, systemPrompt, template, auditEndpoint, toAudit }) {
+async function runAuditBatch({ volume, volumeDir, bundle, refs, systemPrompt, template, auditEndpoint, toAudit }) {
   await harness.assertModelServing({ ...auditEndpoint, label: "polish-audit stage" });
   console.log(
     `[polish-audit] cross-model final audit of ${toAudit.length} chapter(s) with ${auditEndpoint.model} ` +
       `(PASS ≥ ${polishVerifyPassingScore}/100)…`
   );
   const results = [];
-  await runWithConcurrency(toAudit, flashConcurrency, async ({ id }) => {
+  await runWithConcurrency(toAudit, auditConcurrency, async ({ id }) => {
     const seg = bundle.segments.find((s) => s.id === id);
     const { draftFile, polishedFile } = chapterArtifactNames(id);
     const sourceText = await fs.readFile(path.join(volumeDir, seg.file), "utf8");
@@ -174,7 +178,7 @@ async function runFlashAudit({ volume, volumeDir, bundle, refs, systemPrompt, te
     const pass = score !== null && score >= polishVerifyPassingScore;
     results.push({ id, score, pass, findings: findingsOf(vResult) });
     console.log(
-      `  Volume ${volume.installmentNumber} ${id}: flash-next audit ` +
+      `  Volume ${volume.installmentNumber} ${id}: audit ` +
         `${score === null ? "n/a (unparseable — FAIL)" : score + "/100"} → ${pass ? "PASS" : "FAIL"}.`
     );
   });
@@ -182,12 +186,12 @@ async function runFlashAudit({ volume, volumeDir, bundle, refs, systemPrompt, te
 }
 
 /**
- * (#3/#4) The batched Qwen re-polish — the correction pass over the candidates
- * the flash-next audit failed. Each is re-polished by the Qwen edit model (NO
- * source text — surface cleanup) with the audit's findings injected as a
- * numbered "fix these" task (the retranslate pattern). The new candidate is
- * written and marked pending the next audit round. The caller wraps this in the
- * polish hook (on local setups: the switch back to the Qwen container).
+ * (#3/#4) The batched re-polish — the correction pass over the candidates the
+ * audit failed. Each is re-polished on the edit endpoint (NO source text —
+ * surface cleanup) with the audit's findings injected as a numbered "fix
+ * these" task (the retranslate pattern). The new candidate is written and
+ * marked pending the next audit round. The caller wraps this in the polish
+ * hook (on local setups: the switch back to the edit container).
  *
  * @param {{
  *   volume: {installmentNumber: string}, volumeDir: string,
@@ -200,9 +204,9 @@ async function runFlashAudit({ volume, volumeDir, bundle, refs, systemPrompt, te
  * }} ctx
  * @returns {Promise<void>}
  */
-async function runQwenRePolish({ volume, volumeDir, bundle, refs, systemPrompt, template, endpoint, state, failed }) {
+async function runRePolish({ volume, volumeDir, bundle, refs, systemPrompt, template, endpoint, state, failed }) {
   console.log(
-    `[polish] re-polishing ${failed.length} chapter(s) with ${endpoint.model} (flash-next audit findings injected)…`
+    `[polish] re-polishing ${failed.length} chapter(s) with ${endpoint.model} (audit findings injected)…`
   );
   await runWithConcurrency(failed, polishConcurrency, async ({ id, findings, draftHash }) => {
     const { draftFile, polishedFile } = chapterArtifactNames(id);
@@ -384,10 +388,10 @@ async function processPolishVolume(ctx) {
       return;
     }
 
-    // (#3/#4) Phase A — produce a guard-gated polish candidate (Qwen, NO
-    // source text). The deterministic regression guard is the only per-chapter
-    // gate now; the source-aware cross-model final audit is Phase B (a batched
-    // flash-next pass, after every candidate exists). A Phase B FAIL re-polishes
+    // (#3/#4) Phase A — produce a guard-gated polish candidate (the edit
+    // endpoint, NO source text). The deterministic regression guard is the only
+    // per-chapter gate now; the source-aware final audit is Phase B (a batched
+    // cross-check pass, after every candidate exists). A Phase B FAIL re-polishes
     // here with the findings injected, so this loop is the re-polish step.
     let attemptText = hasExistingPolish ? (await fs.readFile(polishedPath, "utf8")) : null;
 
@@ -487,14 +491,14 @@ async function processPolishVolume(ctx) {
   });
 
   // Crash-safety: persist the Phase A state (candidates + guard findings)
-  // before the model switch to flash-next — a crash mid-Phase-B must not lose
+  // before the switch to the audit endpoint — a crash mid-Phase-B must not lose
   // the guard-gated candidates.
   await saveTranslationState(path.join(volumeDir, "translation-state.json"), state);
 
-  // (#3/#4) Phase B — the batched cross-model FINAL audit (flash-next). Runs
-  // AFTER every Phase A candidate exists, so the whole batch runs under one
-  // model (the polish-audit hook switches flash-next in on local setups) —
-  // never interleaved with the Qwen polisher. A FAIL re-polishes via Qwen (the
+  // (#3/#4) Phase B — the batched cross-model FINAL audit. Runs AFTER every
+  // Phase A candidate exists, so the whole batch runs under one endpoint (the
+  // polish-audit hook switches the audit container in on local setups) — never
+  // interleaved with the polisher. A FAIL re-polishes on the edit endpoint (the
   // polish hook switches it back) and is re-audited next round; after
   // polishMaxRounds rounds a still-failing chapter keeps the DRAFT (any
   // polished file is dropped so the merge publishes it) and its findings
@@ -539,9 +543,9 @@ async function processPolishVolume(ctx) {
       break;
     }
 
-    // The batched flash-next audit (one model switch for the whole batch).
+    // The batched audit (one endpoint switch for the whole batch).
     const auditPhase = withHooks("polish-audit", () =>
-      runFlashAudit({
+      runAuditBatch({
         volume,
         volumeDir,
         bundle,
@@ -601,11 +605,11 @@ async function processPolishVolume(ctx) {
       break;
     }
 
-    // Re-polish the failed candidates (Qwen — the polish hook switches back on
-    // local setups) with the audit findings injected; they re-enter the queue
-    // for the next round.
+    // Re-polish the failed candidates (the edit endpoint — the polish hook
+    // switches back on local setups) with the audit findings injected; they
+    // re-enter the queue for the next round.
     const rePolishPhase = withHooks("polish", () =>
-      runQwenRePolish({
+      runRePolish({
         volume,
         volumeDir,
         bundle,
@@ -733,7 +737,7 @@ async function polish() {
     `[polish] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl} ` +
       `(model from ${endpoint.modelSource}, base from ${endpoint.baseUrlSource}); ` +
       `thinking=${polishThinking ? polishThinkingLevel : "off"}; ` +
-      `final audit ${polishVerifyEnabled ? `ON (batched cross-model flash-next, PASS ≥ ${polishVerifyPassingScore}/100)` : "OFF (deterministic guard only)"}; ` +
+      `final audit ${polishVerifyEnabled ? `ON (batched cross-model audit, PASS ≥ ${polishVerifyPassingScore}/100)` : "OFF (deterministic guard only)"}; ` +
       `max ${polishMaxRounds} round(s)/chapter; concurrency=${polishConcurrency}.`
   );
 

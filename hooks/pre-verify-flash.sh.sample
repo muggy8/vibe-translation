@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# pre-verify-flash.sample — BEFORE the verify-translate task's borderline
-# tiebreak sub-phase (the batched flash-next cross-model re-score of the
-# chapters whose Qwen score sits near the passing line). Copy to
-# hooks/pre-verify-flash.sh, chmod +x, and point it at YOUR flash-next
-# container's compose dir. Idempotent: no-op when flash-next already serves the
-# port. Fired only around the whole flash-next batch — never per chapter.
-set -euo pipefail
-exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/Qwen3.8-flash-next

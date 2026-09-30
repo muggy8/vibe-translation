@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# pre-verify-translate.sample — BEFORE the verify-translate task (Qwen stage).
-# Copy to hooks/pre-verify-translate.sh, chmod +x, and point it at YOUR
-# Qwen container's compose dir. Idempotent: no-op when Qwen already serves
-# the port (so the pipeline's SECOND verify-translate pass is instant).
+# pre-verify-translate.sample — BEFORE the verify-translate task: this
+# machine's container for the VERIFY_* role. Copy to
+# hooks/pre-verify-translate.sh, chmod +x, and point it at YOUR container for
+# this role (the task logic does not care which model it is). Idempotent:
+# no-op when that container already serves the port (so the pipeline's SECOND
+# verify-translate pass is instant).
 set -euo pipefail
-exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/Qwen3.8-27b
+exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/<your-verify-model>

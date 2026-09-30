@@ -7,8 +7,8 @@
  *     1. Skip it when the verification sidecar (translation-verification.json)
  *        already covers the CURRENT source + draft hashes (idempotency;
  *        --force re-verifies).
- *     2. One-shot call to the verify model (Qwen3.8-27B via VERIFY_* env):
- *        source + draft + glossary + style rules + story background
+ *     2. One-shot call to the verify endpoint (VERIFY_* env): source + draft
+ *        + glossary + style rules + story background
  *        (shared wiki + volume wiki + POV map — refs.background) → a
  *        0–100 score with banded rubric + severity-banded findings
  *        (system-prompts/verify-translate.md, user-prompts/verify-translate.md).
@@ -18,11 +18,11 @@
  *     4. Persist the sidecar entry + write the per-volume report
  *        (translation-verification.md).
  *
- * Chapters that FAIL are retranslated by the "retranslate" task (Hy-MT2,
- * using the findings as correction instructions); the pipeline re-runs
- * verify-translate afterwards. Set VERIFY_TRANSLATE_ENABLED=false to make
- * this task a no-op (retranslate is disabled with it — they are one QA
- * chain).
+ * Chapters that FAIL are retranslated by the "retranslate" task (the
+ * TRANSLATE_* endpoint), using the findings as correction instructions; the
+ * pipeline re-runs verify-translate afterwards. Set
+ * VERIFY_TRANSLATE_ENABLED=false to make this task a no-op (retranslate is
+ * disabled with it — they are one QA chain).
  *
  * Usage:
  *   npx gulp verify-translate              # run the full task
@@ -63,26 +63,29 @@ const verifyEnabled = process.env.VERIFY_TRANSLATE_ENABLED !== "false";
 const verifyConcurrency = stageConcurrency("VERIFY");
 /** Score (0–100) at or above which a chapter passes verification. */
 const passingScore = Math.min(100, Math.max(0, parseInt(process.env.VERIFY_PASSING_SCORE, 10) || 70));
-/** The verify model's thinking level (Qwen3-style dialect). */
+/** The verify endpoint's thinking dialect. */
 const verifyThinkingLevel = process.env.VERIFY_THINKING_LEVEL || "medium";
 const verifyThinking = process.env.VERIFY_THINKING !== "false";
 const verifyTemperature = parseFloat(process.env.VERIFY_TEMPERATURE ?? "0.2");
 /** Findings are injected into the retranslate prompt — keep them bounded. */
 const FINDINGS_MAX_CHARS = 6000;
 
-/** (#5) Flash-next cross-model audit role (Qwen3.8-flash-next — a DIFFERENT
- *  model than the verifier; the pre-verify-flash hook switches it in on
- *  shared-port local setups). */
+/** (#5) The audit role — a SECOND endpoint (AUDIT_* env) used as the
+ *  cross-check. The task logic is identical whatever model serves it; on
+ *  shared-port local setups the pre-verify-audit hook decides which container
+ *  answers. Configure it to a DIFFERENT model than the verifier, or the
+ *  cross-check grades the work with the same model twice. */
 const auditThinkingLevel = process.env.AUDIT_THINKING_LEVEL || "medium";
 const auditThinking = process.env.AUDIT_THINKING !== "false";
 const auditTemperature = parseFloat(process.env.AUDIT_TEMPERATURE ?? "0.2");
-/** (#5) Borderline tiebreak: a chapter whose Qwen verify score lands within
- *  ±VERIFY_TIEBREAK_BAND of the passing score is re-scored by flash-next and
- *  the two scores are AVERAGED (a batched cross-model pass). DEFAULT-ON. */
+/** (#5) Borderline tiebreak: a chapter whose verifier score lands within
+ *  ±VERIFY_TIEBREAK_BAND of the passing score is re-scored by the audit
+ *  endpoint and the two scores are AVERAGED (a batched cross-check pass).
+ *  DEFAULT-ON. */
 const tiebreakEnabled = process.env.VERIFY_TIEBREAK_ENABLED !== "false";
 const tiebreakBand = Math.max(0, parseInt(process.env.VERIFY_TIEBREAK_BAND, 10) || 5);
-/** (#5) Flash-next batch concurrency (opt-in; default 1 — flash-next is slower). */
-const flashConcurrency = stageConcurrency("VERIFY_FLASH");
+/** (#5) Audit batch concurrency (opt-in; default 1). */
+const auditConcurrency = stageConcurrency("AUDIT");
 
 /**
  * Load the verification sidecar (fail-open: missing/corrupt → {}).
@@ -122,17 +125,18 @@ function findingsOf(raw) {
 }
 
 /**
- * (#5) The borderline tiebreak — a BATCHED cross-model pass over the chapters
- * whose Qwen verify score lands within ±tiebreakBand of the passing score. Each
- * such chapter is re-scored by flash-next (a DIFFERENT model than the
- * verifier) and the two scores are AVERAGED: a second opinion on the chapters
- * closest to the pass/fail boundary, where a single stochastic score matters
- * most. The pass/fail is recomputed from the averaged score. The whole batch
- * runs in one model switch (the caller wraps it in the verify-flash hook),
- * never interleaved with the Qwen verify loop.
+ * (#5) The borderline tiebreak — a BATCHED cross-check pass over the chapters
+ * whose verifier score lands within ±tiebreakBand of the passing score. Each
+ * such chapter is re-scored by the audit endpoint (a SECOND endpoint, distinct
+ * from the verifier's) and the two scores are AVERAGED: a second opinion on
+ * the chapters closest to the pass/fail boundary, where a single stochastic
+ * score matters most. The pass/fail is recomputed from the averaged score.
+ * The whole batch runs under one endpoint (the caller wraps it in the
+ * verify-audit hook — on shared-port local setups that is one container
+ * switch), never interleaved with the verify loop.
  *
- * Fail-open: an unparseable flash-next score leaves the Qwen score in place
- * (the tiebreak is a second opinion, not a veto — the Qwen score already
+ * Fail-open: an unparseable audit score leaves the verifier's score in place
+ * (the tiebreak is a second opinion, not a veto — the first score already
  * stands). A chapter is tiebreak-applied at most once per draft
  * (`tiebreakApplied`), so a plain re-run is a cheap no-op.
  *
@@ -147,10 +151,10 @@ function findingsOf(raw) {
  *   sidecarPath: string,
  *   auditEndpoint: {baseUrl: string, apiKey?: string, model: string},
  * }} ctx
- * @returns {Promise<Array<{id: string, qwen: number, flash: number|null, final: number, prevPass: boolean, newPass: boolean}>>}
+ * @returns {Promise<Array<{id: string, verifier: number, auditor: number|null, final: number, prevPass: boolean, newPass: boolean}>>}
  *   The tiebroken chapters (empty when there is nothing to tiebreak).
  */
-async function runFlashTiebreak({ volume, volumeDir, bundle, refs, systemPrompt, template, sidecar, sidecarPath, auditEndpoint }) {
+async function runAuditTiebreak({ volume, volumeDir, bundle, refs, systemPrompt, template, sidecar, sidecarPath, auditEndpoint }) {
   const eligible = [];
   for (const seg of bundle.segments) {
     const e = sidecar.chapters[seg.id] || {};
@@ -161,14 +165,14 @@ async function runFlashTiebreak({ volume, volumeDir, bundle, refs, systemPrompt,
   }
   if (eligible.length === 0) return [];
 
-  await harness.assertModelServing({ ...auditEndpoint, label: "verify-flash tiebreak" });
+  await harness.assertModelServing({ ...auditEndpoint, label: "verify-audit tiebreak" });
   console.log(
-    `[verify-flash] ${eligible.length} borderline chapter(s) (score within ±${tiebreakBand} of ${passingScore}) — ` +
-      `tiebreaking with ${auditEndpoint.model}.`
+    `[verify-audit] ${eligible.length} borderline chapter(s) (score within ±${tiebreakBand} of ${passingScore}) — ` +
+      `tiebreaking with the audit endpoint (${auditEndpoint.model}).`
   );
 
   const results = [];
-  await runWithConcurrency(eligible, flashConcurrency, async (seg) => {
+  await runWithConcurrency(eligible, auditConcurrency, async (seg) => {
     const { draftFile } = chapterArtifactNames(seg.id);
     const chapterPath = path.join(volumeDir, seg.file);
     const draftPath = path.join(volumeDir, draftFile);
@@ -182,8 +186,8 @@ async function runFlashTiebreak({ volume, volumeDir, bundle, refs, systemPrompt,
     }
     const e = sidecar.chapters[seg.id] || {};
     // Re-confirm the sidecar entry still covers the CURRENT source + draft —
-    // a stale entry means the Qwen score is stale too, so tiebreaking it is
-    // meaningless.
+    // a stale entry means the verifier's score is stale too, so tiebreaking
+    // it is meaningless.
     if (e.sourceHash !== sha256(sourceText) || e.draftHash !== sha256(draft)) return;
 
     const values = {
@@ -201,26 +205,26 @@ async function runFlashTiebreak({ volume, volumeDir, bundle, refs, systemPrompt,
       temperature: Number.isFinite(auditTemperature) ? auditTemperature : 0.2,
       thinking: auditThinking,
       thinkingLevel: auditThinkingLevel,
-      label: `verify-flash-v${volume.installmentNumber}-${seg.id}`,
+      label: `verify-audit-v${volume.installmentNumber}-${seg.id}`,
     });
-    const flashScore = parseAcceptanceScore(result);
-    const qwen = e.score;
-    const final = flashScore !== null ? Math.round((qwen + flashScore) / 2) : qwen;
+    const auditScore = parseAcceptanceScore(result);
+    const verifierScore = e.score;
+    const final = auditScore !== null ? Math.round((verifierScore + auditScore) / 2) : verifierScore;
     const prevPass = e.pass === true;
     const newPass = final >= passingScore;
     sidecar.chapters[seg.id] = {
       ...e,
       score: final,
       pass: newPass,
-      tiebreak: { qwen, flash: flashScore, final },
+      tiebreak: { verifier: verifierScore, auditor: auditScore, final },
       tiebreakApplied: true,
       verifiedAt: new Date().toISOString(),
     };
     await fs.writeFile(sidecarPath, JSON.stringify(sidecar, null, 2) + "\n", "utf8");
-    results.push({ id: seg.id, qwen, flash: flashScore, final, prevPass, newPass });
+    results.push({ id: seg.id, verifier: verifierScore, auditor: auditScore, final, prevPass, newPass });
     console.log(
-      `  Volume ${volume.installmentNumber} ${seg.id}: tiebreak — Qwen ${qwen}, flash-next ` +
-        `${flashScore === null ? "n/a (kept Qwen)" : flashScore} → averaged ${final}/100 → ${newPass ? "PASS" : "FAIL"}.`
+      `  Volume ${volume.installmentNumber} ${seg.id}: tiebreak — verifier ${verifierScore}, auditor ` +
+        `${auditScore === null ? "n/a (kept the verifier score)" : auditScore} → averaged ${final}/100 → ${newPass ? "PASS" : "FAIL"}.`
     );
   });
   return results;
@@ -363,13 +367,13 @@ async function processVerifyVolume(ctx) {
     rows[idx] = { id: seg.id, title: seg.title, status: "verified", score, pass, findings };
   });
 
-  // (#5) Borderline tiebreak — a batched cross-model pass (flash-next) over the
-  // chapters closest to the pass/fail boundary, wrapped in the verify-flash
-  // hook (on local setups: the switch to the flash-next container). Updates the
-  // sidecar, the run's PASS/FAIL counts, and the report rows.
+  // (#5) Borderline tiebreak — a batched cross-check pass over the chapters
+  // closest to the pass/fail boundary, wrapped in the verify-audit hook (on
+  // local setups: the switch to the audit container). Updates the sidecar, the
+  // run's PASS/FAIL counts, and the report rows.
   if (tiebreakEnabled && !dryRun && auditEndpoint) {
-    const tiebreakPhase = withHooks("verify-flash", () =>
-      runFlashTiebreak({
+    const tiebreakPhase = withHooks("verify-audit", () =>
+      runAuditTiebreak({
         volume,
         volumeDir,
         bundle,
@@ -387,7 +391,7 @@ async function processVerifyVolume(ctx) {
       if (row) {
         row.score = t.final;
         row.pass = t.newPass;
-        row.status = `verified (tiebreak ${t.qwen}→${t.final})`;
+        row.status = `verified (tiebreak ${t.verifier}→${t.final})`;
       }
       if (t.prevPass && !t.newPass) {
         passed -= 1;
@@ -520,7 +524,7 @@ async function verifyTranslate() {
       `(model from ${endpoint.modelSource}, base from ${endpoint.baseUrlSource}); ` +
       `passing score ${passingScore}; thinking=${verifyThinking ? verifyThinkingLevel : "off"}; ` +
       `concurrency=${verifyConcurrency}; ` +
-      `tiebreak=${tiebreakEnabled ? `ON (flash-next ±${tiebreakBand}, averaged with Qwen)` : "off"}.`
+      `tiebreak=${tiebreakEnabled ? `ON (audit endpoint ±${tiebreakBand}, averaged with the verify score)` : "off"}.`
   );
 
   const failedVolumes = [];

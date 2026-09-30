@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# post-polish.sample — AFTER the polish task (last model stage of the
-# pipeline). Leave the model running (it is usually the one you want up) or
-# stop it to free VRAM:
+# post-polish.sample — AFTER the polish task (the pipeline's last model stage).
+# Pick one: leave the model running, switch back to the container you want
+# serving once the run ends, or stop the container to free VRAM:
+#   exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/<your-default-model>
 #   docker ps --filter "publish=9200" --format '{{.ID}}' | xargs -r docker stop
 echo "[post-polish] polish stage finished — translation pipeline done."

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# pre-verify-audit.sample — BEFORE the verify-translate task's borderline
+# tiebreak sub-phase (the batched cross-model re-score of the chapters whose
+# verify score sits near the passing line): this machine's container for the
+# AUDIT_* role. Copy to hooks/pre-verify-audit.sh, chmod +x, and point it at
+# YOUR container for this role — choose a DIFFERENT model than the VERIFY_*
+# role's, or the tiebreak is one model grading itself. Idempotent: no-op when
+# that container already serves the port. Fired only around the whole audit
+# batch — never per chapter.
+set -euo pipefail
+exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/<your-audit-model>

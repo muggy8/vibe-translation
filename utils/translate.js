@@ -10,12 +10,19 @@
  * logic stays unit-testable
  * without the filesystem or the AI (test/test-translate.js).
  *
- * Model roles (see the TRANSLATE_* / VERIFY_* / EDIT_* env vars):
- *   - translate / retranslate: Hy-MT2-30B-A3B (translation-specialized,
- *     fast "no_think" mode, official single-user-message contract — NO
- *     system prompt).
- *   - verify-translate / polish: Qwen3.8-27B (source-anchored proofreading
- *     and final polish; reads the Japanese source).
+ * Endpoint roles (see the TRANSLATE_* / VERIFY_* / EDIT_* / AUDIT_* env vars —
+ * each names an ENDPOINT, never a model: the stage logic is identical whatever
+ * answers, and on local setups the per-machine hooks decide which container
+ * serves the port):
+ *   - translate / retranslate: the TRANSLATE_* endpoint. The prompt below is
+ *     the one genuinely model-specific contract in this stage (the official
+ *     translation-model single-user-message shape + its sampling recipe), so
+ *     swapping this endpoint means swapping that prompt too.
+ *   - verify-translate / polish: the VERIFY_* / EDIT_* endpoints
+ *     (source-anchored checking and final polish — they read the source).
+ *   - the cross-checks (verify tiebreak + polish final audit): the AUDIT_*
+ *     endpoint, deliberately a DIFFERENT endpoint from the one that produced
+ *     the text being graded.
  */
 
 const crypto = require("crypto");
