@@ -27,6 +27,7 @@ const JSZip = require("jszip");
 const {
   openEpub,
   readEpubSection,
+  htmlToPlainText,
   scriptCounts,
   extractEpubToBundle,
 } = require("../utils/source");
@@ -45,6 +46,10 @@ const {
   fixedValuesBlock,
   committedLayoutBlock,
   isVolumeArtifact,
+  validateManifest,
+  findDuplicateSources,
+  readUsableManifest,
+  createIntakeApprove,
   MANIFEST_SCHEMA,
 } = require("../get-translation-target");
 
@@ -190,6 +195,43 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   await fs.promises.writeFile(notZip, "this is not a zip");
   await assert.rejects(() => openEpub(notZip), /.+/);
 
+  // The OPF is parsed as XML (so EPUB3's text-valued <meta> keeps its value) but
+  // it must stay CASE-INSENSITIVE: XML mode keeps tag names exactly as written,
+  // and real files do use <Package>/<Manifest>/<Spine>. A strict parser reports
+  // those perfectly readable books as "the spine contains no readable items".
+  const upperZip = new JSZip();
+  upperZip.file("mimetype", "application/epub+zip");
+  upperZip.file(
+    "META-INF/container.xml",
+    `<container version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`
+  );
+  upperZip.file(
+    "OEBPS/content.opf",
+    `<?xml version="1.0" encoding="utf-8"?><Package version="3.0" unique-identifier="id">` +
+      `<Metadata><dc:Title xmlns:dc="dc">Upper Case Book</dc:Title><dc:Language>ja</dc:Language></Metadata>` +
+      `<Manifest><Item id="s0" href="c1.xhtml" media-type="application/xhtml+xml"/></Manifest>` +
+      `<Spine><ItemRef idref="s0"/></Spine></Package>`
+  );
+  upperZip.file("OEBPS/c1.xhtml", `<?xml version="1.0"?><html><body><p>text</p></body></html>`);
+  const upperPath = path.join(dir, "uppercase.opf.epub");
+  await fs.promises.writeFile(upperPath, await upperZip.generateAsync({ type: "nodebuffer" }));
+  const upperOpened = await openEpub(upperPath);
+  assert.strictEqual(upperOpened.textItems.length, 1, "uppercase OPF tags still resolve");
+  assert.strictEqual(upperOpened.metadata.title, "Upper Case Book", "uppercase Dublin Core too");
+
+  // ─── htmlToPlainText: the text the intake agent judges a book by ───────────
+  // A real chapter is ONE wrapping div around many <p>. Walking only the
+  // top-level children glued every paragraph into one run-on line.
+  assert.strictEqual(
+    htmlToPlainText(`<html><body><div class="body"><p>line one</p><p>line two</p><p>line three</p></div></body></html>`),
+    "line one\n\nline two\n\nline three",
+    "paragraph breaks survive a wrapping div"
+  );
+  assert.strictEqual(htmlToPlainText(`<p>a <em>b</em> c</p>`), "a b c", "inline markup stays inside its sentence");
+  assert.strictEqual(htmlToPlainText(`<div>lead<p>next</p></div>`), "lead\n\nnext", "mixed text and blocks");
+  assert.strictEqual(htmlToPlainText(`<p>a<br/>b</p>`), "a\n\nb", "a hard break starts a new piece");
+  assert.strictEqual(htmlToPlainText(`<html><body><script>var x=1;</script><p>real</p></body></html>`), "real");
+
   // ─── readEpubSection: bounded sampling ─────────────────────────────────────
   const first = await readEpubSection(opened, 1, { limit: 20 });
   assert.strictEqual(first.index, 1);
@@ -316,6 +358,23 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
     "the refused escape created nothing"
   );
 
+  // The intake approve gate: the plain file tools are text tools, so they are
+  // shut at book files (readFile on an epub returns zip bytes, and writeFile
+  // over a book would destroy the source the pipeline exists to translate).
+  const intakeGate = createIntakeApprove(
+    await harness.createGatedFsTools({ cwd: seriesDir, allowedDirs: [seriesDir] }),
+    await harness.createEpubTools({ cwd: seriesDir, allowedDirs: [seriesDir], sampleChars: 40 })
+  );
+  assert.strictEqual(intakeGate({ toolName: "readFile", input: { filePath: "loose01.epub" } }), false, "a book is not readable as text");
+  assert.strictEqual(intakeGate({ toolName: "writeFile", input: { filePath: "loose01.epub" } }), false, "a book can never be overwritten");
+  assert.strictEqual(intakeGate({ toolName: "editFile", input: { filePath: "Loose(01)/loose01.epub" } }), false);
+  assert.strictEqual(intakeGate({ toolName: "readFile", input: { filePath: "notes.txt" } }), true, "plain text is still readable");
+  assert.strictEqual(intakeGate({ toolName: "writeFile", input: { filePath: "translation-target.json" } }), true, "the outputs are still writable");
+  assert.strictEqual(intakeGate({ toolName: "writeFile", input: { filePath: "../outside/x.md" } }), false, "the write gate still applies");
+  assert.strictEqual(intakeGate({ toolName: "epubInfo", input: { filePath: "loose01.epub" } }), true, "the epub tools are the door to a book");
+  assert.strictEqual(intakeGate({ toolName: "stageVolume", input: { sourceFile: "loose01.epub", folder: "Loose(01)" } }), true);
+  assert.strictEqual(intakeGate({ toolName: "stageVolume", input: { sourceFile: "loose01.epub", folder: "../outside" } }), false);
+
   // The approve gate: reading a book is always allowed; staging is confined to
   // the allowed dirs; deletes are denied outright.
   assert.strictEqual(gates.approve({ toolName: "epubInfo", input: { filePath: "/anywhere/x.epub" } }), true);
@@ -354,6 +413,69 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.deepStrictEqual(filterVolumesByInstallment(manifestForFilter, "10"), ["第十巻"]);
   assert.deepStrictEqual(filterVolumesByInstallment(manifestForFilter, "Second Book"), ["Second Book"], "an exact folder name also matches");
   assert.deepStrictEqual(filterVolumesByInstallment(manifestForFilter, "9"), [], "no match is an empty list, not a guess");
+
+  // ─── the manifest rules that keep a volume and its book in one place ──────
+  const manifestWith = (volumes) => ({
+    schema: MANIFEST_SCHEMA,
+    seriesName: "S",
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+    volumes,
+  });
+  // A volume's source must be the staged copy inside its own folder. Pointing a
+  // volume at a loose file at the series root (or at another volume's book)
+  // writes the artifacts into one folder while the book sits in another, and
+  // the loose copy then looks like a new book to the next intake.
+  assert.throws(
+    () => validateManifest(manifestWith([{ installmentNumber: "01", folder: "Loose(01)", sourceFile: "loose01.epub" }])),
+    /inside its own volume folder/,
+    "a source at the series root is rejected"
+  );
+  assert.throws(
+    () => validateManifest(manifestWith([{ installmentNumber: "01", folder: "A(01)", sourceFile: "B(02)/book.epub" }])),
+    /inside its own volume folder/,
+    "another volume's book is rejected"
+  );
+  assert.strictEqual(
+    validateManifest(manifestWith([{ installmentNumber: "01", folder: "A(01)", sourceFile: "A(01)/book.epub" }])).volumes[0].sourceFile,
+    "A(01)/book.epub",
+    "the staged path is accepted"
+  );
+  assert.strictEqual(
+    validateManifest(manifestWith([{ installmentNumber: "01", folder: "A(01)", sourceFile: "A(01)\\book.epub" }])).volumes[0].sourceFile,
+    "A(01)/book.epub",
+    "backslashes are stored as forward slashes (a Windows manifest must resolve on Linux)"
+  );
+
+  // The same book listed twice is the one mistake folder-name freedom makes
+  // possible, and it doubles every cumulative artifact built on it.
+  const dupDir = makeTmpDir("ai-client-dup-");
+  for (const folder of ["A(01)", "B(02)"]) {
+    await fs.promises.mkdir(path.join(dupDir, folder), { recursive: true });
+  }
+  await fs.promises.writeFile(path.join(dupDir, "A(01)", "book.epub"), "identical content");
+  await fs.promises.writeFile(path.join(dupDir, "B(02)", "copy-of-book.epub"), "identical content");
+  await fs.promises.writeFile(path.join(dupDir, "B(02)", "other.epub"), "a different book");
+  const duplicate = await findDuplicateSources(
+    dupDir,
+    manifestWith([
+      { installmentNumber: "01", folder: "A(01)", sourceFile: "A(01)/book.epub" },
+      { installmentNumber: "02", folder: "B(02)", sourceFile: "B(02)/copy-of-book.epub" },
+    ])
+  );
+  assert.ok(duplicate && /SAME book/.test(duplicate), "the same book as two volumes is detected");
+  assert.ok(/discovery.excluded/.test(duplicate), "and the fix is spelled out for the agent");
+  assert.strictEqual(
+    await findDuplicateSources(
+      dupDir,
+      manifestWith([
+        { installmentNumber: "01", folder: "A(01)", sourceFile: "A(01)/book.epub" },
+        { installmentNumber: "02", folder: "B(02)", sourceFile: "B(02)/other.epub" },
+      ])
+    ),
+    null,
+    "distinct books pass"
+  );
 
   // ─── settings precedence: .env > manifest > default ────────────────────────
   const savedEnv = {
@@ -469,9 +591,14 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   const low = confidenceGate({ discovery: { confidence: { order: 0.3, seriesName: 0.9 } } });
   assert.strictEqual(low.ok, false, "a guessed order stops the run");
   assert.strictEqual(low.worstKey, "order");
-  assert.strictEqual(confidenceGate({}).ok, true, "no confidence reported: nothing to gate");
+  // Fail-closed: a gate the model can pass by saying nothing is not a gate.
+  const silent = confidenceGate({});
+  assert.strictEqual(silent.ok, false, "a plan that reports no confidence is refused");
+  assert.ok(/no "discovery.confidence"/.test(silent.reason), "and the reason is stated");
+  assert.strictEqual(confidenceGate({ discovery: { summary: "guessed", confidence: {} } }).ok, false, "an empty confidence block is refused too");
   process.env.DISCOVER_MIN_CONFIDENCE = "0";
   assert.strictEqual(confidenceGate({ discovery: { confidence: { order: 0.1 } } }).ok, true, "0 disables the gate");
+  assert.strictEqual(confidenceGate({}).ok, true, "0 also disables the missing-confidence check");
   delete process.env.DISCOVER_MIN_CONFIDENCE;
 
   // ─── the deterministic (--dry-run) layout: a flat pile gets staged ─────────
@@ -508,6 +635,43 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   );
   assert.strictEqual(flat.volumes[0].sourceFile, path.join("side-story(01)", "side-story.epub"));
   assert.ok(isVolumeArtifact("translation-01.md") && !isVolumeArtifact("volume-one.epub"));
+
+  // A series the intake agent already laid out must preview AS IT IS. The old
+  // builder only recognised the legacy "<folder>/<folder>.epub" naming, so a
+  // dry run re-staged every book into a SECOND set of folders next to the
+  // committed ones — including the files the agent had deliberately excluded —
+  // and previewed a different order than the real run.
+  const laidOut = makeTmpDir("ai-client-laidout-");
+  for (const [folder, file] of [["My Series(01)", "book-one.epub"], ["My Series(02)", "book-two.epub"]]) {
+    await fs.promises.mkdir(path.join(laidOut, folder), { recursive: true });
+    await writeEpub(laidOut, path.join(folder, file), {
+      title: folder,
+      series: "My Series",
+      sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+    });
+    // the original copy is still loose at the root, exactly as stageVolume leaves it
+    await fs.promises.copyFile(path.join(laidOut, folder, file), path.join(laidOut, file));
+  }
+  const laidOutPreview = await buildDeterministicManifest(laidOut, {
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+    seriesName: undefined, // SERIES_NAME is optional now — the preview must still work
+  });
+  assert.deepStrictEqual(
+    laidOutPreview.volumes.map((v) => v.sourceFile),
+    ["My Series(01)/book-one.epub", "My Series(02)/book-two.epub"],
+    "the committed folders are previewed, with the file names the agent chose"
+  );
+  assert.deepStrictEqual(
+    laidOutPreview.volumes.map((v) => v.installmentNumber),
+    ["01", "02"],
+    "numbered from the folder names"
+  );
+  assert.deepStrictEqual(
+    fs.readdirSync(laidOut).filter((n) => n.endsWith(")")).sort(),
+    ["My Series(01)", "My Series(02)"],
+    "no rival set of volume folders was created"
+  );
 
   // ─── the prompt blocks the agent is given ──────────────────────────────────
   const fixed = fixedValuesBlock({ targetLanguage: "English" });
@@ -694,7 +858,100 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.strictEqual(reused.volumes.length, 2, "the cached plan of record was reused");
   assert.ok(logs.some((l) => /reusing the existing manifest/.test(l)), "the reuse is logged");
 
-  // G. an agent that never produces a plan fails the step loudly.
+  // G. an INVALID cached manifest is never reused — not even when every file it
+  // lists still exists. (The bug this pins: the code logged "cached manifest is
+  // invalid … re-running intake" and then returned that manifest on the next
+  // line, so an old-schema plan with an unsanitized folder name and an
+  // un-normalized installment number went to every downstream task.)
+  setSeriesEnv(liveDir);
+  await fs.promises.writeFile(
+    path.join(liveDir, intake.MANIFEST_FILE_NAME),
+    JSON.stringify({
+      schema: 1,
+      seriesName: "Old Name",
+      sourceLanguage: "Japanese",
+      targetLanguage: "English",
+      volumes: [{ installmentNumber: "1", folder: "Bad:Name", sourceFile: "Oresuki(01)/vol1.epub" }],
+    })
+  );
+  assert.strictEqual(
+    await readUsableManifest(liveDir, path.join(liveDir, intake.MANIFEST_FILE_NAME)),
+    null,
+    "an invalid manifest is not usable"
+  );
+  stubIntakeAgent([planFor(twoVolumes())]);
+  const repaired = await intake.getTranslationTarget();
+  assert.strictEqual(repaired.schema, MANIFEST_SCHEMA, "the old-schema plan was replaced, not reused");
+  assert.notStrictEqual(repaired.seriesName, "Old Name", "and the agent's decisions are the plan of record");
+  assert.ok(logs.some((l) => /cached manifest is invalid/.test(l)), "the rejection is logged");
+  assert.ok(logs.some((l) => /running the intake agent/.test(l)), "intake actually re-ran");
+
+  // H. a half-written manifest (no volumes at all) must not crash the task.
+  setSeriesEnv(liveDir);
+  await fs.promises.writeFile(
+    path.join(liveDir, intake.MANIFEST_FILE_NAME),
+    JSON.stringify({ schema: MANIFEST_SCHEMA, seriesName: "Half written" })
+  );
+  stubIntakeAgent([planFor(twoVolumes())]);
+  const repaired2 = await intake.getTranslationTarget();
+  assert.strictEqual(repaired2.volumes.length, 2, "a corrupt plan falls back to a fresh intake");
+
+  // I. --dry-run previews the committed plan instead of building a rival layout
+  // (and creates nothing on disk while doing it).
+  setSeriesEnv(liveDir);
+  const beforePreview = fs.readdirSync(liveDir);
+  const preview = await intake.getTranslationTarget({ dryRun: true });
+  assert.deepStrictEqual(
+    preview.volumes.map((v) => v.folder),
+    ["Oresuki(01)", "Oresuki(02)"],
+    "the preview is the plan the real run will follow"
+  );
+  assert.deepStrictEqual(fs.readdirSync(liveDir), beforePreview, "the dry run created no new folders");
+  assert.ok(logs.some((l) => /previewing the committed plan of record/.test(l)), "the preview is logged");
+
+  // J. a series with no committed plan AND no SERIES_NAME says why it cannot preview.
+  setSeriesEnv(liveDir);
+  await fs.promises.unlink(path.join(liveDir, intake.MANIFEST_FILE_NAME));
+  await assert.rejects(
+    () => intake.getTranslationTarget({ dryRun: true }),
+    /no committed .* and SERIES_NAME is not set/,
+    "an unnameable preview fails with an actionable message, not a schema error"
+  );
+  await writeEpub(liveDir, "loose-extra.epub", {
+    title: "Loose Extra",
+    series: "Oresuki",
+    sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+  });
+  process.env.SERIES_NAME = "Oresuki";
+  const previewNamed = await intake.getTranslationTarget({ dryRun: true });
+  assert.ok(previewNamed.volumes.length >= 2, "with a name, the deterministic layout previews");
+  delete process.env.SERIES_NAME;
+  // restore the committed plan for anything after this block
+  stubIntakeAgent([planFor(twoVolumes())]);
+  await intake.getTranslationTarget({ force: true });
+
+  // K. the same book planned as two volumes is rejected — and shown to the agent
+  // as its own correction task before the attempt is thrown away.
+  const dupLive = makeTmpDir("ai-client-intake-dup-");
+  for (const folder of ["First(01)", "Second(02)"]) {
+    await fs.promises.mkdir(path.join(dupLive, folder), { recursive: true });
+    await fs.promises.writeFile(path.join(dupLive, folder, "book.epub"), "the same book, staged twice");
+  }
+  setSeriesEnv(dupLive);
+  stubIntakeAgent([
+    planFor([
+      { installmentNumber: "1", folder: "First(01)", sourceFile: "First(01)/book.epub", title: "One", notes: "" },
+      { installmentNumber: "2", folder: "Second(02)", sourceFile: "Second(02)/book.epub", title: "Two", notes: "" },
+    ]),
+  ]);
+  await assert.rejects(
+    () => intake.getTranslationTarget({ force: true }),
+    /SAME book/,
+    "a duplicated volume stops the run"
+  );
+  assert.ok(logs.some((l) => /correction turn/.test(l)), "the agent was given the chance to fix it first");
+
+  // L. an agent that never produces a plan fails the step loudly.
   setSeriesEnv(liveDir);
   stubIntakeAgent([{ text: "" }]);
   await assert.rejects(

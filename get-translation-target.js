@@ -54,10 +54,11 @@
  * purpose: re-discovery does not rename a volume folder that already holds
  * pipeline output (applyCommittedLayout).
  *
- * With --dry-run no AI call is made: a deterministic layout is built instead
- * (the legacy "<Series Name>(NN)" convention, extended to a flat pile of source
- * files, which it stages into volume folders so the preview matches the real
- * layout).
+ * With --dry-run no AI call is made: the committed plan of record is previewed
+ * when one exists, and only when there is none is a deterministic layout built
+ * instead (the legacy "<Series Name>(NN)" convention, extended to any folder
+ * holding a book and to a flat pile of source files, which it stages into
+ * volume folders so the preview matches the real layout).
  *
  * Usage (module):
  *   const { getTranslationTarget } = require("./get-translation-target");
@@ -188,7 +189,9 @@ function discoverMinConfidence() {
   return Number.isFinite(n) ? Math.max(0, Math.min(n, 1)) : 0.6;
 }
 
-/** DISCOVER_STRICT=true turns layout disagreements and thin evidence into errors. */
+/** DISCOVER_STRICT=true turns a disagreement with the existing folder layout
+ * into an error instead of a warn-and-keep (it fails the step immediately — a
+ * retry cannot make the agent respect a policy). */
 function discoverStrict() {
   return String(process.env.DISCOVER_STRICT || "").trim().toLowerCase() === "true";
 }
@@ -296,7 +299,7 @@ async function applyCommittedLayout(seriesDir, manifest, committed) {
         `remove it by hand if you want it gone.`
     );
     vol.folder = owner.folder;
-    vol.sourceFile = path.join(owner.folder, owner.src.file);
+    vol.sourceFile = `${owner.folder}/${owner.src.file}`;
     vol.notes = [vol.notes, `folder kept for existing pipeline output: ${owner.folder}`]
       .filter(Boolean)
       .join("; ");
@@ -358,12 +361,26 @@ function validateManifest(manifest) {
     if (typeof vol.sourceFile !== "string" || vol.sourceFile.trim() === "") {
       throw new Error(`${where} is missing a non-empty string "sourceFile".`);
     }
-    const src = vol.sourceFile.trim();
+    const src = vol.sourceFile.trim().replace(/\\/g, "/");
     if (path.isAbsolute(src) || /^[A-Za-z]:[\\/]/.test(src)) {
       throw new Error(`${where} sourceFile must be relative to the series location: "${src}".`);
     }
-    if (src.split(/[\\/]/).includes("..")) {
+    if (src.split("/").includes("..")) {
       throw new Error(`${where} sourceFile cannot contain "..": "${src}".`);
+    }
+    // The source must live inside the volume's own folder. Without this an agent
+    // could point a volume at a loose file at the series root (or at another
+    // volume's book): the artifacts would be written into one folder while the
+    // book sits in another, and the loose copy would look like a new book to
+    // the next intake. Forward slashes are the stored form, so a manifest
+    // written on Windows still resolves on Linux.
+    const parent = src.split("/").slice(0, -1).join("/");
+    if (parent !== vol.folder) {
+      throw new Error(
+        `${where} sourceFile must be the staged file inside its own volume folder ` +
+          `"${vol.folder}/" (got "${src}"). Stage it with stageVolume first, then point ` +
+          `sourceFile at the staged copy.`
+      );
     }
     vol.sourceFile = src;
     for (const key of ["title", "notes"]) {
@@ -454,31 +471,120 @@ async function manifestSourcesExist(seriesDir, manifest) {
  * its decisions. Below DISCOVER_MIN_CONFIDENCE the run stops before it can
  * build a whole series on a guessed order.
  *
+ * Fail-closed: a plan that reports NO confidence is refused, the same way an
+ * unparseable acceptance score is. A gate the model can pass by saying nothing
+ * is not a gate, and reading order is the one mistake every later artifact
+ * would inherit.
+ *
  * @param {TranslationTargetManifest} manifest - A validated manifest.
- * @returns {{ok: boolean, worst: number|null, worstKey: string|null, min: number}}
+ * @returns {{ok: boolean, worst: number|null, worstKey: string|null, min: number, reason: string|null}}
  */
 function confidenceGate(manifest) {
   const min = discoverMinConfidence();
   const conf = manifest.discovery && manifest.discovery.confidence;
-  if (min <= 0 || !conf || typeof conf !== "object") {
-    return { ok: true, worst: null, worstKey: null, min };
+  if (min <= 0) return { ok: true, worst: null, worstKey: null, min, reason: null };
+  if (!conf || typeof conf !== "object" || Array.isArray(conf)) {
+    return {
+      ok: false,
+      worst: null,
+      worstKey: null,
+      min,
+      reason: 'the plan reports no "discovery.confidence" object at all',
+    };
   }
-  const entries = Object.entries(conf).filter(([, v]) => typeof v === "number");
-  if (entries.length === 0) return { ok: true, worst: null, worstKey: null, min };
+  const entries = Object.entries(conf).filter(([, v]) => typeof v === "number" && Number.isFinite(v));
+  if (entries.length === 0) {
+    return {
+      ok: false,
+      worst: null,
+      worstKey: null,
+      min,
+      reason: '"discovery.confidence" is empty — no confidence was reported for the order, the name, or the language',
+    };
+  }
   const [worstKey, worst] = entries.reduce((a, b) => (b[1] < a[1] ? b : a));
-  return { ok: worst >= min, worst, worstKey, min };
+  return { ok: worst >= min, worst, worstKey, min, reason: null };
+}
+
+/**
+ * Find a book listed twice. The agent chooses folder names and stages copies, so
+ * the same book can end up as two volumes under two names — which silently
+ * doubles every cumulative artifact built on it. Content hashes are the only
+ * reliable detector, because the file names differ on purpose.
+ *
+ * @param {string} seriesDir - The SERIES_LOCATION path.
+ * @param {TranslationTargetManifest} manifest - A validated manifest.
+ * @param {Map<string,string>} [hashCache] - Reused path -> sha256 map (the check runs twice per attempt; a 17-book series should not be hashed twice).
+ * @returns {Promise<string|null>} The problem as a sentence, or null when every source is distinct.
+ */
+async function findDuplicateSources(seriesDir, manifest, hashCache = new Map()) {
+  const seen = new Map();
+  for (const vol of manifest.volumes) {
+    const abs = path.resolve(seriesDir, vol.sourceFile);
+    let hash = hashCache.get(abs);
+    if (hash === undefined) {
+      try {
+        hash = await sha256OfFile(abs);
+      } catch {
+        continue; // a missing source is reported by manifestSourcesExist
+      }
+      hashCache.set(abs, hash);
+    }
+    const other = seen.get(hash);
+    if (other) {
+      return (
+        `volumes ${other.installmentNumber} ("${other.folder}") and ${vol.installmentNumber} ` +
+        `("${vol.folder}") are the SAME book — identical content (sha256 ${hash.slice(0, 12)}…). ` +
+        `Keep one volume and list the other file in discovery.excluded as a duplicate.`
+      );
+    }
+    seen.set(hash, vol);
+  }
+  return null;
 }
 
 // ─── Discovery backends ─────────────────────────────────────────────────────
 
 /**
+ * Find the book staged inside a volume folder.
+ *
+ * Two shapes are accepted: the legacy convention ("<folder>.md" / ".epub" /
+ * ".txt" — the file named after its own folder) and the shape the intake agent
+ * produces (the original file name kept, staged into the folder it chose).
+ * Recognising only the first one made --dry-run re-stage every book into a
+ * SECOND set of folders next to the committed ones.
+ *
+ * @param {string} volumeDir - The volume folder.
+ * @param {string} folderName - Its name (used for the legacy convention).
+ * @returns {Promise<string|null>} The file name inside the folder, or null.
+ */
+async function firstSourceInVolumeDir(volumeDir, folderName) {
+  for (const candidate of [`${folderName}.md`, `${folderName}.epub`, `${folderName}.txt`]) {
+    if (await fileExists(path.join(volumeDir, candidate))) return candidate;
+  }
+  let names;
+  try {
+    names = await fs.readdir(volumeDir);
+  } catch {
+    return null;
+  }
+  const sources = names.filter(
+    (name) => /\.(epub|txt|md)$/i.test(name) && !isVolumeArtifact(name)
+  );
+  if (sources.length === 0) return null;
+  return orderBy(sources)[0];
+}
+
+/**
  * Build the manifest with NO AI call — the --dry-run backend, so prompt
- * previews stay fully offline.
+ * previews stay fully offline. Only used when there is no committed plan of
+ * record: getTranslationTarget() previews the committed manifest instead, so a
+ * preview always matches what the real run will do.
  *
  * Two layouts are recognized:
- *   1. the legacy one: directories under SERIES_LOCATION whose name contains
- *      SERIES_NAME, naturally sorted, source "<folder>/<folder>.md" (or .epub /
- *      .txt when the Markdown file is absent);
+ *   1. volume folders that already exist — the legacy "<SERIES_NAME>(NN)" ones
+ *      and the folders the intake agent named — each holding its staged book
+ *      (under any file name), naturally sorted;
  *   2. a flat pile: loose .epub / .txt / .md files sitting directly in
  *      SERIES_LOCATION. Those are staged into "<base>(NN)/" folders — the same
  *      layout the intake agent produces — so a dry run previews the layout the
@@ -495,32 +601,53 @@ async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLan
   const entries = await fs.readdir(seriesDir, { withFileTypes: true });
   const volumes = [];
 
-  // 1. The legacy volume-folder layout.
+  // 1. Volume folders that already exist.
   const folderNames = entries
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .filter((folderName) => name && folderName.includes(name));
-  for (const folderName of orderBy(folderNames)) {
-    const volumeDir = path.join(seriesDir, folderName);
-    let sourceFile = null;
-    for (const candidate of [`${folderName}.md`, `${folderName}.epub`, `${folderName}.txt`]) {
-      if (await fileExists(path.join(volumeDir, candidate))) {
-        sourceFile = path.join(folderName, candidate); // relative to seriesDir
-        break;
-      }
+    .filter((entry) => entry.isDirectory() && entry.name !== "images")
+    .map((entry) => entry.name);
+  // Prefer the folders that carry the series name (the legacy convention); when
+  // the name is unknown or the agent chose other names, take every folder that
+  // actually holds a book.
+  const named = name ? folderNames.filter((folderName) => folderName.includes(name)) : folderNames;
+  for (const folderName of orderBy(named.length > 0 ? named : folderNames)) {
+    let folder;
+    try {
+      folder = sanitizeFolderName(folderName);
+    } catch {
+      harness.logLine(
+        `[get-translation-target] skipping folder "${folderName}" in the deterministic layout: its name is not usable as a volume folder.`
+      );
+      continue;
     }
+    if (folder !== folderName) {
+      // Sanitizing only trims and collapses spaces, and a preview cannot rename
+      // a folder that already holds work — so a folder whose real name differs
+      // from its usable form is reported and skipped rather than mis-pointed.
+      harness.logLine(
+        `[get-translation-target] skipping folder "${folderName}" in the deterministic layout: ` +
+          `its name needs cleaning ("${folder}"); rename it by hand or let the intake agent lay the series out.`
+      );
+      continue;
+    }
+    const sourceFile = await firstSourceInVolumeDir(path.join(seriesDir, folderName), folderName);
     if (!sourceFile) continue;
     let number;
     try {
-      number = installmentNumberFromDir(volumeDir);
-    } catch {
       // No "(NN)" in the name: fall back to the position in the natural sort.
+      number = installmentNumberFromDir(path.join(seriesDir, folderName));
+    } catch {
       number = String(volumes.length + 1);
     }
+    let installmentNumber = normalizeInstallmentNumber(number);
+    if (volumes.some((v) => v.installmentNumber === installmentNumber)) {
+      // Two folders claiming the same number ("Series(1)" and "Series(01)"):
+      // fall back to the sort position instead of failing the whole preview.
+      installmentNumber = normalizeInstallmentNumber(volumes.length + 1);
+    }
     volumes.push({
-      installmentNumber: normalizeInstallmentNumber(number),
-      folder: folderName,
-      sourceFile,
+      installmentNumber,
+      folder,
+      sourceFile: `${folder}/${sourceFile}`, // relative to seriesDir, forward slashes
       title: folderName,
       notes: "deterministic fallback (no AI)",
     });
@@ -546,7 +673,7 @@ async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLan
       volumes.push({
         installmentNumber: number,
         folder,
-        sourceFile: path.join(folder, file),
+        sourceFile: `${folder}/${file}`,
         title: base,
         notes: "deterministic fallback (no AI): staged from the series root",
       });
@@ -590,12 +717,13 @@ const INTAKE_TOOLS_NOTE = `
 ## Tools (agent mode)
 
 Your working folder is the series location; always use paths relative to it.
-- listFiles / grep / readFile — inspect the folder and any plain-text file. readFile CANNOT read .epub files.
+- listFiles(dirPath, recursive: true) — inspect the folder. Pass recursive: true, or you only see the top level and miss books inside subfolders.
+- readFile / grep — plain-text files only. The file tools REFUSE .epub paths: an epub is a zip, and reading one as text returns binary junk, so readFile on a book is blocked rather than wasted.
 - epubInfo(filePath) — open a book: its catalog card (title, author, language tag, the series name and book number stored inside it) and its section list.
 - readEpubText(filePath, section, offset, limit) — sample a bounded slice of one section's text.
 - stageVolume({ sourceFile, folder, as }) — create a volume folder and copy a source into it. It never touches the original.
 - writeFile — write the manifest and the plan document. Always write the WHOLE file with writeFile; never append.
-- You cannot delete files.
+- You cannot delete files, and you cannot write over a book file.
 - **CRITICAL: both output files must be written with writeFile. A chat reply is not saved to disk — if you put the JSON in your reply instead of calling writeFile, the manifest will not exist and the run will fail.**
 `;
 
@@ -795,6 +923,46 @@ function firstManifestProblem(manifest) {
 }
 
 /**
+ * The same check plus the checks that need the disk (a book listed twice).
+ * Whatever it returns is shown to the agent as its correction task, so a
+ * mistake the agent can fix is fixed by the agent instead of failing the step.
+ *
+ * @param {Object|null} manifest - The parsed manifest.
+ * @param {Function} [extraChecks] - async (manifest) => problem string | null.
+ * @returns {Promise<{message: string}|null>} null when the plan is usable.
+ */
+async function firstPlanProblem(manifest, extraChecks) {
+  const sync = firstManifestProblem(manifest);
+  if (sync) return sync;
+  if (!extraChecks) return null;
+  const message = await extraChecks(manifest);
+  return message ? { message } : null;
+}
+
+/**
+ * The file tools the intake agent is given are text tools: readFile on an epub
+ * returns zip bytes, and writeFile over a book would destroy the source the
+ * whole pipeline exists to translate. The epub tools are the door to a book,
+ * so the plain file tools are shut at book files.
+ *
+ * @param {Object} fsGate - createGatedFsTools' gate.
+ * @param {Object} epubGate - createEpubTools' gate.
+ * @returns {(call: Object) => boolean} The composed approve gate.
+ */
+function createIntakeApprove(fsGate, epubGate) {
+  const FILE_TOOLS = new Set(["readFile", "grep", "writeFile", "editFile", "deleteFile"]);
+  return (call) => {
+    const input = (call && call.input) || {};
+    const target =
+      typeof input.filePath === "string" ? input.filePath : typeof input.path === "string" ? input.path : "";
+    if (FILE_TOOLS.has(call && call.toolName) && /\.(epub|zip)$/i.test(target)) {
+      return false;
+    }
+    return fsGate.approve(call) && epubGate.approve(call);
+  };
+}
+
+/**
  * Run the intake agent over the series location and return the plan it wrote.
  *
  * One turn to explore, decide, stage, and write; then, if the plan fails
@@ -805,10 +973,10 @@ function firstManifestProblem(manifest) {
  * for a finished one.
  *
  * @param {string} seriesDir - The SERIES_LOCATION path.
- * @param {{overrides: {seriesName?: string, sourceLanguage?: string, targetLanguage: string}, committed: CommittedVolumeDir[], maxSteps?: number}} p
- * @returns {Promise<Object>} The parsed manifest (not yet validated).
+ * @param {{overrides: {seriesName?: string, sourceLanguage?: string, targetLanguage: string}, committed: CommittedVolumeDir[], maxSteps?: number, extraChecks?: Function}} p
+ * @returns {Promise<Object>} The parsed manifest (validated against extraChecks).
  */
-async function runDiscoveryAgent(seriesDir, { overrides, committed, maxSteps }) {
+async function runDiscoveryAgent(seriesDir, { overrides, committed, maxSteps, extraChecks }) {
   const manifestPath = path.join(seriesDir, MANIFEST_FILE_NAME);
   const planPath = path.join(seriesDir, PLAN_FILE_NAME);
   harness.logLine(`[get-translation-target] running the intake agent over ${seriesDir}`);
@@ -845,7 +1013,7 @@ async function runDiscoveryAgent(seriesDir, { overrides, committed, maxSteps }) 
     name: "intake",
     systemPrompt: await loadIntakeSystemPrompt(),
     tools: { ...fsGate.tools, ...epubGate.tools },
-    approve: (call) => fsGate.approve(call) && epubGate.approve(call),
+    approve: createIntakeApprove(fsGate, epubGate),
     cwd: seriesDir,
     maxSteps: stepCap,
   });
@@ -865,7 +1033,7 @@ async function runDiscoveryAgent(seriesDir, { overrides, committed, maxSteps }) 
       manifest = await salvageManifest(result.text, manifestPath);
     }
 
-    let problem = firstManifestProblem(manifest);
+    let problem = await firstPlanProblem(manifest, extraChecks);
     if (problem) {
       harness.logLine(
         `[get-translation-target] the intake plan is invalid (${problem.message}); ` +
@@ -874,11 +1042,12 @@ async function runDiscoveryAgent(seriesDir, { overrides, committed, maxSteps }) 
       result = await agent.sendTurn(buildCorrectionTurnPrompt(problem.message), {
         label: "series-intake-correction",
       });
+      assertRealToolCalls(result, "the intake agent's correction turn");
       const again =
         (await readManifestFile(manifestPath)) ||
         (result && result.text ? await salvageManifest(result.text, manifestPath) : null);
       if (again) manifest = again;
-      problem = firstManifestProblem(manifest);
+      problem = await firstPlanProblem(manifest, extraChecks);
       if (problem) {
         throw new Error(
           `the intake agent's plan is still invalid after a correction turn: ${problem.message}`
@@ -933,16 +1102,75 @@ function logManifestSummary(manifest) {
 }
 
 /**
+ * Read the committed plan of record and decide whether it is still usable.
+ *
+ * Returns null — never a half-valid manifest — when the file is missing,
+ * unparseable, fails validation, was generated for a different series location,
+ * or lists a source file that has gone. Every caller then produces a fresh plan.
+ *
+ * (The bug this helper exists to prevent: the old code logged "cached manifest
+ * is invalid … re-running intake" and then returned the invalid manifest on the
+ * next line, because the parse/validate failure left the object in hand. An
+ * unsanitized folder name, an un-normalized installment number, or a half-written
+ * file then went to every downstream task.)
+ *
+ * @param {string} seriesDir - The SERIES_LOCATION path.
+ * @param {string} manifestPath - The manifest file.
+ * @param {{why?: string}} [opts] - How to phrase the follow-up in the log.
+ * @returns {Promise<TranslationTargetManifest|null>} The usable manifest, or null.
+ */
+async function readUsableManifest(seriesDir, manifestPath, { why = "re-running intake" } = {}) {
+  if (!(await fileExists(manifestPath))) return null;
+  let cached;
+  try {
+    cached = extractJsonObject(await fs.readFile(manifestPath, "utf-8"));
+  } catch (err) {
+    harness.logLine(
+      `[get-translation-target] cached manifest could not be parsed (${err.message}); ${why}.`
+    );
+    return null;
+  }
+  const problem = firstManifestProblem(cached);
+  if (problem) {
+    harness.logLine(`[get-translation-target] cached manifest is invalid (${problem.message}); ${why}.`);
+    return null;
+  }
+  // A manifest generated for a different series location is stale even when
+  // every listed (relative) source file still exists — e.g. after migrating
+  // machines: a Windows "C:\..." seriesLocation is not absolute on Linux, so
+  // any consumer trusting it would resolve every file op relative to the CWD.
+  // (Observed live: a Windows-generated manifest was reused on Linux and the
+  // character-voice task crashed with ENOENT on <CWD>/C:\.../test_story(1).)
+  if (cached.seriesLocation && path.resolve(cached.seriesLocation) !== path.resolve(seriesDir)) {
+    harness.logLine(
+      `[get-translation-target] cached manifest was generated for ${cached.seriesLocation}, ` +
+        `not ${seriesDir}; ${why}.`
+    );
+    return null;
+  }
+  if (!(await manifestSourcesExist(seriesDir, cached))) {
+    harness.logLine(
+      `[get-translation-target] cached manifest is stale (a listed source file is missing); ${why}.`
+    );
+    return null;
+  }
+  return cached;
+}
+
+/**
  * Get (or produce) the translation-target manifest for SERIES_LOCATION.
  *
- *   - dryRun: no AI call — a deterministic layout is built (keeps --dry-run offline).
+ *   - dryRun: no AI call. The committed plan of record is previewed when one
+ *     exists (so the preview always matches the real run); otherwise a
+ *     deterministic layout is built (keeps --dry-run offline).
  *   - Otherwise an existing valid schema-2 manifest is reused unless force is
  *     set, a listed source file has gone, or its seriesLocation no longer
- *     matches SERIES_LOCATION.
+ *     matches SERIES_LOCATION. An INVALID cached manifest is never reused.
  *   - When the intake must run: snapshot the committed layout, run the intake
  *     agent (up to DISCOVER_MAX_ATTEMPTS fresh agents), validate its plan, keep
- *     committed folder names stable, check every source file exists, and apply
- *     the confidence gate. Then stamp the authoritative fields and persist.
+ *     committed folder names stable, check every source file exists, reject the
+ *     same book listed twice, and apply the confidence gate. Then stamp the
+ *     authoritative fields and persist.
  *
  * @param {{force?: boolean, dryRun?: boolean}} [opts]
  * @returns {Promise<TranslationTargetManifest>} The validated manifest.
@@ -977,8 +1205,35 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
     targetLanguage: process.env.TRANSLATION_TARGET_LANGUAGE || "English",
   };
 
-  // --dry-run: no AI calls. Build the layout deterministically.
+  const manifestPath = path.join(seriesDir, MANIFEST_FILE_NAME);
+  const planPath = path.join(seriesDir, PLAN_FILE_NAME);
+
+  // --dry-run: no AI calls. Preview the committed plan when there is one.
+  // Building a layout from scratch instead used to preview a DIFFERENT order
+  // and re-stage every book into a second set of folders next to the committed
+  // ones — including the files the intake agent had deliberately excluded
+  // (observed: an art book and a preview sample came back as volumes 01 and 03,
+  // and the litter then showed up as "existing folders" on the next intake).
   if (dryRun) {
+    const committedPlan = await readUsableManifest(seriesDir, manifestPath, {
+      why: "previewing the committed plan instead",
+    });
+    if (committedPlan) {
+      harness.logLine(
+        `[get-translation-target] dry-run: previewing the committed plan of record ` +
+          `(${manifestPath}); no layout was built and nothing was written.`
+      );
+      logManifestSummary(committedPlan);
+      return committedPlan;
+    }
+    if (!overrides.seriesName) {
+      throw new Error(
+        `--dry-run cannot preview ${seriesDir}: there is no committed ${MANIFEST_FILE_NAME} ` +
+          `and SERIES_NAME is not set, so nothing here has a name to build a preview from. ` +
+          `Run "npx gulp discover" first (the intake agent names the series and writes the ` +
+          `plan of record), or set SERIES_NAME in .env.`
+      );
+    }
     const manifest = await buildDeterministicManifest(seriesDir, {
       sourceLanguage: overrides.sourceLanguage || "Japanese",
       targetLanguage: overrides.targetLanguage,
@@ -986,7 +1241,7 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
     });
     if (manifest.volumes.length === 0) {
       throw new Error(
-        `No volumes found in ${seriesDir}: no "<SERIES_NAME>(NN)" folders and no ` +
+        `No volumes found in ${seriesDir}: no volume folder holding a book and no ` +
           `source files (.epub/.txt/.md) at the series root.`
       );
     }
@@ -995,45 +1250,14 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
     return manifest;
   }
 
-  const manifestPath = path.join(seriesDir, MANIFEST_FILE_NAME);
-  const planPath = path.join(seriesDir, PLAN_FILE_NAME);
-
-  // Reuse a cached manifest unless forced or stale.
-  if (!force && (await fileExists(manifestPath))) {
-    let cached = null;
-    try {
-      cached = extractJsonObject(await fs.readFile(manifestPath, "utf-8"));
-      validateManifest(cached);
-    } catch (err) {
-      harness.logLine(
-        `[get-translation-target] cached manifest is invalid (${err.message}); re-running intake.`
-      );
-    }
-    // A manifest generated for a different series location is stale even when
-    // every listed (relative) source file still exists — e.g. after migrating
-    // machines: a Windows "C:\..." seriesLocation is not absolute on Linux, so
-    // any consumer trusting it would resolve every file op relative to the CWD.
-    // (Observed live: a Windows-generated manifest was reused on Linux and the
-    // character-voice task crashed with ENOENT on <CWD>/C:\.../test_story(1).)
-    const sameLocation =
-      !cached ||
-      !cached.seriesLocation ||
-      path.resolve(cached.seriesLocation) === path.resolve(seriesDir);
-    if (cached && sameLocation && (await manifestSourcesExist(seriesDir, cached))) {
+  // Reuse a cached manifest unless forced or stale — and only a manifest that
+  // still validates (see readUsableManifest).
+  if (!force) {
+    const cached = await readUsableManifest(seriesDir, manifestPath);
+    if (cached) {
       harness.logLine(`[get-translation-target] reusing the existing manifest (${manifestPath}).`);
       logManifestSummary(cached);
       return cached;
-    }
-    if (cached && !sameLocation) {
-      harness.logLine(
-        `[get-translation-target] cached manifest was generated for ${cached.seriesLocation}, ` +
-          `not ${seriesDir}; re-running intake.`
-      );
-    } else if (cached) {
-      harness.logLine(
-        `[get-translation-target] cached manifest is stale (a listed source file is missing); ` +
-          `re-running intake.`
-      );
     }
   }
 
@@ -1041,19 +1265,34 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
   // applied again after, so a plan that ignores it cannot orphan finished work.
   const committed = await readCommittedLayout(seriesDir);
   const attempts = discoverMaxAttempts();
+  const sourceHashes = new Map(); // shared across attempts: the same books are re-checked every attempt
   let manifest = null;
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const candidate = await runDiscoveryAgent(seriesDir, { overrides, committed });
+      const candidate = await runDiscoveryAgent(seriesDir, {
+        overrides,
+        committed,
+        // A book listed twice is shown to the agent as its own correction task
+        // (it can fix that); the same check runs again here as the final gate.
+        extraChecks: (m) => findDuplicateSources(seriesDir, m, sourceHashes),
+      });
       validateManifest(candidate);
       const warnings = await applyCommittedLayout(seriesDir, candidate, committed);
       for (const warning of warnings) harness.logLine(`[get-translation-target] ${warning}`);
       if (discoverStrict() && warnings.length > 0) {
-        throw new Error(
+        // A deliberate policy choice, not a model mistake: retrying cannot make
+        // the agent respect it, so fail now instead of burning the attempts.
+        const fatal = new Error(
           `the intake agent renamed ${warnings.length} volume folder(s) that already ` +
             `hold pipeline output (DISCOVER_STRICT=true): ${warnings[0]}`
         );
+        fatal.fatal = true;
+        throw fatal;
+      }
+      const duplicate = await findDuplicateSources(seriesDir, candidate, sourceHashes);
+      if (duplicate) {
+        throw new Error(`${duplicate} (inspect ${manifestPath}).`);
       }
       if (!(await manifestSourcesExist(seriesDir, candidate))) {
         throw new Error(
@@ -1064,17 +1303,22 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
       const gate = confidenceGate(candidate);
       if (!gate.ok) {
         throw new Error(
-          `the intake agent reported low confidence (${gate.worstKey} = ${gate.worst}, ` +
-            `DISCOVER_MIN_CONFIDENCE=${gate.min}). Read ${planPath} and the evidence ` +
-            `in ${manifestPath}: a wrong reading order corrupts every cumulative ` +
-            `artifact, so the run stops here. Set DISCOVER_MIN_CONFIDENCE=0 to accept ` +
-            `the plan anyway, or fix the folder and re-run with --force.`
+          gate.reason
+            ? `the intake plan was rejected: ${gate.reason}, and DISCOVER_MIN_CONFIDENCE=${gate.min} ` +
+              `requires the agent to report one for every decision. Read ${planPath} and ` +
+              `${manifestPath}, or set DISCOVER_MIN_CONFIDENCE=0 to accept an unmeasured plan.`
+            : `the intake agent reported low confidence (${gate.worstKey} = ${gate.worst}, ` +
+              `DISCOVER_MIN_CONFIDENCE=${gate.min}). Read ${planPath} and the evidence ` +
+              `in ${manifestPath}: a wrong reading order corrupts every cumulative ` +
+              `artifact, so the run stops here. Set DISCOVER_MIN_CONFIDENCE=0 to accept ` +
+              `the plan anyway, or fix the folder and re-run with --force.`
         );
       }
       manifest = candidate;
       break;
     } catch (err) {
       lastError = err;
+      if (err && err.fatal) throw err;
       harness.logLine(
         `[get-translation-target] intake attempt ${attempt}/${attempts} failed: ${err.message}`
       );
@@ -1116,7 +1360,8 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
 /**
  * Run the intake on its own (the "discover" gulp task): produce or refresh the
  * plan of record and say where it landed, without running any other stage.
- * With dryRun it previews the deterministic layout instead (no AI call).
+ * With dryRun it previews the committed plan (or a deterministic layout when
+ * there is none) — no AI call, and no plan of record written.
  *
  * @param {{force?: boolean, dryRun?: boolean}} [opts]
  * @returns {Promise<TranslationTargetManifest>}
@@ -1129,8 +1374,8 @@ async function discoverSeries({ force = false, dryRun = false } = {}) {
     // A dry run never writes the plan of record — say so, or the log reads as
     // if the manifest existed on disk.
     harness.logLine(
-      `[discover] dry-run preview only: ${manifest.volumes.length} volume(s) laid out ` +
-        `without an AI call. Nothing was written to ${path.join(dir, MANIFEST_FILE_NAME)}; ` +
+      `[discover] dry-run preview only: ${manifest.volumes.length} volume(s), no AI call. ` +
+        `Nothing was written to ${path.join(dir, MANIFEST_FILE_NAME)}; ` +
         `run "npx gulp discover" (no --dry-run) to commit the plan of record.`
     );
     return manifest;
@@ -1152,9 +1397,12 @@ module.exports = {
   extractJsonObject: require("./utils/manifest").extractJsonObject,
   validateManifest,
   manifestSourcesExist,
+  findDuplicateSources,
+  readUsableManifest,
   readCommittedLayout,
   applyCommittedLayout,
   confidenceGate,
+  createIntakeApprove,
   buildDiscoveryTurnPrompt,
   buildCorrectionTurnPrompt,
   fixedValuesBlock,

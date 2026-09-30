@@ -853,6 +853,26 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
       : null;
   const sha256Of = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
 
+  /**
+   * One open book per path, reused across calls (invalidated when the file's
+   * mtime/size changes). openEpub reads the whole archive into memory and
+   * parses its catalog, so re-opening it on every readEpubText call made an
+   * agent that samples a book's opening at three offsets pay for the whole
+   * book three times. The cache is bounded: an intake agent works through one
+   * series at a time, and a few open archives is all that needs to stay warm.
+   */
+  const OPEN_CACHE_MAX = 6;
+  const openCache = new Map();
+  const openBook = async (abs) => {
+    const st = await fsp.stat(abs);
+    const hit = openCache.get(abs);
+    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.opened;
+    const opened = await openEpub(abs);
+    if (openCache.size >= OPEN_CACHE_MAX) openCache.delete(openCache.keys().next().value);
+    openCache.set(abs, { mtimeMs: st.mtimeMs, size: st.size, opened });
+    return opened;
+  };
+
   const tools = {
     epubInfo: tool({
       description:
@@ -868,7 +888,7 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
       execute: async ({ filePath }) => {
         const abs = path.resolve(cwd, filePath);
         try {
-          const opened = await openEpub(abs);
+          const opened = await openBook(abs);
           const st = await fsp.stat(abs);
           const sections = opened.textItems.map((it) => ({
             index: it.index,
@@ -929,7 +949,7 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
       execute: async ({ filePath, section, offset, limit }) => {
         const abs = path.resolve(cwd, filePath);
         try {
-          const opened = await openEpub(abs);
+          const opened = await openBook(abs);
           const slice = await readEpubSection(opened, section || 1, {
             offset: offset || 0,
             limit: Math.min(limit || sampleChars, 6000),

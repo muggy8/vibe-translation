@@ -456,7 +456,19 @@ async function openEpub(epubPath) {
   // Parse the OPF as XML, not HTML: in HTML mode <meta> is a void element, so
   // EPUB3's text-valued <meta property="belongs-to-collection">Name</meta>
   // would lose its value (observed: the series marker came back empty).
-  const $opf = cheerio.load(opfXml, { xml: true });
+  // Parse the OPF as XML, not HTML: in HTML mode <meta> is a void element, so
+  // EPUB3's text-valued <meta property="belongs-to-collection">Name</meta>
+  // would lose its value (observed: the series marker came back empty).
+  // lowerCaseTags + lowerCaseAttributeNames are NOT optional: xml mode keeps tag
+  // names exactly as written, and the HTML mode this reader used before was
+  // case-insensitive. Real files do use <Package>/<Manifest>/<Spine> (observed:
+  // such a book failed with "the spine contains no readable items" once the
+  // parser went strict).
+  const $opf = cheerio.load(opfXml, {
+    xml: true,
+    lowerCaseTags: true,
+    lowerCaseAttributeNames: true,
+  });
 
   // ── The catalog card ──────────────────────────────────────────────────────
   // Dublin Core elements carry the book's own description; <meta> entries
@@ -611,9 +623,86 @@ async function readEpubSection(opened, index, { offset = 0, limit = 4000 } = {})
 }
 
 /**
+ * Block-level tags: each one starts a new piece of text. Everything else is
+ * inline and stays glued to the sentence it belongs to.
+ *
+ * @type {Set<string>}
+ */
+const PLAIN_TEXT_BLOCK_TAGS = new Set([
+  "address", "article", "aside", "blockquote", "body", "caption", "dd", "div",
+  "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2",
+  "h3", "h4", "h5", "h6", "header", "li", "main", "nav", "ol", "p", "pre",
+  "section", "table", "tbody", "td", "th", "tr", "ul",
+]);
+
+/**
+ * Text of a node WITHOUT crossing into a nested block element (a nested block
+ * is handled by htmlToPlainText's own recursion, so it is not swallowed here).
+ * <br> becomes a newline so a hard line break inside a paragraph survives.
+ *
+ * @param {Object|null} node - A cheerio/domhandler node.
+ * @returns {string} The inline text.
+ */
+function inlineTextOf(node) {
+  if (!node) return "";
+  if (node.type === "text") return node.data || "";
+  if (node.type !== "tag") return "";
+  const name = (node.name || "").toLowerCase();
+  if (PLAIN_TEXT_BLOCK_TAGS.has(name)) return "";
+  if (name === "br") return "\n";
+  return (node.children || []).map(inlineTextOf).join("");
+}
+
+/**
+ * Collect the paragraph-shaped pieces of a document into `out`.
+ *
+ * @param {Object|null} node - A cheerio/domhandler node.
+ * @param {string[]} out - The pieces collected so far (mutated).
+ * @returns {void}
+ */
+function collectTextPieces(node, out) {
+  if (!node) return;
+  if (node.type === "text") {
+    const piece = normalizeSpaces(node.data);
+    if (piece) out.push(piece);
+    return;
+  }
+  if (node.type !== "tag") return;
+  const name = (node.name || "").toLowerCase();
+  if (name === "br") return;
+  if (PLAIN_TEXT_BLOCK_TAGS.has(name)) {
+    // This block's own text (its direct text + inline children), split on any
+    // hard <br> breaks...
+    const own = (node.children || [])
+      .map(inlineTextOf)
+      .join("")
+      .split("\n")
+      .map(normalizeSpaces)
+      .filter(Boolean);
+    out.push(...own);
+    // ...then its nested blocks, each of which becomes its own piece. Only
+    // blocks: the inline and text children were already folded into `own`.
+    for (const child of node.children || []) {
+      if (child && child.type === "tag" && PLAIN_TEXT_BLOCK_TAGS.has((child.name || "").toLowerCase())) {
+        collectTextPieces(child, out);
+      }
+    }
+    return;
+  }
+  const piece = normalizeSpaces(inlineTextOf(node));
+  if (piece) out.push(piece);
+}
+
+/**
  * Convert XHTML to plain text (paragraph breaks kept, no markup). Lighter
  * than xhtmlToMarkdown(): no image references, no heading/list syntax — used
  * when the text only needs to be looked at.
+ *
+ * Paragraph structure is the whole point of this function: an epub chapter is
+ * normally ONE block element wrapping many <p> tags, so walking only the
+ * top-level children glued every paragraph together into a single run-on line
+ * (observed: "<p>a</p><p>b</p><p>c</p>" came back as "abc"), which is the text
+ * the intake agent judges a book by.
  *
  * @param {string} html - The XHTML document.
  * @returns {string} The plain text.
@@ -621,14 +710,9 @@ async function readEpubSection(opened, index, { offset = 0, limit = 4000 } = {})
 function htmlToPlainText(html) {
   const $ = cheerio.load(typeof html === "string" ? html : "");
   $("script, style, head, title").remove();
-  const root = $("body").length ? $("body") : $.root();
+  const root = $("body").length ? $("body").get(0) : $.root().get(0);
   const out = [];
-  root.children().each((i, node) => {
-    if (!node) return;
-    const piece =
-      node.type === "text" ? normalizeSpaces(node.data) : normalizeSpaces($(node).text());
-    if (piece) out.push(piece);
-  });
+  collectTextPieces(root, out);
   return out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 

@@ -279,8 +279,8 @@ assert.throws(
     validateManifest({
       ...goodManifest,
       volumes: [
-        { installmentNumber: "01", folder: "s(1)", sourceFile: "a" },
-        { installmentNumber: "01", folder: "s(2)", sourceFile: "b" },
+        { installmentNumber: "01", folder: "s(1)", sourceFile: "s(1)/a" },
+        { installmentNumber: "01", folder: "s(2)", sourceFile: "s(2)/b" },
       ],
     }),
   /duplicates installment/
@@ -290,11 +290,38 @@ assert.throws(
     validateManifest({
       ...goodManifest,
       volumes: [
-        { installmentNumber: "01", folder: "s(1)", sourceFile: "a" },
-        { installmentNumber: "02", folder: "s(1)", sourceFile: "b" },
+        { installmentNumber: "01", folder: "s(1)", sourceFile: "s(1)/a" },
+        { installmentNumber: "02", folder: "s(1)", sourceFile: "s(1)/b" },
       ],
     }),
   /duplicates folder/
+);
+// A volume's source must be the staged copy inside its own folder: otherwise the
+// artifacts land in one folder while the book sits in another (or at the series
+// root, where the next intake would see it as a new book).
+assert.throws(
+  () =>
+    validateManifest({
+      ...goodManifest,
+      volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "loose.md" }],
+    }),
+  /inside its own volume folder/
+);
+assert.throws(
+  () =>
+    validateManifest({
+      ...goodManifest,
+      volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "s(2)/other.md" }],
+    }),
+  /inside its own volume folder/
+);
+assert.strictEqual(
+  validateManifest({
+    ...goodManifest,
+    volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "s(1)\\s(1).md" }],
+  }).volumes[0].sourceFile,
+  "s(1)/s(1).md",
+  "backslash separators are stored as forward slashes"
 );
 // A folder name that would escape the series folder or break a file system.
 assert.throws(
@@ -316,14 +343,14 @@ assert.throws(
 // Installment numbers are normalized ("1" -> "01"), and a non-number fails.
 const normalized = validateManifest({
   ...goodManifest,
-  volumes: [{ installmentNumber: "1", folder: "s(1)", sourceFile: "a" }],
+  volumes: [{ installmentNumber: "1", folder: "s(1)", sourceFile: "s(1)/a" }],
 });
 assert.strictEqual(normalized.volumes[0].installmentNumber, "01");
 assert.throws(
   () =>
     validateManifest({
       ...goodManifest,
-      volumes: [{ installmentNumber: "first", folder: "s(1)", sourceFile: "a" }],
+      volumes: [{ installmentNumber: "first", folder: "s(1)", sourceFile: "s(1)/a" }],
     }),
   /positive integer/
 );

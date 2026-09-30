@@ -147,9 +147,16 @@ fences:
   "02", …). It does not have to match a number written in the file name — it is
   the order you decided.
 - `sourceFile` is relative to the series location and must be the file you
-  staged.
-- `confidence` values are 0 to 1. Be honest: 0.9 means "I checked this against
-  real evidence", 0.5 means "I guessed". A wrong order at 0.9 is worse than a
+  staged, **inside that volume's own folder** — `"<folder>/<file>"`. A path at
+  the series root, or a path into another volume's folder, is rejected: the
+  volume's artifacts and its book must live in the same folder.
+- The same book may not appear as two volumes. If two files have the same
+  content, keep one and list the other in `discovery.excluded` as a duplicate.
+- `confidence` is **required**, with a number for each decision you made
+  (`seriesName`, `sourceLanguage`, `order` at minimum). A plan that reports no
+  confidence is rejected outright — the run refuses to build a whole series on
+  unmeasured guesses. Be honest: 0.9 means "I checked this against real
+  evidence", 0.5 means "I guessed". A wrong order at 0.9 is worse than a
   flagged uncertainty at 0.5.
 
 ## The plan document
