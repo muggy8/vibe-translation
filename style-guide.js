@@ -450,7 +450,9 @@ async function styleGuide() {
         `Re-run the task (idempotent) to pick them up.`
     );
   }
-  if (volumeArg) { console.log("\n--volume: skipping the series-root copy."); }
+  if (volumeArg || dryRun) {
+    console.log(volumeArg ? "\n--volume: skipping the series-root copy." : "\n--dry-run: skipping the series-root copy (dry runs make no file writes).");
+  }
   else {
     const finalStyleFile = process.env.STYLE_OUTPUT_FILE || path.join(seriesDir, "style-guide.md");
     let lastStyle = null;

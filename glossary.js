@@ -839,8 +839,12 @@ async function glossary() {
 
   // Copy the last volume's glossary to the series root for easy access
   // (skipped for single-volume runs, which would publish a stale snapshot).
-  if (volumeArg) {
-    console.log("\n--volume: skipping the series-root copy (single-volume run).");
+  if (volumeArg || dryRun) {
+    console.log(
+      volumeArg
+        ? "\n--volume: skipping the series-root copy (single-volume run)."
+        : "\n--dry-run: skipping the series-root copy (dry runs make no file writes)."
+    );
   } else {
     const finalGlossaryFile =
       process.env.GLOSSARY_OUTPUT_FILE || path.join(seriesDir, "glossary.md");

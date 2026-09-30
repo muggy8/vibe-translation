@@ -460,7 +460,9 @@ async function characterVoice() {
         `Re-run the task (idempotent) to pick them up.`
     );
   }
-  if (volumeArg) { console.log("\n--volume: skipping the series-root copy."); }
+  if (volumeArg || dryRun) {
+    console.log(volumeArg ? "\n--volume: skipping the series-root copy." : "\n--dry-run: skipping the series-root copy (dry runs make no file writes).");
+  }
   else {
     const finalVoiceFile = process.env.VOICE_OUTPUT_FILE || path.join(seriesDir, "character-voice.md");
     let lastVoice = null;

@@ -844,8 +844,12 @@ async function jumpInWiki() {
   // downstream tool starting the next volume reads ONE file instead of having
   // to find the newest volume folder. Skipped for --volume runs (a
   // single volume's snapshot would not be the series-current state).
-  if (volumeArg) {
-    console.log("\n--volume: skipping the series-root shared-wiki copy.");
+  if (volumeArg || dryRun) {
+    console.log(
+      volumeArg
+        ? "\n--volume: skipping the series-root shared-wiki copy."
+        : "\n--dry-run: skipping the series-root shared-wiki copy (dry runs make no file writes)."
+    );
   } else {
     const finalSharedWikiFile =
       process.env.SHARED_WIKI_OUTPUT_FILE || path.join(seriesDir, "shared-wiki.md");
