@@ -730,7 +730,7 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
         turn += 1;
         if (plan.manifest !== undefined) {
           await fs.promises.writeFile(
-            path.join(cwd, intake.MANIFEST_FILE_NAME),
+            path.join(cwd, intake.DRAFT_MANIFEST_FILE_NAME),
             JSON.stringify(plan.manifest, null, 2)
           );
         }
@@ -793,7 +793,7 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   // A. the happy path: the agent's plan is validated, stamped, and persisted.
   setSeriesEnv(liveDir);
   stubIntakeAgent([planFor(twoVolumes())]);
-  const live = await intake.getTranslationTarget({ force: true });
+  const live = await intake.getTranslationTarget({ forceIntake: true });
   assert.strictEqual(live.seriesLocation, liveDir, "the live SERIES_LOCATION wins over the agent's copy");
   assert.deepStrictEqual(live.volumes.map((v) => v.installmentNumber), ["01", "02"], "installment numbers normalized");
   const persisted = intake.extractJsonObject(
@@ -806,7 +806,7 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   // B. .env overrides win over the agent's decisions.
   setSeriesEnv(liveDir, { SERIES_NAME: "Chosen Name", TRANSLATION_SOURCE_LANGUAGE: "Korean" });
   stubIntakeAgent([planFor(twoVolumes())]);
-  const overridden = await intake.getTranslationTarget({ force: true });
+  const overridden = await intake.getTranslationTarget({ forceIntake: true });
   assert.strictEqual(overridden.seriesName, "Chosen Name", "SERIES_NAME overrides the agent's name");
   assert.strictEqual(overridden.sourceLanguage, "Korean", "TRANSLATION_SOURCE_LANGUAGE overrides the agent's guess");
   assert.strictEqual(overridden.targetLanguage, "English", "the target language is a fixed setting");
@@ -825,7 +825,7 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
       { installmentNumber: "1", folder: "Pretty(01)", sourceFile: path.join("Pretty(01)", "book.epub"), title: "One", notes: "" },
     ]),
   ]);
-  const kept = await intake.getTranslationTarget({ force: true });
+  const kept = await intake.getTranslationTarget({ forceIntake: true });
   assert.strictEqual(kept.volumes[0].folder, "Old(01)", "the folder holding pipeline output keeps its name");
   assert.strictEqual(kept.volumes[0].sourceFile, path.join("Old(01)", "book.epub"), "and the manifest points at the copy already there");
   assert.ok(kept.volumes[0].notes.includes("folder kept"), "the reason is recorded in the manifest");
@@ -836,7 +836,7 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   setSeriesEnv(liveDir);
   stubIntakeAgent([planFor(twoVolumes(), { volumes: 0.9, order: 0.2, language: 0.9 })]);
   await assert.rejects(
-    () => intake.getTranslationTarget({ force: true }),
+    () => intake.getTranslationTarget({ forceIntake: true }),
     /DISCOVER_MIN_CONFIDENCE/,
     "low confidence stops the run"
   );
@@ -844,7 +844,7 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   // E. an agent that writes nothing on its first turn is given the correction turn.
   setSeriesEnv(liveDir);
   stubIntakeAgent([{ text: "" }, planFor(twoVolumes())]);
-  const corrected = await intake.getTranslationTarget({ force: true });
+  const corrected = await intake.getTranslationTarget({ forceIntake: true });
   assert.strictEqual(corrected.volumes.length, 2, "the correction turn saved the attempt");
   assert.ok(logs.some((l) => /correction turn/.test(l)), "the correction turn is logged");
 
@@ -895,6 +895,37 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   const repaired2 = await intake.getTranslationTarget();
   assert.strictEqual(repaired2.volumes.length, 2, "a corrupt plan falls back to a fresh intake");
 
+  // H2. a FAILED intake must not destroy the plan of record. (The bug this
+  // pins: runDiscoveryAgent deleted translation-target.json before the agent
+  // even ran, so an intake that failed left the series with NO plan — and every
+  // later task then had to re-decide the whole series from scratch.)
+  setSeriesEnv(liveDir);
+  stubIntakeAgent([{ manifest: { schema: MANIFEST_SCHEMA, seriesName: "Broken" } }]);
+  const before = await fs.promises.readFile(path.join(liveDir, intake.MANIFEST_FILE_NAME), "utf-8");
+  await assert.rejects(() => intake.getTranslationTarget({ forceIntake: true }), /intake failed/i);
+  assert.strictEqual(
+    await fs.promises.readFile(path.join(liveDir, intake.MANIFEST_FILE_NAME), "utf-8"),
+    before,
+    "the previous plan of record survived the failed intake untouched"
+  );
+  // The rejected draft may stay on disk (it is the evidence of what the agent
+  // got wrong) — but it is never the plan of record, and it is never read as
+  // one: readUsableManifest only ever looks at translation-target.json.
+  assert.ok(
+    await fs.promises.stat(path.join(liveDir, intake.DRAFT_MANIFEST_FILE_NAME)).catch(() => null),
+    "the rejected draft is kept as diagnostic evidence"
+  );
+  assert.ok(
+    await readUsableManifest(liveDir, path.join(liveDir, intake.MANIFEST_FILE_NAME)),
+    "the surviving plan of record still validates as the plan of record"
+  );
+  // …and the next run still works off the surviving plan, with no intake.
+  harness.createAgentHandle = async () => {
+    throw new Error("the intake agent must not run when a valid manifest survived");
+  };
+  const afterFailure = await intake.getTranslationTarget();
+  assert.strictEqual(afterFailure.volumes.length, 2, "the surviving plan of record is still the plan of record");
+
   // I. --dry-run previews the committed plan instead of building a rival layout
   // (and creates nothing on disk while doing it).
   setSeriesEnv(liveDir);
@@ -936,7 +967,7 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   delete process.env.SERIES_NAME;
   // restore the committed plan for anything after this block
   stubIntakeAgent([planFor(twoVolumes())]);
-  await intake.getTranslationTarget({ force: true });
+  await intake.getTranslationTarget({ forceIntake: true });
 
   // K. the same book planned as two volumes is rejected — and shown to the agent
   // as its own correction task before the attempt is thrown away.
@@ -953,7 +984,7 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
     ]),
   ]);
   await assert.rejects(
-    () => intake.getTranslationTarget({ force: true }),
+    () => intake.getTranslationTarget({ forceIntake: true }),
     /SAME book/,
     "a duplicated volume stops the run"
   );
@@ -963,7 +994,7 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   setSeriesEnv(liveDir);
   stubIntakeAgent([{ text: "" }]);
   await assert.rejects(
-    () => intake.getTranslationTarget({ force: true }),
+    () => intake.getTranslationTarget({ forceIntake: true }),
     /Series intake failed after 1 attempt/,
     "a planless agent fails the step"
   );

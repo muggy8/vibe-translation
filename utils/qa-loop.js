@@ -19,8 +19,13 @@
 const {
   ACCEPTANCE_WINDOW_SIZE,
   ACCEPTANCE_PASSING_SCORE,
+  ACCEPTANCE_CONFIRMATION_CHECKS,
+  ACCEPTANCE_EXCEPTIONAL_SCORE,
+  ACCEPTANCE_SCORE_TOLERANCE,
   computeRollingAverage,
   meetsAcceptanceCriteria,
+  meetsExceptionalCriteria,
+  isExceptionalScore,
   saveRollingState,
 } = require("../configs/shared");
 const { assertWroteWithFallback } = require("./fs");
@@ -48,6 +53,10 @@ const { assertWroteWithFallback } = require("./fs");
  *   malformed-tool-call guard (fail-loud on tool-call syntax emitted as text).
  * @property {(iteration: number) => Promise<number|null>} acceptanceCheck - The task's
  *   grader one-shot (artifact + report → 0–100; null = unparseable = failed check).
+ * @property {(p: {score: number, index: number, temperature: number}) => Promise<number|null|{score: number|null, temperature: number}>} [confirmationCheck]
+ *   Re-grade the SAME artifact at the given temperature (the exceptional-score
+ *   confirmation). May return the bare score or a { score, temperature } pair —
+ *   the loop normalizes both. Omit it and the fast-accept path never runs.
  * @property {() => string} feedbackLogLine - The line logged before each feedback pass.
  * @property {(iteration: number) => Promise<void>} runFeedback - The task's feedback stage
  *   (fresh author agent per iteration, or the wiki's author session).
@@ -125,6 +134,81 @@ async function runSharedQaLoop(cfg) {
       }
     }
 
+    // ── Exceptional score: is it real, or a fluke? ──────────────────────────
+    // A grade in the rubric's top band (>= ACCEPTANCE_EXCEPTIONAL_SCORE) is
+    // re-graded ACCEPTANCE_CONFIRMATION_CHECKS more times on the SAME artifact
+    // — the first re-grade at temperature 0 (the deterministic anchor), the
+    // rest at the calm judging temperature. If the consensus holds, the volume
+    // is accepted NOW: no feedback pass, no second full validator turn (the
+    // expensive part of a loop iteration). If it collapses, the scores stay in
+    // the window and the normal loop continues — the great grade was luck.
+    if (
+      score !== null &&
+      cfg.confirmationCheck &&
+      isExceptionalScore(score)
+    ) {
+      console.log(
+        `${cfg.volumeLabel}: acceptance score ${score}/100 is exceptional (≥ ${ACCEPTANCE_EXCEPTIONAL_SCORE}) ` +
+          `— confirming with ${ACCEPTANCE_CONFIRMATION_CHECKS} more grade(s) (one at temperature 0)…`
+      );
+      const confirmations = [];
+      for (let ci = 0; ci < ACCEPTANCE_CONFIRMATION_CHECKS; ci++) {
+        // The FIRST confirmation is always the deterministic one.
+        const temperature = ci === 0 ? 0 : undefined;
+        const raw = await cfg.confirmationCheck({ score, index: ci, temperature });
+        // A task may return the bare score (its acceptanceCheck does) or a
+        // { score, temperature } pair; both are normalized here so the loop —
+        // and the temperature-0 anchor rule — cannot depend on which one a
+        // task happened to use.
+        const confirmationScore =
+          raw !== null && typeof raw === "object" ? raw.score : raw;
+        const confirmationTemperature =
+          raw !== null && typeof raw === "object" && Number.isFinite(raw.temperature)
+            ? raw.temperature
+            : temperature ?? null;
+        confirmations.push({
+          score: Number.isFinite(confirmationScore) ? confirmationScore : null,
+          temperature: confirmationTemperature,
+        });
+      }
+      // The confirmation scores are NOT pushed into the rolling window. They
+      // exist to answer one question — was the exceptional grade real? — and if
+      // the answer is no, the volume must continue through exactly the loop it
+      // would have run anyway (feedback pass, next validator turn). Letting
+      // extra samples into the window could accept a volume whose consensus just
+      // failed, without ever running the feedback that failure calls for.
+      const verdict = meetsExceptionalCriteria(score, confirmations);
+      const spread = confirmations
+        .map((c) => `${c.score === null ? "unparseable" : c.score}${c.temperature === 0 ? " (temp 0)" : ""}`)
+        .join(", ");
+      if (verdict.accepted) {
+        console.log(
+          `${cfg.volumeLabel}: exceptional score confirmed (${score}; confirmations: ${spread}) — ` +
+            `${verdict.reason}. Accepted without a feedback pass.`
+        );
+        await saveRollingState(cfg.stateFile, recentRollingScores, {
+          sourceFingerprint: cfg.sourceFingerprint,
+          acceptedBy: "exceptional-consensus",
+          deterministicScore: confirmations.find((c) => c.temperature === 0)?.score,
+          confirmations: confirmations.map((c) => c.score),
+        });
+        return {
+          accepted: true,
+          limitReached: false,
+          scores: recentRollingScores,
+          acceptedBy: "exceptional-consensus",
+        };
+      }
+      console.log(
+        `${cfg.volumeLabel}: exceptional score NOT confirmed (${score}; confirmations: ${spread}) — ${verdict.reason}. ` +
+          `Continuing the normal loop (the confirmation grades are recorded, not counted).`
+      );
+      await saveRollingState(cfg.stateFile, recentRollingScores, {
+        sourceFingerprint: cfg.sourceFingerprint,
+        rejectedConfirmations: confirmations.map((c) => c.score),
+      });
+    }
+
     // Persist the rolling window to disk so that a re-run can recover the
     // exact acceptance state without re-calling the AI. Saved on every
     // iteration — including the accepting one — so the idempotency
@@ -142,7 +226,11 @@ async function runSharedQaLoop(cfg) {
           `(${recentRollingScores.length} checks) meets the passing score ` +
           `${ACCEPTANCE_PASSING_SCORE}. Accepted.`
       );
-      return { accepted: true, limitReached: false, scores: recentRollingScores };
+      await saveRollingState(cfg.stateFile, recentRollingScores, {
+        sourceFingerprint: cfg.sourceFingerprint,
+        acceptedBy: "rolling-window",
+      });
+      return { accepted: true, limitReached: false, scores: recentRollingScores, acceptedBy: "rolling-window" };
     }
 
     // Apply the feedback (task-specific stage).

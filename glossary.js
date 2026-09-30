@@ -56,8 +56,8 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
+const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature } = require("./configs/shared");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
@@ -160,31 +160,87 @@ function parseTerms(output) {
  * @returns {string} The (possibly truncated) content.
  */
 function truncateGlossary(content) {
-  if (!content || content.length <= GLOSSARY_TRUNCATION_THRESHOLD) {
-    return content;
+  if (!content || content.length <= GLOSSARY_TRUNCATION_THRESHOLD) return content;
+
+  // Group the file into runs: a table (consecutive "|…" lines) or a single
+  // other line. Inside a table, line 0 is the column header and line 1 the
+  // |---| separator; everything after that is one term entry.
+  //
+  // (Rewritten: this helper used to split on "- Term:" list items, but the
+  // glossary the workflow prompts for is a set of Markdown TABLES
+  // (`| source | rendering | notes |`), so the split found zero entries and the
+  // helper returned the file unchanged no matter how big it got — the
+  // truncation AGENTS.md describes had never actually happened.)
+  const lines = content.split("\n");
+  const runs = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim().startsWith("|")) {
+      const start = i;
+      while (i + 1 < lines.length && lines[i + 1].trim().startsWith("|")) i++;
+      const block = lines.slice(start, i + 1);
+      runs.push({ kind: "table", block, dataFrom: block.length > 1 ? 2 : block.length });
+      continue;
+    }
+    runs.push({ kind: "line", block: [lines[i]] });
   }
-  // Split by term entries: each term starts with "- " followed by the term name
-  // and a colon or parenthesis (e.g. "- TermName: " or "- TermName (")).
-  const entries = content.split(/^(- .+?[:\(])/m);
-  // entries is: [header, term1Marker, term1Body, term2Marker, term2Body, ...]
-  // Collect the header and term blocks.
-  const header = entries[0];
-  const termBlocks = [];
-  for (let i = 1; i < entries.length - 1; i += 2) {
-    termBlocks.push(entries[i] + entries[i + 1]);
+
+  const totalData = runs.reduce(
+    (n, r) => (r.kind === "table" ? n + Math.max(0, r.block.length - r.dataFrom) : n),
+    0
+  );
+  if (totalData <= GLOSSARY_TRUNCATION_MAX_ENTRIES) return content;
+
+  // Drop the OLDEST term rows (document order) and keep the newest window —
+  // the newest entries are where a conflict with a NEW term can live.
+  let toDrop = totalData - GLOSSARY_TRUNCATION_MAX_ENTRIES;
+  let dropped = 0;
+  let droppedSections = 0;
+  const out = [];
+  for (const run of runs) {
+    if (run.kind !== "table") {
+      out.push(...run.block);
+      continue;
+    }
+    const dataCount = Math.max(0, run.block.length - run.dataFrom);
+    const drop = Math.min(dataCount, toDrop);
+    toDrop -= drop;
+    dropped += drop;
+    const kept = run.block.slice(run.dataFrom + drop);
+    if (kept.length === 0) {
+      // This whole section is older than the window — drop its table too.
+      droppedSections++;
+      continue;
+    }
+    out.push(...run.block.slice(0, run.dataFrom), ...kept);
   }
-  if (termBlocks.length <= GLOSSARY_TRUNCATION_MAX_ENTRIES) {
-    return content;
+
+  // Drop a "## Section" heading whose tables were truncated away entirely, so
+  // the model is not told about a section it cannot see.
+  const final = [];
+  for (let i = 0; i < out.length; i++) {
+    if (!/^##\s+/.test(out[i].trim())) {
+      final.push(out[i]);
+      continue;
+    }
+    let j = i + 1;
+    while (j < out.length && out[j].trim() === "") j++;
+    if (j < out.length && out[j].trim().startsWith("|")) {
+      final.push(out[i]);
+      continue;
+    }
+    droppedSections++;
   }
-  // Keep the last N entries.
-  const keep = termBlocks.splice(-GLOSSARY_TRUNCATION_MAX_ENTRIES);
-  const truncated = [
-    header,
-    `[TRUNCATED: previous glossary has ${termBlocks.length + keep.length} entries. ` +
-      `Showing last ${keep.length} entries. Earlier entries are carried forward unchanged.]`,
-    keep.join("\n"),
-  ].join("\n\n");
-  return truncated;
+
+  const keptCount = totalData - dropped;
+  final.splice(
+    1,
+    0,
+    "",
+    `[TRUNCATED: this glossary has ${totalData} term rows. Showing the ${keptCount} most recent; ` +
+      `${dropped} older row(s)${droppedSections ? ` and ${droppedSections} fully older section(s)` : ""} are omitted. ` +
+      `Earlier entries are carried forward unchanged in the file itself — reconcile NEW terms against what is shown here.]`
+  );
+  return final.join("\n");
 }
 
 // ─── Malformed-tool-call guard ──────────────────────────────────────────────
@@ -568,7 +624,8 @@ async function glossary() {
   // Discover the volumes with the AI-driven translation-target manifest (see
   // get-translation-target.js). It yields, in reading order, each volume's
   // folder and its exact source file, so nothing below has to guess names.
-  const manifest = await getTranslationTarget({ force, dryRun });
+  // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
+  const manifest = await getTranslationTarget({ dryRun });
   // Series name + languages: .env override > the intake manifest's decision >
   // the default (one rule for every stage — see resolveRunSettings).
   const runSettings = resolveRunSettings(manifest);
@@ -882,7 +939,7 @@ async function glossary() {
  * @returns {Promise<number | null>} The parsed score (0–100), or `null` when
  *   no valid score could be extracted (treated as a failed check).
  */
-async function acceptanceCheck(ctx, iteration) {
+async function acceptanceCheck(ctx, iteration, temperature) {
   const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt, glossaryOutputFile } = ctx;
   const acceptanceOutput = await harness.runOneShot({
     systemPrompt: acceptanceSystemPrompt,
@@ -891,6 +948,9 @@ async function acceptanceCheck(ctx, iteration) {
       { file: validationOutputFile, name: "glossary-validation.md" },
       { text: acceptancePrompt },
     ],
+    // A grader, not a writer: JUDGE_TEMPERATURE (the house writing temperature
+    // used to apply here, which made the acceptance score needlessly noisy).
+    temperature: temperature ?? judgeTemperature(),
     label: `glossary-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
   });
   const reply = parseAcceptanceReply(acceptanceOutput);
@@ -1086,7 +1146,7 @@ async function runChunkedVolumeAgent(ctx) {
     const messages = [{ file: path.join(volumeDir, segment.file), name: segment.file }];
     const stateFile = si === 0 ? previousGlossaryFile : glossaryOutputFile;
     if (stateFile) {
-      messages.push({ file: stateFile, name: si === 0 ? "glossary-previous.md" : "glossary-current.md" });
+      messages.push(await inlineReferenceMessage(stateFile, si === 0 ? "glossary-previous.md" : "glossary-current.md", { truncate: truncateGlossary }));
     }
     messages.push({ text: termsPrompt }, { text: chapterSegmentNote(bundle, segment, si) });
     const termsOutput = await harness.runOneShot({
@@ -1190,11 +1250,29 @@ async function runChunkedQaLoop(ctx) {
           { label: `glossary-validate-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
         );
         assertRealToolCalls(validateResult, `the validator agent (chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(
+        const validateFallbackUsed = await assertWroteWithFallback(
           partialFile,
           `the validator agent (chapter ${segment.id})`,
           validateResult?.text
         );
+        // Recovery turn: ONLY when the partial was actually missing after the
+        // fallback — never over a file the agent already wrote correctly.
+        if (validateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
+          const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
+          const recoveryPrompt = hasContent
+            ? `You were asked to write the validation report to "${path.basename(partialFile)}" using writeFile, but you replied with the content in your chat message instead. Please rewrite the complete report using writeFile now.`
+            : `You produced no output. Please read the materials and write the complete validation report to "${path.basename(partialFile)}" using writeFile now.`;
+          const recoveryResult = await validator.sendTurn(recoveryPrompt, {
+            label: `glossary-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
+          });
+          assertRealToolCalls(recoveryResult, `the validator agent (recovery, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
+          await assertWroteWithFallback(
+            partialFile,
+            `the validator agent (recovery, chapter ${segment.id})`,
+            recoveryResult?.text
+          );
+        }
+        await assertRealOutput(partialFile, `the validator agent (chapter ${segment.id})`);
       } finally {
         await validator.close();
       }
@@ -1216,6 +1294,7 @@ async function runChunkedQaLoop(ctx) {
       );
       assertRealToolCalls(mergeResult, "the findings-merge agent", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(validationOutputFile, "the findings-merge agent", mergeResult?.text);
+      await assertRealOutput(validationOutputFile, "the findings-merge agent");
     } finally {
       await merger.close();
     }
@@ -1258,11 +1337,29 @@ async function runChunkedQaLoop(ctx) {
           { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
         );
         assertRealToolCalls(feedbackResult, `the author agent (feedback pass, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(
+        const feedbackFallbackUsed = await assertWroteWithFallback(
           glossaryOutputFile,
           `the author agent (feedback pass, chapter ${segment.id})`,
           feedbackResult?.text
         );
+        // Recovery turn: ONLY when the glossary was actually missing after the
+        // fallback — never over a file the agent already wrote correctly.
+        if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
+          const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
+          const recoveryPrompt = hasContent
+            ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead. Please rewrite the complete glossary using writeFile now.`
+            : `You produced no output. Please read the materials and write the complete glossary to "glossary.md" using writeFile now.`;
+          const recoveryResult = await feedbackAuthor.sendTurn(recoveryPrompt, {
+            label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
+          });
+          assertRealToolCalls(recoveryResult, `the author agent (feedback recovery, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
+          await assertWroteWithFallback(
+            glossaryOutputFile,
+            `the author agent (feedback recovery, chapter ${segment.id})`,
+            recoveryResult?.text
+          );
+        }
+        await assertRealOutput(glossaryOutputFile, `the author agent (feedback pass, chapter ${segment.id})`);
       } finally {
         await feedbackAuthor.close();
       }
@@ -1318,7 +1415,8 @@ async function runVolumeAgent(ctx) {
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: extracting new terms...`);
   const baseMessages = [{ file: sourceFile, name: path.basename(sourceFile) }];
   if (!isFirst) {
-    baseMessages.push({ file: previousGlossaryFile, name: "glossary-previous.md" });
+    // Inlined (not readFile) — so the cumulative glossary is bounded here.
+    baseMessages.push(await inlineReferenceMessage(previousGlossaryFile, "glossary-previous.md", { truncate: truncateGlossary }));
   }
   const termsOutput = await harness.runOneShot({
     systemPrompt: termsSystemPrompt,
@@ -1506,6 +1604,9 @@ async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, 
         recoveryResult?.text
       );
     }
+    // Hard stop: the recovery turn is the last chance — a still-missing or
+    // empty glossary is a failure, not an output.
+    await assertRealOutput(glossaryOutputFile, "the author agent");
 
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: saved the glossary to ${glossaryOutputFile}`
@@ -1554,6 +1655,9 @@ async function runQaLoop(ctx) {
         `Please read the source materials and write the complete validation report to "glossary-validation.md" using writeFile now.`,
     assertRealToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
     acceptanceCheck: (iteration) => acceptanceCheck(ctx, iteration),
+    // Exceptional-score confirmation re-grades (see utils/qa-loop.js): the same
+    // artifact, graded again — the loop asks for temperature 0 on the first one.
+    confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
     feedbackLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: applying validation feedback (fresh author agent)...`,
     runFeedback: (iteration) => runGlossaryFeedback(ctx, iteration),
     limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`,
@@ -1616,6 +1720,7 @@ async function runGlossaryFeedback(ctx, iteration) {
         feedbackRecoveryResult?.text
       );
     }
+    await assertRealOutput(glossaryOutputFile, "the author agent (feedback pass)");
   } finally {
     await feedbackAuthor.close();
   }

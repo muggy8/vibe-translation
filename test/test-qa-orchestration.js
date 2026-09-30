@@ -24,15 +24,24 @@ const { execFileSync } = require("child_process");
 // The ON_QA_LIMIT=fail child must keep its policy — pin the run policies only
 // in the parent (the child gets ON_QA_LIMIT=fail via the spawn env below).
 const childFailLimit = process.argv.includes("--child-fail-limit");
+const childConsensus = process.argv.includes("--child-consensus");
 
 // Pin the acceptance config so the loop tests are deterministic regardless of
 // the local .env (the values below are also the current code defaults: window
-// 2 / min samples 2 / passing 70 / average strategy).
+// 2 / min samples 2 / passing 70).
 process.env.PASSING_SCORE = "70";
 process.env.ACCEPTANCE_PASSING_SCORE = "70";
-process.env.ACCEPTANCE_STRATEGY = "average";
 process.env.ACCEPTANCE_WINDOW_SIZE = "2";
 process.env.ACCEPTANCE_MIN_SAMPLES = "2";
+// The exceptional-score fast-accept path is pinned OFF in the parent (floor
+// 100, and no scenario below scores 100) so the scenarios below keep
+// exercising the rolling-window path. The consensus path is exercised in a
+// spawned child with its own pins — see scenarioExceptionalConsensusInChild.
+if (!childConsensus) {
+  process.env.ACCEPTANCE_EXCEPTIONAL_SCORE = "100";
+}
+process.env.ACCEPTANCE_SCORE_TOLERANCE = "3";
+process.env.ACCEPTANCE_CONFIRMATION_CHECKS = "2";
 process.env.QA_MAX_ITERATIONS = "4";
 process.env.AGENT_RECOVERY_ENABLED = "true";
 if (!childFailLimit) {
@@ -161,12 +170,23 @@ function writeReport(volumeDir, marker) {
  *   on its recovery turn) and returns compileText; the validator writes the
  *   report; the feedback author rewrites the artifacts (marker "revised").
  */
-function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = true, compileText = "wrote both files" } = {}) {
+function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = true, compileText = "wrote both files", confirmationReplies = [] } = {}) {
   let acceptanceIndex = 0;
+  let confirmationIndex = 0;
   return {
     oneShot(label) {
       if (label.startsWith("character-voice-extract-")) return "[]";
       if (label.startsWith("character-voice-acceptance-")) {
+        // Exceptional-score confirmations are scripted separately so a scenario
+        // can control the consensus independently of the first grade.
+        if (label.includes("-confirm")) {
+          if (confirmationReplies.length === 0) {
+            throw new Error(`Unexpected confirmation call on ${label} (no confirmation replies scripted).`);
+          }
+          const reply = confirmationReplies[Math.min(confirmationIndex, confirmationReplies.length - 1)];
+          confirmationIndex += 1;
+          return reply;
+        }
         const i = acceptanceIndex++;
         if (i >= acceptanceReplies.length) {
           throw new Error(`Unexpected acceptance call ${i + 1} (only ${acceptanceReplies.length} scripted).`);
@@ -461,6 +481,80 @@ async function scenarioSkipDecision() {
   }
 }
 
+/**
+ * Exceptional-score consensus, exercised in a spawned child so configs/shared.js
+ * loads with the exceptional floor ON (the parent pins it OFF so the other
+ * scenarios keep exercising the rolling-window path).
+ *
+ * A. confirmed: 87 first, confirmations 86 (temperature 0) and 85 — the loop
+ *    accepts WITHOUT a feedback pass and without a second validator turn.
+ * B. fluke: 92 first, but the deterministic grade says 74 — the consensus
+ *    collapses and the normal loop continues.
+ */
+function scenarioExceptionalConsensusInChild() {
+  const out = execFileSync(process.execPath, [__filename, "--child-consensus"], {
+    encoding: "utf8",
+    env: { ...process.env, ACCEPTANCE_EXCEPTIONAL_SCORE: "85", ACCEPTANCE_SCORE_TOLERANCE: "3" },
+  });
+  assert.ok(out.includes("CHILD-OK"), "child printed CHILD-OK (got: " + out.trim().slice(-300) + ")");
+}
+
+/** The child's entry point (exceptional-consensus path). */
+async function scenarioExceptionalConsensus() {
+  // A. confirmed exceptional score → accepted on the spot.
+  {
+    const v = makeVolumeDir();
+    const ctx = makeCtx(v);
+    script = makeDefaultScript(v.volumeDir, [jsonReply(87)], {
+      confirmationReplies: [jsonReply(86), jsonReply(85)],
+    });
+    callLog = [];
+    try {
+      await cv.runVolume(ctx);
+      const labels = acceptanceLabels();
+      assert.strictEqual(labels.length, 3, `first grade + 2 confirmations (got ${labels.length})`);
+      assert.ok(labels.some((l) => l.includes("confirm1")), "the first confirmation ran");
+      // One validator turn only: the fast path skipped the feedback pass AND
+      // the second full validator turn the normal loop would have needed.
+      assert.strictEqual(agentCalls("validator-voice-").length, 1, "exactly one validator turn");
+      assert.strictEqual(agentCalls("author-voice-feedback-").length, 0, "no feedback pass");
+      const state = await loadState(ctx.validationOutputFile);
+      assert.strictEqual(state.acceptedBy, "exceptional-consensus", "the state records HOW it was accepted");
+      assert.strictEqual(state.deterministicScore, 86, "the temperature-0 grade is persisted");
+      assert.ok(isAcceptedState(state), "the persisted state still reads as accepted (no-AI skip check)");
+    } finally {
+      cleanup(v.root);
+    }
+  }
+
+  // B. the deterministic grade disagrees → it was a fluke → normal loop.
+  // Both iterations' deterministic confirmation says 74, so the consensus never
+  // fires and the volume goes the long way round.
+  {
+    const v = makeVolumeDir();
+    const ctx = makeCtx(v);
+    script = makeDefaultScript(v.volumeDir, [jsonReply(92), jsonReply(88)], {
+      confirmationReplies: [jsonReply(74), jsonReply(74)],
+    });
+    callLog = [];
+    try {
+      await cv.runVolume(ctx);
+      assert.strictEqual(agentCalls("author-voice-feedback-").length, 1, "the feedback pass ran — the fast path did not fire");
+      assert.strictEqual(agentCalls("validator-voice-").length, 2, "the normal second validation iteration ran");
+      const state = await loadState(ctx.validationOutputFile);
+      assert.strictEqual(state.acceptedBy, "rolling-window", "accepted by the normal criterion instead");
+      // The confirmation grades are recorded for diagnosis but never counted:
+      // the window holds only the two iteration grades. (The last iteration's
+      // own rejected confirmations are then overwritten by its acceptance
+      // save — the state describes the FINAL iteration, which is what the
+      // skip-check needs.)
+      assert.deepStrictEqual(state.results, [92, 88], "the confirmation scores stayed out of the rolling window");
+    } finally {
+      cleanup(v.root);
+    }
+  }
+}
+
 // ─── Entry points ────────────────────────────────────────────────────────────
 
 async function main() {
@@ -473,12 +567,21 @@ async function main() {
   await scenarioRecoveryDisabled();
   await scenarioUnparseableAcceptanceFailsClosed();
   await scenarioSkipDecision();
+  scenarioExceptionalConsensusInChild();
   console.log("qa-orchestration: all checks passed.");
 }
 
 if (childFailLimit) {
   installStubs();
   scenarioLimitFailPolicy()
+    .then(() => console.log("CHILD-OK"))
+    .catch((err) => {
+      console.error("CHILD-FAIL:", err && err.stack || err);
+      process.exit(1);
+    });
+} else if (childConsensus) {
+  installStubs();
+  scenarioExceptionalConsensus()
     .then(() => console.log("CHILD-OK"))
     .catch((err) => {
       console.error("CHILD-FAIL:", err && err.stack || err);

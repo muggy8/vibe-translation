@@ -59,8 +59,8 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature } = require("./configs/shared");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, writeProvenanceSidecar } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const { writeVolumeHandoff } = require("./utils/handoff");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
@@ -535,7 +535,8 @@ async function jumpInWiki() {
   // Discover the volumes with the AI-driven translation-target manifest (see
   // get-translation-target.js). It yields, in reading order, each volume's
   // folder and its exact source file, so nothing below has to guess names.
-  const manifest = await getTranslationTarget({ force, dryRun });
+  // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
+  const manifest = await getTranslationTarget({ dryRun });
   // Series name + languages: .env override > the intake manifest's decision >
   // the default (see resolveRunSettings in configs/shared.js).
   const runSettings = resolveRunSettings(manifest);
@@ -668,10 +669,14 @@ async function jumpInWiki() {
 
     // generating the initial wiki is expensive, so we gotta check if it's already
     // been generated and if so, we can skip the initial generation step.
+    // "The wiki already exists" must mean "real wiki text exists". A crashed
+    // run leaves the scaffold stubs in place, and a plain fileExists() check
+    // let the next run skip generation and publish "(stub — the agent replaces
+    // this…)" as the volume's wiki.
     const wikiAndSharedWikiExists =
       !force &&
-      (await fileExists(wikiOutputFile)) &&
-      (await fileExists(sharedWikiOutputFile));
+      (await hasRealOutput(wikiOutputFile)) &&
+      (await hasRealOutput(sharedWikiOutputFile));
 
     const ctx = {
       values,
@@ -935,7 +940,21 @@ async function runChunkedVolumeAgent(ctx) {
         { label: `jump-in-wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}` }
       );
       assertRealToolCalls(sectionResult, `the section author agent (chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(sectionFile, "the section author agent", sectionResult?.text);
+      const sectionFallbackUsed = await assertWroteWithFallback(sectionFile, "the section author agent", sectionResult?.text);
+      if (sectionFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
+        const hasSection = sectionResult?.text && sectionResult.text.trim().length > 0;
+        const sectionRecoveryPrompt = hasSection
+          ? `You were asked to write this chapter's wiki section to "wiki-${segment.id}.md" using writeFile, but you replied with the content in your chat message instead. Please write the file using writeFile now with the exact same content.`
+          : `You produced no output. Please write this chapter's wiki section to "wiki-${segment.id}.md" using writeFile now.`;
+        const sectionRecoveryResult = await sectionAuthor.sendTurn(sectionRecoveryPrompt, {
+          label: `jump-in-wiki-section-recovery-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+        });
+        assertRealToolCalls(sectionRecoveryResult, `the section author agent (chapter ${segment.id}, recovery)`, values.INSTALLMENT_NUMBER);
+        await assertWroteWithFallback(sectionFile, "the section author agent (recovery)", sectionRecoveryResult?.text);
+      }
+      // Hard stop: a chapter section left as a stub would be merged straight
+      // into wiki.md / shared-wiki.md as finished work.
+      await assertRealOutput(sectionFile, `the section author agent (chapter ${segment.id})`);
     } finally {
       await sectionAuthor.close();
     }
@@ -990,6 +1009,9 @@ async function runChunkedVolumeAgent(ctx) {
         recoveryResult?.text
       );
     }
+    // Hard stop: the merged wiki is the deliverable — a surviving stub is a
+    // failure, not an artifact.
+    await assertRealOutput([wikiOutputFile, sharedWikiOutputFile], "the merge agent");
   } finally {
     await merger.close();
   }
@@ -1078,6 +1100,7 @@ async function runChunkedQaLoop(ctx) {
         { file: validationOutputFile, name: path.basename(validationOutputFile) },
         { text: ctx.acceptanceUserPrompt },
       ],
+      temperature: judgeTemperature(),
       label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
     });
     const reply = parseAcceptanceReply(acceptanceOutput);
@@ -1273,6 +1296,8 @@ async function runVolumeAgent(ctx) {
           wikiRecoveryResult?.text
         );
       }
+      // Hard stop: a surviving scaffold stub is a failure, not an artifact.
+      await assertRealOutput([wikiOutputFile, sharedWikiOutputFile], "the author agent");
     }
 
     await runQaLoop(ctx, author);
@@ -1324,6 +1349,8 @@ async function runQaLoop(ctx, author) {
         `Please read the source materials and write the complete validation report using writeFile now.`,
     assertRealToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
     acceptanceCheck: (iteration) => wikiAcceptanceCheck(ctx, iteration),
+    // Exceptional-score confirmation re-grades (see utils/qa-loop.js).
+    confirmationCheck: ({ index, temperature }) => wikiAcceptanceCheck(ctx, `confirm${index + 1}`, temperature),
     feedbackLogLine: () => "Calling the AI to apply the validation feedback (author agent)...",
     runFeedback: (iteration) => runWikiFeedback(ctx, author, iteration),
     limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade. The last feedback pass is unvalidated; re-run the task to validate it.`,
@@ -1342,7 +1369,7 @@ async function runQaLoop(ctx, author) {
  * @returns {Promise<number|null>} The parsed score, or `null` when no valid
  *   score could be extracted (treated as a failed check).
  */
-async function wikiAcceptanceCheck(ctx, iteration) {
+async function wikiAcceptanceCheck(ctx, iteration, temperature) {
   const { values, validationOutputFile } = ctx;
   const acceptanceOutput = await harness.runOneShot({
     systemPrompt: ctx.acceptanceSystemPrompt,
@@ -1352,6 +1379,7 @@ async function wikiAcceptanceCheck(ctx, iteration) {
       { file: validationOutputFile, name: path.basename(validationOutputFile) },
       { text: ctx.acceptanceUserPrompt },
     ],
+    temperature: temperature ?? judgeTemperature(),
     label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
   });
   const reply = parseAcceptanceReply(acceptanceOutput);

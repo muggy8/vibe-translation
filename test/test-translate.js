@@ -13,6 +13,10 @@ const {
   sha256,
   splitChapter,
   parseGlossaryTerms,
+  parseGlossaryRows,
+  splitTableRow,
+  selectTermsForChapter,
+  chapterTerminology,
   extractStyleRules,
   buildTranslationTaskLines,
   buildTranslationPrompt,
@@ -103,6 +107,67 @@ assert.strictEqual(sha256("a"), sha256("a"));
   assert.deepStrictEqual(parseGlossaryTerms(null), []);
 }
 
+{
+  // The column-shift bug: an EMPTY middle cell must stay a cell. Filtering out
+  // empty cells shifted every later column one place left and promoted the
+  // Notes cell into the canonical-rendering column — the translation stage then
+  // enforced "ソラ" → "AI agent of the institute" as terminology law.
+  const sparse = [
+    "## Characters",
+    "| Source | Target | Notes |",
+    "|---|---|---|",
+    "| ソラ |  | AI agent of the institute |",
+    "| 黒鋼 | Kurogane |  |",
+    "| 端末 | terminal | a device |",
+  ].join("\n");
+  assert.deepStrictEqual(
+    parseGlossaryTerms(sparse).map((t) => [t.term, t.rendering]),
+    [
+      ["黒鋼", "Kurogane"],
+      ["端末", "terminal"],
+    ],
+    "an empty Target column drops the row (no rendering) — it never promotes the Notes column"
+  );
+
+  // The malformed rows are reported, not silently swallowed.
+  const seen = [];
+  parseGlossaryTerms(sparse, { onMalformed: (e) => seen.push([e.term, e.reason]) });
+  assert.deepStrictEqual(
+    seen,
+    [["ソラ", "rendering column is empty"]],
+    "onMalformed reports a row the model left unrendered"
+  );
+
+  // A 4-column table (the style-guide shape) keeps its columns aligned — an
+  // empty cell in column 3 must not pull column 4 left into column 2.
+  const wide = [
+    "## Address & Honorifics",
+    "| Source | Meaning / Context | Rendering | Notes |",
+    "|---|---|---|---|",
+    "| 〜さん | general polite address | -san | keep as-is |",
+    "| 〜様 |  | -sama |  |",
+  ].join("\n");
+  const wideRows = parseGlossaryRows(wide);
+  assert.deepStrictEqual(
+    wideRows.map((r) => r.cells.length),
+    [4, 4],
+    "every data row keeps all 4 columns, empty cells included"
+  );
+  assert.deepStrictEqual(wideRows[1].cells, ["〜様", "", "-sama", ""]);
+  assert.deepStrictEqual(
+    parseGlossaryTerms(wide).map((t) => [t.term, t.rendering]),
+    [["〜さん", "general polite address"]],
+    "column 2 is read as column 2 (the glossary convention: Source | Target | Notes)"
+  );
+
+  // parseGlossaryRows is the shared low-level reader: every data row, positionally.
+  const rows = parseGlossaryRows(sparse);
+  assert.deepStrictEqual(rows.length, 3);
+  assert.deepStrictEqual(rows[0].cells, ["ソラ", "", "AI agent of the institute"]);
+  assert.deepStrictEqual(rows[0].section, "Characters");
+  assert.deepStrictEqual(parseGlossaryRows(""), []);
+}
+
 // ─── extractStyleRules ────────────────────────────────────────────────────────
 
 {
@@ -180,6 +245,50 @@ assert.strictEqual(sha256("a"), sha256("a"));
   assert.strictEqual(countOccurrences("nothing", "ソラ"), 0);
   assert.strictEqual(countOccurrences("", "x"), 0);
   assert.strictEqual(countOccurrences("text", ""), 0);
+}
+
+// ─── selectTermsForChapter / chapterTerminology ───────────────────────────────
+
+{
+  // The cumulative glossary grows with the SERIES; a chapter's prompt must see
+  // only the terms this chapter can actually render.
+  const cumulative = [
+    { term: "ソラ", rendering: "Sora", section: "Characters" },
+    { term: "黒鋼", rendering: "Kurogane", section: "Characters" },
+    { term: "魔法学園", rendering: "Magic Academy", section: "Places" },
+    { term: "端末", rendering: "terminal", section: "Items" },
+  ];
+  const chapter = "ソラは黒鋼さんを見た。";
+
+  const sel = selectTermsForChapter(cumulative, chapter, { maxChars: 100000 });
+  assert.deepStrictEqual(
+    sel.terms.map((t) => t.term),
+    ["ソラ", "黒鋼"],
+    "terms absent from this chapter are dropped (魔法学園 / 端末)"
+  );
+  assert.strictEqual(sel.present, 2);
+  assert.strictEqual(sel.dropped, 2);
+
+  // Substring matching means an honorific suffix still counts as the term.
+  assert.deepStrictEqual(
+    selectTermsForChapter(cumulative, "黒鋼さん", { maxChars: 100000 }).terms.map((t) => t.term),
+    ["黒鋼"],
+    "黒鋼さん contains the glossary term 黒鋼"
+  );
+
+  // The character budget caps the block and reports what it dropped.
+  const capped = selectTermsForChapter(cumulative, "ソラ 黒鋼 魔法学園 端末", { maxChars: 40 });
+  assert.ok(capped.terms.length >= 1 && capped.terms.length < 4, `capped to ${capped.terms.length}`);
+  assert.strictEqual(capped.dropped, 4 - capped.terms.length);
+  assert.ok(capped.usedChars <= 40, `usedChars ${capped.usedChars} stays under the budget`);
+
+  assert.deepStrictEqual(selectTermsForChapter(null, "x").terms, []);
+  assert.deepStrictEqual(selectTermsForChapter([], "").terms, []);
+
+  // chapterTerminology renders the prompt lines from the same selection.
+  const ct = chapterTerminology({ terms: cumulative }, chapter, { maxChars: 100000 });
+  assert.deepStrictEqual(ct.lines, ['"ソラ" translates to "Sora"', '"黒鋼" translates to "Kurogane"']);
+  assert.deepStrictEqual(chapterTerminology(null, "x").lines, []);
 }
 
 // ─── checkTranslationQa ───────────────────────────────────────────────────────
@@ -495,7 +604,7 @@ const stateFile = path.join(tmp, "translation-state.json");
 
   // ─── assertWroteWithFallback contract (the recovery-turn gate) ──────────────
   {
-    const { assertWroteWithFallback } = require("../utils/fs");
+    const { assertWroteWithFallback, assertRealOutput, isPlaceholderContent } = require("../utils/fs");
     const fbDir = path.join(tmp, "fb");
     fs.mkdirSync(fbDir, { recursive: true });
     const okFile = path.join(fbDir, "ok.md");
@@ -524,6 +633,63 @@ const stateFile = path.join(tmp, "translation-state.json");
     assert.strictEqual(await assertWroteWithFallback([a, b], "the test agent", "content"), true);
     assert.strictEqual(fs.readFileSync(b, "utf8"), "content");
     assert.strictEqual(await assertWroteWithFallback([a, b], "the test agent", "content"), false);
+  }
+
+  // ─── empty / scaffold-stub output is NOT "written" (utils/fs.js) ───────────
+  {
+    const { assertWroteWithFallback, assertRealOutput, isPlaceholderContent } = require("../utils/fs");
+    const stubDir = path.join(tmp, "stub");
+    fs.mkdirSync(stubDir, { recursive: true });
+
+    // The pure detector.
+    assert.strictEqual(isPlaceholderContent(null), true, "absent file");
+    assert.strictEqual(isPlaceholderContent(""), true, "empty");
+    assert.strictEqual(isPlaceholderContent("   \n  "), true, "whitespace only");
+    assert.strictEqual(isPlaceholderContent("(stub — the agent replaces this with the wiki)\n"), true, "scaffold stub");
+    assert.strictEqual(isPlaceholderContent("# Wiki\nreal content"), false, "real output");
+
+    // An EMPTY file that exists must be treated as missing (the old check only
+    // asked whether the path existed, so an interrupted run's 0-byte file was
+    // finished work forever).
+    const emptyFile = path.join(stubDir, "empty.md");
+    fs.writeFileSync(emptyFile, "", "utf8");
+    assert.strictEqual(
+      await assertWroteWithFallback(emptyFile, "the test agent", "recovered"),
+      true,
+      "an empty file counts as missing"
+    );
+    assert.strictEqual(fs.readFileSync(emptyFile, "utf8"), "recovered");
+
+    // A scaffold stub must be OVERWRITTEN by the fallback, not left alone.
+    const stubFile = path.join(stubDir, "wiki.md");
+    fs.writeFileSync(stubFile, "(stub — the agent replaces this with the complete volume wiki)\n", "utf8");
+    assert.strictEqual(
+      await assertWroteWithFallback(stubFile, "the wiki agent", "# Wiki\nreal content"),
+      true,
+      "a stub counts as missing"
+    );
+    assert.strictEqual(fs.readFileSync(stubFile, "utf8"), "# Wiki\nreal content");
+    // …and once it holds real content, it is no longer missing.
+    assert.strictEqual(await assertWroteWithFallback(stubFile, "the wiki agent", "x"), false);
+
+    // A stub with no chat content to recover with → recovery turn needed.
+    const stub2 = path.join(stubDir, "shared-wiki.md");
+    fs.writeFileSync(stub2, "(stub — the merge pass replaces this with the complete shared wiki)\n", "utf8");
+    assert.strictEqual(await assertWroteWithFallback(stub2, "the wiki agent", ""), true);
+
+    // assertRealOutput is the hard stop after a recovery turn.
+    await assertRealOutput(stubFile, "the wiki agent"); // real content: passes
+    await assert.rejects(
+      () => assertRealOutput(stub2, "the wiki agent"),
+      /never wrote real output/
+    );
+    await assert.rejects(
+      () => assertRealOutput(path.join(stubDir, "nope.md"), "the wiki agent"),
+      /never wrote real output/
+    );
+    const empty2 = path.join(stubDir, "empty2.md");
+    fs.writeFileSync(empty2, "  \n", "utf8");
+    await assert.rejects(() => assertRealOutput(empty2, "the wiki agent"), /never wrote real output/);
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

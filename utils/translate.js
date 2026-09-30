@@ -101,44 +101,110 @@ function splitChapter(text, maxChars = 24000) {
 
 /**
  * Parse source-language terms AND their canonical target renderings out of
- * a glossary Markdown file.
+ * a glossary Markdown file (column 1 = the source term, column 2 = the
+ * canonical rendering; see {@link parseGlossaryRows} for the row handling).
  *
- * Walks the table rows (first column = source term, second column = target
- * rendering), tracking the `## ` section each row belongs to. For each
- * maximal run of consecutive table rows, the header row and separator row
- * are skipped. Emphasis-wrapped cells are normalized.
+ * Rows whose term is an unrendered template placeholder, or whose rendering
+ * column is empty or a "—", are NOT returned — they cannot drive a terminology
+ * constraint — but they are reported through `onMalformed`, so a caller can warn
+ * that the glossary is incomplete instead of quietly translating without the
+ * term.
  *
  * @param {string} markdown - The glossary file content.
+ * @param {{onMalformed?: (entry: {term: string, section: string, reason: string}) => void}} [opts]
  * @returns {Array<{term: string, rendering: string, section: string}>}
- *   One entry per term row, in file order (rows without a rendering are
- *   dropped — they cannot drive the terminology constraint).
+ *   One entry per usable term row, in file order.
  */
-function parseGlossaryTerms(markdown) {
-  if (!markdown || typeof markdown !== "string") return [];
+function parseGlossaryTerms(markdown, { onMalformed } = {}) {
   const entries = [];
+  for (const { cells, section } of parseGlossaryRows(markdown)) {
+    const term = cells[0] || "";
+    const rendering = cells.length > 1 ? cells[1] : "";
+    if (!term) continue;
+    if (/^\[.*\]$/.test(term)) continue; // unrendered template placeholder
+    if (!rendering || /^:?-{3,}:?$/.test(rendering) || rendering === "—") {
+      if (typeof onMalformed === "function") {
+        onMalformed({
+          term,
+          section,
+          reason: rendering
+            ? "rendering column is a placeholder"
+            : "rendering column is empty",
+        });
+      }
+      continue;
+    }
+    entries.push({ term, rendering, section });
+  }
+  return entries;
+}
+
+/**
+ * Normalize one glossary table cell: strip the backtick/emphasis wrappers a
+ * Markdown-writing model likes to add.
+ *
+ * @param {string} cell
+ * @returns {string}
+ */
+function cleanTableCell(cell) {
+  return String(cell ?? "")
+    .trim()
+    .replace(/^`+|`+$/g, "")
+    .trim()
+    .replace(/^\*+|\*+$/g, "")
+    .trim()
+    .replace(/^_+|_+$/g, "")
+    .trim();
+}
+
+/**
+ * Split one Markdown table row into its cells, POSITIONALLY.
+ *
+ * A table row is wrapped in pipes ("| a | b | c |"), so the first and last
+ * pieces produced by split("|") are the shells outside the table and are
+ * dropped. EMPTY CELLS IN THE MIDDLE ARE KEPT.
+ *
+ * (Observed: the previous version filtered out every empty cell, so a row with
+ * an empty Target column shifted the remaining columns one place left —
+ * `| ソラ |  | AI agent of the institute |` came back with the canonical
+ * rendering "AI agent of the institute". That string then went into every
+ * translate / retranslate / verify / polish prompt as a terminology law, and
+ * into the deterministic "missing glossary rendering" check.)
+ *
+ * @param {string} row - A line starting with "|".
+ * @returns {string[]} The cells in column order (empty cells preserved).
+ */
+function splitTableRow(row) {
+  const cells = String(row ?? "").split("|");
+  if (cells.length > 0 && cells[0].trim() === "") cells.shift();
+  if (cells.length > 0 && cells[cells.length - 1].trim() === "") cells.pop();
+  return cells.map(cleanTableCell);
+}
+
+/**
+ * Walk a glossary-style Markdown file and return every DATA row of every
+ * table, positionally, tracking the `## ` section each row belongs to.
+ *
+ * For each maximal run of consecutive table rows, row 0 (the header) and row 1
+ * (the `|---|---|` separator) are skipped. This is the single table reader for
+ * the project: the glossary coverage audit and the translation stage's
+ * terminology constraint both read through it so they cannot drift apart.
+ *
+ * @param {string} markdown - The glossary file content.
+ * @returns {Array<{cells: string[], section: string}>} One entry per data row.
+ */
+function parseGlossaryRows(markdown) {
+  if (!markdown || typeof markdown !== "string") return [];
+  const rows = [];
   let section = "";
   let tableRows = [];
-  const cleanCell = (c) =>
-    c
-      .trim()
-      .replace(/^`+|`+$/g, "")
-      .trim()
-      .replace(/^\*+|\*+$/g, "")
-      .trim()
-      .replace(/^_+|_+$/g, "")
-      .trim();
   const flushTable = () => {
     // Row 0 = header, row 1 = separator — data starts at row 2.
     for (let ri = 2; ri < tableRows.length; ri++) {
-      const cells = tableRows[ri].split("|").map(cleanCell).filter((c) => c !== "");
-      if (cells.length < 2) continue;
-      const term = cells[0];
-      const rendering = cells[1];
-      if (!term) continue;
-      if (/^:?-{3,}:?$/.test(term)) continue; // stray separator
-      if (/^\[.*\]$/.test(term)) continue; // unrendered template placeholder
-      if (!rendering || /^:?-{3,}:?$/.test(rendering) || rendering === "—") continue;
-      entries.push({ term, rendering, section });
+      const cells = splitTableRow(tableRows[ri]);
+      if (cells.length === 0) continue;
+      if (/^:?-{3,}:?$/.test(cells[0])) continue; // stray separator row
+      rows.push({ cells, section });
     }
     tableRows = [];
   };
@@ -157,7 +223,57 @@ function parseGlossaryTerms(markdown) {
     flushTable();
   }
   flushTable();
-  return entries;
+  return rows;
+}
+
+/**
+ * The character budget for the glossary block injected into one chapter's
+ * prompts (TRANSLATION_GLOSSARY_MAX_CHARS, default 12000).
+ *
+ * @returns {number}
+ */
+function glossaryBlockMaxChars() {
+  const n = parseInt(process.env.TRANSLATION_GLOSSARY_MAX_CHARS, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 12000;
+}
+
+/**
+ * Pick the glossary terms this chapter can actually use, bounded by a
+ * character budget.
+ *
+ * The glossary is cumulative: by the last volume of a long series it holds
+ * every term the series has ever introduced. Injecting ALL of them into every
+ * chapter prompt (what the translation stage used to do) makes the prompt grow
+ * with the size of the SERIES rather than of the chapter, until it crowds out
+ * the source text. A term whose source form does not appear in this chapter
+ * cannot be rendered in this chapter, so it is dead weight.
+ *
+ * Substring matching is the right test for Japanese / Chinese / Korean (no
+ * word boundaries): "黒鋼さん" contains the glossary term "黒鋼".
+ *
+ * @param {Array<{term: string, rendering: string, section: string}>} terms - The cumulative glossary terms.
+ * @param {string} sourceText - The chapter's source text.
+ * @param {{maxChars?: number}} [opts] - Character budget for the block (default: glossaryBlockMaxChars()).
+ * @returns {{terms: Array<{term: string, rendering: string, section: string}>, usedChars: number, present: number, dropped: number}}
+ *   `terms` in glossary order, capped by the budget. `present` counts the terms
+ *   that occur in this chapter; `dropped` counts everything in the glossary
+ *   that is not in the returned block (absent terms + over-budget terms).
+ */
+function selectTermsForChapter(terms, sourceText, { maxChars } = {}) {
+  const all = Array.isArray(terms) ? terms : [];
+  const budget = Math.max(0, maxChars ?? glossaryBlockMaxChars());
+  const present = all.filter(
+    (t) => t && t.term && countOccurrences(sourceText || "", t.term) > 0
+  );
+  const kept = [];
+  let usedChars = 0;
+  for (const t of present) {
+    const lineChars = `"${t.term}" → "${t.rendering}"`.length + 1;
+    if (usedChars + lineChars > budget) break;
+    kept.push(t);
+    usedChars += lineChars;
+  }
+  return { terms: kept, usedChars, present: present.length, dropped: all.length - kept.length };
 }
 
 /**
@@ -637,23 +753,14 @@ function stageConcurrency(prefix) {
 }
 
 /**
- * Sampling temperature for every call that GRADES text rather than writes it
- * (chapter verification, the verify tiebreak audit, the polish final audit):
- * JUDGE_TEMPERATURE, default 0.2. A judgment call wants a stable one — the
- * three separate 0.2 knobs were one setting.
- *
- * The legacy names (VERIFY_TEMPERATURE / AUDIT_TEMPERATURE) are still honored,
- * in that order, for an existing .env.
+ * Sampling temperature for every call that GRADES text rather than writes it.
+ * Re-exported from configs/shared.js (its home) so the translation-stage tasks
+ * keep importing it from here — see configs/shared.js for the knob and its
+ * legacy names.
  *
  * @returns {number}
  */
-function judgeTemperature() {
-  for (const key of ["JUDGE_TEMPERATURE", "VERIFY_TEMPERATURE", "AUDIT_TEMPERATURE"]) {
-    const n = parseFloat(process.env[key]);
-    if (Number.isFinite(n)) return n;
-  }
-  return 0.2;
-}
+const judgeTemperature = require("../configs/shared").judgeTemperature;
 
 /**
  * Thinking dialect for a translation-stage call: the global AI_THINKING switch
@@ -707,6 +814,11 @@ module.exports = {
   sha256,
   splitChapter,
   parseGlossaryTerms,
+  parseGlossaryRows,
+  splitTableRow,
+  selectTermsForChapter,
+  chapterTerminology,
+  glossaryBlockMaxChars,
   extractStyleRules,
   buildTranslationTaskLines,
   buildTranslationPrompt,
@@ -811,8 +923,19 @@ async function loadVolumeReferences(volumeDir) {
         `Run the glossary task first for best results.`
     );
   }
-  const terms = parseGlossaryTerms(glossaryText);
-  const terminologyLines = terms.map((t) => `"${t.term}" translates to "${t.rendering}"`);
+  const malformed = [];
+  const terms = parseGlossaryTerms(glossaryText, {
+    onMalformed: ({ term, section, reason }) => {
+      malformed.push(`"${term}" (${section || "unsectioned"}) — ${reason}`);
+    },
+  });
+  if (malformed.length > 0) {
+    console.warn(
+      `[translation] ${volumeDir}: ${malformed.length} glossary row(s) have no usable target rendering ` +
+        `(showing up to 5):\n  ${malformed.slice(0, 5).join("\n  ")}\n` +
+        `  Those terms are NOT enforced as terminology law for this volume — re-run the glossary task if this is unexpected.`
+    );
+  }
   const styleRules = extractStyleRules(styleGuideText);
   // Background for the translation/verification prompts: the shared wiki
   // (the cumulative "series state through this volume" — prior context),
@@ -835,10 +958,30 @@ async function loadVolumeReferences(volumeDir) {
   return {
     glossaryText,
     terms,
-    terminologyLines,
     styleRules,
     background,
     voiceNotes,
     contextHash,
+  };
+}
+
+/**
+ * The terminology block for ONE chapter: the glossary terms that actually occur
+ * in this chapter's source, capped by the prompt budget.
+ *
+ * @param {{terms: Array<{term: string, rendering: string, section: string}>}} refs - The volume references (loadVolumeReferences).
+ * @param {string} sourceText - The chapter's source text.
+ * @param {{maxChars?: number}} [opts]
+ * @returns {{lines: string[], terms: Array<{term: string, rendering: string, section: string}>, present: number, dropped: number}}
+ *   `lines` feeds the translate/retranslate prompt; `terms` feeds the
+ *   verification / polish glossary block; `dropped` is what the caller logs.
+ */
+function chapterTerminology(refs, sourceText, { maxChars } = {}) {
+  const sel = selectTermsForChapter(refs && refs.terms, sourceText, { maxChars });
+  return {
+    lines: sel.terms.map((t) => `"${t.term}" translates to "${t.rendering}"`),
+    terms: sel.terms,
+    present: sel.present,
+    dropped: sel.dropped,
   };
 }

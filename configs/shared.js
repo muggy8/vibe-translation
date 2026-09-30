@@ -139,35 +139,87 @@ const PASSING_SCORE = (() => {
 const ACCEPTANCE_PASSING_SCORE = PASSING_SCORE;
 
 /**
- * Acceptance strategy: how the rolling window of scores is evaluated.
- * - "average" (default): the mean of the recent scores must be >=
- *   ACCEPTANCE_PASSING_SCORE.
- * - "best": at least ACCEPTANCE_BEST_MIN_PASSES of the last ACCEPTANCE_WINDOW_SIZE
- *   scores must each be >= ACCEPTANCE_PASSING_SCORE (best-X-out-of-Y).
- * Read from .env, defaulting to "average".
+ * The exceptional-score floor: a first acceptance grade at or above this is
+ * strong enough to be worth CONFIRMING instead of running another full
+ * validator + acceptance round to be sure.
  *
- * @type {"average"|"best"}
- */
-const ACCEPTANCE_STRATEGY =
-  String(process.env.ACCEPTANCE_STRATEGY || "average")
-    .trim()
-    .toLowerCase() === "best"
-    ? "best"
-    : "average";
-
-/**
- * For the "best" strategy (best-X-out-of-Y): the minimum number of recent
- * scores that must individually meet ACCEPTANCE_PASSING_SCORE. The window
- * size Y is ACCEPTANCE_WINDOW_SIZE.
- * Read from .env, defaulting to 3 (i.e. "best 3 out of 5" with the default
- * window).
+ * 85 is the boundary of the acceptance rubric's top band ("Pass" = 85–100).
+ * Read from .env (ACCEPTANCE_EXCEPTIONAL_SCORE).
  *
  * @type {number}
  */
-const ACCEPTANCE_BEST_MIN_PASSES = Math.max(
-  1,
-  parseInt(process.env.ACCEPTANCE_BEST_MIN_PASSES, 10) || 3
+const ACCEPTANCE_EXCEPTIONAL_SCORE = (() => {
+  const n = parseInt(process.env.ACCEPTANCE_EXCEPTIONAL_SCORE, 10);
+  return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 85;
+})();
+
+/**
+ * How much the confirmation grades may disagree with an exceptional score
+ * before the score is treated as a fluke. A grade that lands more than this
+ * many points below the exceptional floor means the first great score was
+ * luck, not quality.
+ *
+ * Read from .env (ACCEPTANCE_SCORE_TOLERANCE, default 3).
+ *
+ * @type {number}
+ */
+const ACCEPTANCE_SCORE_TOLERANCE = (() => {
+  const n = parseInt(process.env.ACCEPTANCE_SCORE_TOLERANCE, 10);
+  return Number.isFinite(n) ? Math.max(0, n) : 3;
+})();
+
+/**
+ * How many EXTRA grades an exceptional score is re-checked with before it can
+ * be accepted on the spot (ACCEPTANCE_CONFIRMATION_CHECKS, default 2).
+ *
+ * One of them is ALWAYS run at temperature 0 — the deterministic anchor. A
+ * local llama.cpp server is near-deterministic rather than perfectly so
+ * (batching and 16-bit arithmetic drift a little), but it is the one grade
+ * whose agreement means something: if the calm, repeatable grader says
+ * "exceptional" while the stochastic ones wobble, the artifact is exceptional.
+ *
+ * @type {number}
+ */
+const ACCEPTANCE_CONFIRMATION_CHECKS = (() => {
+  const n = parseInt(process.env.ACCEPTANCE_CONFIRMATION_CHECKS, 10);
+  return Number.isFinite(n) ? Math.max(1, n) : 2;
+})();
+
+/**
+ * The floor every confirmation grade must clear: the exceptional score minus
+ * the tolerance (85 - 3 = 82 by default). Below that, the consensus broke down
+ * and the volume falls back to the normal rolling-window loop.
+ *
+ * @type {number}
+ */
+const ACCEPTANCE_CONFIRMATION_MIN_SCORE = Math.max(
+  0,
+  ACCEPTANCE_EXCEPTIONAL_SCORE - ACCEPTANCE_SCORE_TOLERANCE
 );
+
+/**
+ * Sampling temperature for every call that GRADES text rather than writes it:
+ * the acceptance graders of the four volume artifacts, chapter verification, the
+ * verify tiebreak audit and the polish final audit. A judgment call wants a
+ * stable one — the three separate 0.2 knobs were one setting.
+ *
+ * (Used to live in utils/translate.js, which meant the four pre-production
+ * acceptance graders — the calls that decide whether an artifact is accepted —
+ * could not reach it and ran at the house WRITING temperature instead, making
+ * the acceptance score needlessly noisy.)
+ *
+ * JUDGE_TEMPERATURE is the knob; the legacy names (VERIFY_TEMPERATURE /
+ * AUDIT_TEMPERATURE) are still honored, in that order, for an existing .env.
+ *
+ * @returns {number} The grading temperature (default 0.2).
+ */
+function judgeTemperature() {
+  for (const key of ["JUDGE_TEMPERATURE", "VERIFY_TEMPERATURE", "AUDIT_TEMPERATURE"]) {
+    const n = parseFloat(process.env[key]);
+    if (Number.isFinite(n)) return n;
+  }
+  return 0.2;
+}
 
 // ── Un-monitored run policies ────────────────────────────────────────────────
 // These knobs front-load the decisions that would otherwise require a human
@@ -331,25 +383,92 @@ function computeRollingAverage(scores) {
 
 /**
  * Decide whether a rolling window of acceptance scores (0–100) meets the
- * configured acceptance criterion.
- *
- * - "average" strategy: the mean of `scores` is >= ACCEPTANCE_PASSING_SCORE.
- * - "best" strategy: at least ACCEPTANCE_BEST_MIN_PASSES of `scores` are >=
- *   ACCEPTANCE_PASSING_SCORE.
+ * acceptance criterion: the mean of `scores` is >= ACCEPTANCE_PASSING_SCORE.
  *
  * Requires at least ACCEPTANCE_MIN_SAMPLES scores; returns false for fewer
  * (and for empty / non-array input).
+ *
+ * (The "best" strategy — "at least ACCEPTANCE_BEST_MIN_PASSES scores in the
+ * window individually pass" — was removed. With the default window of 2 it
+ * asked for 3 passing scores in a window that can only ever hold 2, so
+ * `ACCEPTANCE_STRATEGY=best` could NEVER accept: every volume burned all
+ * QA_MAX_ITERATIONS validator turns and then fell through to ON_QA_LIMIT.)
  *
  * @param {number[]} scores - The rolling window of acceptance scores.
  * @returns {boolean} True when the window satisfies the criterion.
  */
 function meetsAcceptanceCriteria(scores) {
   if (!Array.isArray(scores) || scores.length < ACCEPTANCE_MIN_SAMPLES) return false;
-  if (ACCEPTANCE_STRATEGY === "best") {
-    const passes = scores.filter((s) => s >= ACCEPTANCE_PASSING_SCORE).length;
-    return passes >= ACCEPTANCE_BEST_MIN_PASSES;
-  }
   return computeRollingAverage(scores) >= ACCEPTANCE_PASSING_SCORE;
+}
+
+/**
+ * Decide whether an exceptional first grade is confirmed by its re-grades — the
+ * "is this a fluke?" test.
+ *
+ * A score at or above ACCEPTANCE_EXCEPTIONAL_SCORE (85, the rubric's top band)
+ * is re-graded ACCEPTANCE_CONFIRMATION_CHECKS more times. The artifact is
+ * accepted on the spot when:
+ *
+ *   - every confirmation score stays within ACCEPTANCE_SCORE_TOLERANCE of the
+ *     exceptional floor (nothing collapsed back into the gray zone), AND
+ *   - the temperature-0 confirmation — the deterministic one, the only grade
+ *     that is not noise — is itself exceptional.
+ *
+ * If either fails, the scores stay in the rolling window and the volume
+ * continues through the normal loop: the great first grade was luck.
+ *
+ * @param {number} firstScore - The original acceptance score.
+ * @param {Array<{score: number|null, temperature: number}>} confirmations - The re-grades (one must be the temperature-0 anchor).
+ * @returns {{accepted: boolean, reason: string}} `reason` explains the decision for the run log.
+ */
+function meetsExceptionalCriteria(firstScore, confirmations) {
+  if (!Number.isFinite(firstScore) || firstScore < ACCEPTANCE_EXCEPTIONAL_SCORE) {
+    return { accepted: false, reason: `the first score ${firstScore} is not exceptional (< ${ACCEPTANCE_EXCEPTIONAL_SCORE})` };
+  }
+  const list = Array.isArray(confirmations) ? confirmations : [];
+  if (list.length === 0) {
+    return { accepted: false, reason: "no confirmation grades were run" };
+  }
+  const scores = list.map((c) => (c && Number.isFinite(c.score) ? c.score : null));
+  const missing = scores.filter((s) => s === null).length;
+  if (missing > 0) {
+    // Fail closed: an unparseable confirmation grade is a failed check, exactly
+    // like an unparseable first grade.
+    return { accepted: false, reason: `${missing} confirmation grade(s) returned no score` };
+  }
+  const lowest = Math.min(...scores);
+  if (lowest < ACCEPTANCE_CONFIRMATION_MIN_SCORE) {
+    return {
+      accepted: false,
+      reason: `a confirmation grade fell to ${lowest} (floor ${ACCEPTANCE_CONFIRMATION_MIN_SCORE} = ${ACCEPTANCE_EXCEPTIONAL_SCORE} − ${ACCEPTANCE_SCORE_TOLERANCE})`,
+    };
+  }
+  const anchor = list.find((c) => c && c.temperature === 0);
+  if (!anchor) {
+    return { accepted: false, reason: "no temperature-0 confirmation grade was run" };
+  }
+  if (anchor.score < ACCEPTANCE_EXCEPTIONAL_SCORE) {
+    return {
+      accepted: false,
+      reason: `the deterministic (temperature 0) grade scored ${anchor.score}, below the exceptional floor ${ACCEPTANCE_EXCEPTIONAL_SCORE}`,
+    };
+  }
+  return {
+    accepted: true,
+    reason: `every grade stayed within ${ACCEPTANCE_SCORE_TOLERANCE} of ${ACCEPTANCE_EXCEPTIONAL_SCORE} and the deterministic grade agrees`,
+  };
+}
+
+/**
+ * Whether a first acceptance grade is exceptional enough to be worth confirming
+ * (see {@link meetsExceptionalCriteria}).
+ *
+ * @param {number} score - The acceptance score.
+ * @returns {boolean}
+ */
+function isExceptionalScore(score) {
+  return Number.isFinite(score) && score >= ACCEPTANCE_EXCEPTIONAL_SCORE;
 }
 
 /**
@@ -357,12 +476,25 @@ function meetsAcceptanceCriteria(scores) {
  * satisfies the acceptance criterion — the deterministic, no-AI-call
  * decision used by the idempotency skip-checks in all task modules.
  *
- * @param {{ results: number[] } | null} state - The state returned by
- *   loadRollingState.
+ * An exceptional-consensus acceptance is reproduced from its own record: the
+ * window may hold a single score (the fast path never runs a second grader
+ * iteration), so the ordinary "enough samples, average high enough" rule would
+ * refuse it and the volume would be rebuilt on every re-run. Instead the state
+ * is trusted when it says the consensus accepted AND the deterministic
+ * (temperature 0) grade it recorded is itself exceptional — a claim that is
+ * checkable from the file, not just a label.
+ *
+ * @param {{ results: number[], acceptedBy?: string, deterministicScore?: number } | null} state - The state returned by loadRollingState.
  * @returns {boolean} True when the persisted window satisfies the criterion.
  */
 function isAcceptedState(state) {
   if (!state) return false;
+  if (state.acceptedBy === "exceptional-consensus") {
+    return (
+      Number.isFinite(state.deterministicScore) &&
+      state.deterministicScore >= ACCEPTANCE_EXCEPTIONAL_SCORE
+    );
+  }
   return meetsAcceptanceCriteria(state.results);
 }
 
@@ -374,7 +506,8 @@ function isAcceptedState(state) {
  *
  * Format:
  *   { "results": [72, 85, 61, ...], "lastCheckedAt": "2026-08-28T...",
- *     "sourceFingerprint": "<sha256 of the source file at last run>" }
+ *     "sourceFingerprint": "<sha256 of the source file at last run>",
+ *     "acceptedBy": "rolling-window" | "exceptional-consensus" }
  *
  * The optional sourceFingerprint (passed via `extra`) lets the skip-check
  * detect a changed source file: when it no longer matches the source's
@@ -382,10 +515,13 @@ function isAcceptedState(state) {
  * artifacts on disk (they were built from the old source) and the volume
  * must be regenerated (see isSourceStale).
  *
+ * acceptedBy / deterministicScore record HOW the volume was accepted, so a
+ * re-run reproduces the decision without re-grading (an exceptional-consensus
+ * acceptance has a different score history than a rolling-window one).
+ *
  * @param {string} filePath - Absolute path to write the state file to.
  * @param {number[]} scores - The current rolling window scores (0–100).
- * @param {{sourceFingerprint?: string}} [extra] - Extra persisted fields
- *   (currently: the source file's sha256).
+ * @param {{sourceFingerprint?: string, acceptedBy?: string, deterministicScore?: number}} [extra] - Extra persisted fields.
  */
 async function saveRollingState(filePath, scores, extra = {}) {
   const fs = require("fs").promises;
@@ -395,6 +531,18 @@ async function saveRollingState(filePath, scores, extra = {}) {
   };
   if (typeof extra.sourceFingerprint === "string" && extra.sourceFingerprint) {
     data.sourceFingerprint = extra.sourceFingerprint;
+  }
+  if (typeof extra.acceptedBy === "string" && extra.acceptedBy) {
+    data.acceptedBy = extra.acceptedBy;
+  }
+  if (Number.isFinite(extra.deterministicScore)) {
+    data.deterministicScore = extra.deterministicScore;
+  }
+  if (Array.isArray(extra.confirmations) && extra.confirmations.length > 0) {
+    data.confirmations = extra.confirmations;
+  }
+  if (Array.isArray(extra.rejectedConfirmations) && extra.rejectedConfirmations.length > 0) {
+    data.rejectedConfirmations = extra.rejectedConfirmations;
   }
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
 }
@@ -430,6 +578,22 @@ async function loadRollingState(filePath) {
         typeof data.sourceFingerprint === "string" && data.sourceFingerprint
           ? data.sourceFingerprint
           : undefined,
+      // Persisted by saveRollingState: HOW the volume was accepted
+      // ("rolling-window" or "exceptional-consensus"). Diagnostic only —
+      // isAcceptedState re-derives the decision from the scores, so an old
+      // state file without it still skips correctly.
+      acceptedBy:
+        typeof data.acceptedBy === "string" && data.acceptedBy
+          ? data.acceptedBy
+          : undefined,
+      deterministicScore: Number.isFinite(data.deterministicScore)
+        ? data.deterministicScore
+        : undefined,
+      // The confirmation grades of a consensus that FAILED (diagnostic only —
+      // they are deliberately not part of `results`).
+      rejectedConfirmations: Array.isArray(data.rejectedConfirmations)
+        ? data.rejectedConfirmations
+        : undefined,
     };
   } catch {
     // File missing, unreadable, or JSON parse error — degrade safely.
@@ -476,8 +640,10 @@ module.exports = {
   ACCEPTANCE_WINDOW_SIZE,
   ACCEPTANCE_MIN_SAMPLES,
   ACCEPTANCE_PASSING_SCORE,
-  ACCEPTANCE_STRATEGY,
-  ACCEPTANCE_BEST_MIN_PASSES,
+  ACCEPTANCE_EXCEPTIONAL_SCORE,
+  ACCEPTANCE_SCORE_TOLERANCE,
+  ACCEPTANCE_CONFIRMATION_CHECKS,
+  ACCEPTANCE_CONFIRMATION_MIN_SCORE,
   // Un-monitored run policies (see the section above).
   normalizePolicy,
   ON_VOLUME_ERROR,
@@ -492,6 +658,9 @@ module.exports = {
   DEFAULT_TARGET_LANGUAGE,
   computeRollingAverage,
   meetsAcceptanceCriteria,
+  meetsExceptionalCriteria,
+  isExceptionalScore,
+  judgeTemperature,
   isAcceptedState,
   isSourceStale,
   saveRollingState,

@@ -42,7 +42,7 @@ const { ON_VOLUME_ERROR, PASSING_SCORE, validateRequiredEnv } = require("./confi
 const { fileExists } = require("./utils/fs");
 const { resolveSourceBundle } = require("./utils/source");
 const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("./utils/prompt");
-const { sha256, roleEndpoint, loadVolumeReferences, runWithConcurrency, stageConcurrency, judgeTemperature, stageThinking } = require("./utils/translate");
+const { sha256, roleEndpoint, loadVolumeReferences, chapterTerminology, glossaryBlockMaxChars, runWithConcurrency, stageConcurrency, judgeTemperature, stageThinking } = require("./utils/translate");
 const { chapterArtifactNames } = require("./translate");
 const { withHooks } = require("./utils/hooks");
 
@@ -194,7 +194,7 @@ async function runAuditTiebreak({ volume, volumeDir, bundle, refs, systemPrompt,
     const values = {
       SOURCE_TEXT: sourceText,
       TRANSLATION_TEXT: draft,
-      GLOSSARY: glossaryBlock(refs.terms),
+      GLOSSARY: glossaryBlock(chapterTerminology(refs, sourceText).terms),
       STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
       BACKGROUND: refs.background || "(none provided — run the jump-in-wiki task)",
     };
@@ -304,7 +304,7 @@ async function processVerifyVolume(ctx) {
     const values = {
       SOURCE_TEXT: sourceText,
       TRANSLATION_TEXT: draft,
-      GLOSSARY: glossaryBlock(refs.terms),
+      GLOSSARY: glossaryBlock(chapterTerminology(refs, sourceText).terms),
       STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
       BACKGROUND: refs.background || "(none provided — run the jump-in-wiki task)",
     };
@@ -415,12 +415,29 @@ async function processVerifyVolume(ctx) {
 /**
  * Build the glossary block for the verify/polish prompts.
  *
+ * The block is capped (TRANSLATION_GLOSSARY_MAX_CHARS): a cumulative glossary
+ * handed whole to every chapter's grader eventually out-shouts the text being
+ * graded. Callers should pass the chapter-scoped selection
+ * (chapterTerminology) — this cap is the backstop for anything that doesn't.
+ *
  * @param {Array<{term: string, rendering: string}>} terms
  * @returns {string} One line per term, or the "none provided" marker.
  */
 function glossaryBlock(terms) {
   if (!terms || terms.length === 0) return "(none provided — run the glossary task)";
-  return terms.map((t) => `"${t.term}" → "${t.rendering}"`).join("\n");
+  const budget = glossaryBlockMaxChars();
+  const lines = [];
+  let used = 0;
+  for (const t of terms) {
+    const line = `"${t.term}" → "${t.rendering}"`;
+    if (used + line.length + 1 > budget) {
+      lines.push(`… (${terms.length - lines.length} further glossary term(s) omitted by the ${budget}-char budget)`);
+      break;
+    }
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -495,7 +512,8 @@ async function verifyTranslate() {
   const systemPrompt = await fs.readFile(verifySystemPromptFile, "utf-8");
   const template = await fs.readFile(verifyTemplateFile, "utf-8");
 
-  const manifest = await getTranslationTarget({ force, dryRun });
+  // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
+  const manifest = await getTranslationTarget({ dryRun });
   const sorted = manifest.volumes.map((v) => v.folder);
   const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
   if (sorted.length === 0) {

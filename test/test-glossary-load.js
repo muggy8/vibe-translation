@@ -12,8 +12,6 @@ const { execFileSync } = require("child_process");
 // values that are already set in the environment).
 process.env.PASSING_SCORE = "70";
 process.env.ACCEPTANCE_PASSING_SCORE = "70";
-process.env.ACCEPTANCE_STRATEGY = "average";
-process.env.ACCEPTANCE_BEST_MIN_PASSES = "3";
 process.env.ACCEPTANCE_MIN_SAMPLES = "3";
 // Pin the un-monitored run policies so the policy tests below are
 // deterministic regardless of the local .env.
@@ -50,9 +48,12 @@ const {
 } = require("../get-translation-target");
 const {
   meetsAcceptanceCriteria,
+  meetsExceptionalCriteria,
+  isExceptionalScore,
   isAcceptedState,
   computeRollingAverage,
 } = require("../configs/shared");
+const sharedConfigPath = path.resolve(__dirname, "..", "configs", "shared.js");
 
 // ─── parseTerms ─────────────────────────────────────────────────────────────
 assert.deepStrictEqual(parseTerms(""), []);
@@ -147,11 +148,13 @@ assert.strictEqual(isAcceptedState({ results: [80, 80, 80] }), true);
 assert.strictEqual(isAcceptedState({ results: [50, 50, 50] }), false);
 assert.strictEqual(isAcceptedState({ results: [100] }), false);
 
-// ─── meetsAcceptanceCriteria (best-X-out-of-Y strategy) ────────────────────
-// The strategy is read from the environment at module load, so the best
-// strategy is exercised in a spawned process with an env override.
-const sharedConfigPath = path.resolve(__dirname, "..", "configs", "shared.js");
-function bestStrategyCheck(scores) {
+// ─── meetsAcceptanceCriteria: the "best" strategy is GONE ───────────────────
+// It asked for ACCEPTANCE_BEST_MIN_PASSES (default 3) passing scores inside a
+// window that can only ever hold ACCEPTANCE_WINDOW_SIZE (default 2) — so
+// ACCEPTANCE_STRATEGY=best could never accept anything: every volume burned all
+// QA_MAX_ITERATIONS validator turns and fell through to ON_QA_LIMIT. Setting the
+// removed variables must now have no effect at all.
+function strategyIgnoredCheck(scores) {
   const script =
     `const { meetsAcceptanceCriteria } = require(${JSON.stringify(sharedConfigPath)});` +
     `console.log(String(meetsAcceptanceCriteria(${JSON.stringify(scores)})));`;
@@ -160,22 +163,63 @@ function bestStrategyCheck(scores) {
     env: {
       ...process.env,
       ACCEPTANCE_STRATEGY: "best",
-      PASSING_SCORE: "70",
-      ACCEPTANCE_PASSING_SCORE: "70",
       ACCEPTANCE_BEST_MIN_PASSES: "3",
-      ACCEPTANCE_MIN_SAMPLES: "3",
+      ACCEPTANCE_WINDOW_SIZE: "2",
+      ACCEPTANCE_MIN_SAMPLES: "2",
+      PASSING_SCORE: "70",
     },
   });
   return out.trim() === "true";
 }
-// Best 3 out of 5: at least 3 scores >= 70 (fewer than 3 checks never accepted).
-assert.strictEqual(bestStrategyCheck([80, 80, 80, 60, 60]), true);
-assert.strictEqual(bestStrategyCheck([70, 70, 70]), true);
-assert.strictEqual(bestStrategyCheck([100, 100]), false);
-// Fewer than ACCEPTANCE_BEST_MIN_PASSES qualifying scores → not accepted, even when
-// the average would pass.
-assert.strictEqual(bestStrategyCheck([95, 45, 45, 45, 45]), false);
-assert.strictEqual(bestStrategyCheck([80, 80, 60, 60, 60]), false);
+// Two 95s in a 2-window: accepted (the old "best" reading would have refused).
+assert.strictEqual(strategyIgnoredCheck([95, 95]), true, "ACCEPTANCE_STRATEGY=best no longer blocks acceptance");
+assert.strictEqual(strategyIgnoredCheck([80, 80, 80, 60, 60]), true, "average 72 → accepted regardless of the removed strategy");
+assert.strictEqual(strategyIgnoredCheck([95, 45]), true, "average 70 boundary: 95+45 = 70 → accepted (inclusive)");
+assert.strictEqual(strategyIgnoredCheck([95, 44]), false, "average 69.5 → rejected");
+
+// ─── meetsExceptionalCriteria (the "is this a fluke?" test) ─────────────────
+{
+  const { meetsExceptionalCriteria, isExceptionalScore } = require("../configs/shared");
+  // Below the exceptional floor: nothing to confirm.
+  assert.strictEqual(isExceptionalScore(84), false);
+  assert.strictEqual(isExceptionalScore(85), true);
+  assert.strictEqual(
+    meetsExceptionalCriteria(80, [{ score: 90, temperature: 0 }]).accepted,
+    false,
+    "a non-exceptional first score is never fast-accepted"
+  );
+  // Confirmed: every grade holds the band and the deterministic grade agrees.
+  const confirmed = meetsExceptionalCriteria(87, [
+    { score: 86, temperature: 0 },
+    { score: 85, temperature: 0.2 },
+  ]);
+  assert.strictEqual(confirmed.accepted, true, confirmed.reason);
+  // A confirmation collapsed out of the band → fluke.
+  const fluke = meetsExceptionalCriteria(88, [
+    { score: 74, temperature: 0 },
+    { score: 87, temperature: 0.2 },
+  ]);
+  assert.strictEqual(fluke.accepted, false, "a grade below 82 breaks the consensus");
+  // The noisy grades agree but the deterministic one does not → fluke.
+  const noisy = meetsExceptionalCriteria(88, [
+    { score: 83, temperature: 0 },
+    { score: 89, temperature: 0.2 },
+  ]);
+  assert.strictEqual(noisy.accepted, false, "the temperature-0 grade must itself be exceptional");
+  // An unparseable confirmation fails closed.
+  assert.strictEqual(
+    meetsExceptionalCriteria(90, [{ score: null, temperature: 0 }, { score: 91, temperature: 0.2 }]).accepted,
+    false,
+    "an unparseable confirmation grade is a failed check"
+  );
+  // No confirmation ran, or no deterministic anchor among them.
+  assert.strictEqual(meetsExceptionalCriteria(95, []).accepted, false);
+  assert.strictEqual(
+    meetsExceptionalCriteria(95, [{ score: 94, temperature: 0.2 }, { score: 93, temperature: 0.2 }]).accepted,
+    false,
+    "a confirmation set without the temperature-0 anchor cannot accept"
+  );
+}
 
 // ─── parseAcceptanceReply (JSON contract + legacy fallback) ────────────────
 // The JSON contract the acceptance prompts now require.
@@ -213,7 +257,6 @@ function defaultCriteriaCheck(scores) {
     encoding: "utf8",
     env: {
       ...process.env,
-      ACCEPTANCE_STRATEGY: "average",
       PASSING_SCORE: "70",
       ACCEPTANCE_PASSING_SCORE: "70",
       ACCEPTANCE_WINDOW_SIZE: "",
@@ -497,16 +540,45 @@ assert.ok(buildGlossaryFeedbackTurnPrompt(glossaryCtx2).includes("../story_name(
 
 // ─── truncateGlossary ────────────────────────────────────────────────────────
 // Under the threshold: returns content unchanged.
-const shortGlossary = "- TermA (character): A character\n- TermB (place): A place";
+const shortGlossary = "## Characters\n| Source | Rendering | Notes |\n|---|---|---|\n| A | Alpha | a |\n| B | Beta | b |";
 assert.strictEqual(truncateGlossary(shortGlossary), shortGlossary, "truncateGlossary: short content unchanged");
+assert.strictEqual(truncateGlossary(""), "", "truncateGlossary: empty content unchanged");
 
-// Over the threshold (64KB): returns truncated content with header note.
-// Each entry is ~60 bytes; need ~1100+ entries to exceed 64KB.
-const longGlossary = Array.from({ length: 1200 }, (_, i) => `- Term${i} (character): This is a description for term ${i} that is quite long`).join("\n");
+// Over the threshold (64KB). The glossary the workflow actually writes is a set
+// of Markdown TABLES — the old list-item splitter matched none of them, so
+// truncation never happened (the helper returned the file untouched).
+const tableRows = Array.from(
+  { length: 1200 },
+  (_, i) => `| Term${i} | Rendering${i} | This is a description for term ${i} that is quite long |`
+);
+const longGlossary = [
+  "# Glossary — Test",
+  "",
+  "## Characters",
+  "| Source | Rendering | Notes |",
+  "|---|---|---|",
+  ...tableRows.slice(0, 600),
+  "",
+  "## Terms & Concepts",
+  "| Source | Rendering | Notes |",
+  "|---|---|---|",
+  ...tableRows.slice(600),
+].join("\n");
+assert.ok(longGlossary.length > 64 * 1024, `fixture is ${longGlossary.length} chars (over the 64KB threshold)`);
 const truncated = truncateGlossary(longGlossary);
-assert.ok(truncated.includes("[TRUNCATED:"), "truncateGlossary: truncated content has header note");
-assert.ok(!truncated.includes("Term0"), "truncateGlossary: first entries removed");
-assert.ok(truncated.includes("Term1199"), "truncateGlossary: last entries kept");
+assert.ok(truncated.includes("[TRUNCATED:"), "truncateGlossary: truncated content has the header note");
+assert.ok(!truncated.includes("| Term0 |"), "truncateGlossary: the oldest rows are removed");
+assert.ok(truncated.includes("| Term1199 |"), "truncateGlossary: the newest rows are kept");
+assert.ok(truncated.includes("| Source | Rendering | Notes |"), "truncateGlossary: the surviving tables keep their header row");
+assert.ok(truncated.includes("## Terms & Concepts"), "truncateGlossary: a surviving section keeps its heading");
+// Exactly the newest window survives.
+const keptRows = (truncated.match(/^\| Term\d+ \|/gm) || []).length;
+assert.strictEqual(keptRows, 200, "truncateGlossary: keeps GLOSSARY_TRUNCATION_MAX_ENTRIES (200) rows");
+// A section truncated away entirely loses its heading (no empty section shown).
+assert.ok(!truncated.includes("## Characters"), "truncateGlossary: a fully truncated section loses its heading");
+// Under the entry cap but over the byte threshold: unchanged (nothing to drop).
+const manyColumns = "## Characters\n| Source | Rendering | Notes |\n|---|---|---|\n" + tableRows.slice(0, 150).join("\n") + "\n" + "x".repeat(70 * 1024);
+assert.strictEqual(truncateGlossary(manyColumns), manyColumns, "truncateGlossary: ≤ 200 rows → unchanged even when oversized");
 
 // ─── buildPerTermResearchPrompt ──────────────────────────────────────────────
 const perTermPrompt = buildPerTermResearchPrompt(glossaryCtx, { term: "ソラ", type: "character", query: "ソラ" }, 0);

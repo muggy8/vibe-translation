@@ -64,6 +64,7 @@ const {
   saveTranslationState,
   roleEndpoint,
   loadVolumeReferences,
+  chapterTerminology,
   runWithConcurrency,
   stageConcurrency,
   judgeTemperature,
@@ -161,7 +162,7 @@ async function runAuditBatch({ volume, volumeDir, bundle, refs, systemPrompt, te
       SOURCE_TEXT: sourceText,
       DRAFT_TEXT: draft,
       POLISHED_TEXT: polished,
-      GLOSSARY: glossaryBlock(refs.terms),
+      GLOSSARY: glossaryBlock(chapterTerminology(refs, sourceText).terms),
     });
     const vResult = await harness.runOneShot({
       systemPrompt,
@@ -209,9 +210,18 @@ async function runRePolish({ volume, volumeDir, bundle, refs, systemPrompt, temp
   await runWithConcurrency(failed, polishConcurrency, async ({ id, findings, draftHash }) => {
     const { draftFile, polishedFile } = chapterArtifactNames(id);
     const draft = await fs.readFile(path.join(volumeDir, draftFile), "utf8");
+    // Chapter-scoped terminology: the polisher sees no source text, so the
+    // selection is anchored on the chapter's own source file.
+    const seg = bundle.segments.find((s) => s.id === id);
+    let chapterSource = "";
+    try {
+      chapterSource = await fs.readFile(path.join(volumeDir, seg.file), "utf8");
+    } catch {
+      chapterSource = "";
+    }
     const values = {
       TRANSLATION_TEXT: draft,
-      GLOSSARY: glossaryBlock(refs.terms),
+      GLOSSARY: glossaryBlock(chapterTerminology(refs, chapterSource).terms),
       STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
       VOICE_NOTES: refs.voiceNotes || "(none provided — run the character-voice task)",
       POLISH_FINDINGS: findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none)",
@@ -344,7 +354,7 @@ async function processPolishVolume(ctx) {
       // is the output of the polish call (unavailable in dry-run).
       const values = {
         TRANSLATION_TEXT: draft,
-        GLOSSARY: glossaryBlock(refs.terms),
+        GLOSSARY: glossaryBlock(chapterTerminology(refs, sourceText).terms),
         STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
         VOICE_NOTES: refs.voiceNotes || "(none provided — run the character-voice task)",
         POLISH_FINDINGS: findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none — first pass)",
@@ -364,7 +374,7 @@ async function processPolishVolume(ctx) {
           SOURCE_TEXT: sourceText,
           DRAFT_TEXT: draft,
           POLISHED_TEXT: "(dry-run: the polished output of the call above — not available)",
-          GLOSSARY: glossaryBlock(refs.terms),
+          GLOSSARY: glossaryBlock(chapterTerminology(refs, sourceText).terms),
         });
         entries.push(
           { title: "One-shot — polish drift-check system prompt", prompt: verifySystemPrompt },
@@ -398,7 +408,7 @@ async function processPolishVolume(ctx) {
       // findings. The polisher sees NO source text — surface cleanup.
       const values = {
         TRANSLATION_TEXT: draft,
-        GLOSSARY: glossaryBlock(refs.terms),
+        GLOSSARY: glossaryBlock(chapterTerminology(refs, sourceText).terms),
         STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
         VOICE_NOTES: refs.voiceNotes || "(none provided — run the character-voice task)",
         POLISH_FINDINGS: findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none — first pass)",
@@ -706,7 +716,8 @@ async function polish() {
     ? await fs.readFile(polishVerifyTemplateFile, "utf-8")
     : null;
 
-  const manifest = await getTranslationTarget({ force, dryRun });
+  // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
+  const manifest = await getTranslationTarget({ dryRun });
   const sorted = manifest.volumes.map((v) => v.folder);
   const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
   if (sorted.length === 0) {

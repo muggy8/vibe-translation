@@ -42,8 +42,8 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile } = require("./configs/shared");
-const { fileExists, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature } = require("./configs/shared");
+const { fileExists, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
@@ -55,6 +55,38 @@ const {
 
 const clientDir = __dirname;
 const seriesDir = process.env.SERIES_LOCATION;
+
+// Context-window protection for the cumulative guide: same threshold as the
+// glossary / voice reference (the guide is cumulative in exactly the same way).
+const STYLE_GUIDE_TRUNCATION_THRESHOLD = 64 * 1024;
+const STYLE_GUIDE_TRUNCATION_MAX_SECTIONS = 40;
+
+/**
+ * Truncate a style guide to its most recent `## ` sections when it exceeds the
+ * threshold. The guide is cumulative, so older policies are carried forward
+ * unchanged in the file itself — the newest sections are where a new construct
+ * would conflict.
+ *
+ * (The glossary and voice reference have had truncators since their inception;
+ * the style guide is cumulative in exactly the same way and had none.)
+ *
+ * @param {string} content - The full style-guide content.
+ * @returns {string} The (possibly truncated) content.
+ */
+function truncateStyleGuide(content) {
+  if (!content || content.length <= STYLE_GUIDE_TRUNCATION_THRESHOLD) return content;
+  const sections = content.match(/^##[ \t]+[\s\S]*?(?=^## |$)/gm);
+  if (!sections || sections.length <= STYLE_GUIDE_TRUNCATION_MAX_SECTIONS) return content;
+  const header = content.slice(0, content.indexOf(sections[0]));
+  const dropped = sections.length - STYLE_GUIDE_TRUNCATION_MAX_SECTIONS;
+  const keep = sections.slice(-STYLE_GUIDE_TRUNCATION_MAX_SECTIONS);
+  return [
+    header.trimEnd(),
+    `[TRUNCATED: this style guide has ${sections.length} sections. Showing the ${keep.length} most recent; ${dropped} older section(s) are omitted. ` +
+      `Earlier policies are carried forward unchanged in the file itself — reconcile NEW rules against what is shown here.]`,
+    keep.join("\n"),
+  ].join("\n\n");
+}
 
 const extractSystemPromptFile = path.join(clientDir, "system-prompts", "style-guide-extract.md");
 const extractUserPromptTemplateFile = path.join(clientDir, "user-prompts", "style-guide-extract.md");
@@ -286,7 +318,8 @@ async function styleGuide() {
       : null);
   console.log("style-guide task starting...");
   validateRequiredEnv({ dryRun });
-  const manifest = await getTranslationTarget({ force, dryRun });
+  // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
+  const manifest = await getTranslationTarget({ dryRun });
   // Series name + languages: .env override > the intake manifest's decision >
   // the default (see resolveRunSettings in configs/shared.js).
   const runSettings = resolveRunSettings(manifest);
@@ -531,7 +564,8 @@ async function runExtract(ctx, seg = null, si = null) {
     const messages = [{ file: path.join(ctx.volumeDir, seg.file), name: seg.file }];
     const stateFile = si === 0 ? ctx.previousStyleGuideFile : ctx.styleOutputFile;
     if (stateFile) {
-      messages.push({ file: stateFile, name: si === 0 ? "style-guide-previous.md" : "style-guide-current.md" });
+      // Inlined (not readFile) — so the cumulative guide is bounded here.
+      messages.push(await inlineReferenceMessage(stateFile, si === 0 ? "style-guide-previous.md" : "style-guide-current.md", { truncate: truncateStyleGuide }));
     }
     messages.push({ text: ctx.extractPrompt }, { text: chapterSegmentNote(ctx.bundle, seg, si) });
     return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `style-guide-extract-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
@@ -540,7 +574,7 @@ async function runExtract(ctx, seg = null, si = null) {
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running style-convention extraction...`);
   const messages = [{ file: sourceFile, name: path.basename(sourceFile) }, { text: ctx.extractPrompt }];
   if (ctx.previousStyleGuideFile) {
-    messages.push({ file: ctx.previousStyleGuideFile, name: "style-guide-previous.md" });
+    messages.push(await inlineReferenceMessage(ctx.previousStyleGuideFile, "style-guide-previous.md", { truncate: truncateStyleGuide }));
   }
   return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `style-guide-extract-${values.INSTALLMENT_NUMBER}` });
 }
@@ -581,6 +615,9 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
       assertRealToolCalls(recoveryResult, `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, recoveryResult?.text);
     }
+    // Hard stop: the recovery turn is the last chance — a still-missing,
+    // empty or stubbed guide is a failure, not an output.
+    await assertRealOutput(ctx.styleOutputFile, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`);
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved style guide to ${ctx.styleOutputFile}${seg ? ` (after chapter ${seg.id})` : ""}`);
   } finally { await author.close(); }
 }
@@ -610,6 +647,8 @@ async function runQaLoop(ctx) {
     assertRealToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
     acceptanceLogLine: () => "Calling the AI for the acceptance check...",
     acceptanceCheck: (iteration) => acceptanceCheck(ctx, iteration),
+    // Exceptional-score confirmation re-grades (see utils/qa-loop.js).
+    confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
     feedbackLogLine: () => "Calling the AI to apply the validation feedback (author agent)...",
     runFeedback: (iteration) => runFeedback(ctx),
     limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`,
@@ -644,6 +683,7 @@ async function runFeedback(ctx, seg = null, si = null) {
       assertRealToolCalls(recoveryResult, `the author agent (feedback recovery${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (feedback recovery${seg ? `, chapter ${seg.id}` : ""})`, recoveryResult?.text);
     }
+    await assertRealOutput(ctx.styleOutputFile, `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`);
   } finally { await author.close(); }
 }
 
@@ -658,9 +698,9 @@ async function runFeedback(ctx, seg = null, si = null) {
  * @returns {Promise<number | null>} The parsed score (0–100), or `null`
  *   when no valid score could be extracted (treated as a failed check).
  */
-async function acceptanceCheck(ctx, iteration) {
+async function acceptanceCheck(ctx, iteration, temperature) {
   const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt, styleOutputFile } = ctx;
-  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: styleOutputFile, name: "style-guide.md" }, { file: validationOutputFile, name: "style-guide-validation.md" }, { text: acceptancePrompt }], label: `style-guide-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
+  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: styleOutputFile, name: "style-guide.md" }, { file: validationOutputFile, name: "style-guide-validation.md" }, { text: acceptancePrompt }], temperature: temperature ?? judgeTemperature(), label: `style-guide-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
   const reply = parseAcceptanceReply(acceptanceOutput);
   if (reply === null) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response (got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`);
@@ -757,6 +797,7 @@ async function runChunkedQaLoop(ctx) {
           assertRealToolCalls(recoveryResult, `the validator agent (recovery, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
           await assertWroteWithFallback(partialFile, `the validator agent (recovery, chapter ${segment.id})`, recoveryResult?.text);
         }
+        await assertRealOutput(partialFile, `the validator agent (chapter ${segment.id})`);
       } finally { await validator.close(); }
     }
     // Findings merge: consolidate the partials into the standard report.
@@ -765,6 +806,7 @@ async function runChunkedQaLoop(ctx) {
       const mergeResult = await merger.sendTurn(buildStyleFindingsMergePrompt(ctx), { label: `style-guide-validate-merge-${values.INSTALLMENT_NUMBER}-${iteration}` });
       assertRealToolCalls(mergeResult, "the findings-merge agent", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(validationOutputFile, "the findings-merge agent", mergeResult?.text);
+      await assertRealOutput(validationOutputFile, "the findings-merge agent");
     } finally { await merger.close(); }
     // Acceptance (unchanged: tool-less one-shot over the standard report).
     const score = await acceptanceCheck(ctx, iteration);

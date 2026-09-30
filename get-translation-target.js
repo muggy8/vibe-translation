@@ -62,7 +62,8 @@
  *
  * Usage (module):
  *   const { getTranslationTarget } = require("./get-translation-target");
- *   const manifest = await getTranslationTarget({ force, dryRun });
+ *   const manifest = await getTranslationTarget({ dryRun });          // --force does NOT re-run intake
+ *   const manifest2 = await getTranslationTarget({ forceIntake: true });    // this does
  *
  * Usage (CLI):
  *   node get-translation-target.js          # reuse a valid manifest, else intake
@@ -90,6 +91,12 @@ const { sha256OfFile } = require("./utils/source");
 
 /** File name of the manifest (the plan of record), relative to SERIES_LOCATION. */
 const MANIFEST_FILE_NAME = "translation-target.json";
+// The intake agent writes its plan under this name; it becomes the plan of
+// record only after the code has validated it and promoted it. Writing straight
+// to MANIFEST_FILE_NAME meant an intake run deleted a perfectly good plan of
+// record up front — and if the agent then failed, the series was left with NO
+// plan at all.
+const DRAFT_MANIFEST_FILE_NAME = "translation-target.draft.json";
 
 /** File name of the human-readable plan written next to it. */
 const PLAN_FILE_NAME = "translation-plan.md";
@@ -816,7 +823,7 @@ async function buildDiscoveryTurnPrompt({ seriesDir, overrides, committed }) {
   const template = await fs.readFile(USER_PROMPT_FILE, "utf-8");
   return transformUserPrompt(template, {
     SERIES_LOCATION: seriesDir,
-    MANIFEST_FILE: MANIFEST_FILE_NAME,
+    MANIFEST_FILE: DRAFT_MANIFEST_FILE_NAME,
     PLAN_FILE: PLAN_FILE_NAME,
     SAMPLE_CHARS: String(discoverSampleChars()),
     FIXED_VALUES_BLOCK: fixedValuesBlock(overrides),
@@ -834,7 +841,7 @@ async function buildDiscoveryTurnPrompt({ seriesDir, overrides, committed }) {
  */
 function buildCorrectionTurnPrompt(problem) {
   return [
-    `Your plan failed validation. Fix it and write ${MANIFEST_FILE_NAME} again`,
+    `Your plan failed validation. Fix it and write ${DRAFT_MANIFEST_FILE_NAME} again`,
     "with writeFile — the whole file, same schema, nothing but the JSON object.",
     "",
     "Validation error:",
@@ -995,10 +1002,12 @@ function createIntakeApprove(fsGate, epubGate) {
  * @returns {Promise<Object>} The parsed manifest (validated against extraChecks).
  */
 async function runDiscoveryAgent(seriesDir, { overrides, committed, maxSteps, extraChecks }) {
-  const manifestPath = path.join(seriesDir, MANIFEST_FILE_NAME);
+  const manifestPath = path.join(seriesDir, DRAFT_MANIFEST_FILE_NAME);
   const planPath = path.join(seriesDir, PLAN_FILE_NAME);
   harness.logLine(`[get-translation-target] running the intake agent over ${seriesDir}`);
 
+  // Only the DRAFT is cleared — the plan of record stays on disk until a new
+  // one has validated, so a failed intake can never leave a series with no plan.
   for (const stale of [manifestPath, planPath]) {
     try {
       await fs.unlink(stale);
@@ -1181,8 +1190,8 @@ async function readUsableManifest(seriesDir, manifestPath, { why = "re-running i
  *   - dryRun: no AI call. The committed plan of record is previewed when one
  *     exists (so the preview always matches the real run); otherwise a
  *     deterministic layout is built (keeps --dry-run offline).
- *   - Otherwise an existing valid schema-2 manifest is reused unless force is
- *     set, a listed source file has gone, or its seriesLocation no longer
+ *   - Otherwise an existing valid schema-2 manifest is reused unless intake is
+ *     forced, a listed source file has gone, or its seriesLocation no longer
  *     matches SERIES_LOCATION. An INVALID cached manifest is never reused.
  *   - When the intake must run: snapshot the committed layout, run the intake
  *     agent (up to DISCOVER_MAX_ATTEMPTS fresh agents), validate its plan, keep
@@ -1190,10 +1199,19 @@ async function readUsableManifest(seriesDir, manifestPath, { why = "re-running i
  *     same book listed twice, and apply the confidence gate. Then stamp the
  *     authoritative fields and persist.
  *
- * @param {{force?: boolean, dryRun?: boolean}} [opts]
+ * `forceIntake` is the ONLY way to re-run the intake on a valid plan. The
+ * tasks' `--force` deliberately does NOT set it: --force means "redo THIS
+ * stage", and re-running the intake nine times in one pipeline run (once per
+ * task) burned model calls and risked re-deciding a plan that was already fine.
+ * Re-decide the plan on purpose with `npx gulp discover --force`.
+ *
+ * Intake still runs automatically when it must — no usable plan exists, the
+ * plan is invalid, or a listed source file has gone missing.
+ *
+ * @param {{forceIntake?: boolean, dryRun?: boolean}} [opts]
  * @returns {Promise<TranslationTargetManifest>} The validated manifest.
  */
-async function getTranslationTarget({ force = false, dryRun = false } = {}) {
+async function getTranslationTarget({ forceIntake = false, dryRun = false } = {}) {
   const seriesDir = process.env.SERIES_LOCATION;
   if (!seriesDir) {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
@@ -1252,9 +1270,9 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
     return manifest;
   }
 
-  // Reuse a cached manifest unless forced or stale — and only a manifest that
-  // still validates (see readUsableManifest).
-  if (!force) {
+  // Reuse a cached manifest unless intake is forced or the plan is stale — and
+  // only a manifest that still validates (see readUsableManifest).
+  if (!forceIntake) {
     const cached = await readUsableManifest(seriesDir, manifestPath);
     if (cached) {
       harness.logLine(`[get-translation-target] reusing the existing manifest (${manifestPath}).`);
@@ -1350,7 +1368,14 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
   manifest.targetLanguage = overrides.targetLanguage;
   manifest.generator = "get-translation-target.js";
   manifest.generatedAt = new Date().toISOString();
-  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+  // Publish atomically: write beside the plan of record, then rename over it.
+  // A crash mid-write used to leave a half-written manifest, which the next run
+  // rejected (readUsableManifest) and had to rebuild from scratch.
+  const tempPath = `${manifestPath}.writing`;
+  await fs.writeFile(tempPath, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+  await fs.rename(tempPath, manifestPath);
+  // The agent's draft has served its purpose; keep the series folder clean.
+  await fs.unlink(path.join(seriesDir, DRAFT_MANIFEST_FILE_NAME)).catch(() => {});
   harness.logLine(
     `[get-translation-target] wrote the manifest to ${manifestPath} ` +
       `(${manifest.volumes.length} volumes).`
@@ -1370,7 +1395,8 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
  */
 async function discoverSeries({ force = false, dryRun = false } = {}) {
   require("./configs/shared").validateRequiredEnv({ dryRun });
-  const manifest = await getTranslationTarget({ force, dryRun });
+  // The discover task is the ONE place --force means "re-run the intake".
+  const manifest = await getTranslationTarget({ forceIntake: force, dryRun });
   const dir = process.env.SERIES_LOCATION;
   if (dryRun) {
     // A dry run never writes the plan of record — say so, or the log reads as
@@ -1412,6 +1438,7 @@ module.exports = {
   emittedToolCallAsText,
   isVolumeArtifact,
   MANIFEST_FILE_NAME,
+  DRAFT_MANIFEST_FILE_NAME,
   PLAN_FILE_NAME,
   MANIFEST_SCHEMA,
   INTAKE_TOOLS_NOTE,
@@ -1425,7 +1452,7 @@ module.exports = {
 
 if (require.main === module) {
   const force = process.argv.includes("--force");
-  getTranslationTarget({ force })
+  getTranslationTarget({ forceIntake: force })
     .then((manifest) => {
       console.log(JSON.stringify(manifest, null, 2));
     })

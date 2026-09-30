@@ -66,6 +66,8 @@ const {
   saveTranslationState,
   roleEndpoint,
   loadVolumeReferences,
+  chapterTerminology,
+  glossaryBlockMaxChars,
   stripContinuityOverlap,
 } = require("./utils/translate");
 
@@ -158,7 +160,7 @@ function translateSampling() {
  *   volume: {folder: string, sourceFile: string, installmentNumber: string},
  *   volumeDir: string,
  *   bundle: {segments: Array<{id: string, file: string, title: string, chars: number}>},
- *   refs: {terminologyLines: string[], background: string, styleRules: string, terms: Array<{term: string, rendering: string}>, contextHash: string},
+ *   refs: {terms: Array<{term: string, rendering: string, section: string}>, background: string, styleRules: string, contextHash: string},
  *   template: string,
  *   endpoint: {baseUrl: string, apiKey?: string, model: string},
  *   sampling: {temperature: number, topP: number, topK: number, repetitionPenalty: number},
@@ -191,6 +193,15 @@ async function processTranslateVolume(ctx) {
     const chapterPath = path.join(volumeDir, seg.file);
     const sourceText = await fs.readFile(chapterPath, "utf8");
     const sourceHash = sha256(sourceText);
+    // Only the glossary terms this chapter actually contains go into the
+    // prompt — the cumulative glossary would otherwise grow with the series.
+    const chapterTerms = chapterTerminology(refs, sourceText);
+    if (chapterTerms.dropped > 0 && chapterTerms.present > 0) {
+      console.log(
+        `  Volume ${volume.installmentNumber} ${seg.id}: ${chapterTerms.present} glossary term(s) apply to this chapter ` +
+          `(${refs.terms.length} in the volume glossary; ${chapterTerms.dropped - chapterTerms.present} dropped by the ${glossaryBlockMaxChars()}-char budget).`
+      );
+    }
 
     const entry = state.chapters[seg.id] || {};
     const draftPath = path.join(volumeDir, draftFile);
@@ -219,7 +230,7 @@ async function processTranslateVolume(ctx) {
       // chapter, no AI calls in dry-run.
       const parts = splitChapter(sourceText, chunkChars);
       const tasks = buildTranslationTaskLines({
-        terminologyLines: refs.terminologyLines,
+        terminologyLines: chapterTerms.lines,
         background: refs.background,
         styleRules: refs.styleRules,
         continuityText: "(the previous chapter's ending would go here)",
@@ -258,7 +269,7 @@ async function processTranslateVolume(ctx) {
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
       const tasks = buildTranslationTaskLines({
-        terminologyLines: refs.terminologyLines,
+        terminologyLines: chapterTerms.lines,
         background: refs.background,
         styleRules: refs.styleRules,
         continuityText: continuity,
@@ -510,7 +521,8 @@ async function translate() {
 
   const template = await fs.readFile(translateTemplateFile, "utf-8");
 
-  const manifest = await getTranslationTarget({ force, dryRun });
+  // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
+  const manifest = await getTranslationTarget({ dryRun });
   // The target language the translation prompt is written for: .env override >
   // the intake manifest's decision > the default.
   const runSettings = resolveRunSettings(manifest);

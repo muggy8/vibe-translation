@@ -57,6 +57,7 @@ const {
   saveTranslationState,
   roleEndpoint,
   loadVolumeReferences,
+  chapterTerminology,
   stripContinuityOverlap,
   runWithConcurrency,
   stageConcurrency,
@@ -135,7 +136,7 @@ async function prevChapterContinuityTail(bundle, segId, volumeDir, chars) {
  *   volume: {folder: string, sourceFile: string, installmentNumber: string},
  *   volumeDir: string,
  *   bundle: {segments: Array<{id: string, file: string, title: string, chars: number}>},
- *   refs: {terminologyLines: string[], background: string, styleRules: string, terms: Array<{term: string, rendering: string}>, contextHash: string},
+ *   refs: {terms: Array<{term: string, rendering: string, section: string}>, background: string, styleRules: string, contextHash: string},
  *   template: string,
  *   endpoint: {baseUrl: string, apiKey?: string, model: string},
  *   sampling: {temperature: number, topP: number, topK: number, repetitionPenalty: number},
@@ -182,6 +183,8 @@ async function processRetranslateVolume(ctx) {
     const draft = await fs.readFile(draftPath, "utf8");
     const sourceHash = sha256(sourceText);
     const draftHash = sha256(draft);
+    // Only the glossary terms this chapter actually contains go into the prompt.
+    const chapterTerms = chapterTerminology(refs, sourceText);
     if (vEntry.sourceHash !== sourceHash || vEntry.draftHash !== draftHash) {
       console.log(
         `  Volume ${volume.installmentNumber} ${seg.id}: verification is stale for the current draft — ` +
@@ -232,7 +235,7 @@ async function processRetranslateVolume(ctx) {
       // per chapter, no AI calls in dry-run) — the later parts differ only
       // in the source part and the continuity tail.
       const tasks = buildTranslationTaskLines({
-        terminologyLines: refs.terminologyLines,
+        terminologyLines: chapterTerms.lines,
         background: refs.background,
         styleRules: refs.styleRules,
         continuityText: "(the previous part's ending would go here)",
@@ -265,7 +268,7 @@ async function processRetranslateVolume(ctx) {
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
       const tasks = buildTranslationTaskLines({
-        terminologyLines: refs.terminologyLines,
+        terminologyLines: chapterTerms.lines,
         background: refs.background,
         styleRules: refs.styleRules,
         continuityText: continuity || undefined,
@@ -380,7 +383,8 @@ async function retranslate() {
 
   const template = await fs.readFile(translateTemplateFile, "utf-8");
 
-  const manifest = await getTranslationTarget({ force, dryRun });
+  // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
+  const manifest = await getTranslationTarget({ dryRun });
   // The target language the correction prompt is written for: .env override >
   // the intake manifest's decision > the default.
   const runSettings = resolveRunSettings(manifest);

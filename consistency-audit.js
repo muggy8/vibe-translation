@@ -205,7 +205,8 @@ async function consistencyAudit() {
   const force = process.argv.includes("--force");
   console.log("consistency-audit task starting...");
   validateRequiredEnv({ dryRun });
-  const manifest = await getTranslationTarget({ force, dryRun });
+  // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
+  const manifest = await getTranslationTarget({ dryRun });
   // Series name + languages: .env override > the intake manifest's decision >
   // the default (see resolveRunSettings in configs/shared.js).
   const runSettings = resolveRunSettings(manifest);

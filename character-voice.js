@@ -33,8 +33,8 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature } = require("./configs/shared");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
@@ -293,7 +293,8 @@ async function characterVoice() {
       : null);
   console.log("character-voice task starting...");
   validateRequiredEnv({ dryRun });
-  const manifest = await getTranslationTarget({ force, dryRun });
+  // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
+  const manifest = await getTranslationTarget({ dryRun });
   // Series name + languages: .env override > the intake manifest's decision >
   // the default (see resolveRunSettings in configs/shared.js).
   const runSettings = resolveRunSettings(manifest);
@@ -540,7 +541,8 @@ async function runExtract(ctx, seg = null, si = null) {
     const messages = [{ file: path.join(ctx.volumeDir, seg.file), name: seg.file }];
     const stateFile = si === 0 ? ctx.previousVoiceRefFile : ctx.voiceOutputFile;
     if (stateFile) {
-      messages.push({ file: stateFile, name: si === 0 ? "character-voice-previous.md" : "character-voice-current.md" });
+      // Inlined (not readFile) — so the cumulative reference is bounded here.
+      messages.push(await inlineReferenceMessage(stateFile, si === 0 ? "character-voice-previous.md" : "character-voice-current.md", { truncate: truncateVoiceRef }));
     }
     messages.push({ text: ctx.extractPrompt }, { text: chapterSegmentNote(ctx.bundle, seg, si) });
     return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `character-voice-extract-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
@@ -549,7 +551,7 @@ async function runExtract(ctx, seg = null, si = null) {
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV extraction...`);
   const messages = [{ file: sourceFile, name: path.basename(sourceFile) }, { text: ctx.extractPrompt }];
   if (ctx.previousVoiceRefFile) {
-    messages.push({ file: ctx.previousVoiceRefFile, name: "character-voice-previous.md" });
+    messages.push(await inlineReferenceMessage(ctx.previousVoiceRefFile, "character-voice-previous.md", { truncate: truncateVoiceRef }));
   }
   return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `character-voice-extract-${values.INSTALLMENT_NUMBER}` });
 }
@@ -590,6 +592,9 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
       assertRealToolCalls(recoveryResult, `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, recoveryResult?.text);
     }
+    // Hard stop: the recovery turn is the last chance — a still-missing,
+    // empty or stubbed artifact is a failure, not an output.
+    await assertRealOutput([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`);
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved voice reference to ${ctx.voiceOutputFile} and POV map to ${ctx.povOutputFile}${seg ? ` (after chapter ${seg.id})` : ""}`);
   } finally { await author.close(); }
 }
@@ -618,6 +623,8 @@ async function runQaLoop(ctx) {
     assertRealToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
     acceptanceLogLine: () => "Calling the AI for the acceptance check...",
     acceptanceCheck: (iteration) => acceptanceCheck(ctx, iteration),
+    // Exceptional-score confirmation re-grades (see utils/qa-loop.js).
+    confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
     feedbackLogLine: () => "Calling the AI to apply the validation feedback (author agent)...",
     runFeedback: (iteration) => runFeedback(ctx),
     limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`,
@@ -646,6 +653,7 @@ async function runFeedback(ctx) {
       assertRealToolCalls(recoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback recovery)", recoveryResult?.text);
     }
+    await assertRealOutput([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)");
   } finally { await author.close(); }
 }
 
@@ -658,9 +666,9 @@ async function runFeedback(ctx) {
  * @returns {Promise<number | null>} The parsed score (0–100), or `null`
  *   when no valid score could be extracted (treated as a failed check).
  */
-async function acceptanceCheck(ctx, iteration) {
+async function acceptanceCheck(ctx, iteration, temperature) {
   const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt, voiceOutputFile, povOutputFile } = ctx;
-  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: voiceOutputFile, name: "character-voice.md" }, { file: povOutputFile, name: "pov-map.md" }, { file: validationOutputFile, name: "character-voice-validation.md" }, { text: acceptancePrompt }], label: `character-voice-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
+  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: voiceOutputFile, name: "character-voice.md" }, { file: povOutputFile, name: "pov-map.md" }, { file: validationOutputFile, name: "character-voice-validation.md" }, { text: acceptancePrompt }], temperature: temperature ?? judgeTemperature(), label: `character-voice-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
   const reply = parseAcceptanceReply(acceptanceOutput);
   if (reply === null) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response (got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`);
@@ -758,6 +766,7 @@ async function runChunkedQaLoop(ctx) {
           assertRealToolCalls(recoveryResult, `the validator agent (recovery, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
           await assertWroteWithFallback(partialFile, `the validator agent (recovery, chapter ${segment.id})`, recoveryResult?.text);
         }
+        await assertRealOutput(partialFile, `the validator agent (chapter ${segment.id})`);
       } finally { await validator.close(); }
     }
     // Findings merge: consolidate the partials into the standard report.
@@ -766,6 +775,7 @@ async function runChunkedQaLoop(ctx) {
       const mergeResult = await merger.sendTurn(buildVoiceFindingsMergePrompt(ctx), { label: `character-voice-validate-merge-${values.INSTALLMENT_NUMBER}-${iteration}` });
       assertRealToolCalls(mergeResult, "the findings-merge agent", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(validationOutputFile, "the findings-merge agent", mergeResult?.text);
+      await assertRealOutput(validationOutputFile, "the findings-merge agent");
     } finally { await merger.close(); }
     // Acceptance (unchanged: tool-less one-shot over the standard report).
     const score = await acceptanceCheck(ctx, iteration);
@@ -799,6 +809,7 @@ async function runChunkedQaLoop(ctx) {
           assertRealToolCalls(recoveryResult, `the author agent (feedback recovery, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
           await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (feedback recovery, chapter ${segment.id})`, recoveryResult?.text);
         }
+        await assertRealOutput([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (feedback pass, chapter ${segment.id})`);
       } finally { await feedbackAuthor.close(); }
     }
     if (iteration === maxValidationIterations) {
