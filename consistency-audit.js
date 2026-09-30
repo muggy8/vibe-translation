@@ -43,7 +43,7 @@ const path = require("path");
 require("./types");
 const harness = require("./harness");
 const { transformUserPrompt, writePromptDump } = require("./utils/prompt");
-const { AGENT_TOOLS_NOTE, validateRequiredEnv } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, validateRequiredEnv, resolveRunSettings } = require("./configs/shared");
 const { fileExists, assertWrote } = require("./utils/fs");
 const { getTranslationTarget } = require("./get-translation-target");
 const { sha256OfFile } = require("./utils/source");
@@ -206,15 +206,18 @@ async function consistencyAudit() {
   console.log("consistency-audit task starting...");
   validateRequiredEnv({ dryRun });
   const manifest = await getTranslationTarget({ force, dryRun });
+  // Series name + languages: .env override > the intake manifest's decision >
+  // the default (see resolveRunSettings in configs/shared.js).
+  const runSettings = resolveRunSettings(manifest);
   // Use the module-level seriesDir (SERIES_LOCATION) — NOT manifest.seriesLocation.
   // That field is provenance metadata (see the identical note in glossary.js /
   // character-voice.js): a Windows-generated "C:\..." path is not absolute on
   // Linux and would make every file op resolve relative to the CWD.
   const values = {
-    SOURCE_NAME: manifest.seriesName,
+    SOURCE_NAME: runSettings.seriesName,
     VOLUME_COUNT: String(manifest.volumes.length),
-    SOURCE_LANGUAGE: process.env.TRANSLATION_SOURCE_LANGUAGE || "Japanese",
-    TARGET_LANGUAGE: process.env.TRANSLATION_TARGET_LANGUAGE || "English",
+    SOURCE_LANGUAGE: runSettings.sourceLanguage,
+    TARGET_LANGUAGE: runSettings.targetLanguage,
   };
   const reportFile = path.join(seriesDir, REPORT_FILE);
 

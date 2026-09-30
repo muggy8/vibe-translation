@@ -18,6 +18,9 @@
  *   - createWikiTools()      Wikipedia research tools backed by research.js
  *   - createGatedFsTools()   filesystem tools whose writes are confined to
  *                            the volume folder (reads allowed, deletes denied)
+ *   - createEpubTools()      epub-aware tools (epubInfo / readEpubText /
+ *                            stageVolume) — the intake agent's senses, so it
+ *                            can open a book instead of guessing from its name
  *
  * Local LLM support: the provider uses a custom fetch with undici's
  * header/body timeouts disabled (local servers can prefill for minutes),
@@ -802,6 +805,251 @@ function createWikiTools() {
       },
     }),
   };
+}
+
+// ─── Epub tools (the intake agent's senses) ─────────────────────────────────
+
+/**
+ * Build the epub-aware tools the series-intake agent needs to actually look
+ * inside a book. The plain filesystem tools cannot do this: readFile rejects
+ * binary files and an epub is a zip, so without these the agent could only
+ * guess from file names.
+ *
+ * These tools are deliberately senses, not decisions — they unzip, read, and
+ * report. Which files are volumes, what order they go in, what language they
+ * are in, and where each volume's artifacts will live are the agent's calls.
+ *
+ *   - epubInfo(filePath)                 the book's catalog card + section list
+ *   - readEpubText(filePath, ...)        a bounded slice of one section's text
+ *   - stageVolume({sourceFile, folder, as})
+ *                                        create the volume folder and copy the
+ *                                        source into it (the agent's "put the
+ *                                        book where it belongs" action)
+ *
+ * Text comes back in bounded windows (sampleChars per call) on purpose: an
+ * agent sampling 17 books must not blow its own context window, and it only
+ * needs enough of each opening to tell the books apart.
+ *
+ * @param {{cwd?: string, allowedDirs: string[], sampleChars?: number}} cfg
+ * @returns {Promise<{tools: Object, approve: Function}>} The tool set plus its
+ *   approve gate (compose it with createGatedFsTools' gate using AND).
+ */
+async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars = 1500 }) {
+  if (!Array.isArray(allowedDirs) || allowedDirs.length === 0) {
+    throw new Error("createEpubTools requires a non-empty allowedDirs array.");
+  }
+  const fsp = require("fs").promises;
+  const crypto = require("crypto");
+  const { openEpub, readEpubSection, scriptCounts, isEpubPath } = require("./utils/source");
+  const allowed = allowedDirs.map((dir) => path.resolve(dir));
+  const inside = (p) => {
+    const resolved = path.resolve(cwd, p);
+    return allowed.some((dir) => resolved === dir || resolved.startsWith(dir + path.sep));
+  };
+  /** Raw (uncompressed) size of a zip entry, when the archive reports one. */
+  const entryBytes = (entry) =>
+    entry && entry._data && typeof entry._data.uncompressedSize === "number"
+      ? entry._data.uncompressedSize
+      : null;
+  const sha256Of = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
+
+  const tools = {
+    epubInfo: tool({
+      description:
+        "Open an .epub file and report what it is: its catalog card (title, " +
+        "author, language tag, publisher, identifier, and the series name and " +
+        "book number the reading app embedded), how many readable sections it " +
+        "has with their titles, its text size and its image count.",
+      inputSchema: z.object({
+        filePath: z
+          .string()
+          .describe("Path to the .epub file (relative to the working folder)."),
+      }),
+      execute: async ({ filePath }) => {
+        const abs = path.resolve(cwd, filePath);
+        try {
+          const opened = await openEpub(abs);
+          const st = await fsp.stat(abs);
+          const sections = opened.textItems.map((it) => ({
+            index: it.index,
+            title: opened.titles.get(it.zipPath) || it.href,
+            bytes: entryBytes(opened.zip.file(it.zipPath)),
+          }));
+          const textBytes = sections.reduce((n, s) => n + (s.bytes || 0), 0);
+          return JSON.stringify(
+            {
+              file: filePath,
+              sizeBytes: st.size,
+              entries: opened.entryCount,
+              images: opened.imageCount,
+              readableSections: sections.length,
+              textBytes,
+              metadata: opened.metadata,
+              sections,
+            },
+            null,
+            1
+          );
+        } catch (err) {
+          return `epubInfo error for ${filePath}: ${err.message}`;
+        }
+      },
+    }),
+
+    readEpubText: tool({
+      description:
+        `Read the plain text of one readable section of an .epub file as a ` +
+        `bounded slice (up to ${sampleChars} characters per call; use offset ` +
+        `to move further in). Use it to sample a book's opening: the writing ` +
+        `system, any volume/series markers inside the text, and whether the ` +
+        `file is prose at all. Returns the text plus a raw count of the ` +
+        `scripts seen (kana / hangul / Han / latin) as evidence.`,
+      inputSchema: z.object({
+        filePath: z.string().describe("Path to the .epub file."),
+        section: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe("1-based section index (from epubInfo). Default: 1."),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Character offset into the section. Default: 0."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(6000)
+          .optional()
+          .describe(`Characters to return (default ${sampleChars}, max 6000).`),
+      }),
+      execute: async ({ filePath, section, offset, limit }) => {
+        const abs = path.resolve(cwd, filePath);
+        try {
+          const opened = await openEpub(abs);
+          const slice = await readEpubSection(opened, section || 1, {
+            offset: offset || 0,
+            limit: Math.min(limit || sampleChars, 6000),
+          });
+          return JSON.stringify(
+            {
+              file: filePath,
+              section: slice.index,
+              title: slice.title,
+              totalChars: slice.totalChars,
+              from: slice.from,
+              scripts: scriptCounts(slice.text),
+              text: slice.text,
+            },
+            null,
+            1
+          );
+        } catch (err) {
+          return `readEpubText error for ${filePath}: ${err.message}`;
+        }
+      },
+    }),
+
+    stageVolume: tool({
+      description:
+        "Create a volume folder inside the series location and copy a source " +
+        "file into it — the action that lays the series out for the rest of " +
+        "the pipeline. The original file is never moved or modified. Re-staging " +
+        "the same content is a no-op; staging a DIFFERENT file over an existing " +
+        "one is refused.",
+      inputSchema: z.object({
+        sourceFile: z
+          .string()
+          .describe("Path of the source file to stage (relative to the working folder)."),
+        folder: z
+          .string()
+          .describe(
+            "The volume folder to create, relative to the working folder. A plain folder name — no absolute path, no '..'."
+          ),
+        as: z
+          .string()
+          .optional()
+          .describe(
+            "File name to store the source under inside the folder (default: its original name)."
+          ),
+      }),
+      execute: async ({ sourceFile, folder, as }) => {
+        const src = path.resolve(cwd, sourceFile);
+        const dir = path.resolve(cwd, folder);
+        const name = as || path.basename(src);
+        if (path.isAbsolute(folder)) {
+          return `stageVolume refused: folder "${folder}" must be relative to the series location.`;
+        }
+        if (folder.split(/[\\/]/).includes("..")) {
+          return `stageVolume refused: folder "${folder}" escapes the series location.`;
+        }
+        if (folder.includes("/") || folder.includes("\\")) {
+          return `stageVolume refused: folder "${folder}" must be a single folder name directly inside the series location.`;
+        }
+        if (!name || name.includes("/") || name.includes("\\") || name === "." || name === "..") {
+          return `stageVolume refused: "${as}" is not a plain file name.`;
+        }
+        if (!inside(dir) || !inside(path.join(dir, name))) {
+          return `stageVolume refused: "${folder}" is outside the allowed write area.`;
+        }
+        let st;
+        try {
+          st = await fsp.stat(src);
+        } catch {
+          return `stageVolume refused: source file not found: ${sourceFile}`;
+        }
+        if (!st.isFile()) return `stageVolume refused: "${sourceFile}" is not a file.`;
+        const target = path.join(dir, name);
+        const srcHash = sha256Of(await fsp.readFile(src));
+        let existing = null;
+        try {
+          existing = await fsp.readFile(target);
+        } catch {
+          /* nothing staged there yet */
+        }
+        if (existing) {
+          if (sha256Of(existing) === srcHash) {
+            return JSON.stringify({ staged: true, unchanged: true, file: target, sha256: srcHash });
+          }
+          return `stageVolume refused: ${target} already holds different content. Pick a different folder or file name.`;
+        }
+        await fsp.mkdir(dir, { recursive: true });
+        await fsp.copyFile(src, target);
+        return JSON.stringify({
+          staged: true,
+          unchanged: false,
+          file: target,
+          bytes: st.size,
+          sha256: srcHash,
+          isEpub: isEpubPath(target),
+        });
+      },
+    }),
+  };
+
+  const approve = (call) => {
+    // Looking inside a book is always allowed — the agent must be able to read
+    // before it decides. Staging writes, so it goes through the same
+    // confinement as writeFile, and deleteFile stays denied outright.
+    if (call.toolName === "deleteFile") return false;
+    if (call.toolName !== "stageVolume") return true;
+    const input = call.input || {};
+    if (typeof input.folder !== "string" || input.folder.trim() === "") return false;
+    if (typeof input.sourceFile !== "string" || input.sourceFile.trim() === "") return false;
+    // One folder level, no escaping, no absolute paths — the same rule the tool
+    // itself enforces and the manifest validator (sanitizeFolderName) requires.
+    const folder = input.folder.trim();
+    if (path.isAbsolute(folder) || folder.includes("/") || folder.includes("\\")) return false;
+    if (folder.split(/[\\/]/).includes("..")) return false;
+    const dir = path.resolve(cwd, folder);
+    const name = input.as || path.basename(String(input.sourceFile));
+    return inside(dir) && inside(path.join(dir, name));
+  };
+
+  return { tools, approve };
 }
 
 /**
@@ -1602,6 +1850,7 @@ module.exports = {
   // Tool factories.
   createWikiTools,
   createGatedFsTools,
+  createEpubTools,
   // Lower-level pieces (used by workflows/CLI/tests).
   createChatModel,
   thinkingExtraBody,

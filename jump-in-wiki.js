@@ -59,12 +59,12 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const { writeVolumeHandoff } = require("./utils/handoff");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
-const { installmentNumberFromDir } = require("./utils/manifest");
+const { installmentNumberFromDir, filterVolumesByInstallment } = require("./utils/manifest");
 const {
   resolveSourceBundle,
   shouldProcessChunked,
@@ -536,6 +536,9 @@ async function jumpInWiki() {
   // get-translation-target.js). It yields, in reading order, each volume's
   // folder and its exact source file, so nothing below has to guess names.
   const manifest = await getTranslationTarget({ force, dryRun });
+  // Series name + languages: .env override > the intake manifest's decision >
+  // the default (see resolveRunSettings in configs/shared.js).
+  const runSettings = resolveRunSettings(manifest);
   const sortedFolderWithSourceMaterial = manifest.volumes.map((v) => v.folder);
   const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
 
@@ -551,17 +554,18 @@ async function jumpInWiki() {
     (process.argv.includes("--volume")
       ? process.argv[process.argv.indexOf("--volume") + 1]
       : null);
+  // "--volume NN" is resolved through the manifest's installment numbers, not by
+  // parsing folder names — the intake agent chooses the folder names.
   let volumes = sortedFolderWithSourceMaterial;
   if (volumeArg) {
-    const wanted = String(parseInt(volumeArg, 10)).padStart(2, "0");
-    volumes = sortedFolderWithSourceMaterial.filter((name) => {
-      const m = name.match(/\((\d+)\)\s*$/);
-      return m && m[1].padStart(2, "0") === wanted;
-    });
+    volumes = filterVolumesByInstallment(manifest, volumeArg);
     if (volumes.length === 0) {
-      throw new Error(`No volume folder matching --volume ${volumeArg}.`);
+      throw new Error(
+        `No volume matching --volume ${volumeArg} (manifest volumes: ` +
+          `${manifest.volumes.map((v) => `${v.installmentNumber} = ${v.folder}`).join(", ")}).`
+      );
     }
-    console.log(`--volume: processing only volume ${wanted}`);
+    console.log(`--volume: processing only ${volumes.join(", ")}`);
   }
 
   const systemPrompt = await fs.readFile(systemPromptFile, "utf-8");
@@ -604,8 +608,8 @@ async function jumpInWiki() {
 
     const values = {
       INSTALLMENT_NUMBER: volume.installmentNumber,
-      SOURCE_NAME: process.env.SERIES_NAME,
-      SOURCE_LANGUAGE: process.env.TRANSLATION_SOURCE_LANGUAGE || "Japanese",
+      SOURCE_NAME: runSettings.seriesName,
+      SOURCE_LANGUAGE: runSettings.sourceLanguage,
     };
 
     const userPrompt = transformUserPrompt(template, values);
@@ -778,13 +782,13 @@ async function jumpInWiki() {
       // Keep the deterministic handoff artifacts fresh (no AI call).
       await writeVolumeHandoff({
         seriesDir,
-        seriesName: process.env.SERIES_NAME,
+        seriesName: runSettings.seriesName,
         volume,
         volumeDir,
         bundle,
         installmentNumber: values.INSTALLMENT_NUMBER,
-        sourceLanguage: process.env.TRANSLATION_SOURCE_LANGUAGE || "Japanese",
-        targetLanguage: process.env.TRANSLATION_TARGET_LANGUAGE || "English",
+        sourceLanguage: runSettings.sourceLanguage,
+        targetLanguage: runSettings.targetLanguage,
       });
       continue;
     }
@@ -796,13 +800,13 @@ async function jumpInWiki() {
     // fail an already-accepted wiki).
     await writeVolumeHandoff({
       seriesDir,
-      seriesName: process.env.SERIES_NAME,
+      seriesName: runSettings.seriesName,
       volume,
       volumeDir,
       bundle,
       installmentNumber: values.INSTALLMENT_NUMBER,
-      sourceLanguage: process.env.TRANSLATION_SOURCE_LANGUAGE || "Japanese",
-      targetLanguage: process.env.TRANSLATION_TARGET_LANGUAGE || "English",
+      sourceLanguage: runSettings.sourceLanguage,
+      targetLanguage: runSettings.targetLanguage,
     });
 
     if (ctx.limitReached) {

@@ -25,6 +25,7 @@ Default: `<project root>/hooks/`. Override the directory with the
 
 | When | Files looked for |
 | --- | --- |
+| before / after `discover` (the series intake: step 0) | `pre-discover` / `post-discover` (or `.sh` / `.js`) |
 | before / after `glossary` | `pre-glossary` / `post-glossary` (or `.sh` / `.js`) |
 | before / after `character-voice` | `pre-character-voice` / `post-character-voice` (or `.sh` / `.js`) |
 | before / after `style-guide` | `pre-style-guide` / `post-style-guide` (or `.sh` / `.js`) |

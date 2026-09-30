@@ -42,6 +42,7 @@ function cleanup() {
 assert.deepStrictEqual(
   TASKS,
   [
+    "discover",
     "glossary",
     "character-voice",
     "style-guide",

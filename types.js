@@ -13,25 +13,40 @@
 
 /**
  * @typedef {Object} TranslationTargetVolume
- * A single volume entry in the translation-target manifest.
- * @property {string} folder            — Volume folder name.
- * @property {string} sourceFile        — Path to source text file relative to series dir.
- * @property {string} installmentNumber — Zero-padded installment number (e.g. "01").
- * @property {string} [seriesName]      — Deprecated; series name recorded by agent.
- * @property {string} [installment]     — Deprecated; human-readable installment label.
+ * A single volume entry in the translation-target manifest (schema 2).
+ * @property {string} folder            — Volume folder name (chosen by the intake agent).
+ * @property {string} sourceFile        — Path to the staged source file, relative to the series folder.
+ * @property {string} installmentNumber — Zero-padded reading-order position (e.g. "01").
+ * @property {string} [title]           — This volume's own title, as the book states it.
+ * @property {string} [notes]           — Anything the intake agent had to decide for this volume.
+ */
+
+/**
+ * @typedef {Object} TranslationTargetDiscovery
+ * The intake agent's own account of its decisions — the audit trail a human
+ * reads when a plan turns out wrong.
+ * @property {string}          [summary]    — What was found and how it was decided.
+ * @property {Object<string, number>} [confidence] — Per-decision confidence, 0 to 1.
+ * @property {string[]}        [evidence]   — Each decision and the evidence for it.
+ * @property {Array<{file: string, reason: string}>} [excluded] — Files judged not to be volumes.
  */
 
 /**
  * @typedef {Object} TranslationTargetManifest
- * The translation-target manifest produced by get-translation-target.js.
- * @property {string}                       seriesLocation   — The SERIES_LOCATION path.
- * @property {string}                       seriesName       — The series name.
- * @property {string}                       sourceLanguage   — Source language code.
- * @property {string}                       targetLanguage   — Target language code.
- * @property {string}                       generator        — Module that produced this manifest.
- * @property {string}                       generatedAt      — ISO timestamp of generation.
- * @property {TranslationTargetVolume[]}    volumes          — Array of volume entries.
+ * The translation-target manifest (schema 2) produced by get-translation-target.js:
+ * the plan of record every pipeline step reads.
+ * @property {number}                         schema           — Manifest schema version (2).
+ * @property {string}                         seriesLocation   — The SERIES_LOCATION path.
+ * @property {string}                         seriesName       — The series name, in its own language.
+ * @property {string}                         [seriesNameAlt]  — Romanized/ASCII form of the name.
+ * @property {string}                         sourceLanguage   — Source language name.
+ * @property {string}                         targetLanguage   — Target language name.
+ * @property {string}                         generator        — Module that produced this manifest.
+ * @property {string}                         generatedAt      — ISO timestamp of generation.
+ * @property {TranslationTargetDiscovery}     [discovery]      — The intake agent's decisions and evidence.
+ * @property {TranslationTargetVolume[]}      volumes          — Volume entries, in reading order.
  */
+
 
 // ─── Source bundles (utils/source.js) ───────────────────────────────────────
 
@@ -60,6 +75,41 @@
  * @property {string|null} sourceFingerprint — sha256 of the source file (set by
  *   resolveSourceBundle); the skip-checks compare it against the fingerprint
  *   persisted in the last run's rolling state (isSourceStale).
+ */
+
+// ─── Epub container (utils/source.js openEpub) ──────────────────────────────
+
+/**
+ * @typedef {Object} EpubMetadata
+ * The catalog card read from an epub's OPF.
+ * @property {string}   title        — dc:title (first).
+ * @property {string[]} titles       — every dc:title.
+ * @property {string}   creator      — dc:creator (first).
+ * @property {string[]} creators     — every dc:creator.
+ * @property {string}   language     — dc:language (first) — a claim to check, not a fact.
+ * @property {string[]} languages    — every dc:language.
+ * @property {string}   publisher    — dc:publisher.
+ * @property {string}   identifier   — dc:identifier.
+ * @property {string}   date         — dc:date.
+ * @property {string}   series       — the series marker the reading app embedded (Calibre or an EPUB3 collection).
+ * @property {string}   seriesIndex  — the book number inside that series.
+ * @property {Array<{name: string, kinds: string[]}>} collections — every belongs-to-collection entry.
+ */
+
+/**
+ * @typedef {Object} OpenedEpub
+ * An open epub container: everything a reader needs to decide what the book is.
+ * @property {string} epubPath        — The file it was opened from.
+ * @property {Object} zip             — The JSZip archive.
+ * @property {string} opfPath         — The OPF's zip entry path.
+ * @property {string} opfDir          — The OPF's zip directory (hrefs resolve against it).
+ * @property {EpubMetadata} metadata  — The catalog card.
+ * @property {Array<{id: string, href: string, mediaType: string, properties: string}>} manifestItems
+ * @property {Array<{id: string, href: string, mediaType: string}>} spine — Items in reading order.
+ * @property {Array<{index: number, zipPath: string, href: string, mediaType: string}>} textItems — Readable sections, 1-based.
+ * @property {Map<string, string>} titles — zip path → section title (from the nav/NCX).
+ * @property {number} imageCount      — Images declared in the OPF manifest.
+ * @property {number} entryCount      — Entries in the archive.
  */
 
 // ─── Workflow volume contexts ────────────────────────────────────────────────
@@ -359,6 +409,9 @@
 module.exports = {
   TranslationTargetManifest: true,
   TranslationTargetVolume: true,
+  TranslationTargetDiscovery: true,
+  EpubMetadata: true,
+  OpenedEpub: true,
   SourceSegment: true,
   SourceBundle: true,
   ResearchConcurrency: true,

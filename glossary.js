@@ -55,7 +55,8 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
+const { filterVolumesByInstallment } = require("./utils/manifest");
+const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
@@ -568,6 +569,9 @@ async function glossary() {
   // get-translation-target.js). It yields, in reading order, each volume's
   // folder and its exact source file, so nothing below has to guess names.
   const manifest = await getTranslationTarget({ force, dryRun });
+  // Series name + languages: .env override > the intake manifest's decision >
+  // the default (one rule for every stage — see resolveRunSettings).
+  const runSettings = resolveRunSettings(manifest);
   const sorted = manifest.volumes.map((v) => v.folder);
   const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
 
@@ -583,17 +587,18 @@ async function glossary() {
     (process.argv.includes("--volume")
       ? process.argv[process.argv.indexOf("--volume") + 1]
       : null);
+  // "--volume NN" is resolved through the manifest's installment numbers, not by
+  // parsing folder names — the intake agent chooses the folder names.
   let volumes = sorted;
   if (volumeArg) {
-    const wanted = String(parseInt(volumeArg, 10)).padStart(2, "0");
-    volumes = sorted.filter((name) => {
-      const m = name.match(/\((\d+)\)\s*$/);
-      return m && m[1].padStart(2, "0") === wanted;
-    });
+    volumes = filterVolumesByInstallment(manifest, volumeArg);
     if (volumes.length === 0) {
-      throw new Error(`No volume folder matching --volume ${volumeArg}.`);
+      throw new Error(
+        `No volume matching --volume ${volumeArg} (manifest volumes: ` +
+          `${manifest.volumes.map((v) => `${v.installmentNumber} = ${v.folder}`).join(", ")}).`
+      );
     }
-    console.log(`--volume: processing only volume ${wanted}`);
+    console.log(`--volume: processing only ${volumes.join(", ")}`);
   }
 
   console.log(`Found ${sorted.length} volume folder(s). Processing in order...`);
@@ -633,9 +638,9 @@ async function glossary() {
 
     const values = {
       INSTALLMENT_NUMBER: volume.installmentNumber,
-      SOURCE_NAME: process.env.SERIES_NAME,
-      SOURCE_LANGUAGE: process.env.TRANSLATION_SOURCE_LANGUAGE || "Japanese",
-      TARGET_LANGUAGE: process.env.TRANSLATION_TARGET_LANGUAGE || "English",
+      SOURCE_NAME: runSettings.seriesName,
+      SOURCE_LANGUAGE: runSettings.sourceLanguage,
+      TARGET_LANGUAGE: runSettings.targetLanguage,
     };
 
     // The previous volume's glossary (the in-progress glossary). Absent for the

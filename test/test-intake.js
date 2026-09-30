@@ -1,0 +1,717 @@
+/**
+ * test/test-intake.js — pure tests for the series intake (no AI, no network).
+ *
+ * Covers the pieces the intake agent stands on:
+ *   - the shared epub reader (utils/source.js openEpub / readEpubSection /
+ *     scriptCounts) and the epub tools the intake agent uses (harness.js
+ *     createEpubTools: epubInfo / readEpubText / stageVolume + its approve gate)
+ *   - manifest schema-2 validation, folder-name sanitizing, installment-number
+ *     normalization, and the manifest-based "--volume NN" lookup
+ *   - the settings precedence rule (resolveRunSettings)
+ *   - the plan-of-record stability rule (readCommittedLayout / applyCommittedLayout)
+ *   - the deterministic (--dry-run) layout builder
+ *   - the full intake run end to end with a stubbed agent (getTranslationTarget):
+ *     validation + stamping + persisting the plan of record, .env overrides,
+ *     committed-folder protection, the confidence gate, the correction turn,
+ *     manifest reuse, and the loud failure when the agent produces no plan
+ *
+ * Run: node test/test-intake.js
+ */
+
+const assert = require("assert");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const JSZip = require("jszip");
+
+const {
+  openEpub,
+  readEpubSection,
+  scriptCounts,
+  extractEpubToBundle,
+} = require("../utils/source");
+const harness = require("../harness");
+const {
+  sanitizeFolderName,
+  normalizeInstallmentNumber,
+  filterVolumesByInstallment,
+} = require("../utils/manifest");
+const { resolveRunSettings } = require("../configs/shared");
+const {
+  buildDeterministicManifest,
+  readCommittedLayout,
+  applyCommittedLayout,
+  confidenceGate,
+  fixedValuesBlock,
+  committedLayoutBlock,
+  isVolumeArtifact,
+  MANIFEST_SCHEMA,
+} = require("../get-translation-target");
+
+// ─── temp-dir helpers ─────────────────────────────────────────────────────────
+
+const tmpDirs = [];
+function makeTmpDir(prefix = "ai-client-intake-") {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tmpDirs.push(d);
+  return d;
+}
+process.on("exit", () => {
+  for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
+});
+
+// ─── epub fixture builder ─────────────────────────────────────────────────────
+
+/**
+ * Build a minimal but real epub: container.xml + OPF (Dublin Core + a Calibre
+ * series marker + an EPUB3 collection) + an EPUB3 nav + XHTML sections.
+ *
+ * @param {{title: string, series?: string, seriesIndex?: string, language?: string, sections: Array<{file: string, title: string, text: string}>, images?: number}} spec
+ * @returns {Promise<Buffer>} The .epub bytes.
+ */
+async function buildEpub({ title, series, seriesIndex, language = "ja", sections, images = 0 }) {
+  const zip = new JSZip();
+  zip.file("mimetype", "application/epub+zip");
+  zip.file(
+    "META-INF/container.xml",
+    `<?xml version="1.0"?>` +
+      `<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">` +
+      `<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>` +
+      `</container>`
+  );
+  const metaExtras = [
+    series
+      ? `<meta property="belongs-to-collection" id="coll1">${series}</meta>` +
+        `<meta refines="#coll1" property="collection-type">set</meta>` +
+        `<meta refines="#coll1" property="group-type">series</meta>`
+      : "",
+    series ? `<meta name="calibre:series" content="${series}"/>` : "",
+    seriesIndex ? `<meta name="calibre:series_index" content="${seriesIndex}"/>` : "",
+  ].join("");
+  const imageItems = Array.from({ length: images }, (_, i) =>
+    `<item id="img${i}" href="images/i${i}.png" media-type="image/png"/>`
+  ).join("");
+  const manifestItems = sections
+    .map((s, i) => `<item id="s${i}" href="${s.file}" media-type="application/xhtml+xml"/>`)
+    .join("");
+  const itemrefs = sections.map((_, i) => `<itemref idref="s${i}"/>`).join("");
+  zip.file(
+    "OEBPS/content.opf",
+    `<?xml version="1.0" encoding="utf-8"?>` +
+      `<package version="3.0" unique-identifier="bookid">` +
+      `<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">` +
+      `<dc:identifier id="bookid">urn:uuid:book</dc:identifier>` +
+      `<dc:title>${title}</dc:title>` +
+      `<dc:creator>Some Author</dc:creator>` +
+      `<dc:language>${language}</dc:language>` +
+      `<dc:publisher>Some Publisher</dc:publisher>` +
+      metaExtras +
+      `</metadata>` +
+      `<manifest>` +
+      `<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>` +
+      manifestItems +
+      imageItems +
+      `</manifest>` +
+      `<spine>${itemrefs}</spine>` +
+      `</package>`
+  );
+  zip.file(
+    "OEBPS/nav.xhtml",
+    `<?xml version="1.0"?><html><head><title>nav</title></head><body>` +
+      `<nav><ol>` +
+      sections.map((s) => `<li><a href="${s.file}">${s.title}</a></li>`).join("") +
+      `</ol></nav></body></html>`
+  );
+  for (const s of sections) {
+    zip.file(
+      `OEBPS/${s.file}`,
+      `<?xml version="1.0"?><html><head><title>${s.title}</title></head><body>` +
+        `<h1>${s.title}</h1><p>${s.text}</p></body></html>`
+    );
+  }
+  for (let i = 0; i < images; i++) {
+    zip.file(`OEBPS/images/i${i}.png`, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  }
+  return zip.generateAsync({ type: "nodebuffer" });
+}
+
+/** Write a fixture epub into a folder and return its path. */
+async function writeEpub(dir, name, spec) {
+  const buf = await buildEpub(spec);
+  const file = path.join(dir, name);
+  await fs.promises.writeFile(file, buf);
+  return file;
+}
+
+const JP_TEXT = "その日、教室で出会った彼女はこう言った。今日からあなたと私は敵同士よ。";
+const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오늘부터 우리는 적이다.";
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+(async () => {
+  // ─── openEpub: the catalog card + the spine ────────────────────────────────
+  const dir = makeTmpDir();
+  const epubPath = await writeEpub(dir, "book01.epub", {
+    title: "俺を好きなのはお前だけかよ",
+    series: "俺を好きなのはお前だけかよ",
+    seriesIndex: "3",
+    language: "ja",
+    sections: [
+      { file: "prologue.xhtml", title: "序章", text: JP_TEXT },
+      { file: "ch1.xhtml", title: "第一章 出会い", text: JP_TEXT + JP_TEXT },
+    ],
+    images: 2,
+  });
+
+  const opened = await openEpub(epubPath);
+  assert.strictEqual(opened.metadata.title, "俺を好きなのはお前だけかよ", "dc:title");
+  assert.strictEqual(opened.metadata.creator, "Some Author", "dc:creator");
+  assert.strictEqual(opened.metadata.language, "ja", "dc:language");
+  assert.strictEqual(opened.metadata.publisher, "Some Publisher", "dc:publisher");
+  assert.strictEqual(opened.metadata.series, "俺を好きなのはお前だけかよ", "series marker");
+  assert.strictEqual(opened.metadata.seriesIndex, "3", "series index");
+  assert.deepStrictEqual(
+    opened.metadata.collections,
+    [{ name: "俺を好きなのはお前だけかよ", kinds: ["set", "series"] }],
+    "EPUB3 collection entry"
+  );
+  assert.strictEqual(opened.textItems.length, 2, "two readable sections");
+  assert.strictEqual(opened.textItems[0].index, 1, "sections are 1-based, in spine order");
+  assert.strictEqual(opened.textItems[1].zipPath, "OEBPS/ch1.xhtml", "hrefs resolve against the OPF dir");
+  assert.strictEqual(opened.titles.get("OEBPS/ch1.xhtml"), "第一章 出会い", "nav titles");
+  assert.strictEqual(opened.imageCount, 2, "images declared in the OPF manifest");
+  assert.ok(opened.entryCount > 4, "archive entry count");
+
+  // A zip that is not an epub, and a file that is not a zip: loud errors.
+  const notEpub = path.join(dir, "not-an-epub.epub");
+  await fs.promises.writeFile(notEpub, await new JSZip().generateAsync({ type: "nodebuffer" }));
+  await assert.rejects(() => openEpub(notEpub), /not a valid epub/i);
+  const notZip = path.join(dir, "broken.epub");
+  await fs.promises.writeFile(notZip, "this is not a zip");
+  await assert.rejects(() => openEpub(notZip), /.+/);
+
+  // ─── readEpubSection: bounded sampling ─────────────────────────────────────
+  const first = await readEpubSection(opened, 1, { limit: 20 });
+  assert.strictEqual(first.index, 1);
+  assert.strictEqual(first.title, "序章");
+  assert.strictEqual(first.text.length, 20, "the limit caps the slice");
+  assert.strictEqual(first.from, 0);
+  assert.ok(first.totalChars > 20, "the whole length is reported so the agent can page on");
+  const paged = await readEpubSection(opened, 1, { offset: 20, limit: 20 });
+  assert.strictEqual(paged.from, 20);
+  assert.notStrictEqual(paged.text, first.text, "offset moves the window");
+  const whole = await readEpubSection(opened, 1, { limit: 100000 });
+  assert.strictEqual(whole.text.length, whole.totalChars, "a limit past the end returns it all");
+  await assert.rejects(() => readEpubSection(opened, 9, {}), /does not exist/);
+
+  // ─── scriptCounts: raw evidence, not a decision ────────────────────────────
+  const jp = scriptCounts(JP_TEXT);
+  assert.ok(jp.kana > 10, "kana present");
+  assert.strictEqual(jp.hangul, 0, "no hangul in Japanese text");
+  assert.strictEqual(scriptCounts(KR_TEXT).hangul > 10, true, "hangul means Korean");
+  assert.strictEqual(scriptCounts("Hello world").latin, 10, "latin only");
+  assert.strictEqual(scriptCounts("").total, 0);
+
+  // ─── extractEpubToBundle still works on the shared openEpub ────────────────
+  const volumeDir = path.join(dir, "Series(03)");
+  await fs.promises.mkdir(volumeDir, { recursive: true });
+  const bundle = await extractEpubToBundle(epubPath, volumeDir, "book01");
+  assert.strictEqual(bundle.format, "epub");
+  assert.deepStrictEqual(
+    bundle.segments.map((s) => s.id),
+    ["ch0", "ch1"],
+    "reading order preserved (prologue then chapter)"
+  );
+  assert.strictEqual(bundle.segments[1].title, "第一章 出会い", "titles carried into the bundle");
+  const wholeMd = await fs.promises.readFile(path.join(volumeDir, bundle.wholeFile), "utf-8");
+  assert.ok(wholeMd.includes("第一章"), "the whole-volume file holds the chapters in order");
+
+  // ─── the epub tools the intake agent uses ──────────────────────────────────
+  const seriesDir = makeTmpDir("ai-client-series-");
+  const loose = await writeEpub(seriesDir, "loose01.epub", {
+    title: "Loose One",
+    series: "Loose",
+    seriesIndex: "1",
+    sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+  });
+  const gates = await harness.createEpubTools({
+    cwd: seriesDir,
+    allowedDirs: [seriesDir],
+    sampleChars: 40,
+  });
+
+  const info = JSON.parse(await gates.tools.epubInfo.execute({ filePath: "loose01.epub" }));
+  assert.strictEqual(info.metadata.title, "Loose One", "epubInfo reports the catalog card");
+  assert.strictEqual(info.readableSections, 1);
+  assert.strictEqual(info.sections[0].title, "One");
+  assert.strictEqual(typeof info.sizeBytes, "number");
+  assert.ok(info.textBytes > 0, "text size reported");
+  assert.ok(
+    String(await gates.tools.epubInfo.execute({ filePath: "nope.epub" })).includes("error"),
+    "a missing book is reported to the agent, not thrown at it"
+  );
+
+  const sample = JSON.parse(await gates.tools.readEpubText.execute({ filePath: "loose01.epub" }));
+  assert.strictEqual(sample.text.length, 40, "sampleChars caps the slice per call");
+  assert.ok(sample.scripts.kana > 0, "the script counts come back as evidence");
+  const smaller = JSON.parse(
+    await gates.tools.readEpubText.execute({ filePath: "loose01.epub", limit: 12 })
+  );
+  assert.strictEqual(smaller.text.length, 12, "an explicit limit is honoured");
+
+  // stageVolume: creates the folder, copies the source, never touches the original.
+  const staged = JSON.parse(
+    await gates.tools.stageVolume.execute({ sourceFile: "loose01.epub", folder: "Loose(01)" })
+  );
+  assert.strictEqual(staged.staged, true);
+  assert.strictEqual(staged.unchanged, false);
+  assert.strictEqual(staged.isEpub, true);
+  assert.strictEqual(staged.file, path.join(seriesDir, "Loose(01)", "loose01.epub"));
+  assert.ok(await fs.promises.stat(loose), "the original is still there");
+
+  // Re-staging the same content is a no-op (idempotent).
+  const again = JSON.parse(
+    await gates.tools.stageVolume.execute({ sourceFile: "loose01.epub", folder: "Loose(01)" })
+  );
+  assert.strictEqual(again.unchanged, true, "re-staging identical content changes nothing");
+  assert.strictEqual(again.sha256, staged.sha256);
+
+  // Staging a DIFFERENT book over an existing staged file is refused.
+  const other = await writeEpub(seriesDir, "other.epub", {
+    title: "Other",
+    sections: [{ file: "c1.xhtml", title: "One", text: KR_TEXT }],
+  });
+  const refused = await gates.tools.stageVolume.execute({
+    sourceFile: "other.epub",
+    folder: "Loose(01)",
+    as: "loose01.epub",
+  });
+  assert.ok(String(refused).includes("refused"), "a different file is not clobbered");
+  assert.ok(await fs.promises.stat(other), "the refused source is untouched");
+  const stillThere = JSON.parse(
+    await gates.tools.epubInfo.execute({ filePath: "Loose(01)/loose01.epub" })
+  );
+  assert.strictEqual(stillThere.metadata.title, "Loose One", "the staged book is unchanged");
+
+  // Path safety: no escaping the series folder, no nested paths, no odd names.
+  assert.ok(
+    (await gates.tools.stageVolume.execute({ sourceFile: "other.epub", folder: "../outside" })).includes("refused")
+  );
+  assert.ok(
+    (await gates.tools.stageVolume.execute({ sourceFile: "other.epub", folder: "a/b" })).includes("single folder name"),
+    "nested volume folders are refused (the manifest validator forbids them too)"
+  );
+  assert.ok(
+    (await gates.tools.stageVolume.execute({ sourceFile: "other.epub", folder: "/etc" })).includes("refused")
+  );
+  assert.ok(
+    (await gates.tools.stageVolume.execute({ sourceFile: "other.epub", folder: "X(01)", as: "../escape.txt" })).includes("refused")
+  );
+  assert.ok(
+    (await gates.tools.stageVolume.execute({ sourceFile: "missing.epub", folder: "X(02)" })).includes("not found")
+  );
+  assert.strictEqual(
+    await fs.promises.stat(path.join(seriesDir, "outside")).then(() => "exists", () => "absent"),
+    "absent",
+    "the refused escape created nothing"
+  );
+
+  // The approve gate: reading a book is always allowed; staging is confined to
+  // the allowed dirs; deletes are denied outright.
+  assert.strictEqual(gates.approve({ toolName: "epubInfo", input: { filePath: "/anywhere/x.epub" } }), true);
+  assert.strictEqual(gates.approve({ toolName: "readEpubText", input: { filePath: "loose01.epub" } }), true);
+  assert.strictEqual(gates.approve({ toolName: "stageVolume", input: { sourceFile: "loose01.epub", folder: "Loose(01)" } }), true);
+  assert.strictEqual(gates.approve({ toolName: "stageVolume", input: { sourceFile: "loose01.epub", folder: "../outside" } }), false);
+  assert.strictEqual(gates.approve({ toolName: "stageVolume", input: { sourceFile: "loose01.epub", folder: "" } }), false);
+  assert.strictEqual(gates.approve({ toolName: "deleteFile", input: { path: "loose01.epub" } }), false);
+
+  // ─── folder names the agent chose are checked, not rewritten ───────────────
+  assert.strictEqual(sanitizeFolderName("俺を好きなのはお前だけかよ(01)"), "俺を好きなのはお前だけかよ(01)", "source-language names are kept");
+  assert.strictEqual(sanitizeFolderName("  Oresuki  (01)  "), "Oresuki (01)", "trimmed, inner runs collapsed");
+  assert.strictEqual(sanitizeFolderName("Vol.3 - Side Story"), "Vol.3 - Side Story", "dashes and dots inside a name are fine");
+  for (const bad of ["", "   ", "../evil", "a/b", "C:\\evil", "/abs", "..", ".", ".hidden", "trailing.", "bad:name", 'quote"', "star*", "q?u", "pipe|", "<angle>"]) {
+    assert.throws(() => sanitizeFolderName(bad), /./, `rejected: ${JSON.stringify(bad)}`);
+  }
+
+  // ─── installment numbers ───────────────────────────────────────────────────
+  assert.strictEqual(normalizeInstallmentNumber("1"), "01");
+  assert.strictEqual(normalizeInstallmentNumber(3), "03");
+  assert.strictEqual(normalizeInstallmentNumber("007"), "07");
+  for (const bad of ["", "0", "abc", "-2", "1.5", null, undefined, {}]) {
+    assert.throws(() => normalizeInstallmentNumber(bad), /positive integer|greater than zero/);
+  }
+
+  // "--volume NN" is looked up in the manifest, not parsed out of folder names.
+  const manifestForFilter = {
+    volumes: [
+      { installmentNumber: "01", folder: "Oresuki(01)" },
+      { installmentNumber: "02", folder: "Second Book" },
+      { installmentNumber: "10", folder: "第十巻" },
+    ],
+  };
+  assert.deepStrictEqual(filterVolumesByInstallment(manifestForFilter, "2"), ["Second Book"], "no (NN) in the name is fine");
+  assert.deepStrictEqual(filterVolumesByInstallment(manifestForFilter, "02"), ["Second Book"]);
+  assert.deepStrictEqual(filterVolumesByInstallment(manifestForFilter, "10"), ["第十巻"]);
+  assert.deepStrictEqual(filterVolumesByInstallment(manifestForFilter, "Second Book"), ["Second Book"], "an exact folder name also matches");
+  assert.deepStrictEqual(filterVolumesByInstallment(manifestForFilter, "9"), [], "no match is an empty list, not a guess");
+
+  // ─── settings precedence: .env > manifest > default ────────────────────────
+  const savedEnv = {
+    SERIES_NAME: process.env.SERIES_NAME,
+    TRANSLATION_SOURCE_LANGUAGE: process.env.TRANSLATION_SOURCE_LANGUAGE,
+    TRANSLATION_TARGET_LANGUAGE: process.env.TRANSLATION_TARGET_LANGUAGE,
+  };
+  const restore = () => {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+  const intakeManifest = {
+    seriesName: "俺だけ",
+    seriesNameAlt: "Oresuki",
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+  };
+  try {
+    delete process.env.SERIES_NAME;
+    delete process.env.TRANSLATION_SOURCE_LANGUAGE;
+    delete process.env.TRANSLATION_TARGET_LANGUAGE;
+    assert.deepStrictEqual(
+      resolveRunSettings(intakeManifest),
+      { seriesName: "俺だけ", seriesNameAlt: "Oresuki", sourceLanguage: "Japanese", targetLanguage: "English" },
+      "nothing in .env: the intake agent's decisions are used"
+    );
+    process.env.TRANSLATION_SOURCE_LANGUAGE = "Korean";
+    assert.strictEqual(
+      resolveRunSettings(intakeManifest).sourceLanguage,
+      "Korean",
+      "an explicit .env value beats the manifest"
+    );
+    process.env.SERIES_NAME = "My Series";
+    assert.strictEqual(resolveRunSettings(intakeManifest).seriesName, "My Series", ".env override wins");
+    delete process.env.TRANSLATION_SOURCE_LANGUAGE;
+    delete process.env.SERIES_NAME;
+    assert.strictEqual(resolveRunSettings(null).sourceLanguage, "Japanese", "no manifest: the default");
+    assert.strictEqual(resolveRunSettings(null).targetLanguage, "English");
+    assert.strictEqual(resolveRunSettings({}).targetLanguage, "English", "a manifest without the field: the default");
+  } finally {
+    restore();
+  }
+
+  // ─── the plan of record is stable: committed folders keep their names ──────
+  const planDir = makeTmpDir("ai-client-plan-");
+  const committedDir = path.join(planDir, "Oresuki(02)");
+  await fs.promises.mkdir(committedDir, { recursive: true });
+  const committedBook = await writeEpub(committedDir, "oresuki2.epub", {
+    title: "Oresuki 2",
+    series: "Oresuki",
+    seriesIndex: "2",
+    sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+  });
+  await fs.promises.writeFile(path.join(committedDir, "glossary.md"), "# glossary\n");
+  // The same book loose at the series root (what a re-intake would plan from).
+  await writeEpub(planDir, "oresuki2-copy.epub", {
+    title: "Oresuki 2",
+    series: "Oresuki",
+    seriesIndex: "2",
+    sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+  });
+  const newBook = await writeEpub(planDir, "oresuki3.epub", {
+    title: "Oresuki 3",
+    series: "Oresuki",
+    seriesIndex: "3",
+    sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+  });
+
+  const committed = await readCommittedLayout(planDir);
+  const committedTwo = committed.find((c) => c.folder === "Oresuki(02)");
+  assert.ok(committedTwo, "the existing folder is seen");
+  assert.strictEqual(committedTwo.hasPipelineOutput, true, "glossary.md marks it as worked on");
+  assert.ok(committedTwo.sources.some((s) => s.file === "oresuki2.epub"), "its staged book is recorded");
+
+  const plan = {
+    schema: MANIFEST_SCHEMA,
+    seriesName: "Oresuki",
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+    volumes: [
+      { installmentNumber: "02", folder: "Oresuki Volume Two", sourceFile: "oresuki2-copy.epub" },
+      { installmentNumber: "03", folder: "Oresuki(03)", sourceFile: "oresuki3.epub" },
+    ],
+  };
+  const warnings = await applyCommittedLayout(planDir, plan, committed);
+  assert.strictEqual(warnings.length, 1, "renaming a finished folder is caught");
+  assert.strictEqual(plan.volumes[0].folder, "Oresuki(02)", "the committed name is kept");
+  assert.strictEqual(
+    plan.volumes[0].sourceFile,
+    path.join("Oresuki(02)", "oresuki2.epub"),
+    "the manifest points at the copy already there"
+  );
+  assert.ok(plan.volumes[0].notes.includes("Oresuki(02)"), "the reason is recorded in the notes");
+  assert.strictEqual(plan.volumes[1].folder, "Oresuki(03)", "a new volume keeps the planned name");
+  assert.ok(await fs.promises.stat(committedBook), "the finished folder's book was not touched");
+  assert.ok(await fs.promises.stat(newBook), "the new book was not touched either");
+
+  // A plan that already reuses the committed name needs no correction.
+  const goodPlan = {
+    schema: MANIFEST_SCHEMA,
+    seriesName: "Oresuki",
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+    volumes: [{ installmentNumber: "02", folder: "Oresuki(02)", sourceFile: "Oresuki(02)/oresuki2.epub" }],
+  };
+  assert.deepStrictEqual(await applyCommittedLayout(planDir, goodPlan, committed), [], "reusing a committed name is a no-op");
+
+  // ─── the confidence gate ───────────────────────────────────────────────────
+  process.env.DISCOVER_MIN_CONFIDENCE = "0.6";
+  assert.strictEqual(confidenceGate({ discovery: { confidence: { order: 0.9, seriesName: 0.8 } } }).ok, true);
+  const low = confidenceGate({ discovery: { confidence: { order: 0.3, seriesName: 0.9 } } });
+  assert.strictEqual(low.ok, false, "a guessed order stops the run");
+  assert.strictEqual(low.worstKey, "order");
+  assert.strictEqual(confidenceGate({}).ok, true, "no confidence reported: nothing to gate");
+  process.env.DISCOVER_MIN_CONFIDENCE = "0";
+  assert.strictEqual(confidenceGate({ discovery: { confidence: { order: 0.1 } } }).ok, true, "0 disables the gate");
+  delete process.env.DISCOVER_MIN_CONFIDENCE;
+
+  // ─── the deterministic (--dry-run) layout: a flat pile gets staged ─────────
+  const flatDir = makeTmpDir("ai-client-flat-");
+  await writeEpub(flatDir, "side-story.epub", {
+    title: "Side Story",
+    series: "Flat",
+    seriesIndex: "2",
+    sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+  });
+  await writeEpub(flatDir, "volume-one.epub", {
+    title: "Volume One",
+    series: "Flat",
+    seriesIndex: "1",
+    sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+  });
+  await fs.promises.writeFile(path.join(flatDir, "glossary.md"), "# not a book\n");
+  const flat = await buildDeterministicManifest(flatDir, {
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+    seriesName: "Flat",
+  });
+  assert.strictEqual(flat.schema, MANIFEST_SCHEMA);
+  assert.strictEqual(flat.volumes.length, 2, "only the two books became volumes");
+  assert.ok(!flat.volumes.some((v) => v.folder.includes("glossary")), "pipeline output is never a source");
+  assert.deepStrictEqual(flat.volumes.map((v) => v.installmentNumber), ["01", "02"], "natural order, numbered");
+  assert.ok(
+    await fs.promises.stat(path.join(flatDir, "side-story(01)", "side-story.epub")),
+    "the flat pile was staged into volume folders"
+  );
+  assert.ok(
+    await fs.promises.stat(path.join(flatDir, "volume-one.epub")),
+    "staging copies: the originals are untouched"
+  );
+  assert.strictEqual(flat.volumes[0].sourceFile, path.join("side-story(01)", "side-story.epub"));
+  assert.ok(isVolumeArtifact("translation-01.md") && !isVolumeArtifact("volume-one.epub"));
+
+  // ─── the prompt blocks the agent is given ──────────────────────────────────
+  const fixed = fixedValuesBlock({ targetLanguage: "English" });
+  assert.ok(fixed.includes("English") && fixed.includes("yours to decide"), "nothing fixed but the target");
+  const fixedAll = fixedValuesBlock({ seriesName: "S", sourceLanguage: "Japanese", targetLanguage: "English" });
+  assert.ok(fixedAll.includes("use exactly this: S"), "an override is stated as a command");
+  assert.ok(committedLayoutBlock([]).includes("no pipeline output"));
+  const block = committedLayoutBlock([
+    { folder: "Oresuki(02)", hasPipelineOutput: true, sources: [{ file: "oresuki2.epub", sha256: "x" }] },
+    { folder: "Draft(03)", hasPipelineOutput: false, sources: [{ file: "oresuki3.epub", sha256: "y" }] },
+  ]);
+  assert.ok(block.includes("Reuse their names") && block.includes("Oresuki(02)"), "committed folders are called out");
+  assert.ok(block.includes("Draft(03)"), "uncommitted folders are listed separately");
+
+  // ─── the full intake run, end to end with a stubbed agent ──────────────────
+  // The live path (getTranslationTarget without --dry-run) is exercised offline:
+  // the harness is monkey-patched (the same pattern as test-qa-orchestration.js)
+  // and the fake agent writes the manifest with the real file system, the way
+  // the real agent does with writeFile. No AI, no network.
+  const intake = require("../get-translation-target");
+  const realHarness = {
+    createAgentHandle: harness.createAgentHandle,
+    createGatedFsTools: harness.createGatedFsTools,
+    createEpubTools: harness.createEpubTools,
+    logLine: harness.logLine,
+  };
+  const envKeys = [
+    "SERIES_LOCATION",
+    "SERIES_NAME",
+    "SERIES_AUTO_DISCOVER",
+    "TRANSLATION_SOURCE_LANGUAGE",
+    "TRANSLATION_TARGET_LANGUAGE",
+    "DISCOVER_MIN_CONFIDENCE",
+    "DISCOVER_MAX_ATTEMPTS",
+  ];
+  const envBackup = {};
+  for (const key of envKeys) envBackup[key] = process.env[key];
+
+  const logs = [];
+  harness.logLine = (message) => {
+    logs.push(String(message));
+  };
+  harness.createGatedFsTools = async () => ({ tools: {}, approve: () => true });
+  harness.createEpubTools = async () => ({ tools: {}, approve: () => true });
+
+  /**
+   * Install a fake intake agent that writes the given plans (one entry per turn)
+   * to disk and reports a real tool call, like the real agent's writeFile turn.
+   * @param {Array<{manifest?: Object, plan?: string, text?: string}>} plans
+   * @returns {void}
+   */
+  function stubIntakeAgent(plans) {
+    let turn = 0;
+    harness.createAgentHandle = async ({ cwd }) => ({
+      sendTurn: async () => {
+        const plan = plans[Math.min(turn, plans.length - 1)];
+        turn += 1;
+        if (plan.manifest !== undefined) {
+          await fs.promises.writeFile(
+            path.join(cwd, intake.MANIFEST_FILE_NAME),
+            JSON.stringify(plan.manifest, null, 2)
+          );
+        }
+        if (plan.plan !== undefined) {
+          await fs.promises.writeFile(path.join(cwd, intake.PLAN_FILE_NAME), plan.plan);
+        }
+        return { text: plan.text || "", toolCalls: [{ toolName: "writeFile" }] };
+      },
+      close: async () => {},
+    });
+  }
+
+  /** A valid agent plan for the given volume list. */
+  const planFor = (volumes, confidence = { volumes: 0.9, order: 0.9, language: 0.9 }) => ({
+    manifest: {
+      schema: MANIFEST_SCHEMA,
+      seriesName: "Oresuki",
+      seriesNameAlt: "Oresuki",
+      sourceLanguage: "Japanese",
+      targetLanguage: "English",
+      discovery: {
+        summary: "Two volumes, in the order the series marker numbered them.",
+        confidence,
+        evidence: ["calibre:series matched on both books"],
+        excluded: [],
+      },
+      volumes,
+    },
+    plan: "# Translation plan\n\nTwo volumes.\n",
+  });
+  const twoVolumes = () => [
+    { installmentNumber: "1", folder: "Oresuki(01)", sourceFile: path.join("Oresuki(01)", "vol1.epub"), title: "Vol 1", notes: "" },
+    { installmentNumber: "2", folder: "Oresuki(02)", sourceFile: path.join("Oresuki(02)", "vol2.epub"), title: "Vol 2", notes: "" },
+  ];
+
+  /** Point the run at a temp series dir (1 attempt, so a failing case stays fast). */
+  function setSeriesEnv(dir, extra = {}) {
+    process.env.SERIES_LOCATION = dir;
+    process.env.DISCOVER_MAX_ATTEMPTS = "1";
+    delete process.env.SERIES_NAME;
+    delete process.env.TRANSLATION_SOURCE_LANGUAGE;
+    delete process.env.DISCOVER_MIN_CONFIDENCE;
+    for (const [key, value] of Object.entries(extra)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+
+  const liveDir = makeTmpDir("ai-client-intake-live-");
+  for (const [folder, index] of [["Oresuki(01)", "1"], ["Oresuki(02)", "2"]]) {
+    await fs.promises.mkdir(path.join(liveDir, folder), { recursive: true });
+    await writeEpub(path.join(liveDir, folder), `vol${index}.epub`, {
+      title: `Volume ${index}`,
+      series: "Oresuki",
+      seriesIndex: index,
+      sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+    });
+  }
+
+  // A. the happy path: the agent's plan is validated, stamped, and persisted.
+  setSeriesEnv(liveDir);
+  stubIntakeAgent([planFor(twoVolumes())]);
+  const live = await intake.getTranslationTarget({ force: true });
+  assert.strictEqual(live.seriesLocation, liveDir, "the live SERIES_LOCATION wins over the agent's copy");
+  assert.deepStrictEqual(live.volumes.map((v) => v.installmentNumber), ["01", "02"], "installment numbers normalized");
+  const persisted = intake.extractJsonObject(
+    await fs.promises.readFile(path.join(liveDir, intake.MANIFEST_FILE_NAME), "utf-8")
+  );
+  assert.strictEqual(persisted.seriesName, "Oresuki", "the agent's series name is the plan of record");
+  assert.strictEqual(persisted.generator, "get-translation-target.js");
+  assert.ok(await fs.promises.stat(path.join(liveDir, intake.PLAN_FILE_NAME)), "the human-readable plan was written");
+
+  // B. .env overrides win over the agent's decisions.
+  setSeriesEnv(liveDir, { SERIES_NAME: "Chosen Name", TRANSLATION_SOURCE_LANGUAGE: "Korean" });
+  stubIntakeAgent([planFor(twoVolumes())]);
+  const overridden = await intake.getTranslationTarget({ force: true });
+  assert.strictEqual(overridden.seriesName, "Chosen Name", "SERIES_NAME overrides the agent's name");
+  assert.strictEqual(overridden.sourceLanguage, "Korean", "TRANSLATION_SOURCE_LANGUAGE overrides the agent's guess");
+  assert.strictEqual(overridden.targetLanguage, "English", "the target language is a fixed setting");
+
+  // C. a folder that already holds pipeline output keeps its name.
+  const keepDir = makeTmpDir("ai-client-intake-committed-");
+  const sameBook = "the same book, staged twice";
+  for (const folder of ["Old(01)", "Pretty(01)"]) {
+    await fs.promises.mkdir(path.join(keepDir, folder), { recursive: true });
+    await fs.promises.writeFile(path.join(keepDir, folder, "book.epub"), sameBook);
+  }
+  await fs.promises.writeFile(path.join(keepDir, "Old(01)", "glossary.md"), "# glossary\n");
+  setSeriesEnv(keepDir);
+  stubIntakeAgent([
+    planFor([
+      { installmentNumber: "1", folder: "Pretty(01)", sourceFile: path.join("Pretty(01)", "book.epub"), title: "One", notes: "" },
+    ]),
+  ]);
+  const kept = await intake.getTranslationTarget({ force: true });
+  assert.strictEqual(kept.volumes[0].folder, "Old(01)", "the folder holding pipeline output keeps its name");
+  assert.strictEqual(kept.volumes[0].sourceFile, path.join("Old(01)", "book.epub"), "and the manifest points at the copy already there");
+  assert.ok(kept.volumes[0].notes.includes("folder kept"), "the reason is recorded in the manifest");
+  assert.ok(logs.some((l) => /keeping that folder name/.test(l)), "the disagreement is logged");
+
+
+  // D. the confidence gate stops an unsure plan.
+  setSeriesEnv(liveDir);
+  stubIntakeAgent([planFor(twoVolumes(), { volumes: 0.9, order: 0.2, language: 0.9 })]);
+  await assert.rejects(
+    () => intake.getTranslationTarget({ force: true }),
+    /DISCOVER_MIN_CONFIDENCE/,
+    "low confidence stops the run"
+  );
+
+  // E. an agent that writes nothing on its first turn is given the correction turn.
+  setSeriesEnv(liveDir);
+  stubIntakeAgent([{ text: "" }, planFor(twoVolumes())]);
+  const corrected = await intake.getTranslationTarget({ force: true });
+  assert.strictEqual(corrected.volumes.length, 2, "the correction turn saved the attempt");
+  assert.ok(logs.some((l) => /correction turn/.test(l)), "the correction turn is logged");
+
+  // F. a valid committed manifest is reused without running the agent again.
+  setSeriesEnv(liveDir);
+  harness.createAgentHandle = async () => {
+    throw new Error("the intake agent must not run when a valid manifest is cached");
+  };
+  const reused = await intake.getTranslationTarget();
+  assert.strictEqual(reused.volumes.length, 2, "the cached plan of record was reused");
+  assert.ok(logs.some((l) => /reusing the existing manifest/.test(l)), "the reuse is logged");
+
+  // G. an agent that never produces a plan fails the step loudly.
+  setSeriesEnv(liveDir);
+  stubIntakeAgent([{ text: "" }]);
+  await assert.rejects(
+    () => intake.getTranslationTarget({ force: true }),
+    /Series intake failed after 1 attempt/,
+    "a planless agent fails the step"
+  );
+
+  for (const key of envKeys) {
+    if (envBackup[key] === undefined) delete process.env[key];
+    else process.env[key] = envBackup[key];
+  }
+  Object.assign(harness, realHarness);
+
+
+  console.log("intake: all checks passed.");
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

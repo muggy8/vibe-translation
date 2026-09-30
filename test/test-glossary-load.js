@@ -246,20 +246,30 @@ assert.throws(() => extractJsonObject("no json object here"), /No JSON object/);
 assert.throws(() => extractJsonObject(""), /No text/);
 
 // ─── validateManifest ───────────────────────────────────────────────────────
+// Schema 2: the intake agent's plan of record. The series-level decisions are
+// required, folder names are sanitized, and installment numbers are normalized.
 const goodManifest = {
+  schema: 2,
   seriesLocation: "/x",
   seriesName: "s",
+  sourceLanguage: "Japanese",
+  targetLanguage: "English",
   volumes: [
     { installmentNumber: "01", folder: "s(1)", sourceFile: "s(1)/s(1).md" },
     { installmentNumber: "02", folder: "s(2)", sourceFile: "s(2)/s(2).md" },
   ],
 };
 assert.strictEqual(validateManifest(goodManifest), goodManifest);
-assert.throws(() => validateManifest({}), /no volumes/i);
-assert.throws(() => validateManifest({ volumes: [] }), /no volumes/i);
+assert.throws(() => validateManifest({ ...goodManifest, schema: 1 }), /schema/);
+assert.throws(() => validateManifest({ ...goodManifest, seriesName: "" }), /seriesName/);
+assert.throws(() => validateManifest({ ...goodManifest, sourceLanguage: undefined }), /sourceLanguage/);
+assert.throws(() => validateManifest({}), /schema/);
+assert.throws(() => validateManifest(null), /not a JSON object/i);
+assert.throws(() => validateManifest({ ...goodManifest, volumes: [] }), /no volumes/i);
 assert.throws(
   () =>
     validateManifest({
+      ...goodManifest,
       volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "" }],
     }),
   /sourceFile/
@@ -267,6 +277,7 @@ assert.throws(
 assert.throws(
   () =>
     validateManifest({
+      ...goodManifest,
       volumes: [
         { installmentNumber: "01", folder: "s(1)", sourceFile: "a" },
         { installmentNumber: "01", folder: "s(2)", sourceFile: "b" },
@@ -274,6 +285,73 @@ assert.throws(
     }),
   /duplicates installment/
 );
+assert.throws(
+  () =>
+    validateManifest({
+      ...goodManifest,
+      volumes: [
+        { installmentNumber: "01", folder: "s(1)", sourceFile: "a" },
+        { installmentNumber: "02", folder: "s(1)", sourceFile: "b" },
+      ],
+    }),
+  /duplicates folder/
+);
+// A folder name that would escape the series folder or break a file system.
+assert.throws(
+  () =>
+    validateManifest({
+      ...goodManifest,
+      volumes: [{ installmentNumber: "01", folder: "../evil", sourceFile: "a" }],
+    }),
+  /single folder name/
+);
+assert.throws(
+  () =>
+    validateManifest({
+      ...goodManifest,
+      volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "../secret.txt" }],
+    }),
+  /\.\./
+);
+// Installment numbers are normalized ("1" -> "01"), and a non-number fails.
+const normalized = validateManifest({
+  ...goodManifest,
+  volumes: [{ installmentNumber: "1", folder: "s(1)", sourceFile: "a" }],
+});
+assert.strictEqual(normalized.volumes[0].installmentNumber, "01");
+assert.throws(
+  () =>
+    validateManifest({
+      ...goodManifest,
+      volumes: [{ installmentNumber: "first", folder: "s(1)", sourceFile: "a" }],
+    }),
+  /positive integer/
+);
+// The discovery block is optional, but a malformed one is a validation failure.
+const withDiscovery = validateManifest({
+  ...goodManifest,
+  discovery: {
+    summary: "s",
+    confidence: { order: 0.9 },
+    evidence: ["e"],
+    excluded: [{ file: "art.epub", reason: "art book" }],
+  },
+});
+assert.strictEqual(withDiscovery.discovery.confidence.order, 0.9);
+assert.strictEqual(withDiscovery.volumes.length, 2);
+assert.throws(
+  () =>
+    validateManifest({
+      ...goodManifest,
+      discovery: { confidence: { order: 90 } },
+    }),
+  /0 to 1/
+);
+assert.throws(
+  () => validateManifest({ ...goodManifest, discovery: { excluded: [{ file: "x" }] } }),
+  /reason/
+);
+
 
 // ─── validatorMaxStepsFor ───────────────────────────────────────────────────
 // The cap must scale with the source size (a fixed 40 ran out on the 521KB
@@ -724,7 +802,16 @@ assert.doesNotThrow(() => validateRequiredEnv({ dryRun: true }), "dry-run does n
 assert.throws(() => validateRequiredEnv(), /AI_API_KEY/, "live run requires AI_API_KEY");
 
 delete process.env.SERIES_NAME;
-assert.throws(() => validateRequiredEnv({ dryRun: true }), /SERIES_NAME/, "SERIES_NAME is always required");
+assert.doesNotThrow(
+  () => validateRequiredEnv({ dryRun: true }),
+  "auto-discovery on: SERIES_NAME comes from the manifest, so it is not required"
+);
+process.env.SERIES_AUTO_DISCOVER = "false";
+assert.throws(
+  () => validateRequiredEnv({ dryRun: true }),
+  /SERIES_NAME/,
+  "SERIES_AUTO_DISCOVER=false makes SERIES_NAME required again"
+);
 
 delete process.env.SERIES_LOCATION;
 assert.throws(
@@ -732,6 +819,7 @@ assert.throws(
   /SERIES_LOCATION.*SERIES_NAME/,
   "the message aggregates every missing variable"
 );
+delete process.env.SERIES_AUTO_DISCOVER;
 
 // ─── isSourceStale / sourceFingerprint (configs/shared) ─────────────────────
 // Source-staleness detection: a persisted rolling state carries the source

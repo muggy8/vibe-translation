@@ -41,7 +41,8 @@ require("./types");
 const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv } = require("./configs/shared");
+const { filterVolumesByInstallment } = require("./utils/manifest");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings } = require("./configs/shared");
 const { fileExists, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
@@ -286,27 +287,26 @@ async function styleGuide() {
   console.log("style-guide task starting...");
   validateRequiredEnv({ dryRun });
   const manifest = await getTranslationTarget({ force, dryRun });
+  // Series name + languages: .env override > the intake manifest's decision >
+  // the default (see resolveRunSettings in configs/shared.js).
+  const runSettings = resolveRunSettings(manifest);
   // Use the module-level seriesDir (SERIES_LOCATION) — NOT manifest.seriesLocation.
   // That field is provenance metadata from the machine that generated the
   // manifest: after a Windows→Linux migration the cached "C:\..." path is not
   // absolute, and every file op would silently resolve relative to the CWD.
-  const sorted = manifest.volumes.map((v) => v.folder).sort((a, b) => {
-    return parseInt(a.match(/\((\d+)\)/)?.[1]||"999",10) - parseInt(b.match(/\((\d+)\)/)?.[1]||"999",10);
-  });
+  // The manifest's order IS the reading order the intake agent decided — it is
+  // used as-is, never re-sorted by parsing folder names.
+  const sorted = manifest.volumes.map((v) => v.folder);
   const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
-  // Match "--volume 01" against the installment number (same convention as
-  // glossary.js / jump-in-wiki.js); an exact folder name also works. A no-match
-  // fails loudly (a silent exit would masquerade as a successful no-op in an
-  // un-monitored run).
-  const volumes = volumeArg
-    ? sorted.filter((f) => {
-        if (f === volumeArg) return true;
-        const m = f.match(/\((\d+)\)\s*$/);
-        return m && m[1].padStart(2, "0") === String(parseInt(volumeArg, 10)).padStart(2, "0");
-      })
-    : sorted;
+  // "--volume 01" is resolved through the manifest's installment numbers (an
+  // exact folder name also works). A no-match fails loudly (a silent exit would
+  // masquerade as a successful no-op in an un-monitored run).
+  const volumes = volumeArg ? filterVolumesByInstallment(manifest, volumeArg) : sorted;
   if (volumes.length === 0) {
-    throw new Error(`No volume folder matching --volume ${volumeArg} (volume folders: ${sorted.join(", ")}).`);
+    throw new Error(
+      `No volume matching --volume ${volumeArg} (manifest volumes: ` +
+        `${manifest.volumes.map((v) => `${v.installmentNumber} = ${v.folder}`).join(", ")}).`
+    );
   }
   let regeneratedAny = false;
   const failedVolumes = [];
@@ -316,7 +316,7 @@ async function styleGuide() {
     // still resolve the correct manifest entry and previous volume.
     const i = sorted.indexOf(folderName);
     const volume = volumeByFolder.get(folderName);
-    const values = { INSTALLMENT_NUMBER: volume.installmentNumber, SOURCE_NAME: manifest.seriesName, SOURCE_LANGUAGE: process.env.TRANSLATION_SOURCE_LANGUAGE||"Japanese", TARGET_LANGUAGE: process.env.TRANSLATION_TARGET_LANGUAGE||"English" };
+    const values = { INSTALLMENT_NUMBER: volume.installmentNumber, SOURCE_NAME: runSettings.seriesName, SOURCE_LANGUAGE: runSettings.sourceLanguage, TARGET_LANGUAGE: runSettings.targetLanguage };
     const volumeDir = path.join(seriesDir, folderName);
     // Resolve the source into a bundle (utils/source.js): plain-text sources
     // pass through as-is (the default whole-installment path); .epub sources

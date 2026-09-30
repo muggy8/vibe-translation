@@ -419,6 +419,245 @@ async function readJsonOrNull(filePath) {
 }
 
 /**
+ * Open an epub container once and read what a reader needs to know about it
+ * before deciding anything: the catalog card (title, author, language tag,
+ * publisher, identifier, and the "series X, book #N" marker reading apps
+ * embed) plus the spine (the book's own declared reading order).
+ *
+ * This is the single place that knows what a valid epub is: it backs both
+ * extractEpubToBundle() (the pipeline's extractor) and the intake agent's
+ * epub tools (createEpubTools in harness.js), which let an agent open a book
+ * without unzipping it by hand.
+ *
+ * @param {string} epubPath - Absolute path to the .epub file.
+ * @returns {Promise<OpenedEpub>} The open container: zip handle, OPF location,
+ *   metadata, manifest items, spine, text sections, section titles, counts.
+ * @throws {Error} When the file is not a valid epub, has no OPF rootfile, or
+ *   its spine contains no items.
+ */
+async function openEpub(epubPath) {
+  const buffer = await fs.readFile(epubPath);
+  const zip = await JSZip.loadAsync(buffer);
+  const containerEntry = zip.file("META-INF/container.xml");
+  if (!containerEntry) {
+    throw new Error(`Not a valid epub (missing META-INF/container.xml): ${epubPath}`);
+  }
+  const containerXml = await containerEntry.async("string");
+  const opfRel = (containerXml.match(/<rootfile[^>]*full-path="([^"]+)"/i) || [])[1];
+  if (!opfRel) {
+    throw new Error(`Could not find the OPF rootfile in META-INF/container.xml of ${epubPath}`);
+  }
+  const opfPath = normalizeZipPath(opfRel);
+  const opfEntry = zip.file(opfPath);
+  if (!opfEntry) {
+    throw new Error(`OPF file "${opfPath}" not found inside ${epubPath}`);
+  }
+  const opfXml = await opfEntry.async("string");
+  // Parse the OPF as XML, not HTML: in HTML mode <meta> is a void element, so
+  // EPUB3's text-valued <meta property="belongs-to-collection">Name</meta>
+  // would lose its value (observed: the series marker came back empty).
+  const $opf = cheerio.load(opfXml, { xml: true });
+
+  // ── The catalog card ──────────────────────────────────────────────────────
+  // Dublin Core elements carry the book's own description; <meta> entries
+  // carry the app-specific extras (Calibre writes calibre:series /
+  // calibre:series_index; EPUB3 writes a belongs-to-collection entry whose
+  // group-type refine says "series"). Both shapes are read so the agent sees
+  // the series marker whichever tool produced the file.
+  const dc = {};
+  const metaEntries = [];
+  $opf("metadata")
+    .children()
+    .each((i, el) => {
+      if (!el || el.type !== "tag") return;
+      const name = (el.name || "").toLowerCase();
+      const attribs = el.attribs || {};
+      if (name === "meta") {
+        // EPUB3 writes the value as the element's text
+        // (<meta property="belongs-to-collection">Name</meta>); Calibre-style
+        // writers use a content attribute (<meta name="…" content="…"/>). Read
+        // either so both shapes are understood.
+        metaEntries.push({
+          id: attribs.id || "",
+          // "refines" points back at an id with a leading "#" (#coll1 -> coll1);
+          // normalize it so the two sides can be matched.
+          refines: (attribs.refines || "").replace(/^#/, ""),
+          property: (attribs.property || attribs.name || "").toLowerCase(),
+          scheme: attribs.scheme || "",
+          content: attribs.content || normalizeSpaces($opf(el).text()),
+        });
+        return;
+      }
+      const text = normalizeSpaces($opf(el).text());
+      if (!text) return;
+      (dc[name] = dc[name] || []).push(text);
+    });
+  const metaValue = (property) =>
+    (metaEntries.find((m) => m.property === property) || {}).content || "";
+  const collections = [];
+  for (const m of metaEntries) {
+    if (m.property !== "belongs-to-collection" || !m.content) continue;
+    const kinds = metaEntries
+      .filter((r) => r.refines && m.id && r.refines === m.id)
+      .filter((r) => r.property === "group-type" || r.property === "collection-type")
+      .map((r) => r.content.toLowerCase())
+      .filter(Boolean);
+    collections.push({ name: m.content, kinds });
+  }
+  const seriesCollection = collections.find((c) => c.kinds.includes("series")) || null;
+  const first = (list) => (list && list.length > 0 ? list[0] : "");
+  const metadata = {
+    title: first(dc["dc:title"]),
+    titles: dc["dc:title"] || [],
+    creator: first(dc["dc:creator"]),
+    creators: dc["dc:creator"] || [],
+    language: first(dc["dc:language"]),
+    languages: dc["dc:language"] || [],
+    publisher: first(dc["dc:publisher"]),
+    identifier: first(dc["dc:identifier"]),
+    date: first(dc["dc:date"]),
+    series: metaValue("calibre:series") || (seriesCollection ? seriesCollection.name : ""),
+    seriesIndex: metaValue("calibre:series_index"),
+    collections,
+  };
+
+  // ── The manifest + spine (the book's own reading order) ───────────────────
+  const manifestItems = [];
+  const manifestById = new Map();
+  $opf("manifest item").each((i, el) => {
+    const id = $opf(el).attr("id");
+    if (!id) return;
+    const item = {
+      id,
+      href: $opf(el).attr("href") || "",
+      mediaType: ($opf(el).attr("media-type") || "").toLowerCase(),
+      properties: $opf(el).attr("properties") || "",
+    };
+    manifestById.set(id, item);
+    manifestItems.push(item);
+  });
+  const spine = [];
+  $opf("spine itemref").each((i, el) => {
+    const idref = $opf(el).attr("idref");
+    if (idref && manifestById.has(idref)) spine.push(manifestById.get(idref));
+  });
+  if (spine.length === 0) {
+    throw new Error(`The spine of ${epubPath} contains no readable items.`);
+  }
+  const opfDir = path.posix.dirname(opfPath);
+
+  // The readable sections, in spine order, each with its resolved zip path.
+  const textItems = [];
+  for (const item of spine) {
+    const zipPath = normalizeZipPath(path.posix.join(opfDir, item.href));
+    const isText =
+      (item.mediaType || "").includes("html") || /\.(x?html?)$/i.test(item.href || "");
+    if (!zip.file(zipPath) || !isText) continue;
+    textItems.push({
+      index: textItems.length + 1,
+      zipPath,
+      href: item.href,
+      mediaType: item.mediaType,
+    });
+  }
+
+  return {
+    epubPath,
+    zip,
+    opfPath,
+    opfDir,
+    metadata,
+    manifestItems,
+    spine,
+    textItems,
+    titles: await loadNavTitles(zip, opfDir, manifestItems),
+    imageCount: manifestItems.filter((it) => (it.mediaType || "").startsWith("image/")).length,
+    entryCount: Object.keys(zip.files).length,
+  };
+}
+
+/**
+ * Read one readable section of an opened epub as plain text (no Markdown
+ * markup — this is for sampling a book's opening, not for producing the
+ * pipeline's normalized source files).
+ *
+ * @param {OpenedEpub} opened - The opened container from openEpub().
+ * @param {number} index - 1-based section index in spine order.
+ * @param {{offset?: number, limit?: number}} [opts] - Character window into
+ *   the section (default: from the start, 4000 chars).
+ * @returns {Promise<{index: number, title: string, zipPath: string, totalChars: number, from: number, text: string}>}
+ * @throws {Error} When the section index does not exist.
+ */
+async function readEpubSection(opened, index, { offset = 0, limit = 4000 } = {}) {
+  const item = opened.textItems[(index || 1) - 1];
+  if (!item) {
+    throw new Error(
+      `Section ${index} does not exist in ${opened.epubPath} ` +
+        `(${opened.textItems.length} readable section(s)).`
+    );
+  }
+  const html = await opened.zip.file(item.zipPath).async("string");
+  const text = htmlToPlainText(html);
+  const from = Math.max(0, Math.floor(offset || 0));
+  const take = Math.max(0, Math.floor(limit || 4000));
+  return {
+    index: item.index,
+    title: opened.titles.get(item.zipPath) || item.href,
+    zipPath: item.zipPath,
+    totalChars: text.length,
+    from,
+    text: text.slice(from, from + take),
+  };
+}
+
+/**
+ * Convert XHTML to plain text (paragraph breaks kept, no markup). Lighter
+ * than xhtmlToMarkdown(): no image references, no heading/list syntax — used
+ * when the text only needs to be looked at.
+ *
+ * @param {string} html - The XHTML document.
+ * @returns {string} The plain text.
+ */
+function htmlToPlainText(html) {
+  const $ = cheerio.load(typeof html === "string" ? html : "");
+  $("script, style, head, title").remove();
+  const root = $("body").length ? $("body") : $.root();
+  const out = [];
+  root.children().each((i, node) => {
+    if (!node) return;
+    const piece =
+      node.type === "text" ? normalizeSpaces(node.data) : normalizeSpaces($(node).text());
+    if (piece) out.push(piece);
+  });
+  return out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * Count the writing systems present in a text sample. Returned to the intake
+ * agent as raw evidence next to the sample it read — the agent still decides
+ * what language a book is in; this only saves it from having to eyeball a
+ * script it may not be confident about (kana means Japanese, hangul means
+ * Korean, Han characters alone mean Chinese).
+ *
+ * @param {string} text - The text sample.
+ * @returns {{kana: number, hangul: number, han: number, latin: number, cyrillic: number, total: number}}
+ */
+function scriptCounts(text) {
+  const s = String(text || "");
+  const count = (re) => (s.match(re) || []).length;
+  return {
+    kana: count(/[\u3040-\u30ff]/g),
+    hangul: count(/[\uac00-\ud7af\u1100-\u11ff]/g),
+    han: count(/[\u4e00-\u9fff]/g),
+    latin: count(/[A-Za-z]/g),
+    cyrillic: count(/[\u0400-\u04ff]/g),
+    total: s.length,
+  };
+}
+
+
+
+/**
  * Collect chapter titles from the epub's navigation documents (EPUB3 nav,
  * then NCX). Keys are zip entry paths.
  *
@@ -558,61 +797,20 @@ class ImageRegistry {
  * @throws {Error} When the file is not a valid epub or has no readable text.
  */
 async function extractEpubToBundle(epubPath, volumeDir, base) {
-  const buffer = await fs.readFile(epubPath);
-  const zip = await JSZip.loadAsync(buffer);
-  const containerEntry = zip.file("META-INF/container.xml");
-  if (!containerEntry) {
-    throw new Error(`Not a valid epub (missing META-INF/container.xml): ${epubPath}`);
-  }
-  const containerXml = await containerEntry.async("string");
-  const opfRel = (containerXml.match(/<rootfile[^>]*full-path="([^"]+)"/i) || [])[1];
-  if (!opfRel) {
-    throw new Error(`Could not find the OPF rootfile in META-INF/container.xml of ${epubPath}`);
-  }
-  const opfPath = normalizeZipPath(opfRel);
-  const opfEntry = zip.file(opfPath);
-  if (!opfEntry) {
-    throw new Error(`OPF file "${opfPath}" not found inside ${epubPath}`);
-  }
-  const opfXml = await opfEntry.async("string");
-  const $opf = cheerio.load(opfXml);
-  const manifestItems = [];
-  const manifestById = new Map();
-  $opf("manifest item").each((i, el) => {
-    const id = $opf(el).attr("id");
-    if (!id) return;
-    const item = {
-      id,
-      href: $opf(el).attr("href") || "",
-      mediaType: ($opf(el).attr("media-type") || "").toLowerCase(),
-      properties: $opf(el).attr("properties") || "",
-    };
-    manifestById.set(id, item);
-    manifestItems.push(item);
-  });
-  const spine = [];
-  $opf("spine itemref").each((i, el) => {
-    const idref = $opf(el).attr("idref");
-    if (idref && manifestById.has(idref)) spine.push(manifestById.get(idref));
-  });
-  if (spine.length === 0) {
-    throw new Error(`The spine of ${epubPath} contains no readable items.`);
-  }
-  const opfDir = path.posix.dirname(opfPath);
-  const navTitles = await loadNavTitles(zip, opfDir, manifestItems);
+  // One shared container read (openEpub) — the same helper the intake agent's
+  // epub tools use, so "what a valid epub is" lives in exactly one place.
+  const opened = await openEpub(epubPath);
+  const { zip, opfDir, manifestItems, textItems, titles: navTitles } = opened;
   const registry = new ImageRegistry(zip, volumeDir);
   const chapterImageRef = (chapterZipPath) => (src) =>
     registry.reference(normalizeZipPath(path.posix.join(path.posix.dirname(chapterZipPath), src)));
 
-  // Convert each spine item (in reading order).
+  // Convert each readable section (in spine/reading order — openEpub resolved
+  // every section's zip path and already dropped the non-text items).
   const chapters = [];
-  for (const item of spine) {
-    const zipPath = normalizeZipPath(path.posix.join(opfDir, item.href));
-    const entry = zip.file(zipPath);
-    const isText =
-      (item.mediaType || "").includes("html") || /\.(x?html?)$/i.test(item.href || "");
-    if (!entry || !isText) continue;
-    const html = await entry.async("string");
+  for (const item of textItems) {
+    const zipPath = item.zipPath;
+    const html = await zip.file(zipPath).async("string");
     const $ = cheerio.load(html);
     const title =
       navTitles.get(zipPath) ||
@@ -917,6 +1115,10 @@ module.exports = {
   xhtmlToMarkdown,
   isEpubPath,
   normalizeZipPath,
+  openEpub,
+  readEpubSection,
+  htmlToPlainText,
+  scriptCounts,
   extractEpubToBundle,
   resolveSourceBundle,
   sha256OfFile,

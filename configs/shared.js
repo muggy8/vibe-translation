@@ -208,14 +208,20 @@ const ON_QA_LIMIT = normalizePolicy(
  * hours in. `dryRun` skips the AI_API_KEY check because --dry-run makes no
  * AI calls.
  *
+ * SERIES_NAME is only required when the intake agent is not allowed to decide
+ * it (SERIES_AUTO_DISCOVER=false): with auto-discovery on, the series name comes
+ * from the manifest, which the intake step produces before any volume runs.
+ *
  * @param {{dryRun?: boolean}} [opts]
  * @param {boolean} [opts.dryRun] - True when running with --dry-run.
  * @throws {Error} Naming every missing required variable.
  */
 function validateRequiredEnv({ dryRun = false } = {}) {
   const missing = [];
+  const autoDiscover =
+    String(process.env.SERIES_AUTO_DISCOVER ?? "true").trim().toLowerCase() !== "false";
   if (!process.env.SERIES_LOCATION) missing.push("SERIES_LOCATION");
-  if (!process.env.SERIES_NAME) missing.push("SERIES_NAME");
+  if (!autoDiscover && !process.env.SERIES_NAME) missing.push("SERIES_NAME");
   if (!dryRun && !process.env.AI_API_KEY) missing.push("AI_API_KEY");
   if (missing.length > 0) {
     throw new Error(
@@ -224,6 +230,50 @@ function validateRequiredEnv({ dryRun = false } = {}) {
     );
   }
 }
+
+/** Fallback source language when neither .env nor the manifest says. */
+const DEFAULT_SOURCE_LANGUAGE = "Japanese";
+/** Fallback target language when neither .env nor the manifest says. */
+const DEFAULT_TARGET_LANGUAGE = "English";
+
+/**
+ * Resolve the settings every stage fills its prompts with, from the two places
+ * they can come from, in precedence order:
+ *
+ *   explicit .env value  >  the intake manifest's decision  >  the default
+ *
+ * .env stays the override it always was (set TRANSLATION_SOURCE_LANGUAGE and it
+ * wins, whatever the intake agent concluded); unset it and the manifest — what
+ * the intake agent actually read — is what the run uses. Every task module reads
+ * its languages and series name through this so there is exactly one rule.
+ *
+ * @param {TranslationTargetManifest|null} [manifest] - The manifest from getTranslationTarget().
+ * @returns {{seriesName: string|null, seriesNameAlt: string|null, sourceLanguage: string, targetLanguage: string}}
+ */
+function resolveRunSettings(manifest) {
+  const fromEnv = (key) => {
+    const value = process.env[key];
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  };
+  const fromManifest = (key) => {
+    const value = manifest && manifest[key];
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  };
+  const seriesName = fromEnv("SERIES_NAME") || fromManifest("seriesName");
+  return {
+    seriesName,
+    seriesNameAlt: fromManifest("seriesNameAlt") || seriesName,
+    sourceLanguage:
+      fromEnv("TRANSLATION_SOURCE_LANGUAGE") ||
+      fromManifest("sourceLanguage") ||
+      DEFAULT_SOURCE_LANGUAGE,
+    targetLanguage:
+      fromEnv("TRANSLATION_TARGET_LANGUAGE") ||
+      fromManifest("targetLanguage") ||
+      DEFAULT_TARGET_LANGUAGE,
+  };
+}
+
 
 /**
  * Compute the rolling average score from an array of numeric acceptance
@@ -392,6 +442,9 @@ module.exports = {
   ON_MISSING_PREVIOUS,
   ON_QA_LIMIT,
   validateRequiredEnv,
+  resolveRunSettings,
+  DEFAULT_SOURCE_LANGUAGE,
+  DEFAULT_TARGET_LANGUAGE,
   computeRollingAverage,
   meetsAcceptanceCriteria,
   isAcceptedState,

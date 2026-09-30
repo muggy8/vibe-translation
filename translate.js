@@ -48,7 +48,8 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { ON_VOLUME_ERROR, validateRequiredEnv } = require("./configs/shared");
+const { filterVolumesByInstallment } = require("./utils/manifest");
+const { ON_VOLUME_ERROR, validateRequiredEnv, resolveRunSettings } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { resolveSourceBundle } = require("./utils/source");
 const { writePromptDump } = require("./utils/prompt");
@@ -168,8 +169,7 @@ function translateSampling() {
  * @returns {Promise<{translated: number, skipped: number, qa: Array<{id: string, title: string, status: string, ok: boolean, cjk: number, lengthRatio: number, warnings: string[]}>}>}
  */
 async function processTranslateVolume(ctx) {
-  const { volume, volumeDir, bundle, refs, template, endpoint, sampling, thinkingMode, dryRun, force } = ctx;
-  const targetLanguage = process.env.TRANSLATION_TARGET_LANGUAGE || "English";
+  const { volume, volumeDir, bundle, refs, template, endpoint, sampling, thinkingMode, dryRun, force, targetLanguage } = ctx;
   const state = await loadTranslationState(path.join(volumeDir, STATE_FILE));
   const qaRows = [];
   let translated = 0;
@@ -511,6 +511,9 @@ async function translate() {
   const template = await fs.readFile(translateTemplateFile, "utf-8");
 
   const manifest = await getTranslationTarget({ force, dryRun });
+  // The target language the translation prompt is written for: .env override >
+  // the intake manifest's decision > the default.
+  const runSettings = resolveRunSettings(manifest);
   const sorted = manifest.volumes.map((v) => v.folder);
   const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
   if (sorted.length === 0) {
@@ -524,15 +527,16 @@ async function translate() {
       : null);
   let volumes = sorted;
   if (volumeArg) {
-    const wanted = String(parseInt(volumeArg, 10)).padStart(2, "0");
-    volumes = sorted.filter((name) => {
-      const m = name.match(/\((\d+)\)\s*$/);
-      return m && m[1].padStart(2, "0") === wanted;
-    });
+    // Resolved through the manifest's installment numbers, not by parsing folder
+    // names — the intake agent chooses the folder names.
+    volumes = filterVolumesByInstallment(manifest, volumeArg);
     if (volumes.length === 0) {
-      throw new Error(`No volume folder matching --volume ${volumeArg}.`);
+      throw new Error(
+        `No volume matching --volume ${volumeArg} (manifest volumes: ` +
+          `${manifest.volumes.map((v) => `${v.installmentNumber} = ${v.folder}`).join(", ")}).`
+      );
     }
-    console.log(`--volume: processing only volume ${wanted}`);
+    console.log(`--volume: processing only ${volumes.join(", ")}`);
   }
 
   console.log(
@@ -563,6 +567,7 @@ async function translate() {
         thinkingMode,
         dryRun,
         force,
+        targetLanguage: runSettings.targetLanguage,
       });
       totalTranslated += result.translated;
       totalSkipped += result.skipped;

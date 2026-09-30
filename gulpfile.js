@@ -41,10 +41,21 @@
  *                                     # whole-installment processing; the fallback
  *                                     # also triggers automatically when the whole
  *                                     # text exceeds SOURCE_CHUNK_THRESHOLD_CHARS)
- *   (default task)                     # all eight in order:
- *                                     # glossary -> character-voice -> style-guide ->
- *                                     # jump-in-wiki -> consistency-audit ->
- *                                     # translate -> translate-qa -> polish
+ *   npx gulp discover               # series intake only: explore SERIES_LOCATION,
+ *                                     decide the series name / source language /
+ *                                     volume order, lay out the volume folders,
+ *                                     and write translation-target.json +
+ *                                     translation-plan.md (the plan of record)
+ *   npx gulp <task> --chunked         # force the chapter-by-chapter fallback for
+ *                                     multi-chapter epub volumes (the default is
+ *                                     whole-installment processing; the fallback
+ *                                     also triggers automatically when the whole
+ *                                     text exceeds SOURCE_CHUNK_THRESHOLD_CHARS)
+ *   (default task)                     # all nine in order:
+ *                                     # discover -> glossary -> character-voice ->
+ *                                     # style-guide -> jump-in-wiki ->
+ *                                     # consistency-audit -> translate ->
+ *                                     # translate-qa -> polish
  *                                     # (translate-qa loops verify -> retranslate
  *                                     # until every chapter passes — see
  *                                     # translate-qa.js)
@@ -54,6 +65,7 @@
  */
 
 require("dotenv").config();
+const { discoverSeries } = require("./get-translation-target");
 const { jumpInWiki } = require("./jump-in-wiki");
 const { glossary } = require("./glossary");
 const { characterVoice } = require("./character-voice");
@@ -69,6 +81,22 @@ const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
 // Wrap each step so its optional per-machine hooks fire around it. The task
 // functions themselves are unchanged — the hook runner (utils/hooks.js) does
 // all the discovery/execution.
+
+/**
+ * The "discover" step (step 0): the series intake agent explores
+ * SERIES_LOCATION, decides the series name, the source language, which files
+ * are volumes and in what order, lays out the volume folders, and writes the
+ * plan of record (translation-target.json) plus translation-plan.md that every
+ * other step reads. Run it on its own to review a plan before an overnight run.
+ */
+async function discover() {
+  await discoverSeries({
+    force: process.argv.includes("--force"),
+    dryRun: process.argv.includes("--dry-run"),
+  });
+}
+
+const discoverTask = withHooks("discover", discover);
 const glossaryTask = withHooks("glossary", glossary);
 const characterVoiceTask = withHooks("character-voice", characterVoice);
 const styleGuideTask = withHooks("style-guide", styleGuide);
@@ -81,7 +109,9 @@ const translateQaTask = withHooks("translate-qa", translateQa);
 const polishTask = withHooks("polish", polish);
 
 /**
- * The eight pipeline steps in run order (step name + hooked task function).
+ * The pipeline steps in run order (step name + hooked task function).
+ * "discover" is step 0: it produces the plan of record every other step reads,
+ * so a plain `npx gulp` needs nothing but SERIES_LOCATION in .env.
  * The translation QA stage (translate-qa) loops verify-translate →
  * retranslate until every chapter passes verification, until a round
  * retranslates nothing (stalled), or until TRANSLATE_QA_MAX_ROUNDS is
@@ -91,6 +121,7 @@ const polishTask = withHooks("polish", polish);
  * @type {Array<{name: string, run: Function}>}
  */
 const PIPELINE_STEPS = [
+  { name: "discover", run: discoverTask },
   { name: "glossary", run: glossaryTask },
   { name: "character-voice", run: characterVoiceTask },
   { name: "style-guide", run: styleGuideTask },
@@ -147,6 +178,7 @@ async function runPipeline() {
   }
 }
 
+exports.discover = discoverTask;
 exports["jump-in-wiki"] = jumpInWikiTask;
 exports.glossary = glossaryTask;
 exports["character-voice"] = characterVoiceTask;

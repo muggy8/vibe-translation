@@ -58,10 +58,12 @@ const harness = require("../harness");
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /**
- * The pipeline steps (gulp task names).
+ * The pipeline steps (gulp task names). "discover" is step 0 — the series
+ * intake that writes the plan of record every other step reads.
  * @type {string[]}
  */
 const TASKS = [
+  "discover",
   "glossary",
   "character-voice",
   "style-guide",

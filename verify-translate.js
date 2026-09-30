@@ -37,6 +37,7 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
+const { filterVolumesByInstallment } = require("./utils/manifest");
 const { ON_VOLUME_ERROR, validateRequiredEnv } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { resolveSourceBundle } = require("./utils/source");
@@ -508,15 +509,16 @@ async function verifyTranslate() {
       : null);
   let volumes = sorted;
   if (volumeArg) {
-    const wanted = String(parseInt(volumeArg, 10)).padStart(2, "0");
-    volumes = sorted.filter((name) => {
-      const m = name.match(/\((\d+)\)\s*$/);
-      return m && m[1].padStart(2, "0") === wanted;
-    });
+    // Resolved through the manifest's installment numbers, not by parsing folder
+    // names — the intake agent chooses the folder names.
+    volumes = filterVolumesByInstallment(manifest, volumeArg);
     if (volumes.length === 0) {
-      throw new Error(`No volume folder matching --volume ${volumeArg}.`);
+      throw new Error(
+        `No volume matching --volume ${volumeArg} (manifest volumes: ` +
+          `${manifest.volumes.map((v) => `${v.installmentNumber} = ${v.folder}`).join(", ")}).`
+      );
     }
-    console.log(`--volume: processing only volume ${wanted}`);
+    console.log(`--volume: processing only ${volumes.join(", ")}`);
   }
 
   console.log(
