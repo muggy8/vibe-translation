@@ -11,7 +11,7 @@
  *     4. Save per-volume snapshots.
  *     5. Run the QA loop with score-based acceptance (the model scores each
  *        validation 0–100; the rolling average of recent scores must reach
- *        ACCEPTANCE_PASSING_SCORE, default 70 — see configs/shared.js).
+ *        PASSING_SCORE, default 70 — see configs/shared.js).
  *   After all volumes: the last volume's character-voice.md is copied to
  *   VOICE_OUTPUT_FILE (default <SERIES_LOCATION>/character-voice.md).
  *
@@ -33,7 +33,7 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
@@ -464,7 +464,7 @@ async function characterVoice() {
     console.log(volumeArg ? "\n--volume: skipping the series-root copy." : "\n--dry-run: skipping the series-root copy (dry runs make no file writes).");
   }
   else {
-    const finalVoiceFile = process.env.VOICE_OUTPUT_FILE || path.join(seriesDir, "character-voice.md");
+    const finalVoiceFile = seriesArtifactFile("character-voice.md", "VOICE_OUTPUT_FILE", seriesDir);
     let lastVoice = null;
     for (let i = sorted.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sorted[i], "character-voice.md");

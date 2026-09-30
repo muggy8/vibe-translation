@@ -12,7 +12,7 @@
  *        (shared wiki + volume wiki + POV map — refs.background) → a
  *        0–100 score with banded rubric + severity-banded findings
  *        (system-prompts/verify-translate.md, user-prompts/verify-translate.md).
- *     3. PASS when the score >= VERIFY_PASSING_SCORE (default 70). An
+ *     3. PASS when the score >= PASSING_SCORE (default 70). An
  *        unparseable score is a FAIL (fail-closed) — the retranslate task
  *        gets another shot at the chapter.
  *     4. Persist the sidecar entry + write the per-volume report
@@ -38,11 +38,11 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { ON_VOLUME_ERROR, validateRequiredEnv } = require("./configs/shared");
+const { ON_VOLUME_ERROR, PASSING_SCORE, validateRequiredEnv } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { resolveSourceBundle } = require("./utils/source");
 const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("./utils/prompt");
-const { sha256, roleEndpoint, loadVolumeReferences, runWithConcurrency, stageConcurrency } = require("./utils/translate");
+const { sha256, roleEndpoint, loadVolumeReferences, runWithConcurrency, stageConcurrency, judgeTemperature, stageThinking } = require("./utils/translate");
 const { chapterArtifactNames } = require("./translate");
 const { withHooks } = require("./utils/hooks");
 
@@ -62,12 +62,13 @@ const verifyEnabled = process.env.VERIFY_TRANSLATE_ENABLED !== "false";
 /** Chapter concurrency within a volume (opt-in; default 1 = serial — the
  *  local hardware runs one inference at a time). */
 const verifyConcurrency = stageConcurrency("VERIFY");
-/** Score (0–100) at or above which a chapter passes verification. */
-const passingScore = Math.min(100, Math.max(0, parseInt(process.env.VERIFY_PASSING_SCORE, 10) || 70));
-/** The verify endpoint's thinking dialect. */
-const verifyThinkingLevel = process.env.VERIFY_THINKING_LEVEL || "medium";
-const verifyThinking = process.env.VERIFY_THINKING !== "false";
-const verifyTemperature = parseFloat(process.env.VERIFY_TEMPERATURE ?? "0.2");
+/** Score (0–100) at or above which a chapter passes verification — the shared
+ *  PASSING_SCORE (the same threshold the acceptance checks use). */
+const passingScore = PASSING_SCORE;
+/** The verify endpoint's thinking dialect (AI_THINKING + STAGE_THINKING_LEVEL). */
+const verifyThinking = stageThinking("VERIFY");
+/** Grading temperature (JUDGE_TEMPERATURE). */
+const verifyTemperature = judgeTemperature();
 /** Findings are injected into the retranslate prompt — keep them bounded. */
 const FINDINGS_MAX_CHARS = 6000;
 
@@ -76,9 +77,8 @@ const FINDINGS_MAX_CHARS = 6000;
  *  shared-port local setups the pre-verify-audit hook decides which container
  *  answers. Configure it to a DIFFERENT model than the verifier, or the
  *  cross-check grades the work with the same model twice. */
-const auditThinkingLevel = process.env.AUDIT_THINKING_LEVEL || "medium";
-const auditThinking = process.env.AUDIT_THINKING !== "false";
-const auditTemperature = parseFloat(process.env.AUDIT_TEMPERATURE ?? "0.2");
+const auditThinking = stageThinking("AUDIT");
+const auditTemperature = judgeTemperature();
 /** (#5) Borderline tiebreak: a chapter whose verifier score lands within
  *  ±VERIFY_TIEBREAK_BAND of the passing score is re-scored by the audit
  *  endpoint and the two scores are AVERAGED (a batched cross-check pass).
@@ -204,8 +204,8 @@ async function runAuditTiebreak({ volume, volumeDir, bundle, refs, systemPrompt,
       messages: [{ text: prompt }],
       endpoint: auditEndpoint,
       temperature: Number.isFinite(auditTemperature) ? auditTemperature : 0.2,
-      thinking: auditThinking,
-      thinkingLevel: auditThinkingLevel,
+      thinking: auditThinking.thinking,
+      thinkingLevel: auditThinking.thinkingLevel,
       label: `verify-audit-v${volume.installmentNumber}-${seg.id}`,
     });
     const auditScore = parseAcceptanceScore(result);
@@ -259,7 +259,7 @@ async function processVerifyVolume(ctx) {
   let noDraft = 0;
 
   // Chapters are INDEPENDENT (each is verified against its own source +
-  // draft), so they can run in parallel when VERIFY_CONCURRENCY > 1. Rows are
+  // draft), so they can run in parallel when STAGE_CONCURRENCY > 1. Rows are
   // stored by index to keep the report in reading order.
   await runWithConcurrency(bundle.segments, verifyConcurrency, async (seg, idx) => {
     const { draftFile } = chapterArtifactNames(seg.id);
@@ -323,7 +323,7 @@ async function processVerifyVolume(ctx) {
           {
             title:
               `One-shot — verify ${seg.id} ` +
-              `(endpoint ${endpoint.model} @ ${endpoint.baseUrl}, thinking=${verifyThinking ? verifyThinkingLevel : "off"})`,
+              `(endpoint ${endpoint.model} @ ${endpoint.baseUrl}, thinking=${verifyThinking.thinking ? verifyThinking.thinkingLevel : "off"})`,
             prompt,
           },
         ]
@@ -340,8 +340,8 @@ async function processVerifyVolume(ctx) {
       messages: [{ text: prompt }],
       endpoint,
       temperature: Number.isFinite(verifyTemperature) ? verifyTemperature : 0.2,
-      thinking: verifyThinking,
-      thinkingLevel: verifyThinkingLevel,
+      thinking: verifyThinking.thinking,
+      thinkingLevel: verifyThinking.thinkingLevel,
       label: `verify-v${volume.installmentNumber}-${seg.id}`,
     });
 
@@ -524,7 +524,7 @@ async function verifyTranslate() {
   console.log(
     `[verify-translate] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl} ` +
       `(model from ${endpoint.modelSource}, base from ${endpoint.baseUrlSource}); ` +
-      `passing score ${passingScore}; thinking=${verifyThinking ? verifyThinkingLevel : "off"}; ` +
+      `passing score ${passingScore}; thinking=${verifyThinking.thinking ? verifyThinking.thinkingLevel : "off"}; ` +
       `concurrency=${verifyConcurrency}; ` +
       `tiebreak=${tiebreakEnabled ? `ON (audit endpoint ±${tiebreakBand}, averaged with the verify score)` : "off"}.`
   );

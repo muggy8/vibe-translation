@@ -162,16 +162,6 @@ function isVolumeArtifact(name) {
 
 // ─── .env knobs ─────────────────────────────────────────────────────────────
 
-/**
- * Whether the intake agent may decide the series name and the source language
- * (default true). With SERIES_AUTO_DISCOVER=false the old strict behavior
- * applies: SERIES_NAME must be in .env.
- * @returns {boolean}
- */
-function autoDiscoverEnabled() {
-  return String(process.env.SERIES_AUTO_DISCOVER ?? "true").trim().toLowerCase() !== "false";
-}
-
 /** How many text characters the intake agent may read per sample call. */
 function discoverSampleChars() {
   const n = parseInt(process.env.DISCOVER_SAMPLE_CHARS, 10);
@@ -685,8 +675,8 @@ async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLan
     generatedAt: new Date().toISOString(),
     generator: "get-translation-target.js (deterministic fallback)",
     seriesLocation: seriesDir,
-    seriesName: name,
-    seriesNameAlt: name,
+    seriesName: name || deriveSeriesName(volumes, seriesDir),
+    seriesNameAlt: name || deriveSeriesName(volumes, seriesDir),
     sourceLanguage,
     targetLanguage,
     discovery: {
@@ -697,6 +687,34 @@ async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLan
     },
     volumes,
   };
+}
+
+/**
+ * Work out a series name for the deterministic preview from what is on disk.
+ *
+ * --dry-run never calls the model, and SERIES_NAME is no longer something every
+ * .env carries (the intake agent normally decides it), so the preview names
+ * itself from the books it found: the name the volume titles share, falling
+ * back to the first title, then to the series folder's own name.
+ *
+ * @param {TranslationTargetVolume[]} volumes - The volumes the deterministic layout produced.
+ * @param {string} seriesDir - SERIES_LOCATION.
+ * @returns {string} A usable series name (never empty).
+ */
+function deriveSeriesName(volumes, seriesDir) {
+  const titles = volumes
+    .map((v) => String(v.title || v.folder || "").replace(/\s*\(\d+\)\s*$/, "").trim())
+    .filter(Boolean);
+  if (titles.length === 0) return path.basename(seriesDir);
+  if (titles.length === 1) return titles[0];
+  let prefix = titles[0];
+  for (const title of titles.slice(1)) {
+    let i = 0;
+    while (i < prefix.length && i < title.length && prefix[i] === title[i]) i += 1;
+    prefix = prefix.slice(0, i);
+  }
+  prefix = prefix.replace(/[\s\u2013\u2014:;,()\-]+$/, "").trim();
+  return prefix.length >= 3 ? prefix : titles[0];
 }
 
 // ─── The intake agent's prompts ─────────────────────────────────────────────
@@ -1180,14 +1198,6 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
   if (!seriesDir) {
     throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
   }
-  if (!autoDiscoverEnabled() && !process.env.SERIES_NAME) {
-    throw new Error(
-      `SERIES_NAME is not set and SERIES_AUTO_DISCOVER=false, so the intake ` +
-        `agent is not allowed to decide it. Set SERIES_NAME in .env, or remove ` +
-        `SERIES_AUTO_DISCOVER to let the intake agent work the series out.`
-    );
-  }
-
   let stat;
   try {
     stat = await fs.stat(seriesDir);
@@ -1225,14 +1235,6 @@ async function getTranslationTarget({ force = false, dryRun = false } = {}) {
       );
       logManifestSummary(committedPlan);
       return committedPlan;
-    }
-    if (!overrides.seriesName) {
-      throw new Error(
-        `--dry-run cannot preview ${seriesDir}: there is no committed ${MANIFEST_FILE_NAME} ` +
-          `and SERIES_NAME is not set, so nothing here has a name to build a preview from. ` +
-          `Run "npx gulp discover" first (the intake agent names the series and writes the ` +
-          `plan of record), or set SERIES_NAME in .env.`
-      );
     }
     const manifest = await buildDeterministicManifest(seriesDir, {
       sourceLanguage: overrides.sourceLanguage || "Japanese",

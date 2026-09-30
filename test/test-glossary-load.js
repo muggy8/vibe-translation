@@ -10,6 +10,7 @@ const { execFileSync } = require("child_process");
 // Pin the acceptance-criterion config so the criterion tests below are
 // deterministic regardless of the local .env (dotenv does not override
 // values that are already set in the environment).
+process.env.PASSING_SCORE = "70";
 process.env.ACCEPTANCE_PASSING_SCORE = "70";
 process.env.ACCEPTANCE_STRATEGY = "average";
 process.env.ACCEPTANCE_BEST_MIN_PASSES = "3";
@@ -159,6 +160,7 @@ function bestStrategyCheck(scores) {
     env: {
       ...process.env,
       ACCEPTANCE_STRATEGY: "best",
+      PASSING_SCORE: "70",
       ACCEPTANCE_PASSING_SCORE: "70",
       ACCEPTANCE_BEST_MIN_PASSES: "3",
       ACCEPTANCE_MIN_SAMPLES: "3",
@@ -212,6 +214,7 @@ function defaultCriteriaCheck(scores) {
     env: {
       ...process.env,
       ACCEPTANCE_STRATEGY: "average",
+      PASSING_SCORE: "70",
       ACCEPTANCE_PASSING_SCORE: "70",
       ACCEPTANCE_WINDOW_SIZE: "",
       ACCEPTANCE_MIN_SAMPLES: "",
@@ -831,22 +834,20 @@ assert.throws(() => validateRequiredEnv(), /AI_API_KEY/, "live run requires AI_A
 delete process.env.SERIES_NAME;
 assert.doesNotThrow(
   () => validateRequiredEnv({ dryRun: true }),
-  "auto-discovery on: SERIES_NAME comes from the manifest, so it is not required"
-);
-process.env.SERIES_AUTO_DISCOVER = "false";
-assert.throws(
-  () => validateRequiredEnv({ dryRun: true }),
-  /SERIES_NAME/,
-  "SERIES_AUTO_DISCOVER=false makes SERIES_NAME required again"
+  "SERIES_NAME is never required: the intake step decides it and the manifest carries it"
 );
 
 delete process.env.SERIES_LOCATION;
 assert.throws(
   () => validateRequiredEnv({ dryRun: true }),
-  /SERIES_LOCATION.*SERIES_NAME/,
+  /SERIES_LOCATION/,
+  "SERIES_LOCATION is always required"
+);
+assert.throws(
+  () => validateRequiredEnv(),
+  /SERIES_LOCATION.*AI_API_KEY/,
   "the message aggregates every missing variable"
 );
-delete process.env.SERIES_AUTO_DISCOVER;
 
 // ─── isSourceStale / sourceFingerprint (configs/shared) ─────────────────────
 // Source-staleness detection: a persisted rolling state carries the source

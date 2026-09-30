@@ -22,7 +22,7 @@
  *
  *   The loop stops when (checked in this order):
  *     - all-pass:    the verify batch reports zero FAIL chapters — the
- *                    validator is happy (every score >= VERIFY_PASSING_SCORE).
+ *                    validator is happy (every score >= PASSING_SCORE).
  *     - round-limit: TRANSLATE_QA_MAX_ROUNDS rounds ran; still-FAIL
  *                    chapters keep their latest draft (polish still runs on
  *                    them); re-run with --force for another attempt.

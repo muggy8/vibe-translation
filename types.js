@@ -343,7 +343,7 @@
  * @property {string} sourceHash — sha256 of the chapter source at check time.
  * @property {string} draftHash — sha256 of the draft the polished text was produced from.
  * @property {number|null} score — 0–100 (null = unparseable verdict = FAIL, fail-closed; or inspector disabled).
- * @property {boolean} pass — score !== null && score >= POLISH_VERIFY_PASSING_SCORE (true when the inspector is disabled and the deterministic guard passed).
+ * @property {boolean} pass — score !== null && score >= PASSING_SCORE (true when the inspector is disabled and the deterministic guard passed).
  * @property {string} findings — The inspector's findings text (the re-polish's input).
  * @property {string} verifiedAt — ISO timestamp.
  */
@@ -354,7 +354,7 @@
  * @property {string} sourceHash — sha256 of the chapter source at verification time.
  * @property {string} draftHash — sha256 of the draft that was verified.
  * @property {number|null} score — 0–100 (null = unparseable verdict = FAIL, fail-closed).
- * @property {boolean} pass — score !== null && score >= VERIFY_PASSING_SCORE.
+ * @property {boolean} pass — score !== null && score >= PASSING_SCORE.
  * @property {string} findings — The verifier's findings text (retranslate's input).
  * @property {string} verifiedAt — ISO timestamp.
  */

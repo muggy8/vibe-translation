@@ -25,7 +25,7 @@
  *        user-prompts/polish-verify.md) scores whether the polished text
  *        preserves the verified draft's meaning, using the source as ground
  *        truth → 0–100 (fail-closed: unparseable = FAIL).
- *        PASS >= POLISH_VERIFY_PASSING_SCORE (default 70).
+ *        PASS >= PASSING_SCORE (default 70).
  *     5. Steps 2–4 loop up to POLISH_QA_MAX_ROUNDS (default 3) attempts per
  *        chapter: a FAIL re-polishes with the findings injected as a
  *        numbered "fix these" task (the retranslate pattern). On
@@ -51,7 +51,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { ON_VOLUME_ERROR, validateRequiredEnv } = require("./configs/shared");
+const { ON_VOLUME_ERROR, PASSING_SCORE, validateRequiredEnv } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { resolveSourceBundle } = require("./utils/source");
 const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("./utils/prompt");
@@ -66,6 +66,9 @@ const {
   loadVolumeReferences,
   runWithConcurrency,
   stageConcurrency,
+  judgeTemperature,
+  stageThinking,
+  writerTemperature,
 } = require("./utils/translate");
 const { chapterArtifactNames, mergeVolumeTranslationFiles } = require("./translate");
 const { glossaryBlock, loadVerificationSidecar, findingsOf } = require("./verify-translate");
@@ -84,21 +87,16 @@ const polishVerifyTemplateFile = path.join(clientDir, "user-prompts", "polish-ve
 const POLISH_QA_REPORT = "polish-qa.md";
 const POLISH_VERIFICATION_FILE = "polish-verification.json";
 
-const polishThinkingLevel = process.env.EDIT_THINKING_LEVEL || "medium";
-const polishThinking = process.env.EDIT_THINKING !== "false";
-const polishTemperature = parseFloat(process.env.EDIT_TEMPERATURE ?? "0.6");
+const polishThinking = stageThinking("EDIT");
+const polishTemperature = writerTemperature("EDIT", 0.6);
 
 /** The source-aware drift inspector — default-ON (the semantic backstop for
  *  the source-free polish pass). POLISH_VERIFY_ENABLED=false gates the pass
  *  on the deterministic regression guard only. */
 const polishVerifyEnabled = process.env.POLISH_VERIFY_ENABLED !== "false";
-/** Score (0–100) at or above which a polished text passes the drift check. */
-const polishVerifyPassingScore = Math.min(
-  100,
-  Math.max(0, parseInt(process.env.POLISH_VERIFY_PASSING_SCORE, 10) || 70)
-);
-/** Drift-inspector sampling temperature (a judgment call — low, like verification). */
-const polishVerifyTemperature = parseFloat(process.env.POLISH_VERIFY_TEMPERATURE ?? "0.2");
+/** Score (0–100) at or above which a polished text passes the drift check —
+ *  the shared PASSING_SCORE. */
+const polishVerifyPassingScore = PASSING_SCORE;
 /** Max [polish + drift check] attempts per chapter (a FAIL re-polishes with
  *  the findings injected as correction tasks). */
 const polishMaxRounds = (() => {
@@ -119,9 +117,8 @@ const polishConcurrency = stageConcurrency("POLISH");
  *  cross-check grades the work with the same model twice. The final semantic
  *  check (drift + source) runs as a BATCHED pass, never interleaved per
  *  chapter. */
-const auditThinkingLevel = process.env.AUDIT_THINKING_LEVEL || "medium";
-const auditThinking = process.env.AUDIT_THINKING !== "false";
-const auditTemperature = parseFloat(process.env.AUDIT_TEMPERATURE ?? "0.2");
+const auditThinking = stageThinking("AUDIT");
+const auditTemperature = judgeTemperature();
 /** (#3/#4) Audit batch concurrency (opt-in; default 1). */
 const auditConcurrency = stageConcurrency("AUDIT");
 
@@ -171,8 +168,8 @@ async function runAuditBatch({ volume, volumeDir, bundle, refs, systemPrompt, te
       messages: [{ text: prompt }],
       endpoint: auditEndpoint,
       temperature: Number.isFinite(auditTemperature) ? auditTemperature : 0.2,
-      thinking: auditThinking,
-      thinkingLevel: auditThinkingLevel,
+      thinking: auditThinking.thinking,
+      thinkingLevel: auditThinking.thinkingLevel,
       label: `polish-audit-v${volume.installmentNumber}-${id}`,
     });
     const score = parseAcceptanceScore(vResult);
@@ -225,8 +222,8 @@ async function runRePolish({ volume, volumeDir, bundle, refs, systemPrompt, temp
       messages: [{ text: prompt }],
       endpoint,
       temperature: Number.isFinite(polishTemperature) ? polishTemperature : 0.6,
-      thinking: polishThinking,
-      thinkingLevel: polishThinkingLevel,
+      thinking: polishThinking.thinking,
+      thinkingLevel: polishThinking.thinkingLevel,
       label: `polish-v${volume.installmentNumber}-${id}-audit-retry`,
     });
     const attemptText = stripMarkdownFence(result);
@@ -296,7 +293,7 @@ async function processPolishVolume(ctx) {
   let auditPending = [];
 
   // Chapters are INDEPENDENT (each is polished from its own draft +
-  // references), so they can run in parallel when POLISH_CONCURRENCY > 1.
+  // references), so they can run in parallel when STAGE_CONCURRENCY > 1.
   // Rows are stored by index to keep the report in reading order.
   await runWithConcurrency(bundle.segments, polishConcurrency, async (seg, idx) => {
     const { draftFile, polishedFile } = chapterArtifactNames(seg.id);
@@ -358,7 +355,7 @@ async function processPolishVolume(ctx) {
         {
           title:
             `One-shot — polish ${seg.id} ` +
-            `(endpoint ${endpoint.model} @ ${endpoint.baseUrl}, thinking=${polishThinking ? polishThinkingLevel : "off"})`,
+            `(endpoint ${endpoint.model} @ ${endpoint.baseUrl}, thinking=${polishThinking.thinking ? polishThinking.thinkingLevel : "off"})`,
           prompt,
         },
       ];
@@ -374,7 +371,7 @@ async function processPolishVolume(ctx) {
           {
             title:
               `One-shot — polish drift-check ${seg.id} ` +
-              `(endpoint ${endpoint.model} @ ${endpoint.baseUrl}, thinking=${polishThinking ? polishThinkingLevel : "off"})`,
+              `(endpoint ${endpoint.model} @ ${endpoint.baseUrl}, thinking=${polishThinking.thinking ? polishThinking.thinkingLevel : "off"})`,
             prompt: vPrompt,
           }
         );
@@ -416,8 +413,8 @@ async function processPolishVolume(ctx) {
         messages: [{ text: prompt }],
         endpoint,
         temperature: Number.isFinite(polishTemperature) ? polishTemperature : 0.6,
-        thinking: polishThinking,
-        thinkingLevel: polishThinkingLevel,
+        thinking: polishThinking.thinking,
+        thinkingLevel: polishThinking.thinkingLevel,
         label: `polish-v${volume.installmentNumber}-${seg.id}${polishMaxRounds > 1 ? `-r${round}` : ""}`,
       });
       const text = stripMarkdownFence(result);
@@ -738,7 +735,7 @@ async function polish() {
   console.log(
     `[polish] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl} ` +
       `(model from ${endpoint.modelSource}, base from ${endpoint.baseUrlSource}); ` +
-      `thinking=${polishThinking ? polishThinkingLevel : "off"}; ` +
+      `thinking=${polishThinking.thinking ? polishThinking.thinkingLevel : "off"}; ` +
       `final audit ${polishVerifyEnabled ? `ON (batched cross-model audit, PASS ≥ ${polishVerifyPassingScore}/100)` : "OFF (deterministic guard only)"}; ` +
       `max ${polishMaxRounds} round(s)/chapter; concurrency=${polishConcurrency}.`
   );

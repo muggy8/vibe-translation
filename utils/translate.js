@@ -613,22 +613,94 @@ async function runWithConcurrency(items, limit, fn) {
 }
 
 /**
- * Per-stage chapter concurrency knob: `<PREFIX>_CONCURRENCY`
- * (VERIFY_CONCURRENCY / RETRANSLATE_CONCURRENCY / POLISH_CONCURRENCY) —
- * the number of chapters processed in parallel within one volume.
+ * Per-stage chapter concurrency knob: STAGE_CONCURRENCY — the number of
+ * independent units a stage runs at once (chapters per verify / retranslate /
+ * polish pass, chapters per audit batch, research agents per glossary term).
  * Defaults to 1 (serial) because the local hardware runs one inference at
  * a time; raise it when the endpoint can serve parallel requests.
+ *
+ * The old per-stage names (`<PREFIX>_CONCURRENCY`) still work as per-stage
+ * overrides for an existing .env.
  *
  * The `translate` task deliberately stays serial: each chapter's prompt
  * carries the previous chapter's ending as continuity context, so its
  * chapters are chained and cannot run in parallel.
  *
- * @param {"VERIFY"|"RETRANSLATE"|"POLISH"} prefix - The env prefix.
+ * @param {"VERIFY"|"RETRANSLATE"|"POLISH"|"AUDIT"} prefix - The legacy per-stage prefix.
  * @returns {number} The concurrency limit (minimum 1).
  */
 function stageConcurrency(prefix) {
-  const n = parseInt(process.env[`${prefix}_CONCURRENCY`], 10);
-  return Number.isInteger(n) && n >= 1 ? n : 1;
+  const perStage = parseInt(process.env[`${prefix}_CONCURRENCY`], 10);
+  if (Number.isInteger(perStage) && perStage >= 1) return perStage;
+  const shared = parseInt(process.env.STAGE_CONCURRENCY, 10);
+  return Number.isInteger(shared) && shared >= 1 ? shared : 1;
+}
+
+/**
+ * Sampling temperature for every call that GRADES text rather than writes it
+ * (chapter verification, the verify tiebreak audit, the polish final audit):
+ * JUDGE_TEMPERATURE, default 0.2. A judgment call wants a stable one — the
+ * three separate 0.2 knobs were one setting.
+ *
+ * The legacy names (VERIFY_TEMPERATURE / AUDIT_TEMPERATURE) are still honored,
+ * in that order, for an existing .env.
+ *
+ * @returns {number}
+ */
+function judgeTemperature() {
+  for (const key of ["JUDGE_TEMPERATURE", "VERIFY_TEMPERATURE", "AUDIT_TEMPERATURE"]) {
+    const n = parseFloat(process.env[key]);
+    if (Number.isFinite(n)) return n;
+  }
+  return 0.2;
+}
+
+/**
+ * Thinking dialect for a translation-stage call: the global AI_THINKING switch
+ * plus STAGE_THINKING_LEVEL (default "medium").
+ *
+ * The stage calls deliberate LESS than the authoring agents (AI_THINKING_LEVEL,
+ * default "xhigh"): an author writes a long artifact, these judge or proofread a
+ * single chapter. Merging the six per-stage knobs into this pair keeps that
+ * separation while dropping the bookkeeping; the legacy names
+ * (`<PREFIX>_THINKING` / `<PREFIX>_THINKING_LEVEL`) are still honored.
+ *
+ * @param {"VERIFY"|"AUDIT"|"EDIT"} prefix - The legacy per-stage prefix.
+ * @returns {{thinking: boolean, thinkingLevel: string}}
+ */
+function stageThinking(prefix) {
+  const legacyOn = process.env[`${prefix}_THINKING`];
+  const thinking =
+    legacyOn !== undefined
+      ? String(legacyOn).trim().toLowerCase() !== "false"
+      : String(process.env.AI_THINKING ?? "true").trim().toLowerCase() !== "false";
+  const level =
+    process.env[`${prefix}_THINKING_LEVEL`] ?? process.env.STAGE_THINKING_LEVEL;
+  return {
+    thinking,
+    thinkingLevel:
+      typeof level === "string" && level.trim() !== "" ? level.trim() : "medium",
+  };
+}
+
+/**
+ * Sampling temperature for a stage that WRITES text: the stage's own knob
+ * (`<PREFIX>_TEMPERATURE`) when set, otherwise the global AI_TEMPERATURE.
+ *
+ * Used by polish (a rewrite pass — it follows the run's house temperature).
+ * `translate` does NOT use this: Hy-MT2's 0.7 is part of the model's official
+ * sampling recipe, not a house preference, so TRANSLATE_TEMPERATURE keeps its
+ * own default.
+ *
+ * @param {"EDIT"} prefix - The stage prefix.
+ * @param {number} fallback - Used when neither the stage knob nor AI_TEMPERATURE is set.
+ * @returns {number}
+ */
+function writerTemperature(prefix, fallback) {
+  const own = parseFloat(process.env[`${prefix}_TEMPERATURE`]);
+  if (Number.isFinite(own)) return own;
+  const global = parseFloat(process.env.AI_TEMPERATURE);
+  return Number.isFinite(global) ? global : fallback;
 }
 
 module.exports = {
@@ -654,6 +726,9 @@ module.exports = {
   stripContinuityOverlap,
   runWithConcurrency,
   stageConcurrency,
+  judgeTemperature,
+  stageThinking,
+  writerTemperature,
 };
 
 // ─── Role endpoint & volume references (shared by the four tasks) ───────────

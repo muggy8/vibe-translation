@@ -28,7 +28,7 @@
  *           0–100. Always a tool-less single-shot call. Each score is
  *           tracked in a rolling window (default: last 5 checks). When the
  *           window meets the acceptance criterion (rolling average of scores
- *           >= ACCEPTANCE_PASSING_SCORE, default 70 — see configs/shared.js)
+ *           >= PASSING_SCORE, default 70 — see configs/shared.js)
  *           and we have at least MIN_SAMPLES (default: 3) checks, accept
  *           and stop.
  *        c. Otherwise, apply the feedback prompts
@@ -59,7 +59,7 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const { writeVolumeHandoff } = require("./utils/handoff");
@@ -855,8 +855,7 @@ async function jumpInWiki() {
         : "\n--dry-run: skipping the series-root shared-wiki copy (dry runs make no file writes)."
     );
   } else {
-    const finalSharedWikiFile =
-      process.env.SHARED_WIKI_OUTPUT_FILE || path.join(seriesDir, "shared-wiki.md");
+    const finalSharedWikiFile = seriesArtifactFile("shared-wiki.md", "SHARED_WIKI_OUTPUT_FILE", seriesDir);
     let lastSharedWiki = null;
     for (let i = sortedFolderWithSourceMaterial.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sortedFolderWithSourceMaterial[i], "shared-wiki.md");

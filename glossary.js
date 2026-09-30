@@ -28,7 +28,7 @@
  *             the glossary 0–100 (always a tool-less single-shot call).
  *          c. Track each score in a rolling window (default: last 5
  *             checks). When the window meets the acceptance criterion
- *             (rolling average of scores >= ACCEPTANCE_PASSING_SCORE,
+ *             (rolling average of scores >= PASSING_SCORE,
  *             default 70 — see configs/shared.js) and we have at least
  *             MIN_SAMPLES (default: 3) checks, accept and stop.
  *          d. Otherwise, apply the feedback (glossary-feedback.md) and
@@ -56,7 +56,7 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, writeProvenanceSidecar } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
@@ -851,8 +851,7 @@ async function glossary() {
         : "\n--dry-run: skipping the series-root copy (dry runs make no file writes)."
     );
   } else {
-    const finalGlossaryFile =
-      process.env.GLOSSARY_OUTPUT_FILE || path.join(seriesDir, "glossary.md");
+    const finalGlossaryFile = seriesArtifactFile("glossary.md", "GLOSSARY_OUTPUT_FILE", seriesDir);
     let lastGlossary = null;
     for (let i = sorted.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sorted[i], "glossary.md");

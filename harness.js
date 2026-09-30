@@ -113,7 +113,7 @@ function getLogStream() {
     logStream.write(
       `model=${process.env.AI_MODEL || "gpt-4o-mini"} ` +
         `base_url=${process.env.AI_BASE_URL || "https://api.openai.com/v1"} ` +
-        `max_tokens=${process.env.AI_MAX_TOKENS || "1024"}\n`
+        `max_tokens=${envMaxTokens()}\n`
     );
     console.error(`[call-ai] logging to ${runDir}`);
   }
@@ -596,25 +596,41 @@ function envThinkingLevel() {
   return "xhigh";
 }
 
-/** Maximum output tokens per call (AI_MAX_TOKENS env, default 1024). */
+/**
+ * The model server's context window (AI_CONTEXT_WINDOW env, default 128000):
+ * one number for one fact. It drives agent session auto-compaction AND the
+ * default output-token cap, so the two can no longer disagree.
+ * (AGENT_CONTEXT_WINDOW is still read as the legacy name.)
+ */
+function envContextWindow() {
+  const n = parseInt(
+    process.env.AI_CONTEXT_WINDOW ?? process.env.AGENT_CONTEXT_WINDOW,
+    10
+  );
+  return Number.isInteger(n) && n >= 4096 ? n : 128000;
+}
+
+/**
+ * Maximum output tokens per call. AI_MAX_TOKENS overrides; otherwise it is
+ * derived as a quarter of the context window.
+ *
+ * Deriving it is the fix for a failure that looked like a model problem: with
+ * AI_MAX_TOKENS equal to the server's context (262144 on both sides), every
+ * agent call was rejected before it started — "prompt (4337 tokens) + max tokens
+ * (262144) exceeds the context; requests are never truncated" — because the
+ * server reserves nothing for the prompt. Keeping one context number and
+ * deriving the output cap makes that combination unreachable by construction.
+ */
 function envMaxTokens() {
-  return parseInt(process.env.AI_MAX_TOKENS, 10) || 1024;
+  const explicit = parseInt(process.env.AI_MAX_TOKENS, 10);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  return Math.max(1024, Math.floor(envContextWindow() / 4));
 }
 
 /** Sampling temperature (AI_TEMPERATURE env, default 0.7). */
 function envTemperature() {
   const t = parseFloat(process.env.AI_TEMPERATURE);
   return Number.isNaN(t) ? 0.7 : t;
-}
-
-/**
- * Context window (tokens) at which session auto-compaction engages
- * (AGENT_CONTEXT_WINDOW env, default 128000). Set it to your server's context
- * size so compaction kicks in before the server runs out of context.
- */
-function envContextWindow() {
-  const n = parseInt(process.env.AGENT_CONTEXT_WINDOW, 10);
-  return Number.isInteger(n) && n >= 4096 ? n : 128000;
 }
 
 /** Default step cap for tool-using agents (AGENT_MAX_STEPS env, default 20). */
@@ -1617,7 +1633,9 @@ async function runOneShot({
       throw new Error(
         `${label}: the model hit its output token limit (finish_reason=length) after ` +
           `${result.text.length} chars — the response is TRUNCATED and was discarded. ` +
-          `Increase AI_MAX_TOKENS (currently ${maxTokens}) or shrink the input ` +
+          `Increase AI_MAX_TOKENS (currently ${maxTokens}${
+            process.env.AI_MAX_TOKENS ? "" : ", derived from AI_CONTEXT_WINDOW"
+          }) or shrink the input ` +
           `(e.g. TRANSLATE_CHUNK_CHARS for translation) and re-run.`
       );
     }
@@ -1632,7 +1650,7 @@ async function runOneShot({
     throw new Error(
       `The model returned no content (finish_reason=${result.finishReason ?? "n/a"}). ` +
         (result.reasoning
-          ? "The token budget appears to have been spent on reasoning; try increasing AI_MAX_TOKENS or the model's context limit. "
+          ? "The token budget appears to have been spent on reasoning; try raising AI_MAX_TOKENS or AI_CONTEXT_WINDOW. "
           : "") +
         `Check the run log: ${logFilePath}`
     );
@@ -1664,7 +1682,7 @@ async function runOneShot({
  *   agents use full thinking for higher-quality output; tune AI_THINKING_LEVEL
  *   to control reasoning spend).
  * @param {string} [cfg.thinkingLevel] - reasoning_effort level (default: AI_THINKING_LEVEL env / "xhigh").
- * @param {number} [cfg.contextWindow] - Compaction window (default: AGENT_CONTEXT_WINDOW env).
+ * @param {number} [cfg.contextWindow] - Compaction window (default: AI_CONTEXT_WINDOW env).
  * @returns {Promise<Object>} { name, session, sendTurn, close }
  */
 async function createAgentHandle({

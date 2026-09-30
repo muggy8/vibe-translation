@@ -155,7 +155,7 @@ async function processRetranslateVolume(ctx) {
 
   // Chapters are INDEPENDENT here (each is retranslated from its own source
   // + findings — no cross-chapter chaining), so they can run in parallel
-  // when RETRANSLATE_CONCURRENCY > 1.
+  // when STAGE_CONCURRENCY > 1.
   await runWithConcurrency(bundle.segments, retranslateConcurrency, async (seg) => {
     const { draftFile, polishedFile } = chapterArtifactNames(seg.id);
     const chapterPath = path.join(volumeDir, seg.file);

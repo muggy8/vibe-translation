@@ -701,7 +701,6 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   const envKeys = [
     "SERIES_LOCATION",
     "SERIES_NAME",
-    "SERIES_AUTO_DISCOVER",
     "TRANSLATION_SOURCE_LANGUAGE",
     "TRANSLATION_TARGET_LANGUAGE",
     "DISCOVER_MIN_CONFIDENCE",
@@ -909,13 +908,21 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.deepStrictEqual(fs.readdirSync(liveDir), beforePreview, "the dry run created no new folders");
   assert.ok(logs.some((l) => /previewing the committed plan of record/.test(l)), "the preview is logged");
 
-  // J. a series with no committed plan AND no SERIES_NAME says why it cannot preview.
+  // J. a series with no committed plan previews ANYWAY: the deterministic
+  //    layout names itself from the books it found. (SERIES_NAME is no longer a
+  //    variable every .env carries — the intake agent normally decides it, and a
+  //    preview must not depend on a value the real run does not need.)
   setSeriesEnv(liveDir);
   await fs.promises.unlink(path.join(liveDir, intake.MANIFEST_FILE_NAME));
-  await assert.rejects(
-    () => intake.getTranslationTarget({ dryRun: true }),
-    /no committed .* and SERIES_NAME is not set/,
-    "an unnameable preview fails with an actionable message, not a schema error"
+  const previewUnnamed = await intake.getTranslationTarget({ dryRun: true });
+  assert.ok(
+    previewUnnamed.volumes.length >= 2,
+    "the deterministic layout previews with no SERIES_NAME in .env"
+  );
+  assert.strictEqual(
+    previewUnnamed.seriesName,
+    "Oresuki",
+    "the preview derived the series name from the volume folders it found"
   );
   await writeEpub(liveDir, "loose-extra.epub", {
     title: "Loose Extra",
@@ -924,7 +931,8 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   });
   process.env.SERIES_NAME = "Oresuki";
   const previewNamed = await intake.getTranslationTarget({ dryRun: true });
-  assert.ok(previewNamed.volumes.length >= 2, "with a name, the deterministic layout previews");
+  assert.ok(previewNamed.volumes.length >= 2, "an explicit SERIES_NAME still wins");
+  assert.strictEqual(previewNamed.seriesName, "Oresuki", "and it is used verbatim");
   delete process.env.SERIES_NAME;
   // restore the committed plan for anything after this block
   stubIntakeAgent([planFor(twoVolumes())]);

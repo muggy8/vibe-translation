@@ -28,6 +28,7 @@ const childFailLimit = process.argv.includes("--child-fail-limit");
 // Pin the acceptance config so the loop tests are deterministic regardless of
 // the local .env (the values below are also the current code defaults: window
 // 2 / min samples 2 / passing 70 / average strategy).
+process.env.PASSING_SCORE = "70";
 process.env.ACCEPTANCE_PASSING_SCORE = "70";
 process.env.ACCEPTANCE_STRATEGY = "average";
 process.env.ACCEPTANCE_WINDOW_SIZE = "2";

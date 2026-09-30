@@ -7,6 +7,28 @@
  * here so the prompt-injection text lives in exactly one place.
  */
 
+const path = require("path");
+
+/**
+ * Where a series-level artifact copy is published: SERIES_ARTIFACTS_DIR,
+ * defaulting to the series root. One knob for the four final copies (glossary /
+ * character voice / style guide / shared wiki), which all defaulted to the same
+ * folder anyway. The old per-file names (GLOSSARY_OUTPUT_FILE /
+ * VOICE_OUTPUT_FILE / STYLE_OUTPUT_FILE / SHARED_WIKI_OUTPUT_FILE) still win
+ * when set, so an existing .env keeps its exact paths.
+ *
+ * @param {string} fileName - Artifact name inside the directory (e.g. "glossary.md").
+ * @param {string} legacyEnvKey - The old per-file env var, honored as an override.
+ * @param {string} seriesDir - SERIES_LOCATION (the fallback directory).
+ * @returns {string} Absolute path for the series-level copy.
+ */
+function seriesArtifactFile(fileName, legacyEnvKey, seriesDir) {
+  const legacy = process.env[legacyEnvKey];
+  if (legacy) return legacy;
+  const dir = (process.env.SERIES_ARTIFACTS_DIR || "").trim() || seriesDir;
+  return path.join(dir, fileName);
+}
+
 /**
  * Appended to the system prompts of agent-mode stages so the mode-agnostic
  * prompt files keep working.
@@ -27,21 +49,29 @@ You have file tools: readFile, listFiles, grep, writeFile, and editFile.
 - When you are done writing files, reply with a short summary: what you read, what you wrote, and any problems you hit.
 `;
 
-// ── Research concurrency ─────────────────────────────────────────────────────
+// ── Stage concurrency ────────────────────────────────────────────────────────
 
 /**
- * Number of parallel research agents to run simultaneously (one per term).
- * Default 1 (sequential): the local inference server runs one request at a
- * time, and sequential research also avoids concurrent editFile calls on the
- * shared glossary-research.md (the fs edit is a non-atomic read-modify-write,
- * so parallel agents could clobber each other's notes). Raise only when the
- * endpoint genuinely serves parallel requests. Read from .env.
+ * How many independent units a stage may run at once: research agents per
+ * glossary term, chapters per verify / retranslate / polish pass, chapters per
+ * cross-model audit batch. One knob for all of them, because on a local
+ * endpoint they all mean the same thing — "how many inferences can this machine
+ * serve at once" — and they were five variables saying default 1.
+ *
+ * Default 1 (serial): a local inference server answers one request at a time,
+ * and parallel research agents would also issue concurrent editFile calls on the
+ * shared glossary-research.md (a non-atomic read-modify-write). Raise it only
+ * when the endpoint genuinely serves parallel requests.
+ *
+ * The old per-stage names (RESEARCH_CONCURRENCY / VERIFY_CONCURRENCY /
+ * RETRANSLATE_CONCURRENCY / POLISH_CONCURRENCY / AUDIT_CONCURRENCY) still work
+ * as per-stage overrides for an existing .env.
  *
  * @type {number}
  */
-const RESEARCH_CONCURRENCY = Math.max(
+const STAGE_CONCURRENCY = Math.max(
   1,
-  parseInt(process.env.RESEARCH_CONCURRENCY, 10) || 1
+  parseInt(process.env.STAGE_CONCURRENCY, 10) || 1
 );
 
 // ── Rolling average validation config ────────────────────────────────────────
@@ -63,23 +93,29 @@ const ACCEPTANCE_WINDOW_SIZE = Math.max(
 
 /**
  * Minimum number of acceptance checks before the criterion can trigger
- * acceptance. Must not exceed ACCEPTANCE_WINDOW_SIZE. Default 2 (accept
- * after two consecutive fresh checks meet the criterion). Read from .env.
+ * acceptance. Not a knob: it is derived from the window, because the rolling
+ * window is capped at ACCEPTANCE_WINDOW_SIZE — asking for more samples than the
+ * window can hold makes acceptance impossible (a footgun the old separate
+ * variable allowed). ACCEPTANCE_MIN_SAMPLES is still honored for an existing
+ * .env.
  *
  * @type {number}
  */
 const ACCEPTANCE_MIN_SAMPLES = Math.max(
   1,
-  parseInt(process.env.ACCEPTANCE_MIN_SAMPLES, 10) || 2
+  parseInt(process.env.ACCEPTANCE_MIN_SAMPLES, 10) ||
+    Math.min(2, ACCEPTANCE_WINDOW_SIZE)
 );
 
 /**
- * Passing score (0–100) for the score-based acceptance criterion.
- * The acceptance one-shot check returns an integer 0–100 (100 = perfect,
- * 0 = atrocious). Under the "average" strategy the rolling average of the
- * recent scores must be >= this value; under the "best" strategy each
- * score is compared against it individually.
- * Read from .env, defaulting to 70.
+ * The single passing threshold (0–100) for every scored gate in the pipeline:
+ * the acceptance check on the four volume artifacts, chapter verification, and
+ * the polish final audit. They all use the same 0–100 rubric, so they share one
+ * number — "at or above this, the work is good enough to keep".
+ *
+ * PASSING_SCORE is the knob. The older per-gate names (ACCEPTANCE_PASSING_SCORE
+ * / VERIFY_PASSING_SCORE / POLISH_VERIFY_PASSING_SCORE) are still read as
+ * fallbacks, in that order, so an existing .env keeps working unchanged.
  *
  * 70 is deliberately the boundary of the acceptance rubric's bands
  * ("Pass with minor edits" = 70–84, "Requires revision" = 40–69), so the
@@ -88,10 +124,19 @@ const ACCEPTANCE_MIN_SAMPLES = Math.max(
  *
  * @type {number}
  */
-const ACCEPTANCE_PASSING_SCORE = Math.min(
-  100,
-  Math.max(0, parseInt(process.env.ACCEPTANCE_PASSING_SCORE, 10) || 70)
-);
+const PASSING_SCORE = (() => {
+  for (const key of [
+    "PASSING_SCORE",
+    "ACCEPTANCE_PASSING_SCORE",
+    "VERIFY_PASSING_SCORE",
+    "POLISH_VERIFY_PASSING_SCORE",
+  ]) {
+    const n = parseInt(process.env[key], 10);
+    if (Number.isFinite(n)) return Math.min(100, Math.max(0, n));
+  }
+  return 70;
+})();
+const ACCEPTANCE_PASSING_SCORE = PASSING_SCORE;
 
 /**
  * Acceptance strategy: how the rolling window of scores is evaluated.
@@ -208,9 +253,9 @@ const ON_QA_LIMIT = normalizePolicy(
  * hours in. `dryRun` skips the AI_API_KEY check because --dry-run makes no
  * AI calls.
  *
- * SERIES_NAME is only required when the intake agent is not allowed to decide
- * it (SERIES_AUTO_DISCOVER=false): with auto-discovery on, the series name comes
- * from the manifest, which the intake step produces before any volume runs.
+ * SERIES_NAME is never required: the series name is a decision the intake step
+ * makes (step 0 of the default run) and every task reads it from the manifest.
+ * Set SERIES_NAME only to override what the intake agent concluded.
  *
  * @param {{dryRun?: boolean}} [opts]
  * @param {boolean} [opts.dryRun] - True when running with --dry-run.
@@ -218,10 +263,7 @@ const ON_QA_LIMIT = normalizePolicy(
  */
 function validateRequiredEnv({ dryRun = false } = {}) {
   const missing = [];
-  const autoDiscover =
-    String(process.env.SERIES_AUTO_DISCOVER ?? "true").trim().toLowerCase() !== "false";
   if (!process.env.SERIES_LOCATION) missing.push("SERIES_LOCATION");
-  if (!autoDiscover && !process.env.SERIES_NAME) missing.push("SERIES_NAME");
   if (!dryRun && !process.env.AI_API_KEY) missing.push("AI_API_KEY");
   if (missing.length > 0) {
     throw new Error(
@@ -430,7 +472,7 @@ function isSourceStale(state, bundle) {
 
 module.exports = {
   AGENT_TOOLS_NOTE,
-  RESEARCH_CONCURRENCY,
+  STAGE_CONCURRENCY,
   ACCEPTANCE_WINDOW_SIZE,
   ACCEPTANCE_MIN_SAMPLES,
   ACCEPTANCE_PASSING_SCORE,
@@ -443,6 +485,9 @@ module.exports = {
   ON_QA_LIMIT,
   validateRequiredEnv,
   resolveRunSettings,
+  seriesArtifactFile,
+  PASSING_SCORE,
+  STAGE_CONCURRENCY,
   DEFAULT_SOURCE_LANGUAGE,
   DEFAULT_TARGET_LANGUAGE,
   computeRollingAverage,
