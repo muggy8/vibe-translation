@@ -327,6 +327,13 @@
  * @property {string} contextHash — sha256 of the injected references (glossary + style rules + background).
  * @property {string} draftHash — sha256 of the current draft file content.
  * @property {boolean} retranslated — A retranslate pass has run for the findings.
+ * @property {number} retranslateAttempts — How many times this chapter has been retranslated against the CURRENT findings set (the stall guard's retry budget; resets when the findings change).
+ * @property {boolean} qaFailed — The current draft failed the deterministic QA checks. It is kept on disk (marked) so the QA loop has something to correct; verify seeds its verdict from qaFindings without a model call, and retranslate treats it as a FAIL.
+ * @property {string|null} qaFindings — The deterministic QA failure as numbered correction tasks (the retranslate prompt's "fix these" list).
+ * @property {number|null} bestScore — The highest verification score this chapter has ever earned (the draft ratchet's baseline).
+ * @property {string|null} bestDraftHash — sha256 of that best draft (translation-<id>.best.md).
+ * @property {{score: number|null, pass: boolean, findings: string, verifiedAt: string}|null} bestVerdict — The verdict the best draft earned (re-pointed into the sidecar when the ratchet restores it).
+ * @property {boolean} noImprovement — The last rewrite scored worse than bestScore, so the ratchet rolled the chapter back.
  * @property {string|null} findingsHash — sha256 of the findings the last retranslate used.
  * @property {string|null} polishedDraftHash — sha256 of the draft the last polish pass polished (null = unpolished).
  * @property {string|null} polishVerifiedDraftHash — sha256 of the draft the source-aware drift inspector approved (null = unverified).
@@ -353,9 +360,13 @@
  * One chapter's entry in a volume's translation-verification.json sidecar.
  * @property {string} sourceHash — sha256 of the chapter source at verification time.
  * @property {string} draftHash — sha256 of the draft that was verified.
- * @property {number|null} score — 0–100 (null = unparseable verdict = FAIL, fail-closed).
+ * @property {number|null} score — 0–100 (null = unparseable verdict = FAIL, fail-closed). The MEDIAN of `samples` when more than one sample was taken.
+ * @property {number[]} samples — The grades this draft received (1 for a confident chapter; 2–3 for a borderline one, the last possibly at temperature 0).
+ * @property {boolean} deterministic — True when the verdict came from the deterministic QA findings instead of a model call (the draft was flagged qaFailed).
  * @property {boolean} pass — score !== null && score >= PASSING_SCORE.
  * @property {string} findings — The verifier's findings text (retranslate's input).
+ * @property {{verifier: number, auditor: number|null, final: number, rescue: boolean}} tiebreak — The cross-model audit's scores for this chapter (present after a tiebreak).
+ * @property {boolean} tiebreakRescue — The chapter passes ONLY because the tiebreak raised it above the line.
  * @property {string} verifiedAt — ISO timestamp.
  */
 
@@ -378,7 +389,7 @@
  * @typedef {Object} HookContext
  * The context describing a pipeline hook invocation (also the source of the
  * AI_CLIENT_* env vars injected into shell hooks). See utils/hooks.js.
- * @property {string} task - The step name (glossary / character-voice / style-guide / jump-in-wiki / consistency-audit / translate / verify-translate / retranslate / polish / pipeline).
+ * @property {string} task - The step name (discover / glossary / character-voice / style-guide / jump-in-wiki / consistency-audit / translate / verify-translate / retranslate / translate-qa / polish / translation-report / pipeline).
  * @property {"before"|"after"} phase - Which side of the step.
  * @property {string} seriesDir - Absolute SERIES_LOCATION ("" when unset).
  * @property {string} seriesName - The SERIES_NAME.

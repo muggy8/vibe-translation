@@ -56,10 +56,11 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage } = require("./utils/fs");
+const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, hasRealOutput } = require("./utils/fs");
+const { loadGlossaryDisputes } = require("./utils/disputes");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
   shouldProcessChunked,
@@ -153,14 +154,30 @@ function parseTerms(output) {
 // ─── Context truncation helpers ──────────────────────────────────────────────
 
 /**
- * Truncate a glossary file to the most recent entries if it exceeds the
- * configured threshold. Returns the full content when under the threshold,
- * or the truncated content (with a header note) when over it.
+ * Truncate a glossary file to the entries that MATTER for the volume being
+ * processed, when it exceeds the configured threshold. Returns the full content
+ * when under the threshold, or the truncated content (with a header note) when
+ * over it.
+ *
+ * The old rule was "drop the oldest rows in document order". A glossary is
+ * organised by SECTION (Characters, Places, Items…), not by when entries were
+ * added — so the head of the Characters table is the volume-1 main cast, and
+ * dropping "the oldest rows" threw away exactly the entries a later volume is
+ * most likely to contain. The extractor was then shown 200 rows that excluded
+ * the protagonists and duly rediscovered them as brand-new terms, volume after
+ * volume.
+ *
+ * The selection is now deterministic and relevance-ordered: rows whose source
+ * term actually occurs in THIS volume's text are kept first (in document order),
+ * then the remaining rows. Section structure and table headers are preserved; a
+ * section whose rows are all omitted loses its heading, so the model is never
+ * told about a section it cannot see.
  *
  * @param {string} content - The full glossary file content.
+ * @param {string} [sourceText] - The volume/chapter source text, used to rank rows by whether the term occurs in it.
  * @returns {string} The (possibly truncated) content.
  */
-function truncateGlossary(content) {
+function truncateGlossary(content, sourceText) {
   if (!content || content.length <= GLOSSARY_TRUNCATION_THRESHOLD) return content;
 
   // Group the file into runs: a table (consecutive "|…" lines) or a single
@@ -174,62 +191,90 @@ function truncateGlossary(content) {
   // truncation AGENTS.md describes had never actually happened.)
   const lines = content.split("\n");
   const runs = [];
+  let currentSection = null;
   for (let i = 0; i < lines.length; i++) {
+    if (/^#{1,6}\s+/.test(lines[i].trim())) {
+      currentSection = runs.length;
+      runs.push({ kind: "line", block: [lines[i]] });
+      continue;
+    }
     if (lines[i].trim().startsWith("|")) {
       const start = i;
       while (i + 1 < lines.length && lines[i + 1].trim().startsWith("|")) i++;
       const block = lines.slice(start, i + 1);
-      runs.push({ kind: "table", block, dataFrom: block.length > 1 ? 2 : block.length });
+      runs.push({
+        kind: "table",
+        block,
+        dataFrom: block.length > 1 ? 2 : block.length,
+        section: currentSection,
+      });
       continue;
     }
     runs.push({ kind: "line", block: [lines[i]] });
   }
 
-  const totalData = runs.reduce(
-    (n, r) => (r.kind === "table" ? n + Math.max(0, r.block.length - r.dataFrom) : n),
-    0
-  );
+  // Every data row, tagged with the section heading it belongs to and whether
+  // its source term occurs in the text being translated.
+  const src = (sourceText || "").trim();
+  const rows = [];
+  runs.forEach((run, runIdx) => {
+    if (run.kind !== "table") return;
+    for (let k = run.dataFrom; k < run.block.length; k++) {
+      const cells = run.block[k].split("|").map((c) => c.trim()).filter((c) => c !== "");
+      rows.push({
+        runIdx,
+        lineIdx: k,
+        term: cells[0] || "",
+        occurs: src ? cells[0] && src.includes(cells[0]) : null,
+      });
+    }
+  });
+  const totalData = rows.length;
   if (totalData <= GLOSSARY_TRUNCATION_MAX_ENTRIES) return content;
 
-  // Drop the OLDEST term rows (document order) and keep the newest window —
-  // the newest entries are where a conflict with a NEW term can live.
-  let toDrop = totalData - GLOSSARY_TRUNCATION_MAX_ENTRIES;
-  let dropped = 0;
-  let droppedSections = 0;
-  const out = [];
-  for (const run of runs) {
-    if (run.kind !== "table") {
-      out.push(...run.block);
-      continue;
-    }
-    const dataCount = Math.max(0, run.block.length - run.dataFrom);
-    const drop = Math.min(dataCount, toDrop);
-    toDrop -= drop;
-    dropped += drop;
-    const kept = run.block.slice(run.dataFrom + drop);
-    if (kept.length === 0) {
-      // This whole section is older than the window — drop its table too.
-      droppedSections++;
-      continue;
-    }
-    out.push(...run.block.slice(0, run.dataFrom), ...kept);
-  }
+  // Relevance first, document order within each group. Without a source text the
+  // old behavior is kept (the newest window, and the note says so).
+  const hasSource = Boolean(src);
+  const ordered = hasSource
+    ? [...rows].sort((a, b) => {
+        const d = (a.occurs ? 0 : 1) - (b.occurs ? 0 : 1);
+        if (d !== 0) return d;
+        if (a.runIdx !== b.runIdx) return a.runIdx - b.runIdx;
+        return a.lineIdx - b.lineIdx;
+      })
+    : [...rows].reverse();
+  const keep = new Set(ordered.slice(0, GLOSSARY_TRUNCATION_MAX_ENTRIES).map((r) => `${r.runIdx}:${r.lineIdx}`));
+  const keptOccurs = ordered.slice(0, GLOSSARY_TRUNCATION_MAX_ENTRIES).filter((r) => r.occurs === true).length;
+  const dropped = totalData - keep.size;
 
-  // Drop a "## Section" heading whose tables were truncated away entirely, so
-  // the model is not told about a section it cannot see.
+  // Re-render the runs, keeping only the rows that survived, and dropping a
+  // heading whose tables lost every row.
+  const out = [];
+  const droppedSections = new Set();
+  for (const [runIdx, run] of runs.entries()) {
+    if (run.kind !== "table") continue;
+    const kept = [];
+    for (let k = run.dataFrom; k < run.block.length; k++) {
+      if (keep.has(`${runIdx}:${k}`)) kept.push(run.block[k]);
+    }
+    if (kept.length === 0) {
+      droppedSections.add(run.section);
+      continue;
+    }
+    out.push({ runIdx, lines: [...run.block.slice(0, run.dataFrom), ...kept] });
+  }
+  const keptRunIdx = new Set(out.map((o) => o.runIdx));
   const final = [];
-  for (let i = 0; i < out.length; i++) {
-    if (!/^##\s+/.test(out[i].trim())) {
-      final.push(out[i]);
+  for (const [runIdx, run] of runs.entries()) {
+    if (run.kind === "table") {
+      const rendered = out.find((o) => o.runIdx === runIdx);
+      if (rendered) final.push(...rendered.lines);
       continue;
     }
-    let j = i + 1;
-    while (j < out.length && out[j].trim() === "") j++;
-    if (j < out.length && out[j].trim().startsWith("|")) {
-      final.push(out[i]);
-      continue;
-    }
-    droppedSections++;
+    // A heading whose tables were truncated away entirely is dropped, so the
+    // model is not told about a section it cannot see.
+    if (/^#{1,6}\s+/.test(run.block[0].trim()) && droppedSections.has(runIdx)) continue;
+    final.push(...run.block);
   }
 
   const keptCount = totalData - dropped;
@@ -237,11 +282,102 @@ function truncateGlossary(content) {
     1,
     0,
     "",
-    `[TRUNCATED: this glossary has ${totalData} term rows. Showing the ${keptCount} most recent; ` +
-      `${dropped} older row(s)${droppedSections ? ` and ${droppedSections} fully older section(s)` : ""} are omitted. ` +
-      `Earlier entries are carried forward unchanged in the file itself — reconcile NEW terms against what is shown here.]`
+    src
+      ? `[TRUNCATED: this glossary has ${totalData} term rows. Showing ${keptCount} of them — every row ` +
+        `whose source term occurs in the text being translated (${keptOccurs} such row(s) are included), ` +
+        `then the rest in document order. ${dropped} row(s)${droppedSections.size ? ` and ${droppedSections.size} fully omitted section(s)` : ""} ` +
+        `are not shown; they are carried forward UNCHANGED in the file itself, so do not re-add a term ` +
+        `as new merely because it is absent from what you can see here.]`
+      : `[TRUNCATED: this glossary has ${totalData} term rows. Showing the ${keptCount} in document order; ` +
+        `${dropped} row(s)${droppedSections.size ? ` and ${droppedSections.size} fully omitted section(s)` : ""} are omitted. ` +
+        `Earlier entries are carried forward unchanged in the file itself — reconcile NEW terms against what is shown here.]`
   );
   return final.join("\n");
+}
+
+/**
+ * Turn the previous volume's coverage audit into a note for THIS volume's
+ * extraction pass (report → input).
+ *
+ * `glossary-coverage.json` already knows which entries were never used: the terms
+ * carried in the cumulative glossary that do not occur once in the volume they
+ * were built for. Without this note the glossary only ever grows — a term
+ * hallucinated in volume 3 is carried forward by every later volume's amend pass
+ * and nobody is ever told it has never been seen. With it, the extractor is
+ * handed the list and asked to reconsider it.
+ *
+ * Bounded on purpose: a 200-term list pasted into a prompt is noise, and the
+ * point is to raise the worst offenders, not to restate the whole glossary.
+ *
+ * @param {Object|null} coverage - The parsed `glossary-coverage.json` of the previous volume.
+ * @param {number} [limit] - How many zero-occurrence terms to name.
+ * @returns {string} "" when there is nothing to say.
+ */
+/**
+ * Turn the open glossary disputes into a first-class input for the amend pass.
+ *
+ * The dispute came from a model reading the SOURCE and concluding that the
+ * glossary entry is wrong. The amend pass is the only place that can settle it,
+ * and it must settle it EXPLICITLY: either correct the entry, or record why the
+ * canonical rendering stands. Silence is not an answer — an unresolved dispute
+ * reappears in every later volume's verification.
+ *
+ * @param {Array<Object>} disputes - The parsed series dispute queue.
+ * @param {string} installmentNumber - The volume being amended (for the header).
+ * @param {number} [limit] - How many disputes to name (bounded: a 200-row list is noise).
+ * @returns {string} "" when there is nothing open.
+ */
+function buildDisputesNote(disputes, installmentNumber, limit = 40) {
+  const list = Array.isArray(disputes) ? disputes : [];
+  if (list.length === 0) return "";
+  const shown = list.slice(0, limit);
+  const lines = [
+    "",
+    "",
+    `## Open glossary disputes (challenged during translation of earlier volumes)`,
+    "",
+    `These renderings were challenged by the translation verifier while working on ` +
+      `another volume: the verifier read the source text and found the canonical ` +
+      `rendering contradicts it. For EACH one below, volume ${installmentNumber}'s ` +
+      `amendment must either (a) correct the entry to the rendering the source supports, ` +
+      `or (b) keep the canonical rendering and record, in the entry's Notes column, ` +
+      `the evidence that makes it stand. Do not leave a dispute unaddressed and do ` +
+      `not silently drop the entry.`,
+    "",
+  ];
+  for (const d of shown) {
+    lines.push(`- **${d.term}** — glossary says "${d.canonical || "?"}"; ` +
+      `challenged as "${d.proposed || "(no alternative proposed)"}"`);
+    if (d.sourceQuote) lines.push(`  - Evidence from the source: "${d.sourceQuote}"`);
+    else lines.push(`  - **No source quote recorded** — check it against this volume's source before changing anything.`);
+    const raised = Array.isArray(d.raised) ? d.raised : [];
+    if (raised.length > 0) {
+      lines.push(`  - Raised in: ${raised.map((r) => `volume ${r.volume}${r.chapter ? ` ${r.chapter}` : ""}`).join(", ")}`);
+    }
+  }
+  if (list.length > shown.length) {
+    lines.push(`- …and ${list.length - shown.length} more (see glossary-disputes.md at the series root).`);
+  }
+  return lines.join("\n");
+}
+
+function buildUnusedEntriesNote(coverage, limit = 40) {
+  const terms = coverage && Array.isArray(coverage.terms) ? coverage.terms : [];
+  if (terms.length === 0) return "";
+  const zero = terms.filter((t) => t && typeof t.occurrences === "number" && t.occurrences === 0);
+  if (zero.length === 0) return "";
+  const named = zero.slice(0, limit).map((t) => `- ${t.term}${t.section ? ` (${t.section})` : ""}`);
+  const rest = zero.length - named.length;
+  return (
+    `\n\n## Entries the previous volume never used\n` +
+    `The coverage audit of volume ${coverage.volume} found ${zero.length} glossary entr(ies) that do not ` +
+    `occur ONCE in that volume's text:\n${named.join("\n")}` +
+    (rest > 0 ? `\n- … and ${rest} more.` : "") +
+    `\n\nFor each one you can see in the current glossary: if it is a real term that simply does not ` +
+    `appear in these chapters, keep it unchanged. If it has no support in the text at all, treat it as a ` +
+    `candidate for removal (or for a corrected source form) and say so in the glossary's notes rather ` +
+    `than carrying it forward silently.\n`
+  );
 }
 
 // ─── Malformed-tool-call guard ──────────────────────────────────────────────
@@ -457,6 +593,9 @@ function buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg =
     ...values,
     TERMS_LIST: termsListText,
     RESEARCH_NOTES: researchNotesPlaceholder,
+    // The disputes queue is a first-class input: the amend pass is the only
+    // stage that can settle a challenged rendering, so it has to see it.
+    DISPUTES: (ctx.disputesText || "").trim() || "(no open glossary disputes)",
   });
   let sourceLine;
   let previousGlossaryLine;
@@ -694,8 +833,46 @@ async function glossary() {
       }
     }
 
+    // Report → input: the previous volume's coverage audit (which glossary entries
+    // were never used) is handed to this volume's extraction pass.
+    let unusedEntriesNote = "";
+    if (previousFolderName) {
+      try {
+        const coveragePath = path.join(seriesDir, previousFolderName, "glossary-coverage.json");
+        if (await fileExists(coveragePath)) {
+          unusedEntriesNote = buildUnusedEntriesNote(JSON.parse(await fs.readFile(coveragePath, "utf8")));
+        }
+      } catch (err) {
+        console.warn(
+          `Volume ${values.INSTALLMENT_NUMBER}: could not read the previous volume's coverage audit ` +
+            `(${err.message}) — extraction proceeds without it.`
+        );
+      }
+    }
+
+    // Report → input: the glossary disputes the translation stage raised
+    // (verify-translate found that the SOURCE contradicts a canonical rendering).
+    // Without this the glossary only ever grows and a wrong entry is carried
+    // forward by every later volume while the QA loop argues about it each time.
+    let disputesText = "";
+    try {
+      const disputes = await loadGlossaryDisputes(seriesDir);
+      disputesText = buildDisputesNote(disputes, values.INSTALLMENT_NUMBER);
+      if (disputesText) {
+        console.log(
+          `Volume ${values.INSTALLMENT_NUMBER}: ${disputes.length} open glossary dispute(s) ` +
+            `are part of this volume's amendment task.`
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `Volume ${values.INSTALLMENT_NUMBER}: could not read the glossary disputes queue ` +
+          `(${err.message}) — amending without them.`
+      );
+    }
+
     // Transform the prompts that use only the standard placeholders.
-    const termsPrompt = transformUserPrompt(termsTemplate, values);
+    const termsPrompt = transformUserPrompt(termsTemplate, values) + unusedEntriesNote;
     const validatorPrompt = transformUserPrompt(validatorTemplate, values);
     const feedbackPrompt = transformUserPrompt(feedbackTemplate, values);
     const acceptancePrompt = transformUserPrompt(acceptanceTemplate, values);
@@ -718,6 +895,7 @@ async function glossary() {
       feedbackPrompt,
       acceptancePrompt,
       glossaryTemplate,
+      disputesText,
       termsSystemPrompt,
       glossarySystemPrompt,
       validatorSystemPrompt,
@@ -854,14 +1032,6 @@ async function glossary() {
     }
   }
 
-  if (failedVolumes.length > 0) {
-    console.error(
-      `\n${failedVolumes.length} of ${volumes.length} volume(s) failed: ` +
-        `${failedVolumes.map((v) => `${v.folder} (${v.error.message})`).join("; ")}. ` +
-        `Re-run the task (idempotent) to pick them up.`
-    );
-  }
-
   // Copy the last volume's glossary to the series root for easy access
   // (skipped for single-volume runs, which would publish a stale snapshot).
   if (volumeArg || dryRun) {
@@ -875,7 +1045,9 @@ async function glossary() {
     let lastGlossary = null;
     for (let i = sorted.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sorted[i], "glossary.md");
-      if (await fileExists(candidate)) {
+      // "Last EXISTING" means last REAL one: an empty or scaffold-stub snapshot
+      // left by a failed volume is not the series' current glossary.
+      if (await hasRealOutput(candidate)) {
         lastGlossary = candidate;
         break;
       }
@@ -888,6 +1060,12 @@ async function glossary() {
       console.log("\nNo glossary snapshots found; nothing to copy to the series root.");
     }
   }
+
+  // A task that failed volumes fails the run. The summary used to be printed and
+  // the task exited 0, so an overnight run with every volume broken looked like a
+  // success and the pipeline marched on into the audit and the translation stage.
+  const volumeError = volumeFailureError("glossary", failedVolumes, volumes.length);
+  if (volumeError) throw volumeError;
 }
 
 /**
@@ -1125,7 +1303,15 @@ async function runChunkedVolumeAgent(ctx) {
     const messages = [{ file: path.join(volumeDir, segment.file), name: segment.file }];
     const stateFile = si === 0 ? previousGlossaryFile : glossaryOutputFile;
     if (stateFile) {
-      messages.push(await inlineReferenceMessage(stateFile, si === 0 ? "glossary-previous.md" : "glossary-current.md", { truncate: truncateGlossary }));
+      // The truncation is ranked by what THIS chapter actually contains (see
+      // truncateGlossary), so the cumulative glossary shown to the extractor is
+      // the part of it that matters for this chapter.
+      const chapterSource = await fs.readFile(path.join(volumeDir, segment.file), "utf8");
+      messages.push(
+        await inlineReferenceMessage(stateFile, si === 0 ? "glossary-previous.md" : "glossary-current.md", {
+          truncate: (raw) => truncateGlossary(raw, chapterSource),
+        })
+      );
     }
     messages.push({ text: termsPrompt }, { text: chapterSegmentNote(bundle, segment, si) });
     const termsOutput = await harness.runOneShot({
@@ -1289,6 +1475,27 @@ async function runChunkedQaLoop(ctx) {
       sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
     });
 
+    // The same exceptional-score confirmation the whole-installment loop runs
+    // (utils/qa-loop.js): a top-band grade is re-graded at temperature 0 and the
+    // calm judging temperature, and a consensus accepts the volume WITHOUT the
+    // expensive per-chapter feedback round below.
+    const exceptional = await confirmExceptionalScore({
+      score,
+      recentRollingScores,
+      confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+      stateFile: stateFilePath,
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
+    if (exceptional.accepted) {
+      // The chunked loop's contract: the only other way out of the loop is the
+      // iteration limit (which sets ctx.limitReached). Reaching here means the
+      // consensus accepted the volume, so record HOW it was accepted for the
+      // run summary and stop before the per-chapter feedback round.
+      ctx.acceptedBy = "exceptional-consensus";
+      break;
+    }
+
     if (meetsAcceptanceCriteria(recentRollingScores)) {
       const avg = computeRollingAverage(recentRollingScores);
       console.log(
@@ -1395,7 +1602,12 @@ async function runVolumeAgent(ctx) {
   const baseMessages = [{ file: sourceFile, name: path.basename(sourceFile) }];
   if (!isFirst) {
     // Inlined (not readFile) — so the cumulative glossary is bounded here.
-    baseMessages.push(await inlineReferenceMessage(previousGlossaryFile, "glossary-previous.md", { truncate: truncateGlossary }));
+    const volumeSourceText = await fs.readFile(sourceFile, "utf8");
+    baseMessages.push(
+      await inlineReferenceMessage(previousGlossaryFile, "glossary-previous.md", {
+        truncate: (raw) => truncateGlossary(raw, volumeSourceText),
+      })
+    );
   }
   const termsOutput = await harness.runOneShot({
     systemPrompt: termsSystemPrompt,
@@ -1905,6 +2117,8 @@ module.exports = {
   glossary,
   parseTerms,
   truncateGlossary,
+  buildUnusedEntriesNote,
+  buildDisputesNote,
   emittedToolCallAsText,
   assertRealToolCalls,
   buildPerTermResearchPrompt,

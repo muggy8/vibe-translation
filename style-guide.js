@@ -39,13 +39,13 @@ const fs = require("fs").promises;
 const path = require("path");
 require("./types");
 const harness = require("./harness");
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
+const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump, selectSectionsByRelevance } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError } = require("./configs/shared");
-const { fileExists, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage } = require("./utils/fs");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
+const { fileExists, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, hasRealOutput } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
   shouldProcessChunked,
@@ -74,19 +74,20 @@ const STYLE_GUIDE_TRUNCATION_MAX_SECTIONS = 40;
  * @param {string} content - The full style-guide content.
  * @returns {string} The (possibly truncated) content.
  */
-function truncateStyleGuide(content) {
+function truncateStyleGuide(content, sourceText) {
   if (!content || content.length <= STYLE_GUIDE_TRUNCATION_THRESHOLD) return content;
-  const sections = content.match(/^##[ \t]+[\s\S]*?(?=^## |$)/gm);
-  if (!sections || sections.length <= STYLE_GUIDE_TRUNCATION_MAX_SECTIONS) return content;
-  const header = content.slice(0, content.indexOf(sections[0]));
-  const dropped = sections.length - STYLE_GUIDE_TRUNCATION_MAX_SECTIONS;
-  const keep = sections.slice(-STYLE_GUIDE_TRUNCATION_MAX_SECTIONS);
-  return [
-    header.trimEnd(),
-    `[TRUNCATED: this style guide has ${sections.length} sections. Showing the ${keep.length} most recent; ${dropped} older section(s) are omitted. ` +
-      `Earlier policies are carried forward unchanged in the file itself — reconcile NEW rules against what is shown here.]`,
-    keep.join("\n"),
-  ].join("\n\n");
+  // Relevance-ordered (see selectSectionsByRelevance in utils/prompt.js): a
+  // section whose quoted source-language pattern occurs in the volume being
+  // processed is kept whatever its position, so the honorific rules decided in
+  // volume 1 are not dropped just because they were written first.
+  const picked = selectSectionsByRelevance({
+    content,
+    headingRe: /^##[ \t]+/m,
+    sourceText,
+    maxUnits: STYLE_GUIDE_TRUNCATION_MAX_SECTIONS,
+    unitLabel: "section(s)",
+  });
+  return picked.content;
 }
 
 const extractSystemPromptFile = path.join(clientDir, "system-prompts", "style-guide-extract.md");
@@ -478,13 +479,6 @@ async function styleGuide() {
       );
     }
   }
-  if (failedVolumes.length > 0) {
-    console.error(
-      `\n${failedVolumes.length} of ${volumes.length} volume(s) failed: ` +
-        `${failedVolumes.map((v) => `${v.folder} (${v.error.message})`).join("; ")}. ` +
-        `Re-run the task (idempotent) to pick them up.`
-    );
-  }
   if (volumeArg || dryRun) {
     console.log(volumeArg ? "\n--volume: skipping the series-root copy." : "\n--dry-run: skipping the series-root copy (dry runs make no file writes).");
   }
@@ -493,11 +487,18 @@ async function styleGuide() {
     let lastStyle = null;
     for (let i = sorted.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sorted[i], "style-guide.md");
-      if (await fileExists(candidate)) { lastStyle = candidate; break; }
+      // Last REAL snapshot: an empty or stubbed one left by a failed volume is
+      // not the series' current style guide.
+      if (await hasRealOutput(candidate)) { lastStyle = candidate; break; }
     }
     if (lastStyle) { await fs.copyFile(lastStyle, finalStyleFile); await writeProvenanceSidecar(finalStyleFile, lastStyle); console.log(`\nCopied the final style guide to: ${finalStyleFile}`); }
     else { console.log("\nNo style guide snapshots found; nothing to copy."); }
   }
+
+  // A task that failed volumes fails the run (see configs/shared.js
+  // volumeFailureError): the summary used to be printed and the task exited 0.
+  const volumeError = volumeFailureError("style-guide", failedVolumes, volumes.length);
+  if (volumeError) throw volumeError;
 }
 
 
@@ -524,8 +525,17 @@ async function runExtract(ctx, seg = null, si = null) {
     const messages = [{ file: path.join(ctx.volumeDir, seg.file), name: seg.file }];
     const stateFile = si === 0 ? ctx.previousStyleGuideFile : ctx.styleOutputFile;
     if (stateFile) {
-      // Inlined (not readFile) — so the cumulative guide is bounded here.
-      messages.push(await inlineReferenceMessage(stateFile, si === 0 ? "style-guide-previous.md" : "style-guide-current.md", { truncate: truncateStyleGuide }));
+      // Inlined (not readFile) — so the cumulative guide is bounded here, and
+      // bounded by RELEVANCE: a policy whose quoted pattern occurs in this
+      // chapter is shown whatever section order it happens to sit in.
+      const chapterSource = await fs.readFile(path.join(ctx.volumeDir, seg.file), "utf8");
+      messages.push(
+        await inlineReferenceMessage(
+          stateFile,
+          si === 0 ? "style-guide-previous.md" : "style-guide-current.md",
+          { truncate: (raw) => truncateStyleGuide(raw, chapterSource) }
+        )
+      );
     }
     messages.push({ text: ctx.extractPrompt }, { text: chapterSegmentNote(ctx.bundle, seg, si) });
     return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `style-guide-extract-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
@@ -534,7 +544,12 @@ async function runExtract(ctx, seg = null, si = null) {
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running style-convention extraction...`);
   const messages = [{ file: sourceFile, name: path.basename(sourceFile) }, { text: ctx.extractPrompt }];
   if (ctx.previousStyleGuideFile) {
-    messages.push(await inlineReferenceMessage(ctx.previousStyleGuideFile, "style-guide-previous.md", { truncate: truncateStyleGuide }));
+    const volumeSourceText = await fs.readFile(sourceFile, "utf8");
+    messages.push(
+      await inlineReferenceMessage(ctx.previousStyleGuideFile, "style-guide-previous.md", {
+        truncate: (raw) => truncateStyleGuide(raw, volumeSourceText),
+      })
+    );
   }
   return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `style-guide-extract-${values.INSTALLMENT_NUMBER}` });
 }
@@ -778,6 +793,25 @@ async function runChunkedQaLoop(ctx) {
     await saveRollingState(stateFilePath, recentRollingScores, {
       sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
     });
+    // The same exceptional-score confirmation the whole-installment loop runs
+    // (utils/qa-loop.js) — a consensus accepts the volume without the per-chapter
+    // feedback round below.
+    const exceptional = await confirmExceptionalScore({
+      score,
+      recentRollingScores,
+      confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+      stateFile: stateFilePath,
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
+    if (exceptional.accepted) {
+      // The chunked loop's contract: the only other way out of the loop is the
+      // iteration limit (which sets ctx.limitReached). Reaching here means the
+      // consensus accepted the volume, so record HOW it was accepted for the
+      // run summary and stop before the per-chapter feedback round.
+      ctx.acceptedBy = "exceptional-consensus";
+      break;
+    }
     if (meetsAcceptanceCriteria(recentRollingScores)) {
       const avg = computeRollingAverage(recentRollingScores);
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 (${recentRollingScores.length} checks) meets the passing score ${ACCEPTANCE_PASSING_SCORE}. Accepted.`);
@@ -834,5 +868,5 @@ async function runVolume(ctx) {
 }
 
 // Export
-module.exports = { styleGuide, parseStyleObservations, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildStyleFindingsMergePrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runExtract, runCompile, runQaLoop, runFeedback, runChunkedVolume, runChunkedQaLoop, acceptanceCheck };
+module.exports = { styleGuide, parseStyleObservations, truncateStyleGuide, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildStyleFindingsMergePrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runExtract, runCompile, runQaLoop, runFeedback, runChunkedVolume, runChunkedQaLoop, acceptanceCheck };
 

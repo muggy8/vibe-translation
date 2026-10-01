@@ -72,6 +72,94 @@ const { assertWroteWithFallback } = require("./fs");
  *   `limitReached` when maxIterations ran without acceptance, and the final
  *   window contents (also persisted to cfg.stateFile on every iteration).
  */
+/**
+ * The exceptional-score confirmation, shared by the whole-installment QA loop and
+ * the four chunked (per-chapter) loops.
+ *
+ * A grade in the rubric's top band (≥ ACCEPTANCE_EXCEPTIONAL_SCORE) is re-graded
+ * ACCEPTANCE_CONFIRMATION_CHECKS more times on the SAME artifact — the first
+ * re-grade at temperature 0 (the deterministic anchor), the rest at the calm
+ * judging temperature. If the consensus holds, the volume is accepted NOW: no
+ * feedback pass, no second full validator turn (the expensive part of a loop
+ * iteration). If it collapses, the scores stay in the window and the normal loop
+ * continues — the great grade was luck.
+ *
+ * The chunked fallback used to run its own acceptance check with none of this, so
+ * a big epub volume (the ones most worth fast-accepting) never got the
+ * confirmation path at all, and a fluke grade there cost a full extra
+ * per-chapter feedback round.
+ *
+ * @param {{
+ *   score: number|null,
+ *   recentRollingScores: number[],
+ *   confirmationCheck?: (p: {score: number, index: number, temperature: number|undefined}) => Promise<number|null|{score: number|null, temperature: number}>,
+ *   volumeLabel: string,
+ *   stateFile: string,
+ *   sourceFingerprint?: string,
+ * }} p
+ * @returns {Promise<{accepted: boolean, confirmations: Array<{score: number|null, temperature: number|null}>}>}
+ *   `accepted` when the consensus held and the caller should stop its loop.
+ */
+async function confirmExceptionalScore({ score, recentRollingScores, confirmationCheck, volumeLabel, stateFile, sourceFingerprint }) {
+  if (score === null || !confirmationCheck || !isExceptionalScore(score)) {
+    return { accepted: false, confirmations: [] };
+  }
+  console.log(
+    `${volumeLabel}: acceptance score ${score}/100 is exceptional (≥ ${ACCEPTANCE_EXCEPTIONAL_SCORE}) ` +
+      `— confirming with ${ACCEPTANCE_CONFIRMATION_CHECKS} more grade(s) (one at temperature 0)…`
+  );
+  const confirmations = [];
+  for (let ci = 0; ci < ACCEPTANCE_CONFIRMATION_CHECKS; ci++) {
+    // The FIRST confirmation is always the deterministic one.
+    const temperature = ci === 0 ? 0 : undefined;
+    const raw = await confirmationCheck({ score, index: ci, temperature });
+    // A task may return the bare score (its acceptanceCheck does) or a
+    // { score, temperature } pair; both are normalized here so the loop — and the
+    // temperature-0 anchor rule — cannot depend on which one a task happened to use.
+    const confirmationScore = raw !== null && typeof raw === "object" ? raw.score : raw;
+    const confirmationTemperature =
+      raw !== null && typeof raw === "object" && Number.isFinite(raw.temperature)
+        ? raw.temperature
+        : temperature ?? null;
+    confirmations.push({
+      score: Number.isFinite(confirmationScore) ? confirmationScore : null,
+      temperature: confirmationTemperature,
+    });
+  }
+  // The confirmation scores are NOT pushed into the rolling window. They exist to
+  // answer one question — was the exceptional grade real? — and if the answer is
+  // no, the volume must continue through exactly the loop it would have run anyway
+  // (feedback pass, next validator turn). Letting extra samples into the window
+  // could accept a volume whose consensus just failed, without ever running the
+  // feedback that failure calls for.
+  const verdict = meetsExceptionalCriteria(score, confirmations);
+  const spread = confirmations
+    .map((c) => `${c.score === null ? "unparseable" : c.score}${c.temperature === 0 ? " (temp 0)" : ""}`)
+    .join(", ");
+  if (verdict.accepted) {
+    console.log(
+      `${volumeLabel}: exceptional score confirmed (${score}; confirmations: ${spread}) — ` +
+        `${verdict.reason}. Accepted without a feedback pass.`
+    );
+    await saveRollingState(stateFile, recentRollingScores, {
+      sourceFingerprint,
+      acceptedBy: "exceptional-consensus",
+      deterministicScore: confirmations.find((c) => c.temperature === 0)?.score,
+      confirmations: confirmations.map((c) => c.score),
+    });
+    return { accepted: true, confirmations };
+  }
+  console.log(
+    `${volumeLabel}: exceptional score NOT confirmed (${score}; confirmations: ${spread}) — ${verdict.reason}. ` +
+      `Continuing the normal loop (the confirmation grades are recorded, not counted).`
+  );
+  await saveRollingState(stateFile, recentRollingScores, {
+    sourceFingerprint,
+    rejectedConfirmations: confirmations.map((c) => c.score),
+  });
+  return { accepted: false, confirmations };
+}
+
 async function runSharedQaLoop(cfg) {
   const { maxIterations, onQaLimit } = cfg;
   // Rolling window of recent acceptance scores (0–100). A score of `null`
@@ -135,78 +223,21 @@ async function runSharedQaLoop(cfg) {
     }
 
     // ── Exceptional score: is it real, or a fluke? ──────────────────────────
-    // A grade in the rubric's top band (>= ACCEPTANCE_EXCEPTIONAL_SCORE) is
-    // re-graded ACCEPTANCE_CONFIRMATION_CHECKS more times on the SAME artifact
-    // — the first re-grade at temperature 0 (the deterministic anchor), the
-    // rest at the calm judging temperature. If the consensus holds, the volume
-    // is accepted NOW: no feedback pass, no second full validator turn (the
-    // expensive part of a loop iteration). If it collapses, the scores stay in
-    // the window and the normal loop continues — the great grade was luck.
-    if (
-      score !== null &&
-      cfg.confirmationCheck &&
-      isExceptionalScore(score)
-    ) {
-      console.log(
-        `${cfg.volumeLabel}: acceptance score ${score}/100 is exceptional (≥ ${ACCEPTANCE_EXCEPTIONAL_SCORE}) ` +
-          `— confirming with ${ACCEPTANCE_CONFIRMATION_CHECKS} more grade(s) (one at temperature 0)…`
-      );
-      const confirmations = [];
-      for (let ci = 0; ci < ACCEPTANCE_CONFIRMATION_CHECKS; ci++) {
-        // The FIRST confirmation is always the deterministic one.
-        const temperature = ci === 0 ? 0 : undefined;
-        const raw = await cfg.confirmationCheck({ score, index: ci, temperature });
-        // A task may return the bare score (its acceptanceCheck does) or a
-        // { score, temperature } pair; both are normalized here so the loop —
-        // and the temperature-0 anchor rule — cannot depend on which one a
-        // task happened to use.
-        const confirmationScore =
-          raw !== null && typeof raw === "object" ? raw.score : raw;
-        const confirmationTemperature =
-          raw !== null && typeof raw === "object" && Number.isFinite(raw.temperature)
-            ? raw.temperature
-            : temperature ?? null;
-        confirmations.push({
-          score: Number.isFinite(confirmationScore) ? confirmationScore : null,
-          temperature: confirmationTemperature,
-        });
-      }
-      // The confirmation scores are NOT pushed into the rolling window. They
-      // exist to answer one question — was the exceptional grade real? — and if
-      // the answer is no, the volume must continue through exactly the loop it
-      // would have run anyway (feedback pass, next validator turn). Letting
-      // extra samples into the window could accept a volume whose consensus just
-      // failed, without ever running the feedback that failure calls for.
-      const verdict = meetsExceptionalCriteria(score, confirmations);
-      const spread = confirmations
-        .map((c) => `${c.score === null ? "unparseable" : c.score}${c.temperature === 0 ? " (temp 0)" : ""}`)
-        .join(", ");
-      if (verdict.accepted) {
-        console.log(
-          `${cfg.volumeLabel}: exceptional score confirmed (${score}; confirmations: ${spread}) — ` +
-            `${verdict.reason}. Accepted without a feedback pass.`
-        );
-        await saveRollingState(cfg.stateFile, recentRollingScores, {
-          sourceFingerprint: cfg.sourceFingerprint,
-          acceptedBy: "exceptional-consensus",
-          deterministicScore: confirmations.find((c) => c.temperature === 0)?.score,
-          confirmations: confirmations.map((c) => c.score),
-        });
-        return {
-          accepted: true,
-          limitReached: false,
-          scores: recentRollingScores,
-          acceptedBy: "exceptional-consensus",
-        };
-      }
-      console.log(
-        `${cfg.volumeLabel}: exceptional score NOT confirmed (${score}; confirmations: ${spread}) — ${verdict.reason}. ` +
-          `Continuing the normal loop (the confirmation grades are recorded, not counted).`
-      );
-      await saveRollingState(cfg.stateFile, recentRollingScores, {
-        sourceFingerprint: cfg.sourceFingerprint,
-        rejectedConfirmations: confirmations.map((c) => c.score),
-      });
+    const exceptional = await confirmExceptionalScore({
+      score,
+      recentRollingScores,
+      confirmationCheck: cfg.confirmationCheck,
+      volumeLabel: cfg.volumeLabel,
+      stateFile: cfg.stateFile,
+      sourceFingerprint: cfg.sourceFingerprint,
+    });
+    if (exceptional.accepted) {
+      return {
+        accepted: true,
+        limitReached: false,
+        scores: recentRollingScores,
+        acceptedBy: "exceptional-consensus",
+      };
     }
 
     // Persist the rolling window to disk so that a re-run can recover the
@@ -253,4 +284,4 @@ async function runSharedQaLoop(cfg) {
   return { accepted: false, limitReached: false, scores: recentRollingScores };
 }
 
-module.exports = { runSharedQaLoop };
+module.exports = { runSharedQaLoop, confirmExceptionalScore };

@@ -74,6 +74,7 @@ const TASKS = [
   "retranslate",
   "translate-qa",
   "polish",
+  "translation-report",
 ];
 
 /**

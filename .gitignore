@@ -41,6 +41,11 @@ yarn-error.log*
 
 # Dry-run prompt dumps
 .dry-run/
+# Grader calibration: the fixture (test/calibration/cases/) is tracked; the
+# reports it writes are per-machine history for the drift comparison.
+test/calibration/calibration-report.md
+test/calibration/calibration-report.json
+
 
 # Pipeline hooks — per-machine executable scripts (git-style). The samples
 # and README stay tracked; the real hooks are local-only (gitignored).

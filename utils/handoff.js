@@ -66,6 +66,12 @@ function buildChaptersJson(bundle) {
     file: s.file,
     title: s.title,
     chars: s.chars,
+    // Carried through from the extraction so a section that converted to nothing
+    // is visible in every downstream list (the translation stage skips it, the
+    // report labels it, the brief shows it) instead of looking like a chapter
+    // nobody bothered to translate.
+    bodyChars: s.bodyChars,
+    empty: s.empty === true,
   }));
 }
 
@@ -167,7 +173,13 @@ function buildTranslationBriefMarkdown(p) {
   lines.push("| Segment | Title | Chars | Source file |");
   lines.push("|---|---|---|---|");
   for (const c of p.chapters) {
-    lines.push(`| ${c.id} | ${c.title} | ${c.chars} | ${c.file} |`);
+    // A section that converted to nothing is called out here too: the brief is
+    // what a human reads before translation, and a hole in the book belongs in
+    // the first page they see, not buried in an extraction log line.
+    lines.push(
+      `| ${c.id} | ${c.empty === true ? `${c.title} **(EMPTY IN SOURCE)**` : c.title} | ` +
+        `${c.chars} | ${c.file} |`
+    );
   }
   lines.push("");
 

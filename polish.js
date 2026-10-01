@@ -51,10 +51,11 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { ON_VOLUME_ERROR, PASSING_SCORE, validateRequiredEnv, resolveRunSettings, isStructuralError, structuralError } = require("./configs/shared");
+const { ON_VOLUME_ERROR, PASSING_SCORE, validateRequiredEnv, resolveRunSettings, isStructuralError, structuralError, volumeFailureError } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { resolveSourceBundle } = require("./utils/source");
 const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("./utils/prompt");
+const { writeTranslationReport } = require("./utils/translation-report");
 const {
   sha256,
   checkTranslationQa,
@@ -63,6 +64,7 @@ const {
   loadTranslationState,
   saveTranslationState,
   roleEndpoint,
+  describeEndpoint,
   loadVolumeReferences,
   chapterTerminology,
   runWithConcurrency,
@@ -70,9 +72,24 @@ const {
   judgeTemperature,
   stageThinking,
   writerTemperature,
+  estimateTokens,
+  fitPromptBudget,
+  describeDroppedBlocks,
+  logRunEstimate,
+  countStageChapters,
+  checkChapterListConsistency,
+  glossaryBlock,
+  loadVerificationSidecar,
+  readFileOrEmpty,
+  saveVerificationSidecar,
+  findingsOf,
+  chapterArtifactNames,
+  MERGED_FILE,
+  STATE_FILE,
+  POLISH_QA_REPORT,
+  POLISH_VERIFICATION_FILE,
 } = require("./utils/translate");
-const { chapterArtifactNames, mergeVolumeTranslationFiles } = require("./translate");
-const { glossaryBlock, loadVerificationSidecar, findingsOf } = require("./verify-translate");
+const { mergeVolumeTranslationFiles } = require("./translate");
 const { withHooks } = require("./utils/hooks");
 
 // ─── Paths & config ──────────────────────────────────────────────────────────
@@ -85,8 +102,8 @@ const polishTemplateFile = path.join(clientDir, "user-prompts", "polish.md");
 const polishVerifySystemPromptFile = path.join(clientDir, "system-prompts", "polish-verify.md");
 const polishVerifyTemplateFile = path.join(clientDir, "user-prompts", "polish-verify.md");
 
-const POLISH_QA_REPORT = "polish-qa.md";
-const POLISH_VERIFICATION_FILE = "polish-verification.json";
+// (POLISH_QA_REPORT / POLISH_VERIFICATION_FILE come from utils/translate.js —
+// the shared translation-stage layer, so no task module imports another.)
 
 const polishThinking = stageThinking("EDIT");
 const polishTemperature = writerTemperature("EDIT", 0.6);
@@ -123,6 +140,38 @@ const auditTemperature = judgeTemperature();
 /** (#3/#4) Audit batch concurrency (opt-in; default 1). */
 const auditConcurrency = stageConcurrency("AUDIT");
 
+/**
+ * Fit a polish/audit prompt's reference blocks into the role's context window.
+ *
+ * The text being judged or polished (source / draft / polished) is never
+ * trimmed — a grader that cannot see the whole chapter, or a polisher given a
+ * sliced chapter, produces a meaningless verdict. The reference blocks give way,
+ * in the order least-useful-first, and every drop is logged.
+ *
+ * @param {{blocks: Array<{name: string, text: string, priority: number}>, fixedTokens: number, endpoint: {contextWindow: number|null, maxTokens: number|null}, label: string}} p
+ * @returns {{pick: (name: string, fallback: string) => string, dropped: Array<{name: string, chars: number}>}}
+ */
+function fitReferenceBlocks({ blocks, fixedTokens, endpoint, label }) {
+  const roleWindow = endpoint.contextWindow || harness.envContextWindow();
+  const outputReserve = endpoint.maxTokens || harness.envMaxTokens();
+  const fitted = fitPromptBudget({ blocks, fixedTokens, roleWindow, outputReserve });
+  if (fitted.dropped.length > 0) describeDroppedBlocks(fitted.dropped, label);
+  const pick = (name, fallback) => {
+    const b = fitted.blocks.find((x) => x.name === name);
+    return b && b.text.trim() ? b.text : fallback;
+  };
+  return { pick, dropped: fitted.dropped };
+}
+
+/** The reference blocks a polish pass injects (never the source text). */
+function polishReferenceBlocks({ refs, sourceText }) {
+  return [
+    { name: "GLOSSARY", text: glossaryBlock(chapterTerminology(refs, sourceText).terms), priority: 5 },
+    { name: "STYLE_RULES", text: refs.styleRules || "", priority: 3 },
+    { name: "VOICE_NOTES", text: refs.voiceNotes || "", priority: 1 },
+  ];
+}
+
 // ─── Per-volume processing ──────────────────────────────────────────────────
 
 /**
@@ -158,16 +207,27 @@ async function runAuditBatch({ volume, volumeDir, bundle, refs, systemPrompt, te
     const sourceText = await fs.readFile(path.join(volumeDir, seg.file), "utf8");
     const draft = await fs.readFile(path.join(volumeDir, draftFile), "utf8");
     const polished = await fs.readFile(path.join(volumeDir, polishedFile), "utf8");
+    const { pick } = fitReferenceBlocks({
+      blocks: [{ name: "GLOSSARY", text: glossaryBlock(chapterTerminology(refs, sourceText).terms), priority: 5 }],
+      fixedTokens:
+        estimateTokens(sourceText) + estimateTokens(draft) + estimateTokens(polished) + estimateTokens(template) + 120,
+      endpoint: auditEndpoint,
+      label: `Volume ${volume.installmentNumber} ${id} (drift audit)`,
+    });
     const prompt = transformUserPrompt(template, {
       SOURCE_TEXT: sourceText,
       DRAFT_TEXT: draft,
       POLISHED_TEXT: polished,
-      GLOSSARY: glossaryBlock(chapterTerminology(refs, sourceText).terms),
+      GLOSSARY: pick("GLOSSARY", "(none provided — run the glossary task)"),
     });
     const vResult = await harness.runOneShot({
       systemPrompt,
       messages: [{ text: prompt }],
       endpoint: auditEndpoint,
+      // The role endpoint's own output cap / context window (harness.js derives
+      // them from the global AI_* settings when the role sets neither).
+      maxTokens: auditEndpoint.maxTokens,
+      contextWindow: auditEndpoint.contextWindow,
       temperature: Number.isFinite(auditTemperature) ? auditTemperature : 0.2,
       thinking: auditThinking.thinking,
       thinkingLevel: auditThinking.thinkingLevel,
@@ -219,18 +279,29 @@ async function runRePolish({ volume, volumeDir, bundle, refs, systemPrompt, temp
     } catch {
       chapterSource = "";
     }
+    const findingsText = findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none)";
+    const { pick } = fitReferenceBlocks({
+      blocks: polishReferenceBlocks({ refs, sourceText: chapterSource }),
+      fixedTokens: estimateTokens(draft) + estimateTokens(findingsText) + estimateTokens(template) + 120,
+      endpoint,
+      label: `Volume ${volume.installmentNumber} ${id} (re-polish)`,
+    });
     const values = {
       TRANSLATION_TEXT: draft,
-      GLOSSARY: glossaryBlock(chapterTerminology(refs, chapterSource).terms),
-      STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
-      VOICE_NOTES: refs.voiceNotes || "(none provided — run the character-voice task)",
-      POLISH_FINDINGS: findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none)",
+      GLOSSARY: pick("GLOSSARY", "(none provided — run the glossary task)"),
+      STYLE_RULES: pick("STYLE_RULES", "(none provided — run the style-guide task)"),
+      VOICE_NOTES: pick("VOICE_NOTES", "(none provided — run the character-voice task)"),
+      POLISH_FINDINGS: findingsText,
     };
     const prompt = transformUserPrompt(template, values);
     const result = await harness.runOneShot({
       systemPrompt,
       messages: [{ text: prompt }],
       endpoint,
+      // The role endpoint's own output cap / context window (harness.js derives
+      // them from the global AI_* settings when the role sets neither).
+      maxTokens: endpoint.maxTokens,
+      contextWindow: endpoint.contextWindow,
       temperature: Number.isFinite(polishTemperature) ? polishTemperature : 0.6,
       thinking: polishThinking.thinking,
       thinkingLevel: polishThinking.thinkingLevel,
@@ -276,7 +347,7 @@ async function runRePolish({ volume, volumeDir, bundle, refs, systemPrompt, temp
  * }} ctx
  * @returns {Promise<{polished: number, skipped: number, rejected: number, noDraft: number}>}
  */
-async function processPolishVolume(ctx) {
+async function polishVolumePhaseA(ctx) {
   const {
     volume,
     volumeDir,
@@ -293,7 +364,7 @@ async function processPolishVolume(ctx) {
     sourceLanguage,
     targetLanguage,
   } = ctx;
-  const state = await loadTranslationState(path.join(volumeDir, "translation-state.json"));
+  const state = await loadTranslationState(path.join(volumeDir, STATE_FILE));
   const sidecar = await loadVerificationSidecar(path.join(volumeDir, POLISH_VERIFICATION_FILE));
   const rows = [];
   let polished = 0;
@@ -354,12 +425,19 @@ async function processPolishVolume(ctx) {
       // and up-to-date chapters were skipped above) — one file per chapter,
       // no AI calls in dry-run. The drift-check prompt's polished-text input
       // is the output of the polish call (unavailable in dry-run).
+      const findingsText = findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none — first pass)";
+      const { pick } = fitReferenceBlocks({
+        blocks: polishReferenceBlocks({ refs, sourceText }),
+        fixedTokens: estimateTokens(draft) + estimateTokens(findingsText) + estimateTokens(template) + 120,
+        endpoint,
+        label: `Volume ${volume.installmentNumber} ${seg.id}`,
+      });
       const values = {
         TRANSLATION_TEXT: draft,
-        GLOSSARY: glossaryBlock(chapterTerminology(refs, sourceText).terms),
-        STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
-        VOICE_NOTES: refs.voiceNotes || "(none provided — run the character-voice task)",
-        POLISH_FINDINGS: findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none — first pass)",
+        GLOSSARY: pick("GLOSSARY", "(none provided — run the glossary task)"),
+        STYLE_RULES: pick("STYLE_RULES", "(none provided — run the style-guide task)"),
+        VOICE_NOTES: pick("VOICE_NOTES", "(none provided — run the character-voice task)"),
+        POLISH_FINDINGS: findingsText,
       };
       const prompt = transformUserPrompt(template, values);
       const entries = [
@@ -408,12 +486,19 @@ async function processPolishVolume(ctx) {
     for (let round = 1; round <= polishMaxRounds && attemptText === null; round++) {
       // Fresh polish (attempt 1) or re-polish with the previous attempt's
       // findings. The polisher sees NO source text — surface cleanup.
+      const findingsText = findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none — first pass)";
+      const { pick } = fitReferenceBlocks({
+        blocks: polishReferenceBlocks({ refs, sourceText }),
+        fixedTokens: estimateTokens(draft) + estimateTokens(findingsText) + estimateTokens(template) + 120,
+        endpoint,
+        label: `Volume ${volume.installmentNumber} ${seg.id}`,
+      });
       const values = {
         TRANSLATION_TEXT: draft,
-        GLOSSARY: glossaryBlock(chapterTerminology(refs, sourceText).terms),
-        STYLE_RULES: refs.styleRules || "(none provided — run the style-guide task)",
-        VOICE_NOTES: refs.voiceNotes || "(none provided — run the character-voice task)",
-        POLISH_FINDINGS: findings ? findings.slice(0, POLISH_FINDINGS_MAX_CHARS) : "(none — first pass)",
+        GLOSSARY: pick("GLOSSARY", "(none provided — run the glossary task)"),
+        STYLE_RULES: pick("STYLE_RULES", "(none provided — run the style-guide task)"),
+        VOICE_NOTES: pick("VOICE_NOTES", "(none provided — run the character-voice task)"),
+        POLISH_FINDINGS: findingsText,
       };
       const prompt = transformUserPrompt(template, values);
       console.log(
@@ -424,6 +509,10 @@ async function processPolishVolume(ctx) {
         systemPrompt,
         messages: [{ text: prompt }],
         endpoint,
+        // The role endpoint's own output cap / context window (harness.js derives
+        // them from the global AI_* settings when the role sets neither).
+        maxTokens: endpoint.maxTokens,
+        contextWindow: endpoint.contextWindow,
         temperature: Number.isFinite(polishTemperature) ? polishTemperature : 0.6,
         thinking: polishThinking.thinking,
         thinkingLevel: polishThinking.thinkingLevel,
@@ -503,143 +592,180 @@ async function processPolishVolume(ctx) {
   // Crash-safety: persist the Phase A state (candidates + guard findings)
   // before the switch to the audit endpoint — a crash mid-Phase-B must not lose
   // the guard-gated candidates.
-  await saveTranslationState(path.join(volumeDir, "translation-state.json"), state);
+  await saveTranslationState(path.join(volumeDir, STATE_FILE), state);
 
-  // (#3/#4) Phase B — the batched cross-model FINAL audit. Runs AFTER every
-  // Phase A candidate exists, so the whole batch runs under one endpoint (the
-  // polish-audit hook switches the audit container in on local setups) — never
-  // interleaved with the polisher. A FAIL re-polishes on the edit endpoint (the
-  // polish hook switches it back) and is re-audited next round; after
-  // polishMaxRounds rounds a still-failing chapter keeps the DRAFT (any
-  // polished file is dropped so the merge publishes it) and its findings
-  // persist for the next run.
-  const polishAuditRounds = Math.max(1, polishMaxRounds);
-  for (let round = 1; round <= polishAuditRounds; round++) {
-    if (auditPending.length === 0) break;
+  // Phase A is done: the candidates and the findings are on disk. Phase B (the
+  // cross-model audit) is driven by the TASK, across every volume at once, so
+  // the container switch happens once per round for the whole run.
+  return {
+    volume,
+    volumeDir,
+    bundle,
+    refs,
+    state,
+    sidecar,
+    rows,
+    polished,
+    skipped,
+    rejected,
+    noDraft,
+    auditPending,
+  };
+}
 
-    if (!polishVerifyEnabled) {
-      // Inspector disabled: the deterministic guard was the only gate — accept
-      // every Phase A candidate as-is (no cross-model audit).
-      for (const c of auditPending) {
-        const s = state.chapters[c.id] || {};
-        state.chapters[c.id] = {
-          ...s,
-          polishedDraftHash: c.draftHash,
-          polishVerifiedDraftHash: c.draftHash,
-          polishScore: null,
-          polishFindings: null,
-          polishFindingsHash: null,
-        };
-        sidecar.chapters[c.id] = {
-          sourceHash: s.sourceHash,
-          draftHash: c.draftHash,
-          score: null,
-          pass: true,
-          findings: "(inspector disabled — deterministic guard only)",
-          verifiedAt: new Date().toISOString(),
-        };
-      }
-      await saveTranslationState(path.join(volumeDir, "translation-state.json"), state);
-      await fs.writeFile(
-        path.join(volumeDir, POLISH_VERIFICATION_FILE),
-        JSON.stringify(sidecar, null, 2) + "\n",
-        "utf8"
-      );
-      polished += auditPending.length;
-      for (const c of auditPending) {
-        const row = rows.find((r) => r.id === c.id);
-        if (row) row.status = "polished (guard only — inspector disabled)";
-      }
-      break;
-    }
+/**
+ * Accept every Phase A candidate without the cross-model audit
+ * (POLISH_VERIFY_ENABLED=false): the deterministic regression guard was the
+ * only gate.
+ *
+ * @param {Object} vc - The volume context from Phase A.
+ */
+async function acceptPolishCandidatesWithoutAudit(vc) {
+  for (const c of vc.auditPending) {
+    const s = vc.state.chapters[c.id] || {};
+    vc.state.chapters[c.id] = {
+      ...s,
+      polishedDraftHash: c.draftHash,
+      polishVerifiedDraftHash: c.draftHash,
+      polishScore: null,
+      polishFindings: null,
+      polishFindingsHash: null,
+    };
+    vc.sidecar.chapters[c.id] = {
+      sourceHash: s.sourceHash,
+      draftHash: c.draftHash,
+      score: null,
+      pass: true,
+      findings: "(inspector disabled — deterministic guard only)",
+      verifiedAt: new Date().toISOString(),
+    };
+    vc.polished += vc.auditPending.length;
+    const row = vc.rows.find((r) => r.id === c.id);
+    if (row) row.status = "polished (guard only — inspector disabled)";
+  }
+  await saveTranslationState(path.join(vc.volumeDir, STATE_FILE), vc.state);
+  await fs.writeFile(
+    path.join(vc.volumeDir, POLISH_VERIFICATION_FILE),
+    JSON.stringify(vc.sidecar, null, 2) + "\n",
+    "utf8"
+  );
+  vc.auditPending = [];
+}
 
-    // The batched audit (one endpoint switch for the whole batch).
-    const auditPhase = withHooks("polish-audit", () =>
-      runAuditBatch({
-        volume,
-        volumeDir,
-        bundle,
-        refs,
-        systemPrompt: verifySystemPrompt,
-        template: verifyTemplate,
-        auditEndpoint,
-        toAudit: auditPending,
-      })
-    );
-    const auditResults = await auditPhase();
-    const byId = new Map(auditResults.map((a) => [a.id, a]));
-    const failed = [];
-    for (const c of auditPending) {
-      const a = byId.get(c.id);
-      const s = state.chapters[c.id] || {};
-      if (!a || !a.pass) {
-        failed.push({ id: c.id, draftHash: c.draftHash, findings: a ? a.findings : "(audit returned no result — re-audit)" });
-        sidecar.chapters[c.id] = {
-          sourceHash: s.sourceHash,
-          draftHash: c.draftHash,
-          score: a ? a.score : null,
-          pass: false,
-          findings: a ? a.findings : "(audit returned no result — re-audit)",
-          verifiedAt: new Date().toISOString(),
-        };
-        continue;
-      }
-      state.chapters[c.id] = {
-        ...s,
-        polishedDraftHash: c.draftHash,
-        polishVerifiedDraftHash: c.draftHash,
-        polishScore: a.score,
-        polishFindings: null,
-        polishFindingsHash: null,
-      };
+/**
+ * Phase B, ONE round, ONE volume — the batched cross-model final audit over
+ * this volume's guard-gated candidates.
+ *
+ * No hooks here on purpose: the caller wraps a whole round across ALL volumes
+ * in a single hook invocation. (Observed: the audit hook used to fire inside
+ * the per-volume loop, so a 17-volume run paid 17 container switches for a pass
+ * that is designed to need one — the exact interleaving the batching exists to
+ * avoid.)
+ *
+ * Mutates `vc.auditPending` (the candidates that failed this round), the
+ * volume's state and its sidecar.
+ *
+ * @param {Object} vc - The volume context from Phase A.
+ * @param {{verifySystemPrompt: string, verifyTemplate: string, auditEndpoint: Object}} ctx
+ * @returns {Promise<number>} How many candidates failed this round.
+ */
+async function runPolishAuditRound(vc, { verifySystemPrompt, verifyTemplate, auditEndpoint }) {
+  const { volume, volumeDir, bundle, refs, state, sidecar, rows } = vc;
+  const auditResults = await runAuditBatch({
+    volume,
+    volumeDir,
+    bundle,
+    refs,
+    systemPrompt: verifySystemPrompt,
+    template: verifyTemplate,
+    auditEndpoint,
+    toAudit: vc.auditPending,
+  });
+  const byId = new Map(auditResults.map((a) => [a.id, a]));
+  const failed = [];
+  for (const c of vc.auditPending) {
+    const a = byId.get(c.id);
+    const s = state.chapters[c.id] || {};
+    if (!a || !a.pass) {
+      failed.push({ id: c.id, draftHash: c.draftHash, findings: a ? a.findings : "(audit returned no result — re-audit)" });
       sidecar.chapters[c.id] = {
         sourceHash: s.sourceHash,
         draftHash: c.draftHash,
-        score: a.score,
-        pass: true,
-        findings: "(no findings)",
+        score: a ? a.score : null,
+        pass: false,
+        findings: a ? a.findings : "(audit returned no result — re-audit)",
         verifiedAt: new Date().toISOString(),
       };
-      polished += 1;
-      const row = rows.find((r) => r.id === c.id);
-      if (row) row.status = `polished (cross-model audit ${a.score === null ? "n/a" : a.score + "/100"})`;
+      continue;
     }
-    await saveTranslationState(path.join(volumeDir, "translation-state.json"), state);
-    await fs.writeFile(
-      path.join(volumeDir, POLISH_VERIFICATION_FILE),
-      JSON.stringify(sidecar, null, 2) + "\n",
-      "utf8"
-    );
-    if (failed.length === 0) {
-      auditPending = [];
-      break;
-    }
-
-    // Re-polish the failed candidates (the edit endpoint — the polish hook
-    // switches back on local setups) with the audit findings injected; they
-    // re-enter the queue for the next round.
-    const rePolishPhase = withHooks("polish", () =>
-      runRePolish({
-        volume,
-        volumeDir,
-        bundle,
-        refs,
-        systemPrompt,
-        template,
-        endpoint,
-        state,
-        failed,
-      })
-    );
-    await rePolishPhase();
-    await saveTranslationState(path.join(volumeDir, "translation-state.json"), state);
-    auditPending = failed.map((f) => ({ id: f.id, draftHash: f.draftHash }));
+    state.chapters[c.id] = {
+      ...s,
+      polishedDraftHash: c.draftHash,
+      polishVerifiedDraftHash: c.draftHash,
+      polishScore: a.score,
+      polishFindings: null,
+      polishFindingsHash: null,
+    };
+    sidecar.chapters[c.id] = {
+      sourceHash: s.sourceHash,
+      draftHash: c.draftHash,
+      score: a.score,
+      pass: true,
+      findings: "(no findings)",
+      verifiedAt: new Date().toISOString(),
+    };
+    vc.polished += 1;
+    const row = rows.find((r) => r.id === c.id);
+    if (row) row.status = `polished (cross-model audit ${a.score === null ? "n/a" : a.score + "/100"})`;
   }
+  await saveTranslationState(path.join(volumeDir, STATE_FILE), state);
+  await fs.writeFile(
+    path.join(volumeDir, POLISH_VERIFICATION_FILE),
+    JSON.stringify(sidecar, null, 2) + "\n",
+    "utf8"
+  );
+  vc.auditPending = failed.map((f) => ({ id: f.id, draftHash: f.draftHash }));
+  return failed.length;
+}
 
-  // After the audit loop: any still-pending candidate failed every round —
-  // keep the DRAFT (drop the polished file so the merge publishes the draft)
-  // and persist the findings (the next run re-audits/re-polishes with them).
-  for (const c of auditPending) {
+/**
+ * Re-polish one volume's audit-failed candidates on the edit endpoint, with the
+ * audit findings injected as a numbered correction task (the retranslate
+ * pattern). Called inside the task-level re-polish batch.
+ *
+ * @param {Object} vc - The volume context.
+ * @param {{systemPrompt: string, template: string, endpoint: Object}} ctx
+ */
+async function runPolishRepairRound(vc, { systemPrompt, template, endpoint }) {
+  await runRePolish({
+    volume: vc.volume,
+    volumeDir: vc.volumeDir,
+    bundle: vc.bundle,
+    refs: vc.refs,
+    systemPrompt,
+    template,
+    endpoint,
+    state: vc.state,
+    failed: vc.auditPending,
+  });
+  await saveTranslationState(path.join(vc.volumeDir, STATE_FILE), vc.state);
+}
+
+/**
+ * Finish one volume: drop the polished text that never passed the audit (so the
+ * merge publishes the draft), re-merge translation.md, and write the polish
+ * report.
+ *
+ * @param {Object} vc - The volume context.
+ * @param {number} auditRounds - How many audit rounds ran (for the report wording).
+ * @returns {Promise<{polished: number, skipped: number, rejected: number, noDraft: number, missing: Array}>}
+ */
+async function finishPolishVolume(vc, auditRounds) {
+  const { volume, volumeDir, bundle, state, rows } = vc;
+  // Any still-pending candidate failed every round — keep the DRAFT (drop the
+  // polished file so the merge publishes the draft) and persist the findings
+  // (the next run re-audits/re-polishes with them).
+  for (const c of vc.auditPending) {
     const { polishedFile } = chapterArtifactNames(c.id);
     await fs.rm(path.join(volumeDir, polishedFile), { force: true });
     const s = state.chapters[c.id] || {};
@@ -650,18 +776,28 @@ async function processPolishVolume(ctx) {
       polishFindings: s.polishFindings,
       polishFindingsHash: s.polishFindingsHash,
     };
-    rejected += 1;
+    vc.rejected += 1;
     const row = rows.find((r) => r.id === c.id);
-    if (row) row.status = `polish rejected after ${polishAuditRounds} audit round(s) — draft kept`;
+    if (row) row.status = `polish rejected after ${auditRounds} audit round(s) — draft kept`;
     console.warn(
-      `  Volume ${volume.installmentNumber} ${c.id}: polish REJECTED after ${polishAuditRounds} cross-model audit round(s) — ` +
-        `keeping the draft (findings saved; the next run re-audits with them, or use --force for a fresh attempt).`
+      `  Volume ${volume.installmentNumber} ${c.id}: polish REJECTED after ${auditRounds} cross-model audit ` +
+        `round(s) — keeping the draft (findings saved; the next run re-audits with them, or use --force for ` +
+        `a fresh attempt).`
     );
   }
   // Re-merge the volume (the polished text wins now).
-  const mergedText = await mergeVolumeTranslationFiles(volumeDir, bundle, state);
-  if (mergedText) {
-    await fs.writeFile(path.join(volumeDir, "translation.md"), mergedText, "utf8");
+  const merged = await mergeVolumeTranslationFiles(volumeDir, bundle, state, {
+    sourceLanguage,
+    targetLanguage,
+  });
+  if (merged.text) {
+    await fs.writeFile(path.join(volumeDir, MERGED_FILE), merged.text, "utf8");
+  }
+  if (merged.missing.length > 0) {
+    console.error(
+      `  Volume ${volume.installmentNumber}: INCOMPLETE — ${merged.missing.length} chapter(s) have no ` +
+        `text after the polish pass: ${merged.missing.map((m) => m.id).join(", ")}.`
+    );
   }
   const lines = [
     `# Polish QA — Volume ${volume.installmentNumber} (${volume.folder})`,
@@ -684,7 +820,7 @@ async function processPolishVolume(ctx) {
     "",
   ];
   await fs.writeFile(path.join(volumeDir, POLISH_QA_REPORT), lines.join("\n"), "utf8");
-  return { polished, skipped, rejected, noDraft };
+  return { polished: vc.polished, skipped: vc.skipped, rejected: vc.rejected, noDraft: vc.noDraft, missing: merged.missing };
 }
 
 // ─── Task entry ─────────────────────────────────────────────────────────────
@@ -747,24 +883,42 @@ async function polish() {
   }
 
   console.log(
-    `[polish] ${sorted.length} volume folder(s); endpoint ${endpoint.model} @ ${endpoint.baseUrl} ` +
-      `(model from ${endpoint.modelSource}, base from ${endpoint.baseUrlSource}); ` +
+    `[polish] ${sorted.length} volume folder(s); endpoint ${describeEndpoint(endpoint)}; ` +
       `thinking=${polishThinking.thinking ? polishThinking.thinkingLevel : "off"}; ` +
       `final audit ${polishVerifyEnabled ? `ON (batched cross-model audit, PASS ≥ ${polishVerifyPassingScore}/100)` : "OFF (deterministic guard only)"}; ` +
       `max ${polishMaxRounds} round(s)/chapter; concurrency=${polishConcurrency}.`
   );
+  await logRunEstimate({
+    stage: "polish",
+    volumes: volumes.length,
+    chapters: (await countStageChapters({ seriesDir, volumes: volumes.map((f) => volumeByFolder.get(f)).filter(Boolean) })).chapters,
+    // One polish call per chapter, plus one audit call, plus a re-polish + audit
+    // for every round the audit rejects.
+    callsPerChapter: 1 + (polishVerifyEnabled ? 2 * polishMaxRounds - 1 : 0),
+    endpoint,
+    extra: polishVerifyEnabled ? "the audit calls run on the audit endpoint" : "no audit calls (deterministic guard only)",
+  });
 
   const failedVolumes = [];
-  let totalPolished = 0;
-  let totalRejected = 0;
+  /** The Phase A results, kept so the audit rounds can run across ALL volumes. */
+  const volumeCtxs = [];
 
+  // ── PHASE A — polish every volume's chapters (the edit endpoint) ──────────
   for (const folderName of volumes) {
     const volume = volumeByFolder.get(folderName);
     const volumeDir = path.join(seriesDir, folderName);
     try {
       const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
-      const refs = await loadVolumeReferences(volumeDir);
-      const result = await processPolishVolume({
+      // The handoff's chapter list and the extracted one must describe the same
+      // book (see checkChapterListConsistency). A disagreement is reported, not
+      // fatal: the extracted list is the one this stage uses.
+      await checkChapterListConsistency(volumeDir, bundle);
+      // The volume's own text decides WHICH sections of the cumulative
+      // references get injected (see loadVolumeReferences): a 17-volume series
+      // must show the translator the state and cast that matter to THIS book.
+      const volumeSourceText = await readFileOrEmpty(bundle.wholePath || path.join(volumeDir, bundle.segments[0].file));
+      const refs = await loadVolumeReferences(volumeDir, volumeSourceText);
+      const vc = await polishVolumePhaseA({
         volume,
         volumeDir,
         bundle,
@@ -780,11 +934,11 @@ async function polish() {
         sourceLanguage: runSettings.sourceLanguage,
         targetLanguage: runSettings.targetLanguage,
       });
-      totalPolished += result.polished;
-      totalRejected += result.rejected;
+      if (dryRun) continue; // Phase A dumped prompts and produced nothing to audit
+      volumeCtxs.push(vc);
       console.log(
-        `[polish] Volume ${volume.installmentNumber}: ${result.polished} polished, ` +
-          `${result.rejected} rejected (draft kept), ${result.skipped} skipped, ${result.noDraft} without draft.`
+        `[polish] Volume ${volume.installmentNumber}: ${vc.auditPending.length} guard-gated candidate(s), ` +
+          `${vc.rejected} guard-rejected (draft kept), ${vc.skipped} skipped, ${vc.noDraft} without draft.`
       );
     } catch (err) {
       // A STRUCTURAL failure (a source file that vanished, an archive that will not
@@ -799,20 +953,89 @@ async function polish() {
     }
   }
 
-  console.log(
-    `[polish] Done: ${totalPolished} chapter(s) polished, ${totalRejected} rejected ` +
-      `(rejected chapters keep their draft and retry on the next run).`
-  );
-  if (failedVolumes.length > 0) {
-    throw new Error(
-      `${failedVolumes.length} of ${volumes.length} volume(s) failed: ${failedVolumes.join(", ")}.`
+  // ── PHASE B — the cross-model audit rounds, batched across EVERY volume ───
+  // One hook invocation per round for the whole run (the container switch on a
+  // shared-port setup), then one re-polish batch, then the next audit round.
+  // It used to be per volume: a 17-volume run paid ~17 switches per round.
+  const auditRounds = Math.max(1, polishMaxRounds);
+  if (!dryRun) {
+    if (!polishVerifyEnabled) {
+      for (const vc of volumeCtxs) await acceptPolishCandidatesWithoutAudit(vc);
+    } else {
+      for (let round = 1; round <= auditRounds; round++) {
+        const pending = volumeCtxs.filter((vc) => vc.auditPending.length > 0);
+        if (pending.length === 0) break;
+        console.log(
+          `[polish-audit] round ${round}/${auditRounds} — auditing ` +
+            `${pending.reduce((n, vc) => n + vc.auditPending.length, 0)} candidate(s) across ` +
+            `${pending.length} volume(s) on ${auditEndpoint.model} (one batch, one switch).`
+        );
+        const auditBatch = withHooks("polish-audit", async () => {
+          for (const vc of pending) {
+            await runPolishAuditRound(vc, { verifySystemPrompt, verifyTemplate, auditEndpoint });
+          }
+        });
+        await auditBatch();
+
+        const failedCount = pending.reduce((n, vc) => n + vc.auditPending.length, 0);
+        if (failedCount === 0) break;
+        if (round === auditRounds) break; // the remaining candidates are finished off below
+
+        const repairBatch = withHooks("polish", async () => {
+          for (const vc of pending) {
+            if (vc.auditPending.length === 0) continue;
+            await runPolishRepairRound(vc, { systemPrompt, template, endpoint });
+          }
+        });
+        await repairBatch();
+      }
+    }
+
+    let totalPolished = 0;
+    let totalRejected = 0;
+    let totalSkipped = 0;
+    let totalNoDraft = 0;
+    const incompleteVolumes = [];
+    for (const vc of volumeCtxs) {
+      const result = await finishPolishVolume(vc, auditRounds);
+      totalPolished += result.polished;
+      totalRejected += result.rejected;
+      totalSkipped += result.skipped;
+      totalNoDraft += result.noDraft;
+      if (result.missing.length > 0) {
+        incompleteVolumes.push({
+          installmentNumber: vc.volume.installmentNumber,
+          missing: result.missing.map((m) => m.id),
+        });
+      }
+    }
+    console.log(
+      `[polish] Done: ${totalPolished} chapter(s) polished, ${totalRejected} rejected ` +
+        `(rejected chapters keep their draft and retry on the next run), ${totalSkipped} skipped, ` +
+        `${totalNoDraft} without draft.`
     );
+    await writeTranslationReport({ seriesDir, manifest, volumes, dryRun });
+    if (incompleteVolumes.length > 0) {
+      throw structuralError(
+        `${incompleteVolumes.length} volume(s) are INCOMPLETE after the polish pass — chapters with no ` +
+          `text: ${incompleteVolumes.map((v) => `${v.installmentNumber} (${v.missing.join(", ")})`).join("; ")}.`
+      );
+    }
+    const volumeError = volumeFailureError("polish", failedVolumes, volumes.length);
+    if (volumeError) throw volumeError;
+    return;
   }
+
+  console.log(`[polish] --dry-run: ${volumes.length} volume(s) previewed, no files written.`);
 }
 
 module.exports = {
   polish,
-  processPolishVolume,
+  polishVolumePhaseA,
+  processPolishVolume: polishVolumePhaseA,
+  runPolishAuditRound,
+  runPolishRepairRound,
+  finishPolishVolume,
   POLISH_QA_REPORT,
   POLISH_VERIFICATION_FILE,
 };

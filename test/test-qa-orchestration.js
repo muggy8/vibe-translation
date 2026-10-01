@@ -555,6 +555,76 @@ async function scenarioExceptionalConsensus() {
   }
 }
 
+// ─── confirmExceptionalScore (the helper the four chunked loops call) ─────────
+// The chunked (chapter-by-chapter) QA loops keep their own inline loop, so they
+// cannot use runSharedQaLoop — but they must run the SAME exceptional-score
+// confirmation, or the biggest volumes (the ones most worth fast-accepting) would
+// be the only ones that never got it. This pins the shared helper directly.
+
+async function scenarioConfirmExceptionalScore() {
+  const { confirmExceptionalScore } = require("../utils/qa-loop");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-client-confirm-"));
+  const stateFile = path.join(dir, "validation-rolling-state.json");
+
+  // A top-band grade that holds up under re-grading: accepted, and the state file
+  // records HOW it was accepted plus the temperature-0 anchor score.
+  const calls = [];
+  // (The parent pins ACCEPTANCE_EXCEPTIONAL_SCORE=100 so the other scenarios keep
+  // exercising the rolling-window path — so the exceptional grades below are 100.)
+  const held = await confirmExceptionalScore({
+    score: 100,
+    recentRollingScores: [92],
+    confirmationCheck: async ({ index, temperature }) => {
+      calls.push({ index, temperature });
+      return { score: 100, temperature: temperature ?? 0.2 };
+    },
+    volumeLabel: "Volume 01",
+    stateFile,
+    sourceFingerprint: "abc",
+  });
+  assert.strictEqual(held.accepted, true, "a consensus accepts the volume");
+  assert.strictEqual(calls.length, 2, "ACCEPTANCE_CONFIRMATION_CHECKS re-grades ran");
+  assert.strictEqual(calls[0].temperature, 0, "the FIRST confirmation is the temperature-0 anchor");
+  const heldState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  assert.strictEqual(heldState.acceptedBy, "exceptional-consensus");
+  assert.strictEqual(heldState.deterministicScore, 100, "the temperature-0 score is recorded");
+
+  // A fluke: the consensus collapses, the caller keeps its loop, and the
+  // confirmation grades are recorded but NOT counted in the rolling window.
+  calls.length = 0;
+  const fluke = await confirmExceptionalScore({
+    score: 100,
+    recentRollingScores: [100],
+    confirmationCheck: async () => ({ score: 40, temperature: 0 }),
+    volumeLabel: "Volume 02",
+    stateFile,
+  });
+  assert.strictEqual(fluke.accepted, false, "a collapsed consensus does not accept");
+  const flukeState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  assert.deepStrictEqual(flukeState.results, [100], "the window is NOT padded with confirmation grades");
+  assert.deepStrictEqual(flukeState.rejectedConfirmations, [40, 40], "the failed consensus is recorded");
+
+  // Nothing to confirm: a normal-band grade, a null grade, or a task that did not
+  // supply a confirmation check all fall straight through to the normal loop.
+  assert.strictEqual(
+    (await confirmExceptionalScore({ score: 74, recentRollingScores: [74], confirmationCheck: async () => 90, volumeLabel: "V", stateFile })).accepted,
+    false,
+    "a passing-but-not-exceptional grade is not re-graded"
+  );
+  assert.strictEqual(
+    (await confirmExceptionalScore({ score: null, recentRollingScores: [], confirmationCheck: async () => 95, volumeLabel: "V", stateFile })).accepted,
+    false,
+    "an unparseable grade is never exceptional"
+  );
+  assert.strictEqual(
+    (await confirmExceptionalScore({ score: 100, recentRollingScores: [100], volumeLabel: "V", stateFile })).accepted,
+    false,
+    "no confirmation check supplied → the fast-accept path never runs"
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ─── Entry points ────────────────────────────────────────────────────────────
 
 async function main() {
@@ -568,6 +638,7 @@ async function main() {
   await scenarioUnparseableAcceptanceFailsClosed();
   await scenarioSkipDecision();
   scenarioExceptionalConsensusInChild();
+  await scenarioConfirmExceptionalScore();
   console.log("qa-orchestration: all checks passed.");
 }
 

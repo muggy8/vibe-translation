@@ -55,6 +55,7 @@ assert.deepStrictEqual(
     "retranslate",
     "translate-qa",
     "polish",
+    "translation-report",
   ]
 );
 assert.strictEqual(PIPELINE_TASK, "pipeline");

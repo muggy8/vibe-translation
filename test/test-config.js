@@ -122,6 +122,42 @@ assert.strictEqual(
   "the old name still overrides"
 );
 
+// ─── ACCEPTANCE_SAMPLE_FLOOR (a bad sample cannot be averaged away) ──────────
+
+{
+  // The hole this closes: with a passing score of 69 and a window of 2, the
+  // average of [100, 38] is 69 — so a document one grader put in the rubric's
+  // "Reject" band was accepted because a second grader loved it.
+  const verdicts = execFileSync(process.execPath, ["-e",
+    `const { meetsAcceptanceCriteria } = require(${JSON.stringify(sharedConfigPath)});` +
+    `console.log(JSON.stringify([` +
+    `meetsAcceptanceCriteria([100, 38]), meetsAcceptanceCriteria([100, 40]), ` +
+    `meetsAcceptanceCriteria([72, 71]), meetsAcceptanceCriteria([100, 100])]));`,
+  ], { encoding: "utf8", env: { ...process.env, ...UNSET, PASSING_SCORE: "69", ACCEPTANCE_WINDOW_SIZE: "2" } }).trim();
+  assert.strictEqual(
+    verdicts,
+    JSON.stringify([false, false, true, true]),
+    "a sample in the rubric's Reject band blocks acceptance; a genuinely passing window still accepts"
+  );
+
+  assert.strictEqual(
+    sharedExportIn("ACCEPTANCE_SAMPLE_FLOOR", { ...UNSET, PASSING_SCORE: "69" }),
+    "54",
+    "default floor: the passing score minus 15 (the bottom of the 'Pass with minor edits' band)"
+  );
+  assert.strictEqual(
+    sharedExportIn("ACCEPTANCE_SAMPLE_FLOOR", { ...UNSET, ACCEPTANCE_SAMPLE_FLOOR: "0" }),
+    "0",
+    "0 restores pure averaging"
+  );
+
+  const averaged = execFileSync(process.execPath, ["-e",
+    `const { meetsAcceptanceCriteria } = require(${JSON.stringify(sharedConfigPath)});` +
+    `console.log(String(meetsAcceptanceCriteria([100, 38])));`,
+  ], { encoding: "utf8", env: { ...process.env, ...UNSET, PASSING_SCORE: "69", ACCEPTANCE_SAMPLE_FLOOR: "0" } }).trim();
+  assert.strictEqual(averaged, "true", "with the floor disabled the old averaging behavior is back");
+}
+
 // ─── seriesArtifactFile (one directory knob for the four root copies) ─────────
 
 {

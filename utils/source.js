@@ -57,11 +57,28 @@ const DEFAULT_CHUNK_THRESHOLD_CHARS = 120000;
  * (v1: interludes were globally numbered "int.K" and the epilogue "chN.5";
  * v2: interludes are "chN.K" anchored to the preceding chapter and the
  * epilogue is "chN.epilogue"; v3: epilogues are named like interludes,
- * continuing the chN.K counter after their anchor chapter).
+ * continuing the chN.K counter after their anchor chapter; v4: segments carry
+ * `bodyChars` and an `empty` flag, so a section that converted to nothing is
+ * recorded as an empty chapter instead of a silent zero-length one).
  *
  * @type {number}
  */
-const BUNDLE_SCHEMA_VERSION = 3;
+const BUNDLE_SCHEMA_VERSION = 4;
+
+/**
+ * A converted section with fewer than this many characters of text is recorded
+ * as an EMPTY chapter (SOURCE_EMPTY_SEGMENT_CHARS). This is not a story-length
+ * rule — a real chapter is longer than this — it is the "the conversion produced
+ * nothing" floor: an image-only page, a page whose text lives in a structure the
+ * converter does not map, or a stub. Flagging it is what makes a missing chapter
+ * visible in the reports instead of becoming a chapter nobody translated.
+ *
+ * @type {number}
+ */
+const EMPTY_SEGMENT_CHARS = (() => {
+  const n = parseInt(process.env.SOURCE_EMPTY_SEGMENT_CHARS, 10);
+  return Number.isFinite(n) ? Math.max(0, n) : 200;
+})();
 
 /**
  * Read the chapter-fallback size threshold from the environment.
@@ -960,6 +977,23 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
     throw new Error(`No readable text chapters found in the spine of ${epubPath}.`);
   }
 
+  // Spine accounting. A book whose declared reading order has 42 items but only
+  // 38 readable sections had 4 items dropped (a cover, a CSS file, a nav page,
+  // an image-only page). That is usually correct — but it is the number that
+  // tells you a chapter went missing, so it must be printed, not assumed.
+  const skippedFromSpine = opened.spine.length - textItems.length;
+  console.log(
+    `[source] ${base}: spine lists ${opened.spine.length} item(s), ${textItems.length} readable ` +
+      `section(s) extracted, ${opened.entryCount} file(s) in the archive` +
+      (skippedFromSpine > 0 ? ` — ${skippedFromSpine} non-text item(s) skipped.` : ".")
+  );
+  if (skippedFromSpine > 0) {
+    const skipped = opened.spine
+      .filter((it) => !/\.x?html?$/i.test(it.href || ""))
+      .map((it) => `${it.id || "?"} (${it.mediaType || "unknown"})`);
+    if (skipped.length > 0) console.log(`[source]   skipped: ${skipped.join(", ")}`);
+  }
+
   // Assign ids, then write the per-chapter files (each starts with its title
   // as an H1; a duplicate leading heading in the chapter body is dropped).
   const ids = assignSegmentIds(chapters.map((c) => c.title));
@@ -975,10 +1009,21 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
     ) {
       body = body.slice(firstLine.length).trim();
     }
+    // A section that converted to nothing (an image-only page, a page whose text
+    // lives in a structure this converter does not map) is recorded as EMPTY
+    // rather than silently becoming a zero-length "chapter" that the translation
+    // stage then dutifully skips.
+    const empty = body.trim().length < EMPTY_SEGMENT_CHARS;
+    if (empty) {
+      console.warn(
+        `[source] ${base} ${ids[i]} ("${title}"): only ${body.trim().length} character(s) of text ` +
+          `after conversion — recorded as an EMPTY chapter (${EMPTY_SEGMENT_CHARS}-char floor).`
+      );
+    }
     const content = `# ${title}\n\n${body}`.trim() + "\n";
     const file = `${base}-${ids[i]}.md`;
     await fs.writeFile(path.join(volumeDir, file), content, "utf-8");
-    segments.push({ id: ids[i], file, title, chars: content.length });
+    segments.push({ id: ids[i], file, title, chars: content.length, bodyChars: body.trim().length, empty });
     contents.push(content.trim());
   }
 
@@ -986,6 +1031,17 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
   const whole = contents.join("\n\n");
   const wholeFile = `${base}-whole.md`;
   await fs.writeFile(path.join(volumeDir, wholeFile), whole + "\n", "utf-8");
+
+  // Lossless check: the whole-volume file must be the chapters, not a subset of
+  // them. A mismatch means the extraction dropped text somewhere.
+  const wholeBodyChars = whole.replace(/^#{1,6}\s+.*$/gm, "").replace(/\s+/g, "").length;
+  const segmentBodyChars = segments.reduce((n, s) => n + (s.bodyChars || 0), 0);
+  if (segmentBodyChars > 0 && wholeBodyChars < segmentBodyChars * 0.98) {
+    console.warn(
+      `[source] ${base}: LOSSLESS CHECK — the chapters hold ${segmentBodyChars} character(s) but ` +
+        `${wholeFile} holds ${wholeBodyChars}: the whole-volume file is missing text.`
+    );
+  }
 
   // Images: everything referenced from the chapters plus every image declared
   // in the OPF manifest (covers, plates, …) so the folder holds ALL embedded
@@ -1006,6 +1062,44 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
     images,
     wholeChars: whole.length,
   };
+}
+
+/**
+ * The chapter title a plain-text source actually declares, if it declares one.
+ *
+ * The merge used to head every plain-text volume with `path.basename(sourceFile)`
+ * — so the published book literally began `# test_story(1).md`: a file name
+ * presented to a reader as a chapter title. A title is only printed when the
+ * source itself carries one (a leading Markdown heading); otherwise the segment
+ * is marked `syntheticTitle` and the merge adds no heading at all.
+ *
+ * @param {string} originalPath - The plain-text source file.
+ * @returns {Promise<{title: string, synthetic: boolean}>} The declared title, or the base name marked synthetic.
+ */
+async function plainTextTitle(originalPath) {
+  const base = path.basename(originalPath).replace(/\.[^.]+$/, "");
+  let head = "";
+  try {
+    const handle = await fs.open(originalPath, "r");
+    try {
+      const buf = Buffer.alloc(4096);
+      const { bytesRead } = await handle.read(buf, 0, 4096, 0);
+      head = buf.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return { title: base, synthetic: true };
+  }
+  for (const line of head.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const m = t.match(/^#{1,6}\s+(.+?)\s*#*$/);
+    if (m && m[1].trim()) return { title: m[1].trim(), synthetic: false };
+    // The first real line is not a heading: the source declares no title.
+    break;
+  }
+  return { title: base, synthetic: true };
 }
 
 // ─── Bundle resolution (the pipeline entry point) ───────────────────────────
@@ -1055,14 +1149,23 @@ async function materializeTextParts(originalPath, volumeDir, base, size, fingerp
       meta = null;
     }
   }
+  // Every part file must still be on disk. `fileExists` is async, so a bare
+  // `.every(p => fileExists(...))` is always truthy (a pending promise is
+  // truthy) — a deleted part file used to be accepted as a cache hit and the
+  // bundle then pointed at files that were not there.
+  const partsOnDisk =
+    Array.isArray(meta?.parts) &&
+    meta.parts.length > 0 &&
+    meta.parts.every((p) => typeof p.file === "string");
+  const allPartsExist =
+    partsOnDisk &&
+    (await Promise.all(meta.parts.map((p) => fileExists(path.join(volumeDir, p.file))))).every(Boolean);
   const validCache =
     meta &&
     meta.fingerprint === fingerprint &&
     meta.targetChars === TEXT_PART_TARGET_CHARS &&
-    Array.isArray(meta.parts) &&
-    meta.parts.length > 0 &&
-    meta.parts.every((p) => typeof p.file === "string") &&
-    meta.parts.every((p) => fileExists(path.join(volumeDir, p.file)));
+    partsOnDisk &&
+    allPartsExist;
   if (validCache) {
     return meta.parts.map((p) => ({ file: p.file, chars: p.chars || 0, cacheHit: true }));
   }
@@ -1121,7 +1224,11 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
         segments: parts.map((p, i) => ({
           id: `part-${String(i + 1).padStart(2, "0")}`,
           file: p.file,
+          // A pipeline-made slice of an oversized text file is not a chapter of
+          // the book: the label exists so the stage can name its outputs, and
+          // `syntheticTitle` stops the merge from printing it as a heading.
           title: `Part ${i + 1} of ${parts.length}`,
+          syntheticTitle: true,
           chars: p.chars,
         })),
         imagesDir: null,
@@ -1130,6 +1237,7 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
         sourceFingerprint: fingerprint,
       };
     }
+    const declared = await plainTextTitle(originalPath);
     return {
       format: "text",
       originalPath,
@@ -1140,8 +1248,13 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
         {
           id: "whole",
           file: path.basename(originalPath),
-          title: path.basename(originalPath),
+          title: declared.title,
+          // True when the "title" is only the file name — the merge must not
+          // print it as a chapter heading in the published book.
+          syntheticTitle: declared.synthetic,
           chars: st.size,
+          bodyChars: st.size,
+          empty: st.size < EMPTY_SEGMENT_CHARS,
         },
       ],
       imagesDir: null,
@@ -1340,6 +1453,9 @@ function chapterContextBlock(values, bundle, segment, index) {
 // ─── Exports ────────────────────────────────────────────────────────────────
 
 module.exports = {
+  plainTextTitle,
+  EMPTY_SEGMENT_CHARS,
+
   DEFAULT_CHUNK_THRESHOLD_CHARS,
   BUNDLE_SCHEMA_VERSION,
   chunkThresholdChars,

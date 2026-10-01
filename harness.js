@@ -1487,6 +1487,8 @@ async function runOneShot({
   endpoint = null,
   temperature = null,
   sampling = null,
+  maxTokens: maxTokensOverride = null,
+  contextWindow: contextWindowOverride = null,
   label = "one-shot",
 }) {
   if (systemPrompt != null && (typeof systemPrompt !== "string" || !systemPrompt.trim())) {
@@ -1516,7 +1518,21 @@ async function runOneShot({
     typeof temperature === "number" && Number.isFinite(temperature)
       ? temperature
       : envTemperature();
-  const maxTokens = envMaxTokens();
+  // The output cap. AI_MAX_TOKENS (or a per-call override) wins; otherwise it is
+  // derived from the context window — the call's own role window when one is
+  // given, else the global AI_CONTEXT_WINDOW. Deriving from a quarter of the
+  // window keeps "prompt + max tokens exceeds the context" unreachable by
+  // construction (gotcha 36), and the per-call override is what lets a role
+  // whose server has a SMALLER context (a translation model at 8k, say) ask for
+  // a smaller answer instead of being handed the global model's cap.
+  const contextWindow =
+    Number.isInteger(contextWindowOverride) && contextWindowOverride > 0
+      ? contextWindowOverride
+      : envContextWindow();
+  const maxTokens =
+    Number.isInteger(maxTokensOverride) && maxTokensOverride > 0
+      ? maxTokensOverride
+      : Math.max(1024, Math.floor(contextWindow / 4));
 
   // Resolve the endpoint this call targets (role override or global AI_*).
   const baseUrl =

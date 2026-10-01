@@ -169,6 +169,28 @@ const ACCEPTANCE_SCORE_TOLERANCE = (() => {
 })();
 
 /**
+ * The floor NO single acceptance grade may fall below (ACCEPTANCE_SAMPLE_FLOOR).
+ *
+ * The acceptance criterion is a rolling average, and an average lets a
+ * near-perfect grade cancel a terrible one: with the default window of 2 and a
+ * passing score of 69, scores of [100, 38] accepted the artifact — 38 is the
+ * rubric's "Reject" band, so the pipeline signed off a document one grader
+ * called atrocious because another grader loved it.
+ *
+ * A bad sample is information, not noise to be averaged away. Default: the
+ * passing score minus 15 (the bottom of the "Pass with minor edits" band), so a
+ * sample in "Requires revision" or "Reject" blocks acceptance whatever the mean
+ * says. Set it to 0 to restore pure averaging.
+ *
+ * @type {number}
+ */
+const ACCEPTANCE_SAMPLE_FLOOR = (() => {
+  const n = parseInt(process.env.ACCEPTANCE_SAMPLE_FLOOR, 10);
+  if (Number.isFinite(n)) return Math.min(100, Math.max(0, n));
+  return Math.max(0, PASSING_SCORE - 15);
+})();
+
+/**
  * How many EXTRA grades an exceptional score is re-checked with before it can
  * be accepted on the spot (ACCEPTANCE_CONFIRMATION_CHECKS, default 2).
  *
@@ -255,6 +277,40 @@ function structuralError(message, cause) {
  */
 function isStructuralError(err) {
   return !!(err && typeof err === "object" && err.structural === true);
+}
+
+/**
+ * Build the error a task must throw when one or more of its volumes failed.
+ *
+ * Every per-volume loop is wrapped in a try/catch so an un-monitored run can keep
+ * going (`ON_VOLUME_ERROR=skip`) — but "keep going" must not mean "report success".
+ * A task that skipped or failed volumes has to fail the run, exactly like the
+ * translation-stage tasks already do; otherwise a whole series of artifacts is
+ * silently missing and the exit code says everything worked. (Observed: the four
+ * pre-production tasks printed the failure summary and exited 0.)
+ *
+ * Returns `null` when there is nothing to fail on, so callers can do their
+ * end-of-run publishing first and throw last.
+ *
+ * @param {string} taskName - The task name, for the message.
+ * @param {Array<{folder?: string, installmentNumber?: string, error?: Error}>} failedVolumes - The recorded failures.
+ * @param {number} totalVolumes - How many volumes the task attempted.
+ * @returns {Error|null} The error to throw, or null when every volume succeeded.
+ */
+function volumeFailureError(taskName, failedVolumes, totalVolumes) {
+  if (!Array.isArray(failedVolumes) || failedVolumes.length === 0) return null;
+  const names = failedVolumes
+    .map((v) => {
+      if (typeof v === "string") return `${v} (volume failed)`;
+      const label = v && (v.installmentNumber || v.folder) ? (v.installmentNumber || v.folder) : "unknown";
+      const reason = v && v.error && v.error.message ? v.error.message : "failed";
+      return `${label} (${reason})`;
+    })
+    .join("; ");
+  return new Error(
+    `${taskName}: ${failedVolumes.length} of ${totalVolumes} volume(s) failed: ${names}. ` +
+      `Re-run the task (idempotent) to pick them up.`
+  );
 }
 
 /**
@@ -439,10 +495,15 @@ function computeRollingAverage(scores) {
 
 /**
  * Decide whether a rolling window of acceptance scores (0–100) meets the
- * acceptance criterion: the mean of `scores` is >= ACCEPTANCE_PASSING_SCORE.
+ * acceptance criterion: every score is at or above ACCEPTANCE_SAMPLE_FLOOR and
+ * the mean of `scores` is >= ACCEPTANCE_PASSING_SCORE.
  *
  * Requires at least ACCEPTANCE_MIN_SAMPLES scores; returns false for fewer
  * (and for empty / non-array input).
+ *
+ * The floor is the important half: an average alone accepted [100, 38] at a
+ * passing score of 69, i.e. a document one grader put in the rubric's "Reject"
+ * band was signed off because a second grader loved it.
  *
  * (The "best" strategy — "at least ACCEPTANCE_BEST_MIN_PASSES scores in the
  * window individually pass" — was removed. With the default window of 2 it
@@ -455,6 +516,8 @@ function computeRollingAverage(scores) {
  */
 function meetsAcceptanceCriteria(scores) {
   if (!Array.isArray(scores) || scores.length < ACCEPTANCE_MIN_SAMPLES) return false;
+  // A sample below the floor is a signal, not noise to average away.
+  if (ACCEPTANCE_SAMPLE_FLOOR > 0 && scores.some((s) => s < ACCEPTANCE_SAMPLE_FLOOR)) return false;
   return computeRollingAverage(scores) >= ACCEPTANCE_PASSING_SCORE;
 }
 
@@ -698,6 +761,7 @@ module.exports = {
   ACCEPTANCE_PASSING_SCORE,
   ACCEPTANCE_EXCEPTIONAL_SCORE,
   ACCEPTANCE_SCORE_TOLERANCE,
+  ACCEPTANCE_SAMPLE_FLOOR,
   ACCEPTANCE_CONFIRMATION_CHECKS,
   ACCEPTANCE_CONFIRMATION_MIN_SCORE,
   // Un-monitored run policies (see the section above).
@@ -705,6 +769,7 @@ module.exports = {
   readBoolEnv,
   structuralError,
   isStructuralError,
+  volumeFailureError,
   ON_VOLUME_ERROR,
   ON_MISSING_PREVIOUS,
   ON_QA_LIMIT,

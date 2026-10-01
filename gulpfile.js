@@ -76,6 +76,8 @@ const { verifyTranslate } = require("./verify-translate");
 const { retranslate } = require("./retranslate");
 const { translateQa } = require("./translate-qa");
 const { polish } = require("./polish");
+const { writeTranslationReport } = require("./utils/translation-report");
+const { getTranslationTarget } = require("./get-translation-target");
 const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
 
 // Wrap each step so its optional per-machine hooks fire around it. The task
@@ -107,6 +109,22 @@ const verifyTranslateTask = withHooks("verify-translate", verifyTranslate);
 const retranslateTask = withHooks("retranslate", retranslate);
 const translateQaTask = withHooks("translate-qa", translateQa);
 const polishTask = withHooks("polish", polish);
+
+/**
+ * The "translation-report" step: rebuild the series-level translation report
+ * (translation-report.md + .json) from the verdict files the translation tasks
+ * already wrote. Deterministic, no AI, no model calls — run it any time to see
+ * what is verified, what is published unverified, and what is missing.
+ */
+async function translationReportStep() {
+  const dryRun = process.argv.includes("--dry-run");
+  const seriesDir = process.env.SERIES_LOCATION;
+  if (!seriesDir) throw new Error("SERIES_LOCATION is not set. Please set it in .env.");
+  const manifest = await getTranslationTarget({ dryRun });
+  await writeTranslationReport({ seriesDir, manifest, volumes: null, dryRun });
+}
+
+const translationReportTask = withHooks("translation-report", translationReportStep);
 
 /**
  * The pipeline steps in run order (step name + hooked task function).
@@ -189,5 +207,6 @@ exports["verify-translate"] = verifyTranslateTask;
 exports.retranslate = retranslateTask;
 exports["translate-qa"] = translateQaTask;
 exports.polish = polishTask;
+exports["translation-report"] = translationReportTask;
 // The whole default run also fires pre-pipeline / post-pipeline around all eight.
 exports.default = withHooks(PIPELINE_TASK, runPipeline);

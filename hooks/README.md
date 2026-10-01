@@ -36,7 +36,8 @@ Default: `<project root>/hooks/`. Override the directory with the
 | before / after `retranslate` | `pre-retranslate` / `post-retranslate` (or `.sh` / `.js`) |
 | before / after `translate-qa` (the QA loop as a whole) | `pre-translate-qa` / `post-translate-qa` (or `.sh` / `.js`) |
 | before / after `polish` | `pre-polish` / `post-polish` (or `.sh` / `.js`) |
-| before the verify **tiebreak** batch | `pre-verify-audit` (or `.sh` / `.js`) |
+| before / after `translation-report` (the deterministic roll-up) | `pre-translation-report` / `post-translation-report` (or `.sh` / `.js`) |
+| before the verify **cross-check** batch (the borderline tiebreak AND the cross-chapter volume audit — one batch, one switch) | `pre-verify-audit` (or `.sh` / `.js`) |
 | before the polish **final audit** batch | `pre-polish-audit` (or `.sh` / `.js`) |
 | around the whole default run | `pre-pipeline` / `post-pipeline` (or `.sh` / `.js`) |
 
@@ -147,7 +148,7 @@ edit and nothing else:
     exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Hy-MT2
     # hooks/pre-polish.sh           (EDIT_* role)
     exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/verify-model
-    # hooks/pre-verify-audit.sh     (AUDIT_* role — the verify tiebreak batch)
+    # hooks/pre-verify-audit.sh     (AUDIT_* role — the tiebreak + cross-chapter audit batch)
     exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/audit-model
     # hooks/pre-polish-audit.sh     (AUDIT_* role — the polish final audit batch)
     exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/audit-model
@@ -157,6 +158,15 @@ edit and nothing else:
 The two cross-check batches (the verify tiebreak and the polish final audit)
 are the `AUDIT_*` role: pick a DIFFERENT model than the stage that produced the
 text, or the check is one model marking its own homework.
+
+Because a role may be answered by a different container with a different size,
+each role also takes its own request limits: `<ROLE>_CONTEXT_WINDOW` and
+`<ROLE>_MAX_TOKENS` (e.g. `AUDIT_CONTEXT_WINDOW=32768`) override the global
+`AI_CONTEXT_WINDOW` / `AI_MAX_TOKENS` for that role only. Set them in the same
+place you set the hook mapping — they describe the container the hook starts.
+Every stage prints the endpoint, model, context window and where each came from
+before its first call, so a mismatch is visible in the log rather than showing
+up as a truncated glossary.
 
 A full default run therefore makes several container switches (translate →
 verify → retranslate → verify → polish → audit → …). The `translate-qa` loop

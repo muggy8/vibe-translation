@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "note": "Grader calibration. Each case is a short source text with a KNOWN defect in one translation and a faithful one in the other. The verifier is supposed to tell them apart. If a grader starts handing out 90s, this is where it shows up — before production does.",
+  "cases": [
+    {
+      "id": "01-omission",
+      "title": "A plot-bearing sentence is dropped",
+      "defect": "The last two sentences of the source — the ones that say the overheating was deliberate — are simply absent from the translation.",
+      "flawedMustFail": true,
+      "cleanMustPass": true,
+      "minGap": 20
+    },
+    {
+      "id": "02-meaning-flip",
+      "title": "The meaning is inverted",
+      "defect": "\"The files are being deleted\" becomes \"the files are safe\", and \"calm voice\" becomes \"panicked voice\".",
+      "flawedMustFail": true,
+      "cleanMustPass": true,
+      "minGap": 25
+    },
+    {
+      "id": "03-terminology-break",
+      "title": "One glossary term, two renderings",
+      "defect": "The canonical rendering of 鏡 is \"the Mirror\"; the flawed text uses \"Looking Glass\" and then \"mirror system\".",
+      "glossary": [
+        { "term": "鏡", "rendering": "the Mirror", "section": "Terms & Concepts" },
+        { "term": "黒鋼蓮", "rendering": "Kurogane Ren", "section": "Characters" }
+      ],
+      "flawedMustFail": true,
+      "cleanMustPass": true,
+      "minGap": 20
+    },
+    {
+      "id": "04-pov-misattribution",
+      "title": "A point-of-view shift is erased and a line given to the wrong character",
+      "defect": "The source marks two POVs and gives the first line to Kurogane; the flawed text drops both markers and puts the line in Sora's mouth.",
+      "flawedMustFail": true,
+      "cleanMustPass": true,
+      "minGap": 20
+    },
+    {
+      "id": "05-hallucinated-addition",
+      "title": "The translation invents events",
+      "defect": "Two sentences of plot that are nowhere in the source (the board failing within the hour, nobody surviving).",
+      "flawedMustFail": true,
+      "cleanMustPass": true,
+      "minGap": 20
+    },
+    {
+      "id": "06-quiet-drift",
+      "title": "A near-miss: tense shifted and a duration dropped",
+      "defect": "\"For three years no one had accessed it\" becomes \"No one has accessed it\" — the duration is gone and the past perfect is gone. Nothing a per-chapter reader would call a disaster, which is exactly why the grader's sensitivity here matters.",
+      "flawedMustFail": false,
+      "cleanMustPass": true,
+      "minGap": 10
+    }
+  ]
+}

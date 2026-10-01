@@ -25,6 +25,7 @@ const {
   checkTranslationQa,
   buildPolishGuardFindings,
   mergeVolumeTranslation,
+  headingForSegment,
   findMissingSegments,
   stripMarkdownFence,
   tailOf,
@@ -36,6 +37,19 @@ const {
   stripContinuityOverlap,
   runWithConcurrency,
   stageConcurrency,
+  previousVolumeTail,
+  chapterContextHash,
+  loadVolumeReferences,
+  findRenderingVariants,
+  renderVariantFindings,
+  checkChapterListConsistency,
+  estimateTokens,
+  fitPromptBudget,
+  buildBudgetedTaskLines,
+  medianScore,
+  verdictCoversCurrentDraft,
+  unverifiedMarker,
+  worthRetranslating,
 } = require("../utils/translate");
 
 // ─── sha256 ───────────────────────────────────────────────────────────────────
@@ -224,12 +238,588 @@ assert.strictEqual(sha256("a"), sha256("a"));
   assert.ok(full[5].includes("ONLY output the translated result"));
   assert.strictEqual(full[full.length - 1], "Translate the [Source Text] into French.");
 
+  // The continuity cue must name where the quoted ending actually came from.
+  // A chapter whose neighbour FAILED leaves the last GOOD chapter's ending as
+  // the cue — calling that "the previous chapter" tells the model to match a
+  // text it is not continuing from.
+  const defaultCue = buildTranslationTaskLines({ continuityText: "alpha" }).find((l) => l.includes('"alpha"'));
+  assert.ok(defaultCue.includes("the previous chapter"), "default label");
+  assert.ok(!defaultCue.includes("immediately"), "no unqualified 'immediately' claim");
+  const honestCue = buildTranslationTaskLines({
+    continuityText: "alpha",
+    continuitySource: "the last usable chapter draft (ch4)",
+  }).find((l) => l.includes('"alpha"'));
+  assert.ok(honestCue.includes("the last usable chapter draft (ch4)"), "the real source is named");
+  const volumeCue = buildTranslationTaskLines({
+    continuityText: "alpha",
+    continuitySource: "the end of the previous volume (Volume 03)",
+  }).find((l) => l.includes('"alpha"'));
+  assert.ok(volumeCue.includes("Volume 03"), "a cross-volume cue says which volume");
+
   const template = "*[Source Text]*\n{{SOURCE_TEXT}}\n\n*[Translation Tasks]*\n{{TASKS}}";
   const prompt = buildTranslationPrompt({ template, sourceText: "本文", tasks: full });
   assert.ok(prompt.startsWith("*[Source Text]*\n本文"), "source block first");
   assert.ok(prompt.includes("*[Translation Tasks]*"));
   assert.ok(prompt.includes("1. **") && prompt.includes("7. **"), "numbered 1..7");
   assert.ok(prompt.endsWith("7. **Translate the [Source Text] into French.**"));
+}
+
+// ─── previousVolumeTail (cross-volume continuity cue) ────────────────────────
+
+(async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-client-tail-"));
+  const manifest = {
+    volumes: [
+      { folder: "book-one(01)", installmentNumber: "01" },
+      { folder: "book-two(02)", installmentNumber: "02" },
+      { folder: "book-three(03)", installmentNumber: "03" },
+    ],
+  };
+  fs.mkdirSync(path.join(dir, "book-one(01)"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "book-two(02)"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "book-one(01)", "translation.md"), "one\n\n" + "x".repeat(2000) + "\nTHE END OF BOOK ONE");
+
+  // The first volume has nothing before it.
+  assert.deepStrictEqual(await previousVolumeTail(dir, manifest, "book-one(01)", 400), { text: "", fromLabel: "" });
+
+  // A later volume gets the previous volume's published ending, labelled with
+  // the volume it came from (reading order from the manifest, not folder names).
+  const tail = await previousVolumeTail(dir, manifest, "book-two(02)", 400);
+  assert.strictEqual(tail.fromLabel, "Volume 01");
+  assert.ok(tail.text.length > 0 && tail.text.length <= 401, `bounded tail: ${tail.text.length} chars`);
+  assert.ok(tail.text.startsWith("…"), "a truncated cue is marked as a fragment");
+
+  // A volume whose predecessor was never translated gets no cue (rather than a
+  // cue invented from a further-back volume).
+  const gap = await previousVolumeTail(dir, manifest, "book-three(03)", 400);
+  assert.deepStrictEqual(gap, { text: "", fromLabel: "" });
+  fs.rmSync(dir, { recursive: true, force: true });
+})();
+
+// ─── medianScore / verdictCoversCurrentDraft / unverifiedMarker ──────────────
+
+{
+  assert.strictEqual(medianScore([70]), 70);
+  assert.strictEqual(medianScore([90, 40]), 65, "even count → mean of the two middle values");
+  assert.strictEqual(medianScore([90, 40, 68]), 68, "odd count → the middle value");
+  assert.strictEqual(medianScore([90, 40, 68, 70]), 69, "rounded to a whole score");
+  // An outlier cannot move the verdict on its own: the middle of [95, 30, 71] is 71.
+  assert.strictEqual(medianScore([95, 30, 71]), 71);
+  assert.strictEqual(medianScore([]), null);
+  assert.strictEqual(medianScore([null, "x", 50]), 50, "non-numeric entries are ignored");
+
+  const stateEntry = { sourceHash: "s1", draftHash: "d1" };
+  assert.strictEqual(verdictCoversCurrentDraft({ sourceHash: "s1", draftHash: "d1" }, stateEntry), true);
+  assert.strictEqual(verdictCoversCurrentDraft({ sourceHash: "s1", draftHash: "d2" }, stateEntry), false, "a retranslate invalidates the verdict");
+  assert.strictEqual(verdictCoversCurrentDraft({ sourceHash: "s2", draftHash: "d1" }, stateEntry), false, "a changed source invalidates it");
+  assert.strictEqual(verdictCoversCurrentDraft(undefined, stateEntry), false);
+  assert.strictEqual(verdictCoversCurrentDraft({ sourceHash: "s1" }, stateEntry), false, "a verdict with no draft hash covers nothing");
+
+  // The marker is visible in the rendered book, not hidden in a comment.
+  const marker = unverifiedMarker({ score: 57, pass: false, reason: "the verifier scored it below the passing threshold" });
+  assert.ok(marker.startsWith("> **"), "a visible blockquote line");
+  assert.ok(marker.includes("UNVERIFIED"));
+  assert.ok(marker.includes("57/100"));
+  assert.ok(marker.includes("the verifier scored it below the passing threshold"));
+  assert.ok(unverifiedMarker({ score: null, pass: false, reason: "verification has not run" }).includes("no verification score"));
+}
+
+// ─── worthRetranslating (the retranslation value filter) ─────────────────────
+
+{
+  // A meaning/terminology problem (HIGH) is always worth a whole-chapter rewrite.
+  assert.strictEqual(worthRetranslating({ score: 72, findings: "- [HIGH] wrong rendering" }, 70), true);
+  // A deterministic-QA failure (residue / truncation / empty) is never cosmetic.
+  assert.strictEqual(worthRetranslating({ score: null, deterministic: true, findings: "1. fix" }, 70), true);
+  // An unparseable score carries no information — retry it.
+  assert.strictEqual(worthRetranslating({ score: null, findings: "" }, 70), true);
+  // A hair under the line with only cosmetic findings is a copy-edit, not a rewrite.
+  assert.strictEqual(worthRetranslating({ score: 68, findings: "- [LOW] awkward phrasing" }, 70), false);
+  // Well under the line is worth rewriting whatever the bands are.
+  assert.strictEqual(worthRetranslating({ score: 40, findings: "- [MEDIUM] tense drift" }, 70), true);
+  assert.strictEqual(worthRetranslating({ score: 68, findings: "- [MEDIUM] tense drift" }, 70, 0), true, "margin 0 retranslates every FAIL");
+}
+
+// ─── estimateTokens / fitPromptBudget (honest trimming) ──────────────────────
+
+{
+  // Latin text: ~0.35 tokens per char. CJK: ~1 token per char. The estimate is a
+  // deliberate over-estimate, so it must never come out LOWER than the char count
+  // for CJK (a kanji is often more than one token).
+  assert.strictEqual(estimateTokens(""), 0);
+  assert.strictEqual(estimateTokens("abcdefghij"), 4, "10 latin chars × 0.35 → 4");
+  assert.strictEqual(estimateTokens("日本語です"), 5, "CJK ≈ 1 token per char");
+  assert.ok(estimateTokens("これは日本語です") >= 8, "CJK is never under-estimated");
+  assert.ok(
+    estimateTokens("日本語です " + "hello world hello world") >
+      estimateTokens("hello world hello world"),
+    "adding CJK raises the estimate"
+  );
+
+  // Everything fits: nothing is dropped, nothing is rewritten.
+  const roomy = fitPromptBudget({
+    blocks: [
+      { name: "glossary", text: '"A" → "a"\n"B" → "b"', priority: 5 },
+      { name: "story background", text: "The plot.", priority: 2 },
+    ],
+    fixedTokens: 100,
+    roleWindow: 8000,
+    outputReserve: 2000,
+  });
+  assert.deepStrictEqual(roomy.dropped, [], "a roomy window drops nothing");
+  assert.strictEqual(roomy.blocks.length, 2);
+  assert.ok(roomy.blocks[0].text.includes('"A" → "a"'));
+  assert.strictEqual(roomy.fits, true);
+
+  // Too small for everything: the LEAST useful block is cut first, and the cut is
+  // reported (never silent).
+  const longLine = "x".repeat(200);
+  const tight = fitPromptBudget({
+    blocks: [
+      { name: "glossary", text: '"A" → "a"', priority: 5 },
+      { name: "story background", text: [longLine, longLine, longLine].join("\n"), priority: 2 },
+      { name: "voice notes", text: [longLine, longLine].join("\n"), priority: 1 },
+    ],
+    fixedTokens: 900,
+    roleWindow: 1200,
+    outputReserve: 100,
+  });
+  assert.ok(tight.dropped.length > 0, "a window with no room reports what it dropped");
+  const keptNames = tight.blocks.map((b) => b.name);
+  assert.ok(keptNames.includes("glossary"), "the highest-priority block survives whole");
+  assert.ok(!keptNames.includes("voice notes"), "the least useful block is dropped first");
+  assert.strictEqual(tight.fits, false, "the caller is told the source alone does not fit");
+
+  // A partial keep cuts WHOLE lines from the end and says how many went missing.
+  const partial = fitPromptBudget({
+    blocks: [
+      {
+        name: "glossary",
+        text: Array.from({ length: 200 }, (_, i) => `"term${i}" → "rendering${i}"`).join("\n"),
+        priority: 5,
+      },
+    ],
+    fixedTokens: 0,
+    roleWindow: 600,
+    outputReserve: 100,
+  });
+  assert.ok(partial.blocks[0].text.includes("further line(s) of the glossary were dropped"), "the truncation is announced in the text");
+  assert.ok(partial.blocks[0].text.includes('"term0"'), "the head of the list survives");
+  assert.ok(!partial.blocks[0].text.includes('"term199"'), "the tail is what goes");
+  assert.ok(partial.dropped[0].chars > 0, "the dropped size is reported");
+
+  // The task-line builder carries the decision through: a squeezed chapter keeps
+  // its terminology and loses its atmosphere.
+  const budgeted = buildBudgetedTaskLines({
+    terminologyLines: ['"ソラ" → "Sora"'],
+    background: "A very long background. ".repeat(400),
+    styleRules: "House rule.",
+    sourceText: "本文です",
+    template: "{{SOURCE_TEXT}}\n{{TASKS}}",
+    roleWindow: 900,
+    outputReserve: 400,
+    label: "test chapter",
+  });
+  assert.ok(budgeted.tasks.some((t) => t.includes('"ソラ" → "Sora"')), "terminology survives the squeeze");
+  assert.ok(!budgeted.tasks.some((t) => t.includes("A very long background")), "the background was dropped");
+  assert.ok(budgeted.dropped.some((d) => d.name === "story background"), "the drop is reported to the caller");
+
+  const roomyTasks = buildBudgetedTaskLines({
+    terminologyLines: ['"ソラ" → "Sora"'],
+    background: "The plot.",
+    styleRules: "House rule.",
+    voiceNotes: "She says ya.",
+    sourceText: "本文です",
+    template: "{{SOURCE_TEXT}}\n{{TASKS}}",
+    roleWindow: 32000,
+    outputReserve: 4000,
+  });
+  assert.deepStrictEqual(roomyTasks.dropped, [], "a roomy window drops nothing");
+  assert.ok(roomyTasks.tasks.some((t) => t.includes("She says ya.")), "voice notes survive when there is room");
+}
+
+// ─── chapterContextHash (per-chapter invalidation) ───────────────────────────
+
+(async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-client-chash-"));
+  const glossary = [
+    "# Glossary",
+    "",
+    "## Characters",
+    "",
+    "| Term | Rendering | Notes |",
+    "|---|---|---|",
+    "| ソラ | Sora | protagonist |",
+    "| 黒鋼 | Kurogane | the other one |",
+    "",
+  ].join("\n");
+  fs.writeFileSync(path.join(dir, "glossary.md"), glossary, "utf8");
+  fs.writeFileSync(path.join(dir, "style-guide.md"), "# Style\n- Keep honorifics.\n", "utf8");
+  fs.writeFileSync(path.join(dir, "character-voice.md"), "# Voices\n- Sora: formal.\n", "utf8");
+
+  const chapterA = "ソラは部屋を見た。";
+  const chapterB = "黒鋼は部屋を見た。";
+
+  const refs1 = await loadVolumeReferences(dir);
+  const hashA1 = chapterContextHash(refs1, chapterA);
+  const hashB1 = chapterContextHash(refs1, chapterB);
+  assert.notStrictEqual(hashA1, hashB1, "two chapters with different terms have different keys");
+
+  // Edit a term chapter A never says: A's key is UNCHANGED (its draft survives),
+  // B's key changes (its draft must be re-made). This is the whole point — the
+  // volume-level hash changes for both, which is what used to re-translate a
+  // whole 17-volume series for one renamed side character.
+  fs.writeFileSync(
+    path.join(dir, "glossary.md"),
+    glossary.replace("| 黒鋼 | Kurogane | the other one |", "| 黒鋼 | Blacksteel | renamed |"),
+    "utf8"
+  );
+  const refs2 = await loadVolumeReferences(dir);
+  assert.strictEqual(chapterContextHash(refs2, chapterA), hashA1, "an unrelated glossary edit leaves chapter A's key alone");
+  assert.notStrictEqual(chapterContextHash(refs2, chapterB), hashB1, "the chapter that DOES use the term invalidates");
+  assert.notStrictEqual(refs2.contextHash, refs1.contextHash, "the volume-level key still changes for both (the fast path)");
+
+  // A term added to the glossary that chapter A contains: A invalidates.
+  fs.writeFileSync(
+    path.join(dir, "glossary.md"),
+    glossary.replace("| 黒鋼 | Kurogane | the other one |", "| 黒鋼 | Kurogane | the other one |\n| 部屋 | room | a room |"),
+    "utf8"
+  );
+  const refs3 = await loadVolumeReferences(dir);
+  assert.notStrictEqual(chapterContextHash(refs3, chapterA), hashA1, "a new term this chapter uses invalidates it");
+
+  // The non-glossary references are injected whole, so changing them invalidates
+  // every chapter — same as before.
+  fs.writeFileSync(path.join(dir, "style-guide.md"), "# Style\n- Drop honorifics.\n", "utf8");
+  const refs4 = await loadVolumeReferences(dir);
+  assert.notStrictEqual(chapterContextHash(refs4, chapterA), hashA1, "a style-guide change invalidates the chapter");
+  assert.notStrictEqual(refs4.sharedContextHash, refs1.sharedContextHash);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+})();
+
+// ─── checkChapterListConsistency (the handoff vs the extraction) ─────────────
+
+(async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-client-chlist-"));
+  const bundle = { segments: [{ id: "ch1", file: "b-ch1.md" }, { id: "ch1.1", file: "b-ch1.1.md" }] };
+
+  // No chapters.json yet (the wiki task has not run): not a disagreement.
+  const none = await checkChapterListConsistency(dir, bundle);
+  assert.strictEqual(none.ok, true, "no chapters.json is not a failure");
+
+  fs.writeFileSync(
+    path.join(dir, "chapters.json"),
+    JSON.stringify({ chapters: [{ id: "ch1", file: "b-ch1.md" }, { id: "ch1.1", file: "b-ch1.1.md" }] }),
+    "utf8"
+  );
+  const agree = await checkChapterListConsistency(dir, bundle);
+  assert.deepStrictEqual(agree, { ok: true, missing: [], extra: [], reason: "" }, "matching lists agree");
+
+  // The source changed (an interlude appeared) and the handoff was never refreshed:
+  // the mismatch is reported, in both directions.
+  const grown = {
+    segments: [
+      { id: "ch1", file: "b-ch1.md" },
+      { id: "ch1.1", file: "b-ch1.1.md" },
+      { id: "ch2", file: "b-ch2.md" },
+    ],
+  };
+  const mismatch = await checkChapterListConsistency(dir, grown);
+  assert.strictEqual(mismatch.ok, false, "a stale handoff is a disagreement");
+  assert.deepStrictEqual(mismatch.missing, ["ch2"], "the chapter the handoff does not know about");
+
+  fs.writeFileSync(
+    path.join(dir, "chapters.json"),
+    JSON.stringify({ chapters: [{ id: "ch1", file: "b-ch1.md" }, { id: "ch9", file: "b-ch9.md" }] }),
+    "utf8"
+  );
+  const stale = await checkChapterListConsistency(dir, bundle);
+  assert.strictEqual(stale.ok, false);
+  assert.deepStrictEqual(stale.missing, ["ch1.1"], "this run has a chapter the handoff lost");
+  assert.deepStrictEqual(stale.extra, ["ch9"], "the handoff lists a chapter this run cannot find");
+
+  // A corrupt chapters.json must not crash the stage.
+  fs.writeFileSync(path.join(dir, "chapters.json"), "{ not json", "utf8");
+  const corrupt = await checkChapterListConsistency(dir, bundle);
+  assert.strictEqual(corrupt.ok, true, "an unreadable handoff is not treated as a disagreement");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+})();
+
+// ─── findRenderingVariants (the deterministic drift scan) ────────────────────
+
+{
+  const terms = [
+    { term: "鏡", rendering: "Mirror" },
+    { term: "黒鋼", rendering: "Blacksteel" },
+    { term: "ソラ", rendering: "Sora" },
+    { term: "若葉", rendering: "Wakaba" },
+    { term: "若葉", rendering: "Young Leaf" },
+  ];
+  const text =
+    "The Mirror operated silently. Sora looked at Blacksteel, then at Black steel. " +
+    "sora left the room. Two Mirrors stood there. The Wakaba Institute, then the Young Leaf Institute.";
+  const findings = findRenderingVariants({ text, terms, targetLanguage: "English" });
+
+  const bySeverity = (sev) => findings.filter((f) => f.severity === sev);
+
+  // HIGH: the glossary gives one source term two renderings and the volume uses both.
+  const high = bySeverity("HIGH");
+  assert.strictEqual(high.length, 1, `one terminology conflict, got ${JSON.stringify(high)}`);
+  assert.strictEqual(high[0].term, "若葉");
+  assert.ok(high[0].variant.includes("Wakaba") && high[0].variant.includes("Young Leaf"));
+
+  // MEDIUM: the canonical name written with an extra space.
+  const medium = bySeverity("MEDIUM");
+  assert.strictEqual(medium.length, 1, `one spacing variant, got ${JSON.stringify(medium)}`);
+  assert.strictEqual(medium[0].term, "黒鋼");
+  assert.strictEqual(medium[0].variant, "Black steel");
+
+  // LOW: capitalisation drift, and a plural alongside the singular.
+  const low = bySeverity("LOW");
+  assert.ok(low.some((f) => f.term === "ソラ" && f.variant === "sora"), "capitalisation drift is reported");
+  assert.ok(low.some((f) => f.term === "鏡" && f.variant === "Mirrors"), "a plural alongside the singular is reported");
+
+  // A volume that uses only the canonical forms produces NOTHING — the scan must
+  // not invent findings.
+  const clean = findRenderingVariants({
+    text: "The Mirror operated silently. Sora looked at Blacksteel. Sora left the room.",
+    terms,
+    targetLanguage: "English",
+  });
+  assert.deepStrictEqual(clean, [], `a clean volume reports nothing: ${JSON.stringify(clean)}`);
+
+  // Hyphenation is the same class as spacing.
+  const hyphen = findRenderingVariants({ text: "He shook Black-steel hand.", terms, targetLanguage: "English" });
+  assert.ok(hyphen.some((f) => f.variant === "Black-steel"), "a hyphenated variant is caught");
+
+  // Word boundaries: "Sora" must not be reported from "Soraque" or "Soran".
+  assert.deepStrictEqual(
+    findRenderingVariants({ text: "Soraque and Soran argued.", terms, targetLanguage: "English" }),
+    [],
+    "a longer word containing the rendering is not a variant"
+  );
+
+  // The report section renders the scan for a human reader.
+  const section = renderVariantFindings(findings);
+  assert.ok(section.includes("## Rendering variants (deterministic scan — no model call)"));
+  assert.ok(section.includes("| HIGH | 若葉 |"));
+  assert.strictEqual(renderVariantFindings([]), "", "nothing found → no section");
+}
+
+// ─── loadVolumeReferences: relevance-ordered injection ───────────────────────
+
+(async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-client-refs-"));
+  // A cumulative voice reference: the volume-1 cast at the TOP (where a
+  // cumulative document keeps them forever), then 40 later characters.
+  const cast = "### 主人公\n- speech: 〜である (formal)\n\n### 黒鋼\n- speech: 〜だぜ (rough)\n\n";
+  const later = Array.from(
+    { length: 40 },
+    (_, i) => `### キャラクター${i}\n- speech: quirk ${i} ${"filler ".repeat(40)}`
+  ).join("\n\n");
+  fs.writeFileSync(path.join(dir, "character-voice.md"), "# Character Voice\n\n" + cast + later, "utf8");
+  fs.writeFileSync(
+    path.join(dir, "shared-wiki.md"),
+    "# Shared Wiki\n\n## Volume 01 state\n- 主人公 met 黒鋼.\n\n" +
+      Array.from({ length: 40 }, (_, i) => `## Volume ${i + 2} state\n- filler beat ${i} ${"more filler ".repeat(40)}`).join("\n\n"),
+    "utf8"
+  );
+
+  const volumeText = "主人公は黒鋼と再会した。";
+  const refs = await loadVolumeReferences(dir, volumeText);
+
+  // The old rule (slice(0, 4000)) showed the FIRST characters in the file and
+  // nothing else; with 40 later characters the volume-1 protagonists were the
+  // ones dropped. Relevance keeps them whatever their position.
+  assert.ok(refs.voiceNotes.includes("### 主人公"), "the volume-1 protagonist's voice notes are injected");
+  assert.ok(refs.voiceNotes.includes("### 黒鋼"), "the second protagonist's voice notes are injected");
+  assert.ok(refs.voiceNotes.includes("occurs in the text being processed"), "the injection says why these sections were chosen");
+  assert.ok(refs.background.includes("## Volume 01 state"), "the wiki section this volume actually references is injected");
+  assert.ok(refs.voiceNotes.length <= 4000 + 400, `voice notes stay inside their budget (${refs.voiceNotes.length})`);
+  assert.ok(refs.background.length <= 8000 + 400, `background stays inside its budget (${refs.background.length})`);
+
+  // Without the source text the old head-of-document behavior is kept.
+  const legacy = await loadVolumeReferences(dir);
+  assert.ok(!legacy.voiceNotes.includes("occurs in the text being processed"), "no source text → no relevance claim");
+
+  // The selection rule is part of the fingerprint, so drafts built under the old
+  // rule are invalidated once (the safe direction).
+  assert.strictEqual(refs.contextHash.length, 64);
+  assert.notStrictEqual(refs.contextHash, refs.sharedContextHash, "the glossary is excluded from the shared half");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+})();
+
+// ─── planTargetedRepair (fix the passage, not the chapter) ──────────────────
+
+{
+  const {
+    paragraphBlocks,
+    parseFindingItems,
+    locateQuoteRange,
+    planTargetedRepair,
+    stitchParagraphs,
+    buildPassageScopeLine,
+  } = require("../utils/translate");
+
+  assert.deepStrictEqual(paragraphBlocks("a\n\nb\n\n\nc  "), ["a", "b", "c"]);
+  assert.deepStrictEqual(paragraphBlocks(""), []);
+
+  // Findings are split into items, each carrying its own source quote.
+  const findings = [
+    "## Findings",
+    '1. [HIGH] the second sentence is omitted',
+    '   - Source: "正常な過熱ではない。"',
+    '   - Translation: "normal overheating"',
+    '   - Fix: translate the negation',
+    "",
+    '2. [LOW] awkward phrasing',
+    '   - Source: "音もなく働いていた"',
+    '   - Translation: "worked silently"',
+    '   - Fix: prefer "had run silently"',
+  ].join("\n");
+  const items = parseFindingItems(findings);
+  assert.strictEqual(items.length, 2, "two findings, not one blob");
+  assert.strictEqual(items[0].quote, "正常な過熱ではない。", "each carries the span it points at");
+  assert.ok(items[1].text.includes("awkward phrasing"));
+
+  // Locating a quote: whitespace-insensitive, and a quote that spans two
+  // paragraphs resolves to BOTH of them.
+  const source = ["第一段落です。", "第二の段落に 改行が\n含まれます。", "第三段落です。"].join("\n\n");
+  const blocks = paragraphBlocks(source);
+  assert.deepStrictEqual(locateQuoteRange(blocks, "第二の段落に 改行が 含まれます。"), { start: 1, end: 1 }, "whitespace is collapsed on both sides");
+  assert.deepStrictEqual(locateQuoteRange(blocks, "段落に 改行が\n含まれます。第三段落です。"), { start: 1, end: 2 }, "a cross-paragraph quote claims both paragraphs");
+  assert.strictEqual(locateQuoteRange(blocks, "存在しない文章"), null, "a quote that is not in the source is not found");
+  assert.strictEqual(locateQuoteRange(blocks, ""), null);
+
+  const jaSource = [
+    "研究所は静かだった。",
+    "七番基板の温度が基準値を超えている。正常な過熱ではない。",
+    "ソラは平静に言った。",
+    "黒鋼は飛び起きた。",
+    "そして沈黙が続いた。",
+  ].join("\n\n");
+  const draft = [
+    "The laboratory was quiet.",
+    "The seventh board's temperature exceeded the baseline.",
+    "Sora said calmly.",
+    "Kurogane jumped up.",
+    "Then the silence went on.",
+  ].join("\n\n");
+  const oneFinding = [
+    "## Findings",
+    '1. [HIGH] the negation is omitted',
+    '   - Source: "正常な過熱ではない。"',
+    '   - Fix: translate it',
+  ].join("\n");
+
+  const plan = planTargetedRepair({ sourceText: jaSource, draftText: draft, findingsText: oneFinding });
+  assert.strictEqual(plan.usable, true, "one located finding repairs one paragraph");
+  assert.strictEqual(plan.blocks.length, 1);
+  assert.deepStrictEqual([plan.blocks[0].start, plan.blocks[0].end], [1, 1]);
+  assert.ok(plan.reason.includes("1/5 paragraphs"), plan.reason);
+
+  // Stitching keeps every untouched paragraph byte-for-byte.
+  const stitched = stitchParagraphs(paragraphBlocks(draft), plan.blocks, [
+    "The seventh board's temperature exceeded the baseline. It was not normal overheating.",
+  ]);
+  assert.ok(stitched.includes("The laboratory was quiet."), "the paragraph before is untouched");
+  assert.ok(stitched.includes("Sora said calmly."), "the paragraph after is untouched");
+  assert.ok(stitched.includes("not normal overheating"), "the repaired paragraph is replaced");
+  assert.strictEqual(paragraphBlocks(stitched).length, 5, "no paragraph was lost or duplicated");
+  assert.throws(() => stitchParagraphs(paragraphBlocks(draft), plan.blocks, [""]), /no corrected text/, "an empty replacement fails loudly instead of deleting a paragraph");
+
+  // Refusals — every one of them falls back to the whole-chapter pass.
+  const ragged = planTargetedRepair({
+    sourceText: jaSource,
+    draftText: "The laboratory was quiet.\n\nThe seventh board was hot.\n\nSora spoke.",
+    findingsText: oneFinding,
+  });
+  assert.strictEqual(ragged.usable, false, "a draft whose paragraphs do not line up with the source cannot be repaired in place");
+  assert.ok(ragged.reason.includes("cannot be aligned"), ragged.reason);
+
+  const unlocatable = planTargetedRepair({
+    sourceText: jaSource,
+    draftText: draft,
+    findingsText: '1. [HIGH] something is wrong\n   - Source: "この文章はソース中に存在しない"',
+  });
+  assert.strictEqual(unlocatable.usable, false, "a finding whose quote is not in the source is structural");
+  assert.ok(unlocatable.reason.includes("structural"), unlocatable.reason);
+
+  const everywhere = planTargetedRepair({
+    sourceText: jaSource,
+    draftText: draft,
+    findingsText: [
+      '1. [HIGH] a\n   - Source: "研究所は静かだった。"',
+      '2. [HIGH] b\n   - Source: "七番基板の温度が基準値を超えている。"',
+      '3. [HIGH] c\n   - Source: "ソラは平静に言った。"',
+      '4. [HIGH] d\n   - Source: "黒鋼は飛び起きた。"',
+      '5. [HIGH] e\n   - Source: "そして沈黙が続いた。"',
+    ].join("\n"),
+  });
+  assert.strictEqual(everywhere.usable, false, "when every paragraph is affected, a whole-chapter pass is cheaper and safer");
+  assert.ok(everywhere.reason.includes("every paragraph"), everywhere.reason);
+
+  const implausible = planTargetedRepair({
+    sourceText: jaSource,
+    draftText: [
+      "The laboratory was quiet.",
+      "A completely unrelated sentence that has nothing whatsoever to do with the source paragraph it would be swapped for, " +
+        "written at length so the length check can see that this draft paragraph is not a rendering of that source span at all.",
+      "Sora said calmly.",
+      "Kurogane jumped up.",
+      "Then the silence went on.",
+    ].join("\n\n"),
+    findingsText: oneFinding,
+  });
+  assert.strictEqual(implausible.usable, false, "a draft paragraph that is not a plausible rendering of its source span means the alignment is wrong");
+  assert.ok(implausible.reason.includes("length ratio"), implausible.reason);
+
+  // Nearby findings merge into ONE passage pass (a call per sentence would cost
+  // more than it saves); distant ones stay separate.
+  const twoNear = planTargetedRepair({
+    sourceText: jaSource,
+    draftText: draft,
+    findingsText: [
+      '1. [HIGH] a\n   - Source: "七番基板の温度が基準値を超えている。"',
+      '2. [HIGH] b\n   - Source: "正常な過熱ではない。"',
+      '3. [HIGH] c\n   - Source: "そして沈黙が続いた。"',
+    ].join("\n"),
+  });
+  assert.strictEqual(twoNear.blocks.length, 2, "the two adjacent findings become one passage, the distant one stays its own");
+  assert.deepStrictEqual([twoNear.blocks[0].start, twoNear.blocks[0].end], [1, 1]);
+  assert.deepStrictEqual([twoNear.blocks[1].start, twoNear.blocks[1].end], [4, 4]);
+
+  // A finding with NO locatable span is chapter-wide: it must reach every
+  // passage pass, or the shortcut would silently drop a real problem.
+  const mixed = planTargetedRepair({
+    sourceText: jaSource,
+    draftText: draft,
+    findingsText: [
+      '1. [HIGH] a\n   - Source: "研究所は静かだった。"',
+      '2. [HIGH] the whole chapter reads too formally (no quote)',
+    ].join("\n"),
+  });
+  assert.strictEqual(mixed.usable, true);
+  assert.ok(
+    mixed.blocks.every((b) => b.findings.some((f) => f.includes("too formally"))),
+    "the unlocatable finding is carried into every passage pass"
+  );
+
+  // The scope line: the model must know it is correcting a passage of a longer
+  // chapter, and must not re-translate the neighbours it was shown.
+  const scope = buildPassageScopeLine({
+    before: "The laboratory was quiet.",
+    after: "Sora said calmly.",
+    blockNumber: 1,
+    blockCount: 2,
+  });
+  assert.ok(scope.includes("ONE passage (1 of 2)"), scope);
+  assert.ok(scope.includes("do not repeat it"), "the preceding text is context, not output");
+  assert.ok(scope.includes("do not translate it"), "and so is the following text");
+  assert.ok(!buildPassageScopeLine({ blockNumber: 1, blockCount: 1 }).includes("FOLLOWS"), "no neighbours, no neighbour lines");
 }
 
 // ─── cjkRatio / countOccurrences ──────────────────────────────────────────────
@@ -436,6 +1026,56 @@ assert.strictEqual(sha256("a"), sha256("a"));
   });
   assert.strictEqual(merged, "# Chapter One\n\ntext-ch1\n\ntext-ch2\n");
   assert.strictEqual(mergeVolumeTranslation({ segments, getText: () => null }), "");
+
+  // The heading rules that used to produce a broken book.
+  // 1. The translator already rendered the title that was in the source: adding
+  //    the source-language title on top gives two headings, one untranslated.
+  const alreadyHeaded = mergeVolumeTranslation({
+    segments: [{ id: "ch1", title: "第一章" }],
+    getText: () => "# Chapter One\n\nThe story begins.",
+  });
+  assert.strictEqual(alreadyHeaded, "# Chapter One\n\nThe story begins.\n", "no duplicated heading, and no untranslated one");
+
+  // 2. A "title" that is only a file name must never be printed as a chapter title.
+  const fileNamed = mergeVolumeTranslation({
+    segments: [{ id: "whole", title: "test_story(1).md", syntheticTitle: true }],
+    getText: () => "The story begins.",
+  });
+  assert.strictEqual(fileNamed, "The story begins.\n", "a file name is not a chapter heading");
+
+  // 3. A pipeline label ("Part 3 of 12") is not a chapter of the book either.
+  const sliced = mergeVolumeTranslation({
+    segments: [{ id: "part-03", title: "Part 3 of 12", syntheticTitle: true }],
+    getText: () => "More text.",
+  });
+  assert.strictEqual(sliced, "More text.\n", "a slice label is not printed as a heading");
+
+  // 4. A title still written in the SOURCE language must not be printed above an
+  //    English chapter: the translator rendered it its own way, and adding the
+  //    Japanese original puts a foreign line at the top of the published book.
+  const sourceTitled = mergeVolumeTranslation({
+    segments: [{ id: "whole", title: "ソラの初夜勤" }],
+    getText: () => "**Sora's First Night Shift**\n\nThe story begins.",
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+  });
+  assert.strictEqual(sourceTitled, "**Sora's First Night Shift**\n\nThe story begins.\n", "no untranslated heading is injected");
+  // The same title, when the pair is the same language, is fine to print.
+  assert.ok(
+    headingForSegment({ title: "ソラの初夜勤" }, "本文", { sourceLanguage: "Japanese", targetLanguage: "Japanese" }),
+    "a same-language title is not residue"
+  );
+  assert.strictEqual(
+    headingForSegment({ title: "第一章" }, "text", { sourceLanguage: "Japanese", targetLanguage: "English" }),
+    null,
+    "a source-script title is refused"
+  );
+
+  // 5. A real declared title with no heading in the text: print it.
+  assert.strictEqual(headingForSegment({ title: "Prologue" }, "text"), "# Prologue");
+  assert.strictEqual(headingForSegment({ title: "Prologue" }, "## Prologue\ntext"), null, "the text's own heading wins");
+  assert.strictEqual(headingForSegment({ title: "" }, "text"), null);
+  assert.strictEqual(headingForSegment({ title: "x", syntheticTitle: true }, "text"), null);
 }
 
 // ─── findMissingSegments (the merged-volume completeness gate) ───────────────
@@ -509,6 +1149,28 @@ assert.strictEqual(sha256("a"), sha256("a"));
   const ep2 = roleEndpoint("TRANSLATE");
   assert.strictEqual(ep2.baseUrl, "http://role/v1", "role var wins");
   assert.strictEqual(ep2.model, "role-model", "role var wins");
+
+  // Per-role context window and output cap: a stage running on a server with a
+  // SMALLER context than the global AI_* model cannot use the global cap.
+  delete process.env.TRANSLATE_CONTEXT_WINDOW;
+  delete process.env.TRANSLATE_MAX_TOKENS;
+  assert.strictEqual(ep2.contextWindow, null, "no role context window → the global one is used");
+  assert.strictEqual(ep2.maxTokens, null, "no role cap → the harness derives one");
+  process.env.TRANSLATE_CONTEXT_WINDOW = "16384";
+  const ep3 = roleEndpoint("TRANSLATE");
+  assert.strictEqual(ep3.contextWindow, 16384, "the role's own context window is reported");
+  assert.strictEqual(ep3.contextWindowSource, "TRANSLATE_CONTEXT_WINDOW");
+  process.env.TRANSLATE_MAX_TOKENS = "4096";
+  const ep4 = roleEndpoint("TRANSLATE");
+  assert.strictEqual(ep4.maxTokens, 4096, "the role's own output cap wins");
+  assert.strictEqual(ep4.maxTokensSource, "TRANSLATE_MAX_TOKENS");
+  delete process.env.TRANSLATE_MAX_TOKENS;
+  assert.strictEqual(
+    ep3.maxTokensSource && roleEndpoint("TRANSLATE").maxTokensSource,
+    "derived from TRANSLATE_CONTEXT_WINDOW",
+    "with a role window but no role cap, the cap is derived from the role window"
+  );
+  delete process.env.TRANSLATE_CONTEXT_WINDOW;
   for (const k of keys) {
     if (prev[k] === undefined) delete process.env[k];
     else process.env[k] = prev[k];
@@ -528,15 +1190,17 @@ assert.strictEqual(sha256("a"), sha256("a"));
     { stop: true, reason: "all-pass" }
   );
   // A chapter with NO draft was never verified at all. Counting it as a pass is
-  // how the loop used to report "all-pass" over an untranslated volume.
+  // how the loop used to report "all-pass" over an untranslated volume — and
+  // looping cannot fix it either (there is nothing to retranslate), so the loop
+  // says so plainly instead of burning rounds.
   assert.deepStrictEqual(
     qaLoopDecision({ phase: "after-verify", round: 1, maxRounds: 3, failed: 0, noDraft: 4 }),
-    { stop: false, reason: null },
-    "noDraft chapters are not a pass"
+    { stop: true, reason: "missing-drafts" },
+    "noDraft chapters stop the loop with their own reason"
   );
   assert.deepStrictEqual(
     qaLoopDecision({ phase: "after-verify", round: 3, maxRounds: 3, failed: 0, noDraft: 4 }),
-    { stop: true, reason: "round-limit" },
+    { stop: true, reason: "missing-drafts" },
     "untranslated chapters reach the round cap, never 'all-pass'"
   );
   assert.deepStrictEqual(
@@ -557,6 +1221,18 @@ assert.strictEqual(sha256("a"), sha256("a"));
   assert.deepStrictEqual(
     qaLoopDecision({ phase: "after-retranslate", round: 1, maxRounds: 3, retranslated: 0 }),
     { stop: true, reason: "stalled" }
+  );
+  // after-verify: the draft ratchet rolled back EVERY failing chapter to a
+  // better earlier draft — the loop is moving the book backwards, so stop
+  // before paying for another round of the same.
+  assert.deepStrictEqual(
+    qaLoopDecision({ phase: "after-verify", round: 1, maxRounds: 3, failed: 3, noImprovement: 3 }),
+    { stop: true, reason: "no-improvement" }
+  );
+  // …but one regression among many fixable chapters is not a reason to stop.
+  assert.deepStrictEqual(
+    qaLoopDecision({ phase: "after-verify", round: 1, maxRounds: 3, failed: 9, noImprovement: 1 }),
+    { stop: false, reason: null }
   );
   // after-retranslate: something applied → continue to the next verify batch.
   // (In the actual loop this phase is only reached with round < maxRounds —

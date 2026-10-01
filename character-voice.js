@@ -30,13 +30,13 @@ const fs = require("fs").promises;
 const path = require("path");
 require("./types");
 const harness = require("./harness");
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
+const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump, selectSectionsByRelevance } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage } = require("./utils/fs");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, hasRealOutput } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
   shouldProcessChunked,
@@ -87,16 +87,29 @@ function parseVoiceQuirks(output) {
 
 /**
  * Truncate a character voice reference if it exceeds the threshold.
+ *
+ * "Show the last N sections" was wrong for the same reason it is wrong for the
+ * glossary: the sections are one per CHARACTER, and the volume-1 cast sits at the
+ * top of the document forever. At volume 17 the extractor was shown a reference
+ * with the protagonists missing and rediscovered them as new characters. The
+ * selection is now relevance-ordered — every character whose name occurs in the
+ * volume being processed is kept, whatever position they hold in the file (see
+ * selectSectionsByRelevance in utils/prompt.js).
+ *
  * @param {string} content - The full character voice reference content.
+ * @param {string} [sourceText] - The volume/chapter source text, used to rank sections.
  * @returns {string}
  */
-function truncateVoiceRef(content) {
+function truncateVoiceRef(content, sourceText) {
   if (!content || content.length <= VOICE_REF_TRUNCATION_THRESHOLD) return content;
-  const allSections = content.match(/^### .+[\s\S]*?(?=^### |$)/gm);
-  if (!allSections || allSections.length <= VOICE_REF_TRUNCATION_MAX_ENTRIES) return content;
-  const header = content.split(/^### /m)[0];
-  const keep = allSections.slice(-VOICE_REF_TRUNCATION_MAX_ENTRIES);
-  return [header, `[TRUNCATED: previous reference has ${allSections.length} sections. Showing last ${keep.length}.]`, keep.join("\n\n")].join("\n\n");
+  const picked = selectSectionsByRelevance({
+    content,
+    headingRe: /^### /m,
+    sourceText,
+    maxUnits: VOICE_REF_TRUNCATION_MAX_ENTRIES,
+    unitLabel: "character section(s)",
+  });
+  return picked.content;
 }
 
 /**
@@ -456,13 +469,6 @@ async function characterVoice() {
       );
     }
   }
-  if (failedVolumes.length > 0) {
-    console.error(
-      `\n${failedVolumes.length} of ${volumes.length} volume(s) failed: ` +
-        `${failedVolumes.map((v) => `${v.folder} (${v.error.message})`).join("; ")}. ` +
-        `Re-run the task (idempotent) to pick them up.`
-    );
-  }
   if (volumeArg || dryRun) {
     console.log(volumeArg ? "\n--volume: skipping the series-root copy." : "\n--dry-run: skipping the series-root copy (dry runs make no file writes).");
   }
@@ -471,11 +477,18 @@ async function characterVoice() {
     let lastVoice = null;
     for (let i = sorted.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sorted[i], "character-voice.md");
-      if (await fileExists(candidate)) { lastVoice = candidate; break; }
+      // Last REAL snapshot: an empty or stubbed one left by a failed volume is
+      // not the series' current voice reference.
+      if (await hasRealOutput(candidate)) { lastVoice = candidate; break; }
     }
     if (lastVoice) { await fs.copyFile(lastVoice, finalVoiceFile); await writeProvenanceSidecar(finalVoiceFile, lastVoice); console.log(`\nCopied the final character voice reference to: ${finalVoiceFile}`); }
     else { console.log("\nNo character voice snapshots found; nothing to copy."); }
   }
+
+  // A task that failed volumes fails the run (see configs/shared.js
+  // volumeFailureError): the summary used to be printed and the task exited 0.
+  const volumeError = volumeFailureError("character-voice", failedVolumes, volumes.length);
+  if (volumeError) throw volumeError;
 }
 
 // The "model emitted tool-call syntax as plain text" guard (emittedToolCallAsText
@@ -507,7 +520,16 @@ async function runExtract(ctx, seg = null, si = null) {
     const stateFile = si === 0 ? ctx.previousVoiceRefFile : ctx.voiceOutputFile;
     if (stateFile) {
       // Inlined (not readFile) — so the cumulative reference is bounded here.
-      messages.push(await inlineReferenceMessage(stateFile, si === 0 ? "character-voice-previous.md" : "character-voice-current.md", { truncate: truncateVoiceRef }));
+      // Relevance-ordered: the characters this chapter actually contains are
+      // shown even when they were introduced in volume 1 (see truncateVoiceRef).
+      const chapterSource = await fs.readFile(path.join(ctx.volumeDir, seg.file), "utf8");
+      messages.push(
+        await inlineReferenceMessage(
+          stateFile,
+          si === 0 ? "character-voice-previous.md" : "character-voice-current.md",
+          { truncate: (raw) => truncateVoiceRef(raw, chapterSource) }
+        )
+      );
     }
     messages.push({ text: ctx.extractPrompt }, { text: chapterSegmentNote(ctx.bundle, seg, si) });
     return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `character-voice-extract-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
@@ -516,7 +538,12 @@ async function runExtract(ctx, seg = null, si = null) {
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV extraction...`);
   const messages = [{ file: sourceFile, name: path.basename(sourceFile) }, { text: ctx.extractPrompt }];
   if (ctx.previousVoiceRefFile) {
-    messages.push(await inlineReferenceMessage(ctx.previousVoiceRefFile, "character-voice-previous.md", { truncate: truncateVoiceRef }));
+    const volumeSourceText = await fs.readFile(sourceFile, "utf8");
+    messages.push(
+      await inlineReferenceMessage(ctx.previousVoiceRefFile, "character-voice-previous.md", {
+        truncate: (raw) => truncateVoiceRef(raw, volumeSourceText),
+      })
+    );
   }
   return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `character-voice-extract-${values.INSTALLMENT_NUMBER}` });
 }
@@ -752,6 +779,25 @@ async function runChunkedQaLoop(ctx) {
     await saveRollingState(stateFilePath, recentRollingScores, {
       sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
     });
+    // The same exceptional-score confirmation the whole-installment loop runs
+    // (utils/qa-loop.js) — a consensus accepts the volume without the per-chapter
+    // feedback round below.
+    const exceptional = await confirmExceptionalScore({
+      score,
+      recentRollingScores,
+      confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+      stateFile: stateFilePath,
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
+    if (exceptional.accepted) {
+      // The chunked loop's contract: the only other way out of the loop is the
+      // iteration limit (which sets ctx.limitReached). Reaching here means the
+      // consensus accepted the volume, so record HOW it was accepted for the
+      // run summary and stop before the per-chapter feedback round.
+      ctx.acceptedBy = "exceptional-consensus";
+      break;
+    }
     if (meetsAcceptanceCriteria(recentRollingScores)) {
       const avg = computeRollingAverage(recentRollingScores);
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 (${recentRollingScores.length} checks) meets the passing score ${ACCEPTANCE_PASSING_SCORE}. Accepted.`);

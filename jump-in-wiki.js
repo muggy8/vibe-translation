@@ -59,10 +59,10 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, writeProvenanceSidecar } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore } = require("./utils/qa-loop");
 const { writeVolumeHandoff } = require("./utils/handoff");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir, filterVolumesByInstallment } = require("./utils/manifest");
@@ -536,6 +536,14 @@ async function jumpInWiki() {
 
   let limitReachedCount = 0;
   const failedVolumes = [];
+  /**
+   * The cumulative invariant the other three cumulative tasks enforce: once any
+   * volume is regenerated, every LATER volume is regenerated too — its wiki was
+   * built on the artifact that just changed, so keeping it would leave the series
+   * state built on a stale base. (AGENTS.md documented this for the wiki; the
+   * task did not implement it.)
+   */
+  let regeneratedAny = false;
 
   for (const folderName of volumes) {
     try {
@@ -576,6 +584,29 @@ async function jumpInWiki() {
       `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md`
     );
 
+    /**
+     * Resolve the previous volume FIRST.
+     * The validator prompt names the prior volume's real installment number, so
+     * that value must exist before the prompt is built. (Observed: these values
+     * were declared further down the same block and read here — a
+     * use-before-declaration ReferenceError that failed EVERY volume, which the
+     * volume-level error handling then logged as a per-volume failure.)
+     */
+    const isFirst = i === 0;
+    const previousFolderName = isFirst ? null : sortedFolderWithSourceMaterial[i - 1];
+    // The previous volume's ACTUAL installment number from the plan of record
+    // (not current-1 — agent-chosen installment numbers are not guaranteed
+    // contiguous, so N-1 would misname the prior volume in the validator
+    // prompt's prose).
+    const previousInstallmentNumber = isFirst
+      ? null
+      : volumeByFolder.get(previousFolderName)?.installmentNumber ?? null;
+    const previousVolumeDir = previousFolderName ? path.join(seriesDir, previousFolderName) : null;
+    const previousWikiOutputFile = previousVolumeDir ? path.join(previousVolumeDir, "wiki.md") : null;
+    const previousSharedWikiOutputFile = previousVolumeDir
+      ? path.join(previousVolumeDir, "shared-wiki.md")
+      : null;
+
     const validatorValues = {
       INSTALLMENT_NUMBER: values.INSTALLMENT_NUMBER,
       SOURCE_NAME: values.SOURCE_NAME,
@@ -608,32 +639,12 @@ async function jumpInWiki() {
     console.log(`Shared Wiki Output file: ${sharedWikiOutputFile}`);
     console.log(`Validation Output file:  ${validationOutputFile}`);
 
-    /**
-     * set some variables (the ctx is built here, before the dry-run check, so
-     * --dry-run can dump the exact agent-mode prompts too)
-     */
-    const isFirst = i === 0;
-    let previousFolderName = null;
-    let previousInstallmentNumber = null;
-    let previousWikiOutputFile = null;
-    let previousSharedWikiOutputFile = null;
-
+    // The wiki builds cumulatively on the previous volume's wiki + shared
+    // wiki, exactly like the three other cumulative tasks — so a missing
+    // previous volume is the same decision (ON_MISSING_PREVIOUS). Both files
+    // must exist AND hold real content (a crashed run leaves scaffold stubs,
+    // which are not a usable base).
     if (!isFirst) {
-      previousFolderName = sortedFolderWithSourceMaterial[i - 1];
-      // The previous volume's ACTUAL installment number from the plan of record
-      // (not current-1 — agent-chosen installment numbers are not guaranteed
-      // contiguous, so N-1 would misname the prior volume in the validator
-      // prompt's prose).
-      previousInstallmentNumber = volumeByFolder.get(previousFolderName)?.installmentNumber ?? null;
-      const previousVolumeDir = path.join(seriesDir, previousFolderName);
-      previousWikiOutputFile = path.join(previousVolumeDir, "wiki.md");
-      previousSharedWikiOutputFile = path.join(previousVolumeDir, "shared-wiki.md");
-
-      // The wiki builds cumulatively on the previous volume's wiki + shared
-      // wiki, exactly like the three other cumulative tasks — so a missing
-      // previous volume is the same decision (ON_MISSING_PREVIOUS). Both files
-      // must exist AND hold real content (a crashed run leaves scaffold stubs,
-      // which are not a usable base).
       const prevWikiMissing = !(await hasRealOutput(previousWikiOutputFile));
       const prevSharedMissing = !(await hasRealOutput(previousSharedWikiOutputFile));
       if (prevWikiMissing || prevSharedMissing) {
@@ -671,6 +682,8 @@ async function jumpInWiki() {
     // this…)" as the volume's wiki.
     const wikiAndSharedWikiExists =
       !force &&
+      // A regenerated earlier volume invalidates this one (cumulative cascade).
+      !regeneratedAny &&
       (await hasRealOutput(wikiOutputFile)) &&
       (await hasRealOutput(sharedWikiOutputFile));
 
@@ -749,7 +762,7 @@ async function jumpInWiki() {
      * (fail-open).
      */
     let currentVolumeHasAlreadyBeenProcessed = false;
-    if (!force && (await fileExists(validationOutputFile))) {
+    if (!force && !regeneratedAny && (await fileExists(validationOutputFile))) {
       const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
       const { loadRollingState } = require("./configs/shared");
       const state = await loadRollingState(stateFilePath);
@@ -795,6 +808,9 @@ async function jumpInWiki() {
     }
 
     await runVolumeAgent(ctx);
+    // This volume's wiki was (re)written, so every later volume's wiki — which
+    // was built on it — is now stale and must be rebuilt too.
+    regeneratedAny = true;
 
     // Deterministic per-volume handoff for the translation stage: chapters.json
     // + translation-brief.md (no AI call; best-effort — a failure here must not
@@ -830,13 +846,6 @@ async function jumpInWiki() {
     }
   }
 
-  if (failedVolumes.length > 0) {
-    console.error(
-      `\n${failedVolumes.length} of ${volumes.length} volume(s) failed: ` +
-        `${failedVolumes.map((v) => `${v.folder} (${v.error.message})`).join("; ")}. ` +
-        `Re-run the task (idempotent) to pick them up.`
-    );
-  }
   if (limitReachedCount > 0) {
     console.log(
       `\n${limitReachedCount} of ${sortedFolderWithSourceMaterial.length} volume(s) reached the ` +
@@ -861,7 +870,11 @@ async function jumpInWiki() {
     let lastSharedWiki = null;
     for (let i = sortedFolderWithSourceMaterial.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sortedFolderWithSourceMaterial[i], "shared-wiki.md");
-      if (await fileExists(candidate)) {
+      // "Last EXISTING" must mean last REAL one. A volume whose author turn
+      // threw still leaves its scaffold stub on disk (the stub is created before
+      // the turn), and a plain fileExists() check published "(stub — the merge
+      // pass replaces this…)" as the series' living wiki.
+      if (await hasRealOutput(candidate)) {
         lastSharedWiki = candidate;
         break;
       }
@@ -874,6 +887,13 @@ async function jumpInWiki() {
       console.log("\nNo shared wiki snapshots found; nothing to copy to the series root.");
     }
   }
+
+  // A task that failed volumes fails the run (see configs/shared.js
+  // volumeFailureError): the summary used to be printed and the task exited 0,
+  // which is how a wiki task that failed on every single volume looked like a
+  // success.
+  const volumeError = volumeFailureError("jump-in-wiki", failedVolumes, volumes.length);
+  if (volumeError) throw volumeError;
 }
 
 /**
@@ -1118,9 +1138,27 @@ async function runChunkedQaLoop(ctx) {
       recentRollingScores.push(reply.score);
       if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) recentRollingScores.shift();
     }
-    await saveRollingState(validationOutputFile.replace(".md", "-rolling-state.json"), recentRollingScores, {
+    const wikiStateFile = validationOutputFile.replace(".md", "-rolling-state.json");
+    await saveRollingState(wikiStateFile, recentRollingScores, {
       sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
     });
+
+    // The same exceptional-score confirmation the whole-installment loop runs
+    // (utils/qa-loop.js): a top-band grade is re-graded at temperature 0 and the
+    // calm judging temperature, and a consensus accepts the volume WITHOUT the
+    // expensive per-chapter feedback round below.
+    const exceptional = await confirmExceptionalScore({
+      score: reply ? reply.score : null,
+      recentRollingScores,
+      confirmationCheck: ({ index, temperature }) => wikiAcceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+      stateFile: wikiStateFile,
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
+    if (exceptional.accepted) {
+      ctx.acceptedBy = "exceptional-consensus";
+      break;
+    }
 
     if (meetsAcceptanceCriteria(recentRollingScores)) {
       const avg = computeRollingAverage(recentRollingScores);

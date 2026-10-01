@@ -174,7 +174,11 @@ function strategyIgnoredCheck(scores) {
 // Two 95s in a 2-window: accepted (the old "best" reading would have refused).
 assert.strictEqual(strategyIgnoredCheck([95, 95]), true, "ACCEPTANCE_STRATEGY=best no longer blocks acceptance");
 assert.strictEqual(strategyIgnoredCheck([80, 80, 80, 60, 60]), true, "average 72 → accepted regardless of the removed strategy");
-assert.strictEqual(strategyIgnoredCheck([95, 45]), true, "average 70 boundary: 95+45 = 70 → accepted (inclusive)");
+// The sample floor: 45 is the rubric's "Requires revision" band, so a window of
+// [95, 45] is NOT accepted even though its average is exactly the passing score
+// — one grader's enthusiasm does not cancel another's rejection.
+assert.strictEqual(strategyIgnoredCheck([95, 45]), false, "a sample below the floor blocks acceptance whatever the average");
+assert.strictEqual(strategyIgnoredCheck([95, 60]), true, "average 77.5 with both samples at/above the floor (55) → accepted");
 assert.strictEqual(strategyIgnoredCheck([95, 44]), false, "average 69.5 → rejected");
 
 // ─── meetsExceptionalCriteria (the "is this a fluke?" test) ─────────────────
@@ -268,8 +272,11 @@ function defaultCriteriaCheck(scores) {
 // One check is not enough (min samples 2); two fresh passes decide.
 assert.strictEqual(defaultCriteriaCheck([100]), false);
 assert.strictEqual(defaultCriteriaCheck([100, 100]), true);
-assert.strictEqual(defaultCriteriaCheck([90, 55]), true); // avg 72.5
-assert.strictEqual(defaultCriteriaCheck([90, 50]), true); // avg 70 (boundary inclusive)
+assert.strictEqual(defaultCriteriaCheck([90, 55]), true); // avg 72.5, both samples at the floor (55)
+// 50 is below the sample floor: the average is exactly the passing score, but
+// one grader put the artifact in the rubric's "Requires revision" band, and a
+// rejection is not noise to average away.
+assert.strictEqual(defaultCriteriaCheck([90, 50]), false); // avg 70 — blocked by the sample floor
 assert.strictEqual(defaultCriteriaCheck([89, 50]), false); // avg 69.5
 // A legacy 5-score state file is evaluated as a whole under the new default
 // (a volume accepted under the old rule keeps skipping — no re-validation).
@@ -588,6 +595,91 @@ assert.ok(!truncated.includes("## Characters"), "truncateGlossary: a fully trunc
 const manyColumns = "## Characters\n| Source | Rendering | Notes |\n|---|---|---|\n" + tableRows.slice(0, 150).join("\n") + "\n" + "x".repeat(70 * 1024);
 assert.strictEqual(truncateGlossary(manyColumns), manyColumns, "truncateGlossary: ≤ 200 rows → unchanged even when oversized");
 
+// Relevance-ordered truncation (the recency bug): a glossary is organised by
+// SECTION, so "drop the oldest rows in document order" threw away the volume-1
+// main cast — which is exactly what volume 17 still contains — and the extractor
+// dutifully rediscovered the protagonists as new terms. With the volume's source
+// text, the rows that occur in it are kept no matter where they sit.
+{
+  // The volume-1 cast sits at the TOP of the Characters table (document order),
+  // and 1,198 filler rows follow it.
+  const cast = ["| ソラ | Sora | protagonist |", "| 黒鋼 | Kurogane | the other one |"];
+  const withCast = [
+    "# Glossary — Test",
+    "",
+    "## Characters",
+    "| Source | Rendering | Notes |",
+    "|---|---|---|",
+    ...cast,
+    ...tableRows,
+    "",
+    "## Terms & Concepts",
+    "| Source | Rendering | Notes |",
+    "|---|---|---|",
+    "| 鏡 | Mirror | the recording system |",
+  ].join("\n");
+  assert.ok(withCast.length > 64 * 1024, "fixture is oversized");
+
+  const volumeText = "ソラは黒鋼を見た。鏡が音もなく働いていた。";
+  const relevant = truncateGlossary(withCast, volumeText);
+  assert.ok(relevant.includes("| ソラ | Sora | protagonist |"), "the volume-1 cast survives (it occurs in this volume)");
+  assert.ok(relevant.includes("| 黒鋼 | Kurogane | the other one |"), "the second protagonist survives");
+  assert.ok(relevant.includes("| 鏡 | Mirror | the recording system |"), "a term from a LATER section survives too");
+  assert.ok(relevant.includes("## Characters"), "the section a kept row belongs to keeps its heading");
+  assert.ok(relevant.includes("## Terms & Concepts"), "cross-section relevance keeps both headings it needs");
+  const relevantRows = (relevant.match(/^\| (?:Term\d+|ソラ|黒鋼|鏡) \|/gm) || []).length;
+  assert.strictEqual(relevantRows, 200, "the entry cap is still respected");
+  assert.ok(
+    relevant.includes("whose source term occurs in the text being translated (3 such row(s)"),
+    "the note says WHY these rows were chosen"
+  );
+
+  // Without a source text the old newest-window behavior is kept (and the note
+  // says so rather than pretending the selection was relevance-based).
+  const legacy = truncateGlossary(withCast);
+  assert.ok(!legacy.includes("| ソラ | Sora | protagonist |"), "no source text → the old document-order window");
+  assert.ok(legacy.includes("Showing the 200 in document order"), "the note is honest about which rule ran");
+}
+
+// ─── buildUnusedEntriesNote (the coverage audit feeding back) ────────────────
+const { buildUnusedEntriesNote } = require("../glossary");
+
+{
+  const coverage = {
+    volume: "02",
+    terms: [
+      { term: "ソラ", section: "Characters", occurrences: 41 },
+      { term: "黒鋼", section: "Characters", occurrences: 0 },
+      { term: "鏡", section: "Items", occurrences: 0 },
+    ],
+  };
+  const note = buildUnusedEntriesNote(coverage);
+  assert.ok(note.includes("## Entries the previous volume never used"), "the note has its own section");
+  assert.ok(note.includes("2 glossary entr"), "it counts the unused entries");
+  assert.ok(note.includes("- 黒鋼 (Characters)") && note.includes("- 鏡 (Items)"), "it names them");
+  assert.ok(!note.includes("ソラ"), "a term that WAS used is not flagged");
+  assert.ok(note.includes("candidate for removal"), "it says what to do about them");
+  assert.ok(note.includes("volume 02"), "it says which volume the audit came from");
+
+  // Nothing to say → nothing injected.
+  assert.strictEqual(buildUnusedEntriesNote(null), "", "no coverage file → no note");
+  assert.strictEqual(buildUnusedEntriesNote({ terms: [] }), "", "empty coverage → no note");
+  assert.strictEqual(
+    buildUnusedEntriesNote({ volume: "01", terms: [{ term: "x", occurrences: 3 }] }),
+    "",
+    "every term used → no note"
+  );
+
+  // Bounded: a 200-term list is noise, so the note names the cap and counts the rest.
+  const many = {
+    volume: "03",
+    terms: Array.from({ length: 200 }, (_, i) => ({ term: `Term${i}`, occurrences: 0 })),
+  };
+  const bounded = buildUnusedEntriesNote(many, 40);
+  assert.strictEqual((bounded.match(/^- Term/gm) || []).length, 40, "the note names at most the cap");
+  assert.ok(bounded.includes("and 160 more"), "and says how many it left out");
+}
+
 // ─── buildPerTermResearchPrompt ──────────────────────────────────────────────
 const perTermPrompt = buildPerTermResearchPrompt(glossaryCtx, { term: "ソラ", type: "character", query: "ソラ" }, 0);
 assert.ok(perTermPrompt.includes("ソラ"), "per-term prompt carries the term");
@@ -628,6 +720,35 @@ assert.strictEqual(povParsed[0].marker, "※");
 assert.throws(() => parseVoiceQuirks("no json here"), /No JSON array/);
 assert.throws(() => parseVoiceQuirks('{"type":"voice"}'), /No JSON array/);
 
+// ─── utils/prompt: selectSectionsByRelevance ─────────────────────────────────
+const { selectSectionsByRelevance } = require("../utils/prompt");
+
+{
+  const doc = ["# Ref", "", "### Sora", "quirk A", "### Kurogane", "quirk B", "### Nobody", "quirk C"].join("\n");
+  // Under the cap: untouched.
+  const untouched = selectSectionsByRelevance({ content: doc, headingRe: /^### /m, sourceText: "Sora", maxUnits: 3 });
+  assert.strictEqual(untouched.content, doc, "at or under the cap the document is returned unchanged");
+  assert.strictEqual(untouched.truncated, false);
+
+  // Relevance wins over position: the FIRST section survives, the last one goes.
+  const picked = selectSectionsByRelevance({ content: doc, headingRe: /^### /m, sourceText: "Sora", maxUnits: 1 });
+  assert.ok(picked.content.includes("### Sora"), "the relevant section is kept");
+  assert.ok(!picked.content.includes("### Nobody"), "the irrelevant newest section is the one dropped");
+  assert.strictEqual(picked.relevant, 1);
+  assert.strictEqual(picked.dropped, 2);
+
+  // A quoted source-language span inside a section also counts as relevance.
+  const quoted = ["## Honorifics", "- keep 〜さん", "## Onomatopoeia", "- render ギューッ as a swoosh"].join("\n");
+  const q = selectSectionsByRelevance({ content: quoted, headingRe: /^## /m, sourceText: "彼はさんづけで呼んだ", maxUnits: 1 });
+  assert.ok(q.content.includes("## Honorifics"), "a section quoting a pattern the source contains is kept");
+  assert.ok(!q.content.includes("## Onomatopoeia"), "the section whose pattern is absent goes");
+
+  // No source text → the old "last N" window, and the note says so.
+  const legacy = selectSectionsByRelevance({ content: doc, headingRe: /^### /m, maxUnits: 1 });
+  assert.ok(legacy.content.includes("### Nobody"), "no source text keeps the legacy window");
+  assert.ok(legacy.content.includes("Showing the last 1"), "the note names the rule that ran");
+}
+
 // ─── character-voice: truncateVoiceRef ──────────────────────────────────────
 const shortVoiceRef = "### ソラ\n- sentence endings: 〜である\n### 黒鋼\n- sentence endings: 〜だぜ";
 assert.strictEqual(truncateVoiceRef(shortVoiceRef), shortVoiceRef, "truncateVoiceRef: short content unchanged");
@@ -636,8 +757,22 @@ assert.strictEqual(truncateVoiceRef(shortVoiceRef), shortVoiceRef, "truncateVoic
 const longVoiceRef = "Header\n\n" + Array.from({ length: 2000 }, (_, i) => `### Character${i}\n- sentence endings: quirk ${i} quirk ${i} quirk ${i} quirk ${i} quirk ${i} quirk ${i}`).join("\n\n");
 const truncatedVoice = truncateVoiceRef(longVoiceRef);
 assert.ok(truncatedVoice.includes("[TRUNCATED:"), "truncateVoiceRef: truncated content has header note");
-assert.ok(!truncatedVoice.includes("Character0"), "truncateVoiceRef: first entries removed");
+assert.ok(!truncatedVoice.includes("Character0"), "truncateVoiceRef: with no source text the legacy window is used");
 assert.ok(truncatedVoice.includes("Character"), "truncateVoiceRef: some entries kept");
+
+// The recency bug: the volume-1 cast sits at the TOP of the reference forever,
+// and "show the last N sections" dropped them — so volume 17 rediscovered the
+// protagonists as new characters. With the volume's source text they survive.
+{
+  const castRef =
+    "Header\n\n### 主人公\n- sentence endings: 〜である quirk quirk quirk\n\n### 黒鋼\n- sentence endings: 〜だぜ quirk quirk quirk\n\n" +
+    longVoiceRef.replace("Header\n\n", "");
+  assert.ok(castRef.length > 64 * 1024, "voice fixture is oversized");
+  const relevantVoice = truncateVoiceRef(castRef, "主人公は黒鋼と歩いた。");
+  assert.ok(relevantVoice.includes("### 主人公"), "the volume-1 protagonist is kept whatever their position");
+  assert.ok(relevantVoice.includes("### 黒鋼"), "the second protagonist is kept");
+  assert.ok(relevantVoice.includes("occurs in the text being processed"), "the note says why these sections were chosen");
+}
 
 // ─── character-voice: emittedToolCallAsText ──────────────────────────────────
 // A turn that made real tool calls is never flagged, even if its text also
@@ -739,7 +874,34 @@ const {
   buildAuthorTurnPrompt: styleBuildAuthorTurnPrompt,
   buildValidatorTurnPrompt: styleBuildValidatorTurnPrompt,
   buildFeedbackTurnPrompt: styleBuildFeedbackTurnPrompt,
+  truncateStyleGuide,
 } = require("../style-guide");
+
+// ─── style-guide: truncateStyleGuide ─────────────────────────────────────────
+{
+  // Over the byte threshold with more sections than the cap.
+  const filler = Array.from(
+    { length: 420 },
+    (_, i) =>
+      `## Category${i}\n- policy ${i}: render pattern${i} this way, with enough prose in every section ` +
+      `to push the whole document past the byte threshold on its own, repeated a few times so the size grows.`
+  ).join("\n\n");
+  const bigGuide =
+    "# Style Guide\n\n## Honorifics\n- keep 〜さん as -san.\n\n## POV markers\n- render ※ as a bold header.\n\n" + filler;
+  assert.ok(bigGuide.length > 64 * 1024, `style fixture is ${bigGuide.length} chars`);
+
+  const legacy = truncateStyleGuide(bigGuide);
+  assert.ok(legacy.includes("[TRUNCATED:"), "oversized guide is truncated");
+  assert.ok(!legacy.includes("## Honorifics"), "with no source text the legacy last-N window drops the first section");
+
+  // Relevance: the honorific policy quotes 〜さん, which this volume contains, so
+  // it survives even though it is the FIRST section in the document.
+  const relevant = truncateStyleGuide(bigGuide, "彼女はさんづけで呼ばれた。");
+  assert.ok(relevant.includes("## Honorifics"), "a policy whose quoted pattern occurs in this volume is kept");
+  assert.ok(relevant.includes("occurs in the text being processed"), "the note says why these sections were chosen");
+  assert.ok(!relevant.includes("## Category419"), "the sections that go are the irrelevant ones at the end of the window");
+  assert.ok(relevant.includes("occurs in the text being processed (1 such section(s))"), "exactly one section was relevance-selected");
+}
 
 assert.deepStrictEqual(parseStyleObservations(""), []);
 assert.deepStrictEqual(parseStyleObservations(null), []);
@@ -1046,11 +1208,28 @@ const { buildChaptersJson, renderNewEntry, buildTranslationBriefMarkdown } = req
 const handoffBundle = {
   segments: [
     { id: "ch0", file: "t-whole.md", title: "Prologue", chars: 123 },
-    { id: "ch1", file: "t-ch1.md", title: "Chapter 1", chars: 456 },
-    { id: "ch1.1", file: "t-ch1.1.md", title: "Interlude", chars: 78 },
+    { id: "ch1", file: "t-ch1.md", title: "Chapter 1", chars: 456, bodyChars: 440, empty: false },
+    { id: "ch1.1", file: "t-ch1.1.md", title: "Interlude", chars: 78, bodyChars: 12, empty: true },
   ],
 };
-assert.deepStrictEqual(buildChaptersJson(handoffBundle)[2], { id: "ch1.1", file: "t-ch1.1.md", title: "Interlude", chars: 78 });
+assert.deepStrictEqual(buildChaptersJson(handoffBundle)[2], {
+  id: "ch1.1",
+  file: "t-ch1.1.md",
+  title: "Interlude",
+  chars: 78,
+  bodyChars: 12,
+  empty: true,
+});
+// A segment the extraction did not measure keeps `bodyChars` unknown (undefined)
+// rather than inventing a number, and is never marked empty.
+assert.deepStrictEqual(buildChaptersJson(handoffBundle)[0], {
+  id: "ch0",
+  file: "t-whole.md",
+  title: "Prologue",
+  chars: 123,
+  bodyChars: undefined,
+  empty: false,
+});
 assert.deepStrictEqual(buildChaptersJson({ segments: [] }), []);
 assert.strictEqual(renderNewEntry({ term: "ソラ", type: "character" }), "- ソラ (character)");
 assert.strictEqual(renderNewEntry({ type: "voice", character: "ソラ", quirkType: "sentenceEnding", description: "formal" }), "- ソラ — sentenceEnding: formal");
@@ -1072,7 +1251,10 @@ const brief = buildTranslationBriefMarkdown({
 });
 assert.ok(brief.includes("# Translation Brief — Test, Volume 01"));
 assert.ok(brief.includes("### New glossary terms (1)"));
-assert.ok(brief.includes("| ch1.1 | Interlude | 78 | t-ch1.1.md |"));
+assert.ok(
+  brief.includes("| ch1.1 | Interlude **(EMPTY IN SOURCE)** | 78 | t-ch1.1.md |"),
+  "the brief calls out a chapter that is empty in the source"
+);
 assert.ok(brief.includes("- **glossary.md**"));
 assert.ok(brief.includes("~~pov-map.md~~"), "missing volume artifact: struck through");
 assert.ok(brief.includes("~~shared-wiki.md~~"), "missing series artifact: struck through");

@@ -22,6 +22,10 @@ Read the following materials **in full** before writing anything:
 
 {{RESEARCH_NOTES}}
 
+## Open Glossary Disputes
+
+{{DISPUTES}}
+
 ## Task
 
 Following the system prompt, produce the **amended glossary** for {{SOURCE_NAME}}:
@@ -29,7 +33,8 @@ Following the system prompt, produce the **amended glossary** for {{SOURCE_NAME}
 1. **Carry forward every existing term** from the previous glossary, unchanged.
 2. **Add each new term** in the correct section, rendered per the rules and informed by the research notes. Where the research confirms an established {{TARGET_LANGUAGE}} name, use it.
 3. **Reconcile any conflicts** between new and existing terms to a single canonical rendering.
-4. **Update the "Current through volume" header** to volume {{INSTALLMENT_NUMBER}}.
+4. **Settle every open dispute** listed above: correct the entry to the rendering the source supports, or keep the canonical rendering and record in its Notes column why it stands. A dispute left unaddressed reappears in every later volume.
+5. **Update the "Current through volume" header** to volume {{INSTALLMENT_NUMBER}}.
 
 ## Output
 

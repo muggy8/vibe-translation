@@ -121,4 +121,131 @@ async function writePromptDump(task, installmentNumber, mode, sections) {
   return file;
 }
 
-module.exports = { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump };
+/**
+ * Keep the sections of a cumulative reference that matter for the volume being
+ * processed, instead of "the last N sections".
+ *
+ * The cumulative artifacts (character voice reference, style guide) are organised
+ * by SECTION — one per character, one per construct category — and the sections
+ * written for volume 1 stay at the TOP of the document forever. Truncating to the
+ * last N sections therefore throws away the main cast and the honorific rules,
+ * which is exactly what a later volume still needs most: the extractor is shown a
+ * reference with the protagonists missing and duly rediscovers them as new.
+ *
+ * Selection is deterministic and relevance-ordered. A section is relevant when
+ *   - its heading text occurs in this volume's source, or
+ *   - a source-language span quoted inside it (a run of 2+ kana / Han / Hangul
+ *     characters) occurs in this volume's source.
+ * Relevant sections are kept first, then the rest in document order, and the
+ * output preserves the original section order. Without a source text the old
+ * "last N" behavior is kept, and the note says which rule ran.
+ *
+ * With `maxChars` instead of `maxUnits` the same ranking packs whole sections
+ * into a CHARACTER budget (what the translation stage needs: the reference must
+ * fit the prompt, and a section count is not the constraint).
+ *
+ * @param {{
+ *   content: string,
+ *   headingRe: RegExp,
+ *   sourceText?: string,
+ *   maxUnits?: number,
+ *   maxChars?: number,
+ *   unitLabel?: string,
+ * }} p - the document, the heading pattern that starts a section (e.g. /^### /m), the volume's source text, and how much to keep (a section count or a character budget).
+ * @returns {{content: string, kept: number, dropped: number, relevant: number, truncated: boolean}}
+ */
+function selectSectionsByRelevance({ content, headingRe, sourceText, maxUnits, maxChars, unitLabel = "section(s)" }) {
+  if (!content) return { content, kept: 0, dropped: 0, relevant: 0, truncated: false };
+  // The `g` flag is required for the exec loop (a non-global exec ignores
+  // lastIndex and matches the same position forever).
+  const flagSet = new Set(headingRe.flags.split(""));
+  flagSet.add("g");
+  flagSet.add("m");
+  const re = new RegExp(headingRe.source, [...flagSet].join(""));
+  const starts = [];
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    starts.push(m.index);
+    if (re.lastIndex === m.index) re.lastIndex++;
+  }
+  const byChars = Number.isFinite(maxChars) && maxChars > 0;
+  if (starts.length === 0 || (!byChars && starts.length <= maxUnits)) {
+    // Under the section cap. With a character budget the document may still be
+    // too big, so fall through to the packing step below.
+    if (!byChars || content.length <= maxChars) {
+      return { content, kept: starts.length, dropped: 0, relevant: 0, truncated: false };
+    }
+  }
+  const header = content.slice(0, starts[0]);
+  const sections = starts.map((start, i) => ({
+    index: i,
+    text: content.slice(start, i + 1 < starts.length ? starts[i + 1] : content.length),
+  }));
+
+  const src = (sourceText || "").trim();
+  const CJK_SPAN = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]{2,}/g;
+  const relevanceOf = (section) => {
+    if (!src) return null;
+    const heading = section.text.split("\n", 1)[0].replace(/^#+\s*/, "").trim();
+    if (heading && src.includes(heading)) return true;
+    const spans = section.text.match(CJK_SPAN) || [];
+    // Only the distinct spans matter, and only a bounded number of them: a long
+    // section can quote hundreds of runs, and testing all of them is pointless
+    // once one has matched.
+    const seen = new Set();
+    for (const span of spans) {
+      if (seen.size >= 60) break;
+      if (seen.has(span)) continue;
+      seen.add(span);
+      if (src.includes(span)) return true;
+    }
+    return false;
+  };
+
+  const ranked = sections.map((section) => ({ section, relevant: relevanceOf(section) }));
+  const ordered = src
+    ? [...ranked].sort((a, b) => {
+        const d = (a.relevant ? 0 : 1) - (b.relevant ? 0 : 1);
+        return d !== 0 ? d : a.section.index - b.section.index;
+      })
+    : [...ranked].reverse();
+  // Pick the survivors: a section count, or whole sections packed into a
+  // character budget (in the same relevance order).
+  const budget = byChars ? Math.max(0, maxChars) : Infinity;
+  const chosen = [];
+  let used = 0;
+  const limit = byChars ? sections.length : Math.min(maxUnits, sections.length);
+  for (const entry of ordered) {
+    if (chosen.length >= limit) break;
+    const size = entry.section.text.trimEnd().length + 2;
+    if (byChars && used + size > budget && chosen.length > 0) continue;
+    chosen.push(entry);
+    used += size;
+  }
+  const keepIdx = new Set(chosen.map((r) => r.section.index));
+  const relevantKept = chosen.filter((r) => r.relevant === true).length;
+  const kept = sections.filter((section) => keepIdx.has(section.index));
+  const dropped = sections.length - kept.length;
+  const note = src
+    ? `[TRUNCATED: this reference has ${sections.length} ${unitLabel}. Showing ${kept.length} of them — every ${unitLabel.replace(/\(s\)/, "")} that occurs in the text being processed (${relevantKept} such section(s)) is included, then the rest in document order. ` +
+      `${dropped} ${unitLabel} are not shown; they are carried forward UNCHANGED in the file itself, so do not treat something as new merely because it is absent from what you can see here.]`
+    : `[TRUNCATED: this reference has ${sections.length} ${unitLabel}. Showing the last ${kept.length}; ${dropped} older ${unitLabel} are omitted. ` +
+      `Earlier entries are carried forward unchanged in the file itself — reconcile new work against what is shown here.]`;
+  return {
+    content: [header.trimEnd(), note, ...kept.map((section) => section.text.trimEnd())].join("\n\n"),
+    kept: kept.length,
+    dropped,
+    relevant: relevantKept,
+    truncated: true,
+  };
+}
+
+module.exports = {
+  transformUserPrompt,
+  isPassingVerdict,
+  parseAcceptanceScore,
+  parseAcceptanceReply,
+  validatorMaxStepsFor,
+  writePromptDump,
+  selectSectionsByRelevance,
+};
