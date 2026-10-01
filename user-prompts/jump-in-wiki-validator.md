@@ -37,7 +37,7 @@ Following the system prompt (Series Continuity Auditor, adversarial mode), do **
 6. For every finding (correctness or placement), provide a concrete fix — exact replacement or insertion text, and say **which file** it goes in.
 
 ### Be honest about scope
-7. You are verifying the volume {{INSTALLMENT_NUMBER}} wiki against its source, and the shared wiki for correctness and cross-file consistency. You do **not** have the original sources or the wikis for volumes 1 through {{INSTALLMENT_NUMBER_MINUS_ONE}} and must not claim to have verified them — their carried-forward state can only be inferred from the shared wiki.
+7. You are verifying the volume {{INSTALLMENT_NUMBER}} wiki against its source, and the shared wiki for correctness and cross-file consistency. You do **not** have the original sources or the wikis for any volume before {{PREVIOUS_INSTALLMENT_NUMBER}} and must not claim to have verified them — their carried-forward state can only be inferred from the shared wiki.
 
 ## Output
 

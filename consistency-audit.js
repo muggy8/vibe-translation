@@ -45,6 +45,7 @@ const harness = require("./harness");
 const { transformUserPrompt, writePromptDump } = require("./utils/prompt");
 const { AGENT_TOOLS_NOTE, validateRequiredEnv, resolveRunSettings, structuralError } = require("./configs/shared");
 const { fileExists, assertWrote } = require("./utils/fs");
+const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { getTranslationTarget } = require("./get-translation-target");
 const { sha256OfFile } = require("./utils/source");
 
@@ -67,41 +68,10 @@ const REPORT_FILE = "consistency-report.md";
 const PROVENANCE_FILE = `${REPORT_FILE}.provenance.json`;
 const MAX_STEPS = 40;
 
-/**
- * Detect a small malformed tool call emitted as plain text (see the identical
- * guard in character-voice.js / style-guide.js / glossary.js / jump-in-wiki.js).
- *
- * @param {Object|null} result - The result object returned by an agent sendTurn.
- * @returns {boolean} True when the turn made zero real tool calls but its text
- *   contains tool-call syntax.
- */
-function emittedToolCallAsText(result) {
-  if (!result) return false;
-  if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) return false;
-  const text = typeof result.text === "string" ? result.text : "";
-  return text.includes("tool_call") || text.includes("<function=");
-}
-
-/**
- * Throw a diagnostic error when an agent turn emitted tool-call syntax as
- * plain text instead of using the tool-calling API (so no file tools ran and
- * nothing was read or written).
- *
- * @param {Object|null} result - The result object returned by an agent sendTurn.
- * @param {string} who - Human name of the agent (for the error message).
- * @returns {void}
- */
-function assertRealToolCalls(result, who) {
-  if (!emittedToolCallAsText(result)) return;
-  throw new Error(
-    `${who} emitted tool-call syntax as plain text ` +
-      `("tool_call" / <function=…>) instead of using the tool-calling API, so no ` +
-      `file tools ran — nothing was read or written. See the agent transcript in ` +
-      `.logs/ for the exact turn. This is an intermittent model/endpoint issue ` +
-      `with OpenAI tool_calls (the smoke test 'npm run smoke fs' can pass even ` +
-      `when it happens). Re-run the task; if it persists, check the endpoint.`
-  );
-}
+// The malformed-tool-call guard (emittedToolCallAsText + assertRealToolCalls)
+// is shared by every file-writing task — see utils/agents.js (AGENTS.md
+// gotcha 18). This module calls assertRealToolCalls(result, who) without a
+// volume label (the audit is series-root, not per-volume).
 
 /**
  * Build the audit turn prompt (pure — testable without the filesystem).

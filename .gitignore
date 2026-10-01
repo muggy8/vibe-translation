@@ -80,10 +80,49 @@ test-series/test_story(2)/*
 # is what the tasks read)
 *.epub
 
+# ── Generated translation artifacts ─────────────────────────────────────────
+# When SERIES_LOCATION points at a folder INSIDE this repo, the pipeline writes
+# these into the series dir and its volume folders. They are ignored by name so
+# they are never accidentally committed (a generated artifact is not source).
+# The prompt templates that share some of these names (glossary.md,
+# character-voice.md, style-guide.md) live in system-prompts/ and user-prompts/
+# and are re-included below — git can re-include them because those parent
+# directories are not themselves excluded.
+glossary.md
+glossary-research.md
+glossary-new-terms.json
+glossary-validation.md
+glossary-coverage.md
+glossary-coverage.json
+character-voice.md
+character-voice-new.json
+character-voice-validation.md
+pov-map.md
+style-guide.md
+style-guide-new.json
+style-guide-validation.md
+wiki.md
+shared-wiki.md
+jump-in-wiki-validation-*.md
+wiki-*.md
+chapters.json
+translation-brief.md
+translation.md
+translation-qa.md
+translation-verification.md
+translation-verification.json
+translation-state.json
+translation-whole.md
+translation-ch[0-9]*.md
+translation-part-[0-9]*.md
+polished-*.md
+polish-qa.md
+polish-verification.json
+consistency-report.md
+# Re-include the prompt templates (same names as some generated artifacts).
+!system-prompts/**/*.md
+!user-prompts/**/*.md
+
 # Testing coverage
 coverage/
 .nyc_output/
-
-# Cache
-.eslintcache
-.stylelintcache

@@ -48,6 +48,7 @@ const { fileTypeFromBuffer } = require("file-type");
 const { Agent: UndiciAgent, fetch: undiciFetch } = require("undici");
 const { tool, generateText } = require("ai");
 const { z } = require("zod");
+const { readBoolEnv } = require("./configs/shared");
 
 // Local LLM servers (e.g. llama.cpp) can take many minutes to prefill a huge
 // prompt and to generate a long answer. undici's default fetch timeouts
@@ -571,16 +572,12 @@ function envCallDeadlineMs() {
 }
 
 /**
- * Thinking mode (AI_THINKING env, default ON).
+ * Thinking mode (AI_THINKING env, default ON). Uses the shared readBoolEnv so
+ * this and the translation-stage reader agree on every value (the two used to
+ * disagree — see readBoolEnv).
  */
 function envThinking() {
-  let performThinking = true;
-
-  if (typeof process.env.AI_THINKING === 'undefined' || process.env.AI_THINKING === "") {
-    return performThinking;
-  }
-
-  return process.env.AI_THINKING === "true" || process.env.AI_THINKING === "1";
+  return readBoolEnv("AI_THINKING", true);
 }
 
 /**

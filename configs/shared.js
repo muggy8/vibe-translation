@@ -257,6 +257,26 @@ function isStructuralError(err) {
   return !!(err && typeof err === "object" && err.structural === true);
 }
 
+/**
+ * Read a boolean env var with one consistent semantics: ON by default, OFF only
+ * for an explicit falsy value. The two historical readers disagreed (the
+ * harness treated any non-true/1 value as OFF, the stage helper treated only
+ * "false" as OFF — so AI_THINKING=0 meant "off" in one place and "on" in the
+ * other). This is the single reader both use now.
+ *
+ * @param {string} name - The env var name.
+ * @param {boolean} [defaultValue=true] - The value when the var is absent/empty/unrecognized.
+ * @returns {boolean}
+ */
+function readBoolEnv(name, defaultValue = true) {
+  const v = process.env[name];
+  if (v === undefined || v === "") return defaultValue;
+  const s = String(v).trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(s)) return true;
+  if (["false", "0", "no", "off"].includes(s)) return false;
+  return defaultValue;
+}
+
 // ── Un-monitored run policies ────────────────────────────────────────────────
 // These knobs front-load the decisions that would otherwise require a human
 // during a long (un-monitored) run: when a volume fails, when the previous
@@ -682,6 +702,7 @@ module.exports = {
   ACCEPTANCE_CONFIRMATION_MIN_SCORE,
   // Un-monitored run policies (see the section above).
   normalizePolicy,
+  readBoolEnv,
   structuralError,
   isStructuralError,
   ON_VOLUME_ERROR,

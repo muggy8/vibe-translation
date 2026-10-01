@@ -922,7 +922,7 @@ function stageConcurrency(prefix) {
  *
  * @returns {number}
  */
-const judgeTemperature = require("../configs/shared").judgeTemperature;
+const { judgeTemperature, readBoolEnv } = require("../configs/shared");
 
 /**
  * Thinking dialect for a translation-stage call: the global AI_THINKING switch
@@ -938,11 +938,10 @@ const judgeTemperature = require("../configs/shared").judgeTemperature;
  * @returns {{thinking: boolean, thinkingLevel: string}}
  */
 function stageThinking(prefix) {
-  const legacyOn = process.env[`${prefix}_THINKING`];
-  const thinking =
-    legacyOn !== undefined
-      ? String(legacyOn).trim().toLowerCase() !== "false"
-      : String(process.env.AI_THINKING ?? "true").trim().toLowerCase() !== "false";
+  // The legacy per-stage prefix wins when set; otherwise the global AI_THINKING
+  // decides. Both go through the shared readBoolEnv so the semantics match the
+  // harness (previously the two readers disagreed on values like "0").
+  const thinking = readBoolEnv(`${prefix}_THINKING`, readBoolEnv("AI_THINKING", true));
   const level =
     process.env[`${prefix}_THINKING_LEVEL`] ?? process.env.STAGE_THINKING_LEVEL;
   return {

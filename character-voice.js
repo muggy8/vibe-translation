@@ -35,6 +35,7 @@ const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage } = require("./utils/fs");
+const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
@@ -477,51 +478,14 @@ async function characterVoice() {
   }
 }
 
-/**
- * Detect the "model emitted tool-call syntax as plain text" failure mode.
- *
- * Observed live (Qwen via an OpenAI-compatible endpoint): the model sometimes
- * emits its tool calls as Qwen-native text — a `tool_call` wrapper around the
- * tool name, e.g. `tool_call <function=readFile>…` or `tool_call <listFiles>…` —
- * in the content field instead of using the API-level tool_calls protocol. The
- * harness only executes real tool calls, so such a turn performs no work at all,
- * yet it looks like an ordinary (short) chat reply, so the stale-file write
- * check and the acceptance loop would silently mask it and burn every
- * validation iteration.
- *
- * @param {Object|null} result - The result object returned by an agent sendTurn.
- * @returns {boolean} True when the turn made no real tool calls and its text
- *   contains tool-call markers (the malformed-tool-call signature).
- */
-function emittedToolCallAsText(result) {
-  if (!result) return false;
-  if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) return false;
-  const text = typeof result.text === "string" ? result.text : "";
-  return text.includes("tool_call") || text.includes("<function=");
-}
-
-/**
- * Fail loudly when an agent turn made no real tool calls because the model
- * emitted tool-call syntax as plain text (see emittedToolCallAsText). Throws a
- * diagnostic error instead of letting the stale-file write check mask the
- * no-op turn.
- *
- * @param {Object|null} result - The result object returned by an agent sendTurn.
- * @param {string} who - Who the agent was (for the error message).
- * @param {string} volumeLabel - The volume label (for the error message).
- * @returns {void}
- */
-function assertRealToolCalls(result, who, volumeLabel) {
-  if (!emittedToolCallAsText(result)) return;
-  throw new Error(
-    `Volume ${volumeLabel}: ${who} emitted tool-call syntax as plain text ` +
-      `("tool_call" / <function=…>) instead of using the tool-calling API, so no ` +
-      `file tools ran — nothing was read or written. See the agent transcript in ` +
-      `.logs/ for the exact turn. This is an intermittent model/endpoint issue ` +
-      `with OpenAI tool_calls (the smoke test 'npm run smoke fs' can pass even ` +
-      `when it happens). Re-run the task; if it persists, check the endpoint.`
-  );
-}
+// The "model emitted tool-call syntax as plain text" guard (emittedToolCallAsText
+// + assertRealToolCalls) is shared by every file-writing task — see
+// utils/agents.js. Observed live (Qwen via an OpenAI-compatible endpoint): the
+// model sometimes emits its tool calls as Qwen-native text — a `tool_call`
+// wrapper around the tool name — in the content field instead of using the
+// API-level tool_calls protocol. The harness only executes real tool calls, so
+// such a turn performs no work yet looks like an ordinary chat reply, and the
+// stale-file write check + acceptance loop would silently mask it.
 
 /**
  * Run the extraction stage: one-shot call to extract voice quirks and POV info.

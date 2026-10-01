@@ -59,8 +59,9 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, writeProvenanceSidecar } = require("./utils/fs");
+const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const { writeVolumeHandoff } = require("./utils/handoff");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
@@ -157,54 +158,9 @@ function knownVolumeFileNames(ctx) {
   ]);
 }
 
-// ─── Malformed-tool-call guard ──────────────────────────────────────────────
-
-/**
- * Detect the "model emitted tool-call syntax as plain text" failure mode.
- *
- * Observed live (Qwen via an OpenAI-compatible endpoint): the model sometimes
- * emits its tool calls as Qwen-native text — a `tool_call` wrapper around the
- * tool name, e.g. `tool_call <function=readFile>…` or `tool_call <listFiles>…`
- * — in the content field instead of using the API-level tool_calls protocol.
- * The harness only executes real tool calls, so such a turn performs no work
- * at all, yet it looks like an ordinary (short) chat reply, so the stale-file
- * write check and the acceptance loop would silently mask it and burn every
- * validation iteration. (Same detector as character-voice.js / style-guide.js
- * — AGENTS.md gotcha 18.)
- *
- * @param {Object|null} result - The result object returned by an agent sendTurn.
- * @returns {boolean} True when the turn made no real tool calls and its text
- *   contains tool-call markers (the malformed-tool-call signature).
- */
-function emittedToolCallAsText(result) {
-  if (!result) return false;
-  if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) return false;
-  const text = typeof result.text === "string" ? result.text : "";
-  return text.includes("tool_call") || text.includes("<function=");
-}
-
-/**
- * Fail loudly when an agent turn made no real tool calls because the model
- * emitted tool-call syntax as plain text (see emittedToolCallAsText). Throws a
- * diagnostic error instead of letting the stale-file write check mask the
- * no-op turn.
- *
- * @param {Object|null} result - The result object returned by an agent sendTurn.
- * @param {string} who - Who the agent was (for the error message).
- * @param {string} volumeLabel - The volume label (for the error message).
- * @returns {void}
- */
-function assertRealToolCalls(result, who, volumeLabel) {
-  if (!emittedToolCallAsText(result)) return;
-  throw new Error(
-    `Volume ${volumeLabel}: ${who} emitted tool-call syntax as plain text ` +
-      `("tool_call" / <function=…>) instead of using the tool-calling API, so no ` +
-      `file tools ran — nothing was read or written. See the agent transcript in ` +
-      `.logs/ for the exact turn. This is an intermittent model/endpoint issue ` +
-      `with OpenAI tool_calls (the smoke test 'npm run smoke fs' can pass even ` +
-      `when it happens). Re-run the task; if it persists, check the endpoint.`
-  );
-}
+// The "model emitted tool-call syntax as plain text" guard
+// (emittedToolCallAsText + assertRealToolCalls) is shared by every
+// file-writing task — see utils/agents.js (AGENTS.md gotcha 18).
 
 // ─── Agent-mode prompt builders ─────────────────────────────────────────────
 // The exact prompts the agent-mode stages send are built here (not inline in
@@ -624,9 +580,10 @@ async function jumpInWiki() {
       INSTALLMENT_NUMBER: values.INSTALLMENT_NUMBER,
       SOURCE_NAME: values.SOURCE_NAME,
       SOURCE_LANGUAGE: values.SOURCE_LANGUAGE,
-      INSTALLMENT_NUMBER_MINUS_ONE: String(
-        parseInt(values.INSTALLMENT_NUMBER, 10) - 1
-      ).padStart(2, "0"),
+      // The prior volume's real installment number (from the manifest), or a
+      // clear marker when this is the first volume — the prose tells the
+      // validator which volumes it cannot see.
+      PREVIOUS_INSTALLMENT_NUMBER: previousInstallmentNumber || "(none — this is the first volume)",
     };
     const validatorUserPrompt = transformUserPrompt(validatorTemplate, validatorValues);
 
@@ -657,14 +614,53 @@ async function jumpInWiki() {
      */
     const isFirst = i === 0;
     let previousFolderName = null;
+    let previousInstallmentNumber = null;
     let previousWikiOutputFile = null;
     let previousSharedWikiOutputFile = null;
 
     if (!isFirst) {
       previousFolderName = sortedFolderWithSourceMaterial[i - 1];
+      // The previous volume's ACTUAL installment number from the plan of record
+      // (not current-1 — agent-chosen installment numbers are not guaranteed
+      // contiguous, so N-1 would misname the prior volume in the validator
+      // prompt's prose).
+      previousInstallmentNumber = volumeByFolder.get(previousFolderName)?.installmentNumber ?? null;
       const previousVolumeDir = path.join(seriesDir, previousFolderName);
       previousWikiOutputFile = path.join(previousVolumeDir, "wiki.md");
       previousSharedWikiOutputFile = path.join(previousVolumeDir, "shared-wiki.md");
+
+      // The wiki builds cumulatively on the previous volume's wiki + shared
+      // wiki, exactly like the three other cumulative tasks — so a missing
+      // previous volume is the same decision (ON_MISSING_PREVIOUS). Both files
+      // must exist AND hold real content (a crashed run leaves scaffold stubs,
+      // which are not a usable base).
+      const prevWikiMissing = !(await hasRealOutput(previousWikiOutputFile));
+      const prevSharedMissing = !(await hasRealOutput(previousSharedWikiOutputFile));
+      if (prevWikiMissing || prevSharedMissing) {
+        const missing = [
+          prevWikiMissing ? previousWikiOutputFile : null,
+          prevSharedMissing ? previousSharedWikiOutputFile : null,
+        ].filter(Boolean).join(" and ");
+        if (dryRun) {
+          console.warn(
+            `Volume ${volume.installmentNumber}: --dry-run: the previous wiki ` +
+              `(${missing}) does not exist yet — a live run would stop here. ` +
+              `Continuing the prompt preview.`
+          );
+        } else if (ON_MISSING_PREVIOUS === "skip") {
+          console.log(
+            `Volume ${volume.installmentNumber}: previous wiki not found (${missing}) — ` +
+              `skipping this volume (ON_MISSING_PREVIOUS=skip).`
+          );
+          continue;
+        } else {
+          throw new Error(
+            `Previous wiki not found: ${missing}. Process the earlier volume ` +
+              `first (or re-run without --force), or set ON_MISSING_PREVIOUS=skip ` +
+              `to skip this volume.`
+          );
+        }
+      }
     }
 
     // generating the initial wiki is expensive, so we gotta check if it's already

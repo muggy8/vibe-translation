@@ -85,6 +85,7 @@ const {
 } = require("./utils/manifest");
 const { fileExists } = require("./utils/fs");
 const { transformUserPrompt } = require("./utils/prompt");
+const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { sha256OfFile, openEpub, isEpubPath, readEpubSection } = require("./utils/source");
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -1114,40 +1115,10 @@ function buildCorrectionTurnPrompt(problem) {
 
 // ─── Running the intake agent ───────────────────────────────────────────────
 
-/**
- * True when an agent turn produced tool-call syntax as plain text instead of
- * real tool calls (the intermittent local-endpoint failure described in
- * AGENTS.md gotcha 18 — a turn that looks fine but read and wrote nothing).
- *
- * @param {Object|null} result - An agent sendTurn result.
- * @returns {boolean}
- */
-function emittedToolCallAsText(result) {
-  if (!result) return false;
-  if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) return false;
-  const text = typeof result.text === "string" ? result.text : "";
-  return text.includes("tool_call") || text.includes("<function=");
-}
-
-/**
- * Fail loudly when the intake agent made no real tool calls at all. Without
- * this, a no-op turn just ends as "no manifest found" and the retry loop burns
- * attempts on the same broken endpoint.
- *
- * @param {Object|null} result - The sendTurn result.
- * @param {string} who - Who the agent was (for the message).
- * @returns {void}
- */
-function assertRealToolCalls(result, who) {
-  if (!emittedToolCallAsText(result)) return;
-  throw new Error(
-    `${who} emitted tool-call syntax as plain text ("tool_call" / <function=…>) ` +
-      `instead of using the tool-calling API, so no tools ran — nothing was read, ` +
-      `staged, or written. See the agent transcript in .logs/. This is an ` +
-      `intermittent model/endpoint issue with OpenAI tool_calls; re-run, and if ` +
-      `it persists check the endpoint.`
-  );
-}
+// The malformed-tool-call guard (emittedToolCallAsText + assertRealToolCalls)
+// is shared by every file-writing task — see utils/agents.js (AGENTS.md
+// gotcha 18). Without it, a no-op turn just ends as "no manifest found" and the
+// retry loop burns attempts on the same broken endpoint.
 
 /**
  * Read and parse the manifest file the agent wrote.
