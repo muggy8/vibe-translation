@@ -172,7 +172,7 @@ function translateSampling() {
  * @returns {Promise<{translated: number, skipped: number, qa: Array<{id: string, title: string, status: string, ok: boolean, cjk: number, lengthRatio: number, warnings: string[]}>}>}
  */
 async function processTranslateVolume(ctx) {
-  const { volume, volumeDir, bundle, refs, template, endpoint, sampling, thinkingMode, dryRun, force, targetLanguage } = ctx;
+  const { volume, volumeDir, bundle, refs, template, endpoint, sampling, thinkingMode, dryRun, force, targetLanguage, sourceLanguage } = ctx;
   const state = await loadTranslationState(path.join(volumeDir, STATE_FILE));
   const qaRows = [];
   let translated = 0;
@@ -221,7 +221,7 @@ async function processTranslateVolume(ctx) {
       console.log(`  Volume ${volume.installmentNumber} ${seg.id}: draft up to date — skipping.`);
       skipped += 1;
       prevChapterTail = tailOf(existingDraft, continuityChars);
-      qaRows.push(await buildQaRow(seg, sourceText, existingDraft, refs, "skipped (up to date)"));
+      qaRows.push(await buildQaRow(seg, sourceText, existingDraft, refs, "skipped (up to date)", sourceLanguage, targetLanguage));
       continue;
     }
 
@@ -315,7 +315,7 @@ async function processTranslateVolume(ctx) {
 
     // Deterministic QA (no AI): hard failures mean the draft is unusable —
     // fail the chapter BEFORE persisting (no corrupted draft on disk).
-    const qa = checkTranslationQa({ sourceText, draftText: draft, terms: refs.terms });
+    const qa = checkTranslationQa({ sourceText, draftText: draft, terms: refs.terms, sourceLanguage, targetLanguage });
     if (!qa.ok) {
       throw new Error(
         `Volume ${volume.installmentNumber} ${seg.id}: translation QA failed: ${qa.errors.join("; ")}. ` +
@@ -340,7 +340,7 @@ async function processTranslateVolume(ctx) {
     await saveTranslationState(path.join(volumeDir, STATE_FILE), state);
     translated += 1;
     prevChapterTail = tailOf(draft, continuityChars);
-    qaRows.push(await buildQaRow(seg, sourceText, draft, refs, qa.warnings));
+    qaRows.push(await buildQaRow(seg, sourceText, draft, refs, qa.warnings, sourceLanguage, targetLanguage));
     if (qa.warnings.length > 0) {
       console.warn(`  Volume ${volume.installmentNumber} ${seg.id}: QA warning: ${qa.warnings.join("; ")}`);
     }
@@ -454,8 +454,8 @@ async function mergeVolumeTranslationFiles(volumeDir, bundle, state) {
  *   the warnings array from the chapter's own QA run.
  * @returns {{id: string, title: string, status: string, ok: boolean, cjk: number, lengthRatio: number, warnings: string[]}}
  */
-function buildQaRow(seg, sourceText, draftText, refs, statusOrWarnings) {
-  const qa = checkTranslationQa({ sourceText, draftText, terms: refs.terms });
+function buildQaRow(seg, sourceText, draftText, refs, statusOrWarnings, sourceLanguage, targetLanguage) {
+  const qa = checkTranslationQa({ sourceText, draftText, terms: refs.terms, sourceLanguage, targetLanguage });
   const status =
     typeof statusOrWarnings === "string"
       ? statusOrWarnings
@@ -597,6 +597,7 @@ async function translate() {
         dryRun,
         force,
         targetLanguage: runSettings.targetLanguage,
+        sourceLanguage: runSettings.sourceLanguage,
       });
       totalTranslated += result.translated;
       totalSkipped += result.skipped;

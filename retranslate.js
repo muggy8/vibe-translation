@@ -147,7 +147,7 @@ async function prevChapterContinuityTail(bundle, segId, volumeDir, chars) {
  * @returns {Promise<{retranslated: number, skipped: number, none: number}>}
  */
 async function processRetranslateVolume(ctx) {
-  const { volume, volumeDir, bundle, refs, template, endpoint, sampling, thinkingMode, dryRun, force, targetLanguage } = ctx;
+  const { volume, volumeDir, bundle, refs, template, endpoint, sampling, thinkingMode, dryRun, force, targetLanguage, sourceLanguage } = ctx;
   const sidecar = await loadVerificationSidecar(path.join(volumeDir, "translation-verification.json"));
   const state = await loadTranslationState(path.join(volumeDir, "translation-state.json"));
   let retranslated = 0;
@@ -309,7 +309,7 @@ async function processRetranslateVolume(ctx) {
       continuity = tailOf(deduped, continuityChars);
     }
     const clean = partTexts.join("\n\n");
-    const qa = checkTranslationQa({ sourceText, draftText: clean, terms: refs.terms });
+    const qa = checkTranslationQa({ sourceText, draftText: clean, terms: refs.terms, sourceLanguage, targetLanguage });
     if (!qa.ok) {
       throw new Error(
         `Volume ${volume.installmentNumber} ${seg.id}: retranslation QA failed: ${qa.errors.join("; ")}. ` +
@@ -442,6 +442,7 @@ async function retranslate() {
         dryRun,
         force,
         targetLanguage: runSettings.targetLanguage,
+        sourceLanguage: runSettings.sourceLanguage,
       });
       totalRetranslated += result.retranslated;
       totalSkipped += result.skipped;

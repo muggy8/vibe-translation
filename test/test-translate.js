@@ -342,6 +342,59 @@ assert.strictEqual(sha256("a"), sha256("a"));
   assert.ok(truncated.errors.some((e) => e.includes("truncated")));
 }
 
+// ─── multi-language residue / length / matching ────────────────────────────────
+{
+  const { residueRatio, isSpaceSeparated, lengthBands, countOccurrences } = require("../utils/translate");
+
+  // JA→EN: kana + Han are both residue (≈ the legacy CJK ratio).
+  assert.ok(residueRatio("日本語", "Japanese", "English") > 0.9, "Japanese text is residue for EN");
+  assert.ok(residueRatio("hello world", "Japanese", "English") === 0, "Latin text has no residue");
+
+  // JA→ZH: Han is shared, so only KANA is residue. A Han-only draft has NO
+  // residue for a Chinese target even though it is all CJK.
+  assert.strictEqual(residueRatio("日本語", "Japanese", "Chinese"), 0, "Han-only is not residue for a ZH target");
+  assert.ok(residueRatio("あいう", "Japanese", "Chinese") > 0.9, "kana IS residue for a ZH target");
+
+  // KO→EN: Hangul is residue (the CJK class does not even cover it).
+  assert.ok(residueRatio("안녕하세요", "Korean", "English") > 0.9, "Hangul is residue for EN");
+  assert.strictEqual(residueRatio("안녕하세요", "Japanese", "English"), 0, "Hangul is not residue for a JA source");
+
+  // ZH→EN: Han is residue.
+  assert.ok(residueRatio("中文", "Chinese", "English") > 0.9, "Han is residue for EN");
+
+  // A target that shares the source script yields zero residue (identity pair).
+  assert.strictEqual(residueRatio("日本語", "Japanese", "Japanese"), 0, "identity pair has no residue");
+
+  // isSpaceSeparated drives word-boundary term matching.
+  assert.strictEqual(isSpaceSeparated("Korean"), true);
+  assert.strictEqual(isSpaceSeparated("English"), true);
+  assert.strictEqual(isSpaceSeparated("Japanese"), false);
+  assert.strictEqual(isSpaceSeparated("Chinese"), false);
+
+  // Word-boundary matching avoids over-counting ("he" inside "the").
+  assert.strictEqual(countOccurrences("the he she thehe", "he", { wordBoundary: false }), 5, "substring over-counts");
+  assert.strictEqual(countOccurrences("the he she thehe", "he", { wordBoundary: true }), 1, "word-boundary counts only whole words");
+
+  // Length bands differ per pair and are overridable.
+  const jaEn = lengthBands("Japanese", "English");
+  const zhEn = lengthBands("Chinese", "English");
+  assert.ok(zhEn.max > jaEn.max, "ZH→EN allows a longer draft than JA→EN");
+  const saved = process.env.TRANSLATION_LENGTH_RATIO;
+  process.env.TRANSLATION_LENGTH_RATIO = "1.0-3.0";
+  const overridden = lengthBands("Japanese", "English");
+  assert.deepStrictEqual({ min: overridden.min, max: overridden.max }, { min: 1, max: 3 }, "TRANSLATION_LENGTH_RATIO overrides the band");
+  if (saved === undefined) delete process.env.TRANSLATION_LENGTH_RATIO; else process.env.TRANSLATION_LENGTH_RATIO = saved;
+
+  // End-to-end: a Korean source translated to English passes, and a draft that
+  // keeps Hangul fails.
+  const koSrc = "안녕하세요. 오늘 날씨가 좋습니다.";
+  const koGood = checkTranslationQa({ sourceText: koSrc, draftText: "Hello. The weather is nice today.", sourceLanguage: "Korean", targetLanguage: "English" });
+  assert.strictEqual(koGood.ok, true, JSON.stringify(koGood.errors));
+  const koEcho = checkTranslationQa({ sourceText: koSrc, draftText: koSrc, sourceLanguage: "Korean", targetLanguage: "English" });
+  assert.strictEqual(koEcho.ok, false, "a Korean draft echoed back is residue for EN");
+  assert.ok(koEcho.cjk > 0.05);
+}
+
 // ─── buildPolishGuardFindings ─────────────────────────────────────────────────
 
 {

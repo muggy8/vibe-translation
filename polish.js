@@ -51,7 +51,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { ON_VOLUME_ERROR, PASSING_SCORE, validateRequiredEnv, isStructuralError, structuralError } = require("./configs/shared");
+const { ON_VOLUME_ERROR, PASSING_SCORE, validateRequiredEnv, resolveRunSettings, isStructuralError, structuralError } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { resolveSourceBundle } = require("./utils/source");
 const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("./utils/prompt");
@@ -290,6 +290,8 @@ async function processPolishVolume(ctx) {
     auditEndpoint,
     dryRun,
     force,
+    sourceLanguage,
+    targetLanguage,
   } = ctx;
   const state = await loadTranslationState(path.join(volumeDir, "translation-state.json"));
   const sidecar = await loadVerificationSidecar(path.join(volumeDir, POLISH_VERIFICATION_FILE));
@@ -436,8 +438,8 @@ async function processPolishVolume(ctx) {
       }
       // Deterministic regression guard (free — no AI call): the polished text
       // must not make things WORSE than the draft.
-      const qaDraft = checkTranslationQa({ sourceText, draftText: draft, terms: refs.terms });
-      const qaPolished = checkTranslationQa({ sourceText, draftText: text, terms: refs.terms });
+      const qaDraft = checkTranslationQa({ sourceText, draftText: draft, terms: refs.terms, sourceLanguage, targetLanguage });
+      const qaPolished = checkTranslationQa({ sourceText, draftText: text, terms: refs.terms, sourceLanguage, targetLanguage });
       const regressed =
         (!qaPolished.ok && qaDraft.ok) || qaPolished.missingTerms.length > qaDraft.missingTerms.length;
       if (regressed) {
@@ -718,6 +720,7 @@ async function polish() {
 
   // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
   const manifest = await getTranslationTarget({ dryRun });
+  const runSettings = resolveRunSettings(manifest);
   const sorted = manifest.volumes.map((v) => v.folder);
   const volumeByFolder = new Map(manifest.volumes.map((v) => [v.folder, v]));
   if (sorted.length === 0) {
@@ -774,6 +777,8 @@ async function polish() {
         auditEndpoint,
         dryRun,
         force,
+        sourceLanguage: runSettings.sourceLanguage,
+        targetLanguage: runSettings.targetLanguage,
       });
       totalPolished += result.polished;
       totalRejected += result.rejected;
