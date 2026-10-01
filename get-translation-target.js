@@ -85,7 +85,7 @@ const {
 } = require("./utils/manifest");
 const { fileExists } = require("./utils/fs");
 const { transformUserPrompt } = require("./utils/prompt");
-const { sha256OfFile } = require("./utils/source");
+const { sha256OfFile, openEpub, isEpubPath, readEpubSection } = require("./utils/source");
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -303,6 +303,242 @@ async function applyCommittedLayout(seriesDir, manifest, committed) {
   }
   return warnings;
 }
+/**
+ * The absolute floor for "this file contains a readable text at all".
+ *
+ * NOT a story-length rule — "is this a real narrative?" is answered by the
+ * intake agent reading it (see validateVolumeIntegrity). This number only
+ * catches the objective case: a few hundred characters means binary junk, an
+ * empty archive, or a stub, whatever the agent believed.
+ *
+ * Read from .env (DISCOVER_MIN_VOLUME_TEXT_CHARS, default 1000).
+ *
+ * @returns {number}
+ */
+function minVolumeTextChars() {
+  const n = parseInt(process.env.DISCOVER_MIN_VOLUME_TEXT_CHARS, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 1000;
+}
+
+/**
+ * Validate one volume's "is this actually a book?" judgment.
+ *
+ * The intake used to report only which files looked like volumes and in what
+ * order. Nothing asked whether the text it read was a real narrative — so an
+ * art book, a preview sample, or a corrupted archive that happened to open
+ * could be listed as volume 03, and the pipeline would build a glossary, a
+ * wiki and a translation for it.
+ *
+ * The judgment is the agent's: "does this read like a story?" is not a question
+ * a character-count threshold answers honestly. What the code enforces is that
+ * the judgment EXISTS, is stated per volume, and says what it was based on — a
+ * gate the model can pass by saying nothing is not a gate (the same rule as the
+ * confidence gate).
+ *
+ * @param {unknown} integrity - The agent's `integrity` block for this volume.
+ * @param {string} where - Position label for the error message.
+ * @returns {{isNarrative: boolean, confidence: number, basis: string}} The normalized block.
+ */
+function validateVolumeIntegrity(integrity, where) {
+  if (!integrity || typeof integrity !== "object" || Array.isArray(integrity)) {
+    throw new Error(
+      `${where} is missing an "integrity" block. For every volume you accept, report ` +
+        `{"integrity": {"isNarrative": true, "confidence": 0.9, "basis": "what you read and why it ` +
+        `reads like a story"}}. A file you are not sure is a real narrative belongs in ` +
+        `discovery.excluded with a reason, not in volumes.`
+    );
+  }
+  if (typeof integrity.isNarrative !== "boolean") {
+    throw new Error(
+      `${where} integrity.isNarrative must be true or false: you must say whether the text you ` +
+        `read is a real narrative (a story, or a legitimate short story), not leave it blank.`
+    );
+  }
+  if (!Number.isFinite(integrity.confidence) || integrity.confidence < 0 || integrity.confidence > 1) {
+    throw new Error(
+      `${where} integrity.confidence must be a number from 0 to 1 — how sure you are that this ` +
+        `is a real narrative.`
+    );
+  }
+  if (typeof integrity.basis !== "string" || integrity.basis.trim().length < 20) {
+    throw new Error(
+      `${where} integrity.basis must say WHAT you read and WHAT made it look like a narrative ` +
+        `(at least 20 characters — e.g. "opening 1500 chars are continuous prose with chapter ` +
+        `structure; 41 text sections, 2 images").`
+    );
+  }
+  return {
+    isNarrative: integrity.isNarrative,
+    confidence: integrity.confidence,
+    basis: integrity.basis.trim(),
+  };
+}
+
+/**
+ * The objective half of "is this a book?" placeholder-removed
+
+/**
+ * The objective half of "is this a book?" — the checks that need no guessing
+ * about what a story is.
+ *
+ * Runs against the STAGED file, after the agent's own judgment has been
+ * recorded, and can override the agent when the file is objectively not a book:
+ *
+ *   - an archive with no readable text section is not a book;
+ *   - a file that yields essentially no text is binary junk or a stub;
+ *   - a text file that is mostly undecodable bytes is a binary file renamed;
+ *   - an archive dominated by images is an art book by construction, whatever
+ *     the agent called it.
+ *
+ * @param {string} seriesDir - The series location.
+ * @param {TranslationTargetVolume} volume - The volume (sourceFile resolved against seriesDir).
+ * @returns {Promise<{ok: boolean, problem?: string, stats: {textChars: number, imageBytes: number, sections: number}}>}  
+ *   `ok` false = a hard structural problem; `problem` explains it.
+ */
+async function checkVolumeSourceShape(seriesDir, volume) {
+  const sourcePath = path.resolve(seriesDir, volume.sourceFile);
+  const stats = { textChars: 0, imageBytes: 0, sections: 0 };
+
+  if (isEpubPath(sourcePath)) {
+    let book = null;
+    try {
+      book = await openEpub(sourcePath);
+    } catch (err) {
+      return { ok: false, stats, problem: `"${volume.sourceFile}" will not open as an archive: ${err.message}` };
+    }
+    const sections = book.textItems || [];
+    stats.sections = sections.length;
+    if (sections.length === 0) {
+      return {
+        ok: false,
+        stats,
+        problem: `"${volume.sourceFile}" has no readable text sections at all — an archive with nothing to read is not a volume.`,
+      };
+    }
+    // Bounded sampling: a 17-book intake must not read every book whole.
+    let textChars = 0;
+    for (const section of sections.slice(0, 12)) {
+      try {
+        const slice = await readEpubSection(book, section.index, { offset: 0, limit: 4000 });
+        textChars += (slice && slice.text ? slice.text.length : 0);
+      } catch {
+        /* an unreadable section just contributes nothing; the floors below catch it */
+      }
+    }
+    stats.textChars = textChars;
+    const floor = minVolumeTextChars();
+    if (textChars < floor) {
+      return {
+        ok: false,
+        stats,
+        problem:
+          `"${volume.sourceFile}" yields only ${textChars} characters of text across ` +
+          `${sections.length} section(s) — under the ${floor}-character floor for ` +
+          `"this file contains a readable text at all".`,
+      };
+    }
+    // Art-book signal: the whole file's bytes against its text. A text book
+    // compresses to roughly its text size; an art book is almost all image
+    // bytes, so its file is many times larger than its prose. (JSZip does not
+    // expose per-entry uncompressed sizes until each file is read, and reading
+    // every image of a 17-book intake to weigh them is exactly the cost this
+    // check exists to avoid.)
+    let fileSize = 0;
+    try {
+      fileSize = (await fs.stat(sourcePath)).size;
+    } catch {
+      fileSize = 0;
+    }
+    stats.imageBytes = fileSize; // the archive-byte total
+    // A real art book is a LARGE file with proportionally little prose. A tiny
+    // text book (one short chapter) is dominated by the archive's fixed
+    // overhead — container, OPF, XHTML wrapper — not by images, so the ratio
+    // is only trusted once the file is big enough to actually hold images.
+    const MIN_ARTBOOK_FILE_BYTES = 50 * 1024;
+    if (fileSize > MIN_ARTBOOK_FILE_BYTES && fileSize > textChars * 30) {
+      return {
+        ok: false,
+        stats,
+        problem:
+          `"${volume.sourceFile}" is ${(fileSize / 1024).toFixed(0)} KB of archive for only ` +
+          `${textChars} characters of text — overwhelmingly non-text, i.e. an art book, ` +
+          `whatever the intake agent reported. Exclude it, or lower DISCOVER_MIN_VOLUME_TEXT_CHARS ` +
+          `if this book really is thin.`,
+      };
+    }
+    return { ok: true, stats };
+  }
+
+  // Plain text / Markdown source.
+  let raw = "";
+  try {
+    raw = await fs.readFile(sourcePath, "utf8");
+  } catch (err) {
+    return { ok: false, stats, problem: `"${volume.sourceFile}" could not be read: ${err.message}` };
+  }
+  const text = raw.trim();
+  stats.textChars = text.length;
+  stats.sections = 1;
+  if (!text) {
+    return { ok: false, stats, problem: `"${volume.sourceFile}" is empty.` };
+  }
+  const floor = minVolumeTextChars();
+  if (text.length < floor) {
+    return {
+      ok: false,
+      stats,
+      problem:
+        `"${volume.sourceFile}" holds only ${text.length} characters — under the ` +
+        `${floor}-character floor for "this file contains a readable text at all".`,
+    };
+  }
+  // A binary file renamed to .txt/.md shows up as replacement characters.
+  const junkRatio = (text.match(/\uFFFD/g) || []).length / text.length;
+  if (junkRatio > 0.02) {
+    return {
+      ok: false,
+      stats,
+      problem:
+        `"${volume.sourceFile}" is ${(junkRatio * 100).toFixed(1)}% undecodable bytes — it looks ` +
+        `like a binary file, not a text source.`,
+    };
+  }
+  return { ok: true, stats };
+}
+
+/**
+ * Gate every listed volume on both halves of the integrity story: the agent's
+ * stated judgment, and the objective shape of the staged file.
+ *
+ * @param {string} seriesDir - The series location.
+ * @param {TranslationTargetManifest} manifest - The validated manifest.
+ * @returns {Promise<string[]>} The problems (empty when the plan passes). A
+ *   non-empty list fails the intake attempt so the agent gets a correction turn.
+ */
+async function volumeIntegrityProblems(seriesDir, manifest) {
+  const problems = [];
+  for (const vol of manifest.volumes || []) {
+    if (!vol.integrity.isNarrative) {
+      problems.push(
+        `volumes[] "${vol.folder}": the intake agent itself reported this is NOT a narrative ` +
+          `("${vol.integrity.basis}"). A volume you do not believe is a story must be listed in ` +
+          `discovery.excluded with that reason, not in volumes.`
+      );
+      continue;
+    }
+    if (vol.integrity.confidence < 0.5) {
+      problems.push(
+        `volumes[] "${vol.folder}": the agent's own narrative confidence is ${vol.integrity.confidence} ` +
+        `(below 0.5). Read more of it and decide, or exclude it with a reason.`
+      );
+      continue;
+    }
+    const shape = await checkVolumeSourceShape(seriesDir, vol);
+    if (!shape.ok) problems.push(`volumes[] "${vol.folder}": ${shape.problem}`);
+  }
+  return problems;
+}
+
 // ─── Manifest validation ────────────────────────────────────────────────────
 
 /**
@@ -380,6 +616,11 @@ function validateManifest(manifest) {
       );
     }
     vol.sourceFile = src;
+    // "Is this actually a book?" is the agent's call to make (see
+    // validateVolumeIntegrity) — but it must be MADE, per volume, with a stated
+    // basis. An art book or a preview listed as volume 03 otherwise gets a full
+    // glossary, wiki and translation built for it.
+    vol.integrity = validateVolumeIntegrity(vol.integrity, `${where} integrity`);
     for (const key of ["title", "notes"]) {
       if (vol[key] === undefined) vol[key] = "";
       if (typeof vol[key] !== "string") throw new Error(`${where} "${key}" must be a string.`);
@@ -647,6 +888,17 @@ async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLan
       sourceFile: `${folder}/${sourceFile}`, // relative to seriesDir, forward slashes
       title: folderName,
       notes: "deterministic fallback (no AI)",
+      // The deterministic layout cannot JUDGE whether a book is a real narrative
+      // — no model read it. It says so instead of pretending, and the dry-run
+      // preview path is the only place this manifest is produced (a live run
+      // always goes through the intake agent, whose judgment is gated).
+      integrity: {
+        isNarrative: true,
+        confidence: 0,
+        basis:
+          "deterministic layout (no AI): the file was recognised as a volume by folder and file " +
+          "name only — nobody read it, so nothing is asserted about its content.",
+      },
     });
   }
 
@@ -673,6 +925,13 @@ async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLan
         sourceFile: `${folder}/${file}`,
         title: base,
         notes: "deterministic fallback (no AI): staged from the series root",
+        integrity: {
+          isNarrative: true,
+          confidence: 0,
+          basis:
+            "deterministic layout (no AI): staged from the series root by file name — nobody read " +
+            "it, so nothing is asserted about its content.",
+        },
       });
     }
   }
@@ -1314,6 +1573,16 @@ async function getTranslationTarget({ forceIntake = false, dryRun = false } = {}
       if (duplicate) {
         throw new Error(`${duplicate} (inspect ${manifestPath}).`);
       }
+      // Both halves of "is this a real volume": the agent's own narrative
+      // judgment, and the objective shape of the staged file. A failure here
+      // gives the agent a correction turn on the next attempt.
+      const integrityProblems = await volumeIntegrityProblems(seriesDir, candidate);
+      if (integrityProblems.length > 0) {
+        throw new Error(
+          `the intake plan lists ${integrityProblems.length} volume(s) that are not sound ` +
+            `books:\n  ${integrityProblems.join("\n  ")}`
+        );
+      }
       if (!(await manifestSourcesExist(seriesDir, candidate))) {
         throw new Error(
           `the intake agent produced a manifest that references source files that ` +
@@ -1429,6 +1698,10 @@ module.exports = {
   readUsableManifest,
   readCommittedLayout,
   applyCommittedLayout,
+  validateVolumeIntegrity,
+  checkVolumeSourceShape,
+  volumeIntegrityProblems,
+  minVolumeTextChars,
   confidenceGate,
   createIntakeApprove,
   buildDiscoveryTurnPrompt,

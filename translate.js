@@ -49,7 +49,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { ON_VOLUME_ERROR, validateRequiredEnv, resolveRunSettings } = require("./configs/shared");
+const { ON_VOLUME_ERROR, validateRequiredEnv, resolveRunSettings, isStructuralError, structuralError } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { resolveSourceBundle } = require("./utils/source");
 const { writePromptDump } = require("./utils/prompt");
@@ -60,6 +60,7 @@ const {
   buildTranslationPrompt,
   checkTranslationQa,
   mergeVolumeTranslation,
+  findMissingSegments,
   stripMarkdownFence,
   tailOf,
   loadTranslationState,
@@ -419,6 +420,22 @@ async function mergeVolumeTranslationFiles(volumeDir, bundle, state) {
     }
     resolved.set(seg.id, text.trim() || null);
   }
+  // Completeness gate. The merge used to skip a chapter with no text, so a
+  // volume could be published as translation.md with chapters missing from the
+  // middle: the file looked complete, the merge reported success, and nothing
+  // said chapter 7 was never translated. A partial volume is a failure, not a
+  // deliverable — and it is a STRUCTURAL one, so no ON_VOLUME_ERROR=skip can
+  // walk past it.
+  const missing = findMissingSegments(bundle.segments, (seg) => resolved.get(seg.id) || null);
+  if (missing.length > 0) {
+    throw structuralError(
+      `${volumeDir}: the merged translation is INCOMPLETE — ${missing.length} of ` +
+        `${bundle.segments.length} chapter(s) have no text: ${missing.map((m) => m.id).join(", ")}. ` +
+        `translation.md is not written for this volume. Run the translate task to produce the ` +
+        `missing drafts (a chapter that failed a model call is retried on a re-run); if a chapter ` +
+        `keeps failing, check the agent transcript under .logs/.`
+    );
+  }
   return mergeVolumeTranslation({
     segments: bundle.segments,
     getText: (seg) => resolved.get(seg.id) || null,
@@ -591,7 +608,10 @@ async function translate() {
           "."
       );
     } catch (err) {
-      if (ON_VOLUME_ERROR === "skip") {
+      // A STRUCTURAL failure (a source file that vanished, an archive that will not
+      // open, a volume whose chapters are incomplete) is never skippable: ON_VOLUME_ERROR
+      //=skip exists for flaky model calls, not for a broken book.
+      if (ON_VOLUME_ERROR === "skip" && !isStructuralError(err)) {
         console.error(
           `[skip] Volume ${volume.installmentNumber} (${folderName}) failed: ${err.message}`
         );

@@ -221,6 +221,42 @@ function judgeTemperature() {
   return 0.2;
 }
 
+/**
+ * Build a STRUCTURAL error: the pipeline's inputs or outputs are broken, as
+ * opposed to a model that had a bad run.
+ *
+ * The distinction decides whether a failure may be skipped. `ON_VOLUME_ERROR=skip`
+ * and `ON_TASK_ERROR=continue` exist so an un-monitored overnight run survives a
+ * flaky model call — but they must NOT paper over a source file that has gone
+ * missing, an archive that will not open, or a volume published with chapters
+ * missing from the middle. Those are not transient: re-running cannot fix them,
+ * and continuing means a whole series of artifacts built on a broken book.
+ *
+ * Mark one with `structuralError(...)` at the point that knows the difference;
+ * every volume-skip site honours it.
+ *
+ * @param {string} message - The error message.
+ * @param {Error} [cause] - The underlying error, if any.
+ * @returns {Error} The marked error.
+ */
+function structuralError(message, cause) {
+  const err = new Error(message);
+  err.structural = true;
+  if (cause) err.cause = cause;
+  return err;
+}
+
+/**
+ * Whether an error is structural (see {@link structuralError}) — the check that
+ * overrides ON_VOLUME_ERROR=skip / ON_TASK_ERROR=continue.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isStructuralError(err) {
+  return !!(err && typeof err === "object" && err.structural === true);
+}
+
 // ── Un-monitored run policies ────────────────────────────────────────────────
 // These knobs front-load the decisions that would otherwise require a human
 // during a long (un-monitored) run: when a volume fails, when the previous
@@ -646,6 +682,8 @@ module.exports = {
   ACCEPTANCE_CONFIRMATION_MIN_SCORE,
   // Un-monitored run policies (see the section above).
   normalizePolicy,
+  structuralError,
+  isStructuralError,
   ON_VOLUME_ERROR,
   ON_MISSING_PREVIOUS,
   ON_QA_LIMIT,

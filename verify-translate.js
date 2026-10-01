@@ -38,7 +38,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { ON_VOLUME_ERROR, PASSING_SCORE, validateRequiredEnv } = require("./configs/shared");
+const { ON_VOLUME_ERROR, PASSING_SCORE, validateRequiredEnv, isStructuralError } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
 const { resolveSourceBundle } = require("./utils/source");
 const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("./utils/prompt");
@@ -582,7 +582,10 @@ async function verifyTranslate() {
           `${result.passed} PASS, ${result.failed} FAIL, ${result.skipped} skipped, ${result.noDraft} without draft.`
       );
     } catch (err) {
-      if (ON_VOLUME_ERROR === "skip") {
+      // A STRUCTURAL failure (a source file that vanished, an archive that will not
+      // open, a volume whose chapters are incomplete) is never skippable: ON_VOLUME_ERROR
+      //=skip exists for flaky model calls, not for a broken book.
+      if (ON_VOLUME_ERROR === "skip" && !isStructuralError(err)) {
         console.error(
           `[skip] Volume ${volume.installmentNumber} (${folderName}) failed: ${err.message}`
         );

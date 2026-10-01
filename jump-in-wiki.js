@@ -59,7 +59,7 @@ const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, writeProvenanceSidecar } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const { writeVolumeHandoff } = require("./utils/handoff");
@@ -822,7 +822,8 @@ async function jumpInWiki() {
       // failure and continues with the next volume (an un-monitored run must
       // not die on one broken volume); "abort" (default) rethrows and fails
       // the task as before.
-      if (ON_VOLUME_ERROR !== "skip") throw err;
+      // A STRUCTURAL failure is never skippable (see configs/shared.js structuralError).
+      if (ON_VOLUME_ERROR !== "skip" || isStructuralError(err)) throw err;
       failedVolumes.push({ folder: folderName, error: err });
       const entry = volumeByFolder.get(folderName);
       console.error(

@@ -494,6 +494,29 @@ function buildPolishGuardFindings(qa) {
 // ─── Merging ────────────────────────────────────────────────────────────────
 
 /**
+ * Which segments have no text to merge — the completeness check behind the
+ * merged volume.
+ *
+ * mergeVolumeTranslation skips a chapter with no text (it cannot invent one),
+ * which is exactly how a volume used to end up published as `translation.md`
+ * with chapters silently missing from the middle: the file looked complete,
+ * the merge reported success, and nothing said that chapter 7 never got
+ * translated.
+ *
+ * @param {Array<{id: string, title?: string}>} segments - The volume's chapters in reading order.
+ * @param {(seg: {id: string}) => string|null} getText
+ * @returns {Array<{id: string, title: string}>} The segments with no text.
+ */
+function findMissingSegments(segments, getText) {
+  const missing = [];
+  for (const seg of segments || []) {
+    const text = (getText(seg) || "").trim();
+    if (!text) missing.push({ id: seg.id, title: seg.title || seg.id });
+  }
+  return missing;
+}
+
+/**
  * Merge a volume's per-chapter texts into the single `translation.md` file
  * (chapter heading + text, in segment reading order).
  *
@@ -624,9 +647,11 @@ async function saveTranslationState(filePath, state) {
  * }} p
  * @returns {{stop: boolean, reason: "all-pass"|"round-limit"|"stalled"|null}}
  */
-function qaLoopDecision({ phase, round, maxRounds, failed = 0, retranslated = 0 }) {
+function qaLoopDecision({ phase, round, maxRounds, failed = 0, retranslated = 0, noDraft = 0 }) {
   if (phase === "after-verify") {
-    if (failed === 0) return { stop: true, reason: "all-pass" };
+    // A chapter with no draft was never verified at all — counting it as a pass
+    // is how the loop could report "all-pass" over an untranslated chapter.
+    if (failed + noDraft === 0) return { stop: true, reason: "all-pass" };
     if (round >= maxRounds) return { stop: true, reason: "round-limit" };
     return { stop: false, reason: null };
   }
@@ -827,6 +852,7 @@ module.exports = {
   checkTranslationQa,
   buildPolishGuardFindings,
   mergeVolumeTranslation,
+  findMissingSegments,
   stripMarkdownFence,
   tailOf,
   loadTranslationState,

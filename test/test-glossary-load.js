@@ -294,16 +294,24 @@ assert.throws(() => extractJsonObject(""), /No text/);
 // ─── validateManifest ───────────────────────────────────────────────────────
 // Schema 2: the intake agent's plan of record. The series-level decisions are
 // required, folder names are sanitized, and installment numbers are normalized.
+// Every volume needs an integrity block ("is this actually a book?" — see
+// validateVolumeIntegrity), so the fixtures build volumes through this helper
+// with a sound default; tests that are actually about the integrity rule build
+// their blocks explicitly.
+const OK_INTEGRITY = { isNarrative: true, confidence: 0.9, basis: "a continuous narrative" };
+const V = (installmentNumber, folder, sourceFile) => ({
+  installmentNumber,
+  folder,
+  sourceFile,
+  integrity: { ...OK_INTEGRITY },
+});
 const goodManifest = {
   schema: 2,
   seriesLocation: "/x",
   seriesName: "s",
   sourceLanguage: "Japanese",
   targetLanguage: "English",
-  volumes: [
-    { installmentNumber: "01", folder: "s(1)", sourceFile: "s(1)/s(1).md" },
-    { installmentNumber: "02", folder: "s(2)", sourceFile: "s(2)/s(2).md" },
-  ],
+  volumes: [V("01", "s(1)", "s(1)/s(1).md"), V("02", "s(2)", "s(2)/s(2).md")],
 };
 assert.strictEqual(validateManifest(goodManifest), goodManifest);
 assert.throws(() => validateManifest({ ...goodManifest, schema: 1 }), /schema/);
@@ -316,7 +324,7 @@ assert.throws(
   () =>
     validateManifest({
       ...goodManifest,
-      volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "" }],
+      volumes: [V("01", "s(1)", "")],
     }),
   /sourceFile/
 );
@@ -325,8 +333,8 @@ assert.throws(
     validateManifest({
       ...goodManifest,
       volumes: [
-        { installmentNumber: "01", folder: "s(1)", sourceFile: "s(1)/a" },
-        { installmentNumber: "01", folder: "s(2)", sourceFile: "s(2)/b" },
+        V("01", "s(1)", "s(1)/a"),
+        V("01", "s(2)", "s(2)/b"),
       ],
     }),
   /duplicates installment/
@@ -336,8 +344,8 @@ assert.throws(
     validateManifest({
       ...goodManifest,
       volumes: [
-        { installmentNumber: "01", folder: "s(1)", sourceFile: "s(1)/a" },
-        { installmentNumber: "02", folder: "s(1)", sourceFile: "s(1)/b" },
+        V("01", "s(1)", "s(1)/a"),
+        V("02", "s(1)", "s(1)/b"),
       ],
     }),
   /duplicates folder/
@@ -349,7 +357,7 @@ assert.throws(
   () =>
     validateManifest({
       ...goodManifest,
-      volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "loose.md" }],
+      volumes: [V("01", "s(1)", "loose.md")],
     }),
   /inside its own volume folder/
 );
@@ -357,14 +365,14 @@ assert.throws(
   () =>
     validateManifest({
       ...goodManifest,
-      volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "s(2)/other.md" }],
+      volumes: [V("01", "s(1)", "s(2)/other.md")],
     }),
   /inside its own volume folder/
 );
 assert.strictEqual(
   validateManifest({
     ...goodManifest,
-    volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "s(1)\\s(1).md" }],
+    volumes: [V("01", "s(1)", "s(1)\\s(1).md")],
   }).volumes[0].sourceFile,
   "s(1)/s(1).md",
   "backslash separators are stored as forward slashes"
@@ -374,7 +382,7 @@ assert.throws(
   () =>
     validateManifest({
       ...goodManifest,
-      volumes: [{ installmentNumber: "01", folder: "../evil", sourceFile: "a" }],
+      volumes: [V("01", "../evil", "a")],
     }),
   /single folder name/
 );
@@ -382,21 +390,21 @@ assert.throws(
   () =>
     validateManifest({
       ...goodManifest,
-      volumes: [{ installmentNumber: "01", folder: "s(1)", sourceFile: "../secret.txt" }],
+      volumes: [V("01", "s(1)", "../secret.txt")],
     }),
   /\.\./
 );
 // Installment numbers are normalized ("1" -> "01"), and a non-number fails.
 const normalized = validateManifest({
   ...goodManifest,
-  volumes: [{ installmentNumber: "1", folder: "s(1)", sourceFile: "s(1)/a" }],
+  volumes: [V("1", "s(1)", "s(1)/a")],
 });
 assert.strictEqual(normalized.volumes[0].installmentNumber, "01");
 assert.throws(
   () =>
     validateManifest({
       ...goodManifest,
-      volumes: [{ installmentNumber: "first", folder: "s(1)", sourceFile: "s(1)/a" }],
+      volumes: [V("first", "s(1)", "s(1)/a")],
     }),
   /positive integer/
 );

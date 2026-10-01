@@ -64,7 +64,7 @@ const { validateRequiredEnv } = require("./configs/shared");
  *
  * @returns {Promise<{rounds: Array<{round: number, verified: number, passed: number, failed: number, skipped: number, noDraft: number, retranslated: number|null}>, reason: string}>}
  *   `reason` is one of "disabled", "dry-run", "all-pass", "round-limit",
- *   "stalled"; `rounds` records each completed round's counters (the
+ *   "stalled", "no-drafts"; `rounds` records each completed round's counters (the
  *   retranslate half of a round is null when the loop stopped after the
  *   verify batch).
  */
@@ -126,20 +126,23 @@ async function translateQa() {
     };
     rounds.push(roundRec);
 
-    const afterVerify = qaLoopDecision({ phase: "after-verify", round, maxRounds, failed: v.failed });
+    // Nothing to QA at all: no chapter has a draft. Re-running verify/retranslate
+    // over an untranslated volume would burn a model call per chapter and change
+    // nothing — say what is missing and stop.
+    if (v.verified === 0 && v.skipped === 0 && v.noDraft > 0) {
+      console.warn(
+        `[translate-qa] ${v.noDraft} chapter(s) have no draft — the loop has nothing to verify ` +
+          `or retranslate. Run the translate task first.`
+      );
+      return { rounds, reason: "no-drafts" };
+    }
+
+    const afterVerify = qaLoopDecision({ phase: "after-verify", round, maxRounds, failed: v.failed, noDraft: v.noDraft });
     if (afterVerify.stop) {
       if (afterVerify.reason === "all-pass") {
-        if (v.passed === 0 && v.noDraft > 0) {
-          console.warn(
-            `[translate-qa] No chapter drafts were verified (${v.noDraft} chapter(s) without a ` +
-              `draft) — run the translate task first.`
-          );
-        } else {
-          console.log(
-            `[translate-qa] Validator satisfied — every chapter with a draft passes verification ` +
-              `(round ${round}).`
-          );
-        }
+        console.log(
+          `[translate-qa] Validator satisfied — every chapter passes verification (round ${round}).`
+        );
       } else {
         console.warn(
           `[translate-qa] Round limit reached (${maxRounds}) with ${v.failed} chapter(s) still FAIL — ` +

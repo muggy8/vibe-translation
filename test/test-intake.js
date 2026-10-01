@@ -51,6 +51,10 @@ const {
   readUsableManifest,
   createIntakeApprove,
   MANIFEST_SCHEMA,
+  validateVolumeIntegrity,
+  checkVolumeSourceShape,
+  volumeIntegrityProblems,
+  minVolumeTextChars,
 } = require("../get-translation-target");
 
 // ─── temp-dir helpers ─────────────────────────────────────────────────────────
@@ -415,12 +419,22 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.deepStrictEqual(filterVolumesByInstallment(manifestForFilter, "9"), [], "no match is an empty list, not a guess");
 
   // ─── the manifest rules that keep a volume and its book in one place ──────
+  /**
+   * A minimal valid manifest for the pure validation tests. Every volume gets a
+   * default `integrity` block so these fixtures stay focused on the rule each
+   * test is actually about (the integrity requirement is tested on its own).
+   */
+  const OK_INTEGRITY = {
+    isNarrative: true,
+    confidence: 0.9,
+    basis: "opening sample is continuous prose with chapter structure",
+  };
   const manifestWith = (volumes) => ({
     schema: MANIFEST_SCHEMA,
     seriesName: "S",
     sourceLanguage: "Japanese",
     targetLanguage: "English",
-    volumes,
+    volumes: volumes.map((v) => ({ integrity: { ...OK_INTEGRITY }, ...v })),
   });
   // A volume's source must be the staged copy inside its own folder. Pointing a
   // volume at a loose file at the series root (or at another volume's book)
@@ -476,6 +490,149 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
     null,
     "distinct books pass"
   );
+
+  // ─── per-volume integrity: "is this actually a book?" ──────────────────────
+  // The judgment must EXIST, be stated, and say what it was based on. A gate
+  // the model can pass by saying nothing is not a gate.
+  assert.throws(() => validateVolumeIntegrity(undefined, "volumes[0]"), /integrity/, "a missing block is rejected");
+  assert.throws(
+    () => validateVolumeIntegrity({ isNarrative: "yes", confidence: 0.9, basis: "a".repeat(30) }, "volumes[0]"),
+    /isNarrative/,
+    "a non-boolean isNarrative is rejected"
+  );
+  assert.throws(
+    () => validateVolumeIntegrity({ isNarrative: true, confidence: 4, basis: "a".repeat(30) }, "volumes[0]"),
+    /confidence/,
+    "a confidence outside 0..1 is rejected"
+  );
+  assert.throws(
+    () => validateVolumeIntegrity({ isNarrative: true, confidence: 0.9, basis: "prose" }, "volumes[0]"),
+    /basis/,
+    "a one-word basis is rejected"
+  );
+  assert.deepStrictEqual(
+    validateVolumeIntegrity({ isNarrative: true, confidence: 0.9, basis: " " + "a".repeat(30) + " " }, "volumes[0]"),
+    { isNarrative: true, confidence: 0.9, basis: "a".repeat(30) },
+    "a good block is normalised (basis trimmed)"
+  );
+
+  // validateManifest enforces the block per volume.
+  assert.throws(
+    () => validateManifest({ ...manifestWith([{ installmentNumber: "01", folder: "A(01)", sourceFile: "A(01)/book.epub" }]), volumes: [{ installmentNumber: "01", folder: "A(01)", sourceFile: "A(01)/book.epub" }] }),
+    /integrity/,
+    "a volume without an integrity block fails validation"
+  );
+
+  // The objective shape check — the half that needs no guessing about what a
+  // story is. It can override the agent when the file is objectively not a book.
+  process.env.DISCOVER_MIN_VOLUME_TEXT_CHARS = "200";
+  assert.strictEqual(minVolumeTextChars(), 200, "the floor is env-driven");
+
+  const shapeDir = makeTmpDir("ai-client-shape-");
+  // A real epub with one short section → too thin by the (raised) floor.
+  await fs.promises.mkdir(path.join(shapeDir, "Thin(01)"), { recursive: true });
+  await writeEpub(path.join(shapeDir, "Thin(01)"), "thin.epub", {
+    title: "Thin",
+    series: "S",
+    seriesIndex: 1,
+    sections: [{ file: "c1.xhtml", title: "One", text: "just a short sentence." }],
+  });
+  let thin = await checkVolumeSourceShape(shapeDir, { folder: "Thin(01)", sourceFile: "Thin(01)/thin.epub" });
+  assert.strictEqual(thin.ok, false, "an epub with under the floor of text is rejected");
+  assert.ok(/under the/.test(thin.problem), "and the floor is named");
+
+  // An archive with no readable text at all (only an image).
+  const zip = new JSZip();
+  zip.file("META-INF/container.xml", `<?xml version="1.0"?><container version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>`);
+  zip.file("OEBPS/content.opf", `<?xml version="1.0"?><package xmlns="http://www.idli.org/2007/ops" version="3.0"><manifest><item id="img" href="art.png" media-type="image/png"/></manifest><spine><itemref idref="img"/></spine></package>`);
+  zip.file("OEBPS/art.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 1, 2, 3, 4]));
+  await fs.promises.writeFile(path.join(shapeDir, "noimg.epub"), await zip.generateAsync({ type: "nodebuffer" }));
+  let noText = await checkVolumeSourceShape(shapeDir, { folder: "X", sourceFile: "noimg.epub" });
+  assert.strictEqual(noText.ok, false, "an archive with no text section is rejected");
+  assert.ok(/no readable text/.test(noText.problem), "and why");
+
+  // An art book: plenty of text, overwhelmingly images → rejected.
+  await fs.promises.mkdir(path.join(shapeDir, "Art(01)"), { recursive: true });
+  const artZip = new JSZip();
+  artZip.file("META-INF/container.xml", `<?xml version="1.0"?><container version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>`);
+  const artOpf = `<?xml version="1.0"?><package xmlns="http://www.idli.org/2007/ops" version="3.0"><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/><item id="img" href="big.png" media-type="image/png"/></manifest><spine><itemref idref="c1"/><itemref idref="img"/></spine></package>`;
+  artZip.file("OEBPS/content.opf", artOpf);
+  artZip.file("OEBPS/c1.xhtml", `<html><body><p>${"a ".repeat(200)}prose that clears the floor so the image test is the one that fires.</p></body></html>`);
+  // ~300KB of "image" bytes — 200KB of text × 4 is 800KB, so this must trip.
+  artZip.file("OEBPS/big.png", Buffer.alloc(300 * 1024, 0x00));
+  await fs.promises.writeFile(path.join(shapeDir, "Art(01)", "art.epub"), await artZip.generateAsync({ type: "nodebuffer" }));
+  let art = await checkVolumeSourceShape(shapeDir, { folder: "Art(01)", sourceFile: "Art(01)/art.epub" });
+  assert.strictEqual(art.ok, false, "an image-dominated archive is rejected");
+  assert.ok(/overwhelmingly non-text/.test(art.problem), "and it is called an art book");
+
+  // A sound book: text clears the floor, images are modest.
+  await fs.promises.mkdir(path.join(shapeDir, "Good(01)"), { recursive: true });
+  await writeEpub(path.join(shapeDir, "Good(01)"), "good.epub", {
+    title: "Good",
+    series: "S",
+    seriesIndex: 1,
+    sections: [{ file: "c1.xhtml", title: "One", text: "a ".repeat(400) + "a long enough passage of prose." }],
+  });
+  let good = await checkVolumeSourceShape(shapeDir, { folder: "Good(01)", sourceFile: "Good(01)/good.epub" });
+  assert.strictEqual(good.ok, true, "a text-dominated book passes");
+
+  // Plain-text sources: empty, too short, and binary-renamed are all rejected.
+  await fs.promises.writeFile(path.join(shapeDir, "empty.txt"), "");
+  let empty = await checkVolumeSourceShape(shapeDir, { folder: "E", sourceFile: "empty.txt" });
+  assert.strictEqual(empty.ok, false, "an empty text file is rejected");
+  await fs.promises.writeFile(path.join(shapeDir, "short.txt"), "only a few words");
+  let short = await checkVolumeSourceShape(shapeDir, { folder: "E", sourceFile: "short.txt" });
+  assert.strictEqual(short.ok, false, "a text file under the floor is rejected");
+  // Raw bytes that are not valid UTF-8 — readFile(…, "utf8") turns them into
+  // replacement characters, which is exactly the signature of a binary file.
+  const junkBytes = Buffer.alloc(2000);
+  for (let i = 0; i < 2000; i += 1) junkBytes[i] = 0xff;
+  await fs.promises.writeFile(path.join(shapeDir, "junk.bin.txt"), junkBytes);
+  let junk = await checkVolumeSourceShape(shapeDir, { folder: "E", sourceFile: "junk.bin.txt" });
+  assert.strictEqual(junk.ok, false, "a binary file renamed to .txt is rejected");
+  assert.ok(/undecodable/.test(junk.problem), "and it is named as such");
+  await fs.promises.writeFile(path.join(shapeDir, "ok.txt"), "a ".repeat(400) + "enough text");
+  let okText = await checkVolumeSourceShape(shapeDir, { folder: "E", sourceFile: "ok.txt" });
+  assert.strictEqual(okText.ok, true, "a plain text file over the floor passes");
+  delete process.env.DISCOVER_MIN_VOLUME_TEXT_CHARS;
+
+  // volumeIntegrityProblems combines both halves: the agent's own judgment and
+  // the objective shape.
+  const comboDir = makeTmpDir("ai-client-combo-");
+  await fs.promises.mkdir(path.join(comboDir, "NotAStory(01)"), { recursive: true });
+  await fs.promises.writeFile(
+    path.join(comboDir, "NotAStory(01)", "ok.txt"),
+    "a ".repeat(400) + "text over the floor"
+  );
+  delete process.env.DISCOVER_MIN_VOLUME_TEXT_CHARS;
+  const combo = {
+    schema: MANIFEST_SCHEMA,
+    seriesName: "S",
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+    volumes: [
+      {
+        installmentNumber: "01",
+        folder: "NotAStory(01)",
+        sourceFile: "NotAStory(01)/ok.txt",
+        title: "T",
+        notes: "",
+        integrity: { isNarrative: false, confidence: 0.8, basis: "it reads like a transcript, not a story" },
+      },
+      {
+        installmentNumber: "02",
+        folder: "Unsure(01)",
+        sourceFile: "Unsure(01)/ok.txt",
+        title: "T",
+        notes: "",
+        integrity: { isNarrative: true, confidence: 0.3, basis: "a ".repeat(40) },
+      },
+    ],
+  };
+  const problems = await volumeIntegrityProblems(comboDir, combo);
+  assert.strictEqual(problems.length, 2, "both unsound volumes are flagged");
+  assert.ok(/NOT a narrative/.test(problems[0]), "a non-narrative volume is told to be excluded");
+  assert.ok(/confidence/.test(problems[1]), "a low-confidence volume is flagged");
 
   // ─── settings precedence: .env > manifest > default ────────────────────────
   const savedEnv = {
@@ -762,14 +919,18 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
     plan: "# Translation plan\n\nTwo volumes.\n",
   });
   const twoVolumes = () => [
-    { installmentNumber: "1", folder: "Oresuki(01)", sourceFile: path.join("Oresuki(01)", "vol1.epub"), title: "Vol 1", notes: "" },
-    { installmentNumber: "2", folder: "Oresuki(02)", sourceFile: path.join("Oresuki(02)", "vol2.epub"), title: "Vol 2", notes: "" },
+    { installmentNumber: "1", folder: "Oresuki(01)", sourceFile: path.join("Oresuki(01)", "vol1.epub"), title: "Vol 1", notes: "", integrity: { isNarrative: true, confidence: 0.9, basis: "opening sample is continuous prose with chapter structure" } },
+    { installmentNumber: "2", folder: "Oresuki(02)", sourceFile: path.join("Oresuki(02)", "vol2.epub"), title: "Vol 2", notes: "", integrity: { isNarrative: true, confidence: 0.9, basis: "opening sample is continuous prose with chapter structure" } },
   ];
 
   /** Point the run at a temp series dir (1 attempt, so a failing case stays fast). */
   function setSeriesEnv(dir, extra = {}) {
     process.env.SERIES_LOCATION = dir;
     process.env.DISCOVER_MAX_ATTEMPTS = "1";
+    // The fixture books are one short paragraph each, so the objective
+    // "is there any text at all" floor has to be lowered for them. The floor
+    // itself is tested on its own (see the integrity checks below).
+    process.env.DISCOVER_MIN_VOLUME_TEXT_CHARS = "10";
     delete process.env.SERIES_NAME;
     delete process.env.TRANSLATION_SOURCE_LANGUAGE;
     delete process.env.DISCOVER_MIN_CONFIDENCE;
@@ -813,16 +974,22 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
 
   // C. a folder that already holds pipeline output keeps its name.
   const keepDir = makeTmpDir("ai-client-intake-committed-");
-  const sameBook = "the same book, staged twice";
   for (const folder of ["Old(01)", "Pretty(01)"]) {
     await fs.promises.mkdir(path.join(keepDir, folder), { recursive: true });
-    await fs.promises.writeFile(path.join(keepDir, folder, "book.epub"), sameBook);
+    // A real archive: the intake now checks that a listed volume actually opens
+    // and contains readable text (see checkVolumeSourceShape).
+    await writeEpub(path.join(keepDir, folder), "book.epub", {
+      title: "Book",
+      series: "Oresuki",
+      seriesIndex: 1,
+      sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+    });
   }
   await fs.promises.writeFile(path.join(keepDir, "Old(01)", "glossary.md"), "# glossary\n");
   setSeriesEnv(keepDir);
   stubIntakeAgent([
     planFor([
-      { installmentNumber: "1", folder: "Pretty(01)", sourceFile: path.join("Pretty(01)", "book.epub"), title: "One", notes: "" },
+      { installmentNumber: "1", folder: "Pretty(01)", sourceFile: path.join("Pretty(01)", "book.epub"), title: "One", notes: "", integrity: { isNarrative: true, confidence: 0.9, basis: "opening sample is continuous prose with chapter structure" } },
     ]),
   ]);
   const kept = await intake.getTranslationTarget({ forceIntake: true });
@@ -979,8 +1146,8 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   setSeriesEnv(dupLive);
   stubIntakeAgent([
     planFor([
-      { installmentNumber: "1", folder: "First(01)", sourceFile: "First(01)/book.epub", title: "One", notes: "" },
-      { installmentNumber: "2", folder: "Second(02)", sourceFile: "Second(02)/book.epub", title: "Two", notes: "" },
+      { installmentNumber: "1", folder: "First(01)", sourceFile: "First(01)/book.epub", title: "One", notes: "", integrity: { isNarrative: true, confidence: 0.9, basis: "opening sample is continuous prose with chapter structure" } },
+      { installmentNumber: "2", folder: "Second(02)", sourceFile: "Second(02)/book.epub", title: "Two", notes: "", integrity: { isNarrative: true, confidence: 0.9, basis: "opening sample is continuous prose with chapter structure" } },
     ]),
   ]);
   await assert.rejects(

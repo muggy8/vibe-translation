@@ -36,6 +36,7 @@ const crypto = require("crypto");
 const JSZip = require("jszip");
 const cheerio = require("cheerio");
 const { fileExists } = require("./fs");
+const { structuralError } = require("../configs/shared");
 require("../types"); // JSDoc type definitions
 
 // ─── Chunking decision ──────────────────────────────────────────────────────
@@ -974,7 +975,16 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
 async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false }) {
   const originalPath = path.resolve(seriesDir, volume.sourceFile);
   if (!(await fileExists(originalPath))) {
-    throw new Error(`Required source file not found: ${originalPath}`);
+    // STRUCTURAL: the manifest's plan of record points at a book that is no
+    // there (a deleted file, a moved folder, a disk failure). No run policy may
+    // skip past it — every artifact built after this point would be built on a
+    // missing book.
+    throw structuralError(
+      `Required source file not found: ${originalPath} (volume ${volume.installmentNumber}, ` +
+        `listed in the plan of record as "${volume.sourceFile}"). ` +
+        `The file is gone or the folder moved — restore it, or re-run "npx gulp discover --force" ` +
+        `to re-plan the series.`
+    );
   }
   const base = path.basename(originalPath).replace(/\.[^.]+$/, "");
 

@@ -136,7 +136,12 @@ fences:
       "folder": "<the volume folder you created>",
       "sourceFile": "<the staged source path, relative to the series location>",
       "title": "<this volume's own title>",
-      "notes": "<anything you had to decide, or an empty string>"
+      "notes": "<anything you had to decide, or an empty string>",
+      "integrity": {
+        "isNarrative": true,
+        "confidence": 0.9,
+        "basis": "<what you actually read, and what about it reads like a real story>"
+      }
     }
   ]
 }
@@ -152,6 +157,16 @@ fences:
   volume's artifacts and its book must live in the same folder.
 - The same book may not appear as two volumes. If two files have the same
   content, keep one and list the other in `discovery.excluded` as a duplicate.
+- Every volume needs an `integrity` block: your own judgment of whether the text
+  you read is a **real narrative** — a story that carries part of the series, or
+  a legitimate short story. Read a sample of it (`readEpubText`) and say what you
+  saw: continuous prose with chapter structure, characters and events, the
+  opening of a novel. `isNarrative: false` on a volume is rejected — a file you
+  do not believe is a story belongs in `discovery.excluded` with that reason,
+  not in `volumes`. An art book, a preview, a drama transcript, or a file that
+  opens but contains almost no prose must be excluded, not listed.
+  `basis` must be specific ("opening 1500 characters are continuous prose with
+  chapter headings; 41 text sections, 2 images"); a vague one is rejected.
 - `confidence` is **required**, with a number for each decision you made
   (`seriesName`, `sourceLanguage`, `order` at minimum). A plan that reports no
   confidence is rejected outright — the run refuses to build a whole series on

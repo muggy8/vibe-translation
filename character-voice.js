@@ -33,7 +33,7 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage } = require("./utils/fs");
 const { runSharedQaLoop } = require("./utils/qa-loop");
 const {
@@ -444,7 +444,8 @@ async function characterVoice() {
       // failure and continues with the next volume (an un-monitored run must
       // not die on one broken volume); "abort" (default) rethrows and fails
       // the task as before.
-      if (ON_VOLUME_ERROR !== "skip") throw err;
+      // A STRUCTURAL failure is never skippable (see configs/shared.js structuralError).
+      if (ON_VOLUME_ERROR !== "skip" || isStructuralError(err)) throw err;
       failedVolumes.push({ folder: folderName, error: err });
       const entry = volumeByFolder.get(folderName);
       console.error(

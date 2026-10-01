@@ -25,6 +25,7 @@ const {
   checkTranslationQa,
   buildPolishGuardFindings,
   mergeVolumeTranslation,
+  findMissingSegments,
   stripMarkdownFence,
   tailOf,
   loadTranslationState,
@@ -384,6 +385,34 @@ assert.strictEqual(sha256("a"), sha256("a"));
   assert.strictEqual(mergeVolumeTranslation({ segments, getText: () => null }), "");
 }
 
+// ─── findMissingSegments (the merged-volume completeness gate) ───────────────
+
+{
+  const segments = [
+    { id: "ch1", title: "Chapter One" },
+    { id: "ch2", title: "Chapter Two" },
+    { id: "ch3", title: "Chapter Three" },
+  ];
+  // The bug this pins: mergeVolumeTranslation silently skips a chapter with no
+  // text, so translation.md shipped with chapter 2 missing and the merge still
+  // reported success.
+  assert.deepStrictEqual(
+    findMissingSegments(segments, (seg) => (seg.id === "ch2" ? null : `text-${seg.id}`)),
+    [{ id: "ch2", title: "Chapter Two" }],
+    "a chapter with no text is reported, not skipped in silence"
+  );
+  assert.deepStrictEqual(
+    findMissingSegments(segments, () => "   \n "),
+    segments.map((s) => ({ id: s.id, title: s.title })),
+    "whitespace-only text counts as missing"
+  );
+  assert.deepStrictEqual(findMissingSegments(segments, (seg) => `text-${seg.id}`), [], "complete volume → nothing missing");
+  assert.deepStrictEqual(findMissingSegments([], () => "x"), []);
+  assert.deepStrictEqual(findMissingSegments(null, () => "x"), []);
+  // A segment with no title falls back to its id in the report.
+  assert.deepStrictEqual(findMissingSegments([{ id: "ch9" }], () => null), [{ id: "ch9", title: "ch9" }]);
+}
+
 // ─── stripMarkdownFence / tailOf ──────────────────────────────────────────────
 
 {
@@ -444,6 +473,22 @@ assert.strictEqual(sha256("a"), sha256("a"));
   assert.deepStrictEqual(
     qaLoopDecision({ phase: "after-verify", round: 3, maxRounds: 3, failed: 0 }),
     { stop: true, reason: "all-pass" }
+  );
+  // A chapter with NO draft was never verified at all. Counting it as a pass is
+  // how the loop used to report "all-pass" over an untranslated volume.
+  assert.deepStrictEqual(
+    qaLoopDecision({ phase: "after-verify", round: 1, maxRounds: 3, failed: 0, noDraft: 4 }),
+    { stop: false, reason: null },
+    "noDraft chapters are not a pass"
+  );
+  assert.deepStrictEqual(
+    qaLoopDecision({ phase: "after-verify", round: 3, maxRounds: 3, failed: 0, noDraft: 4 }),
+    { stop: true, reason: "round-limit" },
+    "untranslated chapters reach the round cap, never 'all-pass'"
+  );
+  assert.deepStrictEqual(
+    qaLoopDecision({ phase: "after-verify", round: 1, maxRounds: 3, failed: 1, noDraft: 2 }),
+    { stop: false, reason: null }
   );
   // after-verify: FAILs remain and the round cap is hit → stop (round-limit).
   assert.deepStrictEqual(
