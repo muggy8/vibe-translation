@@ -109,6 +109,20 @@ function hookCandidates(hookName) {
  *
  * @returns {string} Absolute path to the hooks directory (may not exist).
  */
+/**
+ * How long a hook may run before it is killed (AI_CLIENT_HOOK_TIMEOUT_MS, default
+ * 30 minutes; 0 = no timeout). A hook that hangs (a stuck model-switch poll, a
+ * wedged git push) would otherwise block an un-monitored run forever, so there
+ * is a wall-clock bound by default. A hook that legitimately runs long can
+ * raise or disable the bound.
+ *
+ * @returns {number} The timeout in milliseconds (0 = none).
+ */
+function hookTimeoutMs() {
+  const n = parseInt(process.env.AI_CLIENT_HOOK_TIMEOUT_MS, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 30 * 60 * 1000;
+}
+
 function getHooksDir() {
   return path.resolve(process.env[HOOKS_DIR_ENV] || path.join(PROJECT_ROOT, "hooks"));
 }
@@ -250,10 +264,14 @@ function execHookFile(filePath, ctx) {
     const so = makeOutput(prefix);
     const se = makeOutput(prefix);
 
+    const timeoutMs = hookTimeoutMs();
     const child = execFile(filePath, [], {
       env,
       cwd: PROJECT_ROOT,
       maxBuffer: 64 * 1024 * 1024,
+      // A hung hook must not block the run forever; the child is killed after
+      // this long (0 = no bound, honouring an explicit opt-out).
+      ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
     });
     child.stdout.on("data", so.onData);
     child.stderr.on("data", se.onData);
@@ -271,7 +289,19 @@ function execHookFile(filePath, ctx) {
         reject(e);
       }
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
+      if (signal) {
+        // Killed by the timeout (or another signal): the hook did not finish.
+        reject(
+          new Error(
+            `${filePath} was killed${signal ? ` with signal ${signal}` : ""} ` +
+              `before it finished (timeout of ${timeoutMs} ms). If this hook ` +
+              `legitimately runs longer, raise or disable AI_CLIENT_HOOK_TIMEOUT_MS ` +
+              `(set it to 0 to disable the bound).`
+          )
+        );
+        return;
+      }
       if (code === 0) {
         resolve();
       } else {
@@ -392,6 +422,7 @@ module.exports = {
   TASKS,
   PIPELINE_TASK,
   HOOKS_DIR_ENV,
+  hookTimeoutMs,
   getHooksDir,
   findHookFile,
   buildHookContext,

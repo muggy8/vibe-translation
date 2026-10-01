@@ -539,7 +539,7 @@ assert.ok(gFeedbackTurn.includes("glossary-validation.md"), "glossary feedback t
 const gResearcherTurn = buildGlossaryResearcherTurnPrompt(glossaryCtx, terms);
 assert.ok(gResearcherTurn.includes("glossary-research.md"), "glossary researcher turn names the notes file");
 assert.ok(gResearcherTurn.includes("ソラ"), "glossary researcher turn carries the term list");
-assert.ok(gResearcherTurn.includes("- (pending)"), "glossary researcher turn mentions the placeholder");
+assert.ok(gResearcherTurn.includes("- (pending: "), "glossary researcher turn mentions the unique placeholder");
 
 const glossaryCtx2 = { ...glossaryCtx, isFirst: false, previousFolderName: "story_name(1)" };
 assert.ok(buildGlossaryAuthorTurnPrompt(glossaryCtx2, terms, false).includes("../story_name(1)/glossary.md"), "volume-2: previous glossary path");
@@ -592,7 +592,7 @@ assert.strictEqual(truncateGlossary(manyColumns), manyColumns, "truncateGlossary
 const perTermPrompt = buildPerTermResearchPrompt(glossaryCtx, { term: "ソラ", type: "character", query: "ソラ" }, 0);
 assert.ok(perTermPrompt.includes("ソラ"), "per-term prompt carries the term");
 assert.ok(perTermPrompt.includes("glossary-research.md"), "per-term prompt names the notes file");
-assert.ok(perTermPrompt.includes("- (pending)"), "per-term prompt mentions the placeholder");
+assert.ok(perTermPrompt.includes("- (pending: "), "per-term prompt mentions the unique placeholder");
 assert.ok(perTermPrompt.includes("editFile"), "per-term prompt instructs editFile");
 
 // ─── character-voice: parseVoiceQuirks ──────────────────────────────────────

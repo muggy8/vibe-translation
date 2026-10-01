@@ -1374,6 +1374,30 @@ async function consumeEvents(
     );
   }
 
+  // Truncation guard: a turn that ended with finishReason "length" hit the
+  // output-token cap. For an agent turn whose last step was a file write, the
+  // writeFile/editFile payload was almost certainly cut off mid-content — a
+  // truncated file that would otherwise pass assertWrote (it exists, it is
+  // non-empty) and slip through. Fail the turn so the workflow's error
+  // handling (recovery / re-run) deals with it instead of accepting a stub.
+  if (result.finishReason === "length") {
+    const isAgent = logContext && logContext.type === "agent";
+    const lastTool = result.toolCalls[result.toolCalls.length - 1];
+    const wroteAtEnd = isAgent && lastTool && /^(write|edit)File$/i.test(lastTool.name);
+    console.warn(
+      `  [call-ai] WARNING: ${label} ended with finish_reason=length (hit the output-token ` +
+        `cap) — the response was truncated. Log: ${logFilePath}`
+    );
+    if (wroteAtEnd) {
+      throw new Error(
+        `${label}: the turn was truncated (finish_reason=length) while writing ` +
+        `${lastTool.name} — the file is incomplete. Raise AI_MAX_TOKENS (or ` +
+        `AI_CONTEXT_WINDOW, which it derives from) or split the work into smaller ` +
+        `writes, then re-run. Log: ${logFilePath}`
+      );
+    }
+  }
+
   // Merge the HTTP-layer-tapped reasoning (llama.cpp-style
   // `reasoning_content`): it is the same thinking the provider-native
   // reasoning events would carry, captured at the fetch layer instead.

@@ -43,7 +43,7 @@ const path = require("path");
 require("./types");
 const harness = require("./harness");
 const { transformUserPrompt, writePromptDump } = require("./utils/prompt");
-const { AGENT_TOOLS_NOTE, validateRequiredEnv, resolveRunSettings } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, validateRequiredEnv, resolveRunSettings, structuralError } = require("./configs/shared");
 const { fileExists, assertWrote } = require("./utils/fs");
 const { getTranslationTarget } = require("./get-translation-target");
 const { sha256OfFile } = require("./utils/source");
@@ -298,15 +298,35 @@ async function consistencyAudit() {
     }
   }
 
-  // Gated fs tools: cwd + writes confined to the series root (where the
-  // report lives). Reads are allowed anywhere (the agent may consult volume
-  // folders for context); deleteFile is always denied by the gate.
+  // The auditor's sandbox: it must be able to READ anywhere (it consults the
+  // volume folders for context) but may WRITE only the report. The base gate
+  // confines writes to the series root; we AND it with a single-file check so
+  // the four artifacts under audit are genuinely read-only (a wider gate would
+  // let the agent "fix" an artifact by overwriting it, corrupting the very
+  // thing it is judging).
   const fsGate = await harness.createGatedFsTools({ cwd: seriesDir, allowedDirs: [seriesDir] });
+  const reportResolved = path.resolve(seriesDir, REPORT_FILE);
+  const auditorApprove = (call) => {
+    if (!fsGate.approve(call)) return false;
+    if (call.toolName === "writeFile" || call.toolName === "editFile") {
+      const resolved = path.resolve(seriesDir, typeof call.input?.filePath === "string" ? call.input.filePath : "");
+      return resolved === reportResolved;
+    }
+    return true; // reads pass; deleteFile is already denied by the base gate
+  };
+
+  // Hash the four artifacts BEFORE the agent runs. A report signs off a
+  // specific state; if the state changes while the audit is in flight, the
+  // report is about a different world than the one on disk when the next
+  // skip-check reads it. (The sandbox above makes agent tampering impossible;
+  // this is the belt to the braces — it also catches an external writer.)
+  const hashesBefore = await hashAuditArtifacts(seriesDir);
+
   const auditor = await harness.createAgentHandle({
     name: "consistency-auditor",
     systemPrompt: systemPrompt + AGENT_TOOLS_NOTE,
     tools: fsGate.tools,
-    approve: fsGate.approve,
+    approve: auditorApprove,
     cwd: seriesDir,
     maxSteps: MAX_STEPS,
   });
@@ -318,10 +338,22 @@ async function consistencyAudit() {
     await auditor.close();
   }
 
+  // The audited state must be exactly what we hashed before the agent ran.
+  const hashesAfter = await hashAuditArtifacts(seriesDir);
+  const tampered = AUDIT_ARTIFACTS.filter(([file]) => hashesAfter[file] !== hashesBefore[file]).map(([f, name]) => name);
+  if (tampered.length > 0) {
+    throw structuralError(
+      `The audit is void: ${tampered.join(", ")} changed while the audit agent was running ` +
+        `(its hash before the run differs from the hash after). The report signs off a ` +
+        `state that no longer exists on disk. Re-run "npx gulp consistency-audit --force" ` +
+        `once the artifacts are stable.`
+    );
+  }
+
   // Record the fingerprints of the state this report signs off, so the next
   // run can skip deterministically (best-effort — a failure only means the
   // next run falls back to the legacy mtime check).
-  await writeAuditProvenance(reportFile, await hashAuditArtifacts(seriesDir));
+  await writeAuditProvenance(reportFile, hashesAfter);
 
   // Log the verdict (the report is the deliverable — a FAIL is logged loudly
   // but does not fail the task: the artifacts stay on disk and a fixer re-runs

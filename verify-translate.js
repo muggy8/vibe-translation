@@ -209,15 +209,28 @@ async function runAuditTiebreak({ volume, volumeDir, bundle, refs, systemPrompt,
       label: `verify-audit-v${volume.installmentNumber}-${seg.id}`,
     });
     const auditScore = parseAcceptanceScore(result);
+    const auditorFindings = findingsOf(result);
     const verifierScore = e.score;
     const final = auditScore !== null ? Math.round((verifierScore + auditScore) / 2) : verifierScore;
     const prevPass = e.pass === true;
     const newPass = final >= passingScore;
+    // Keep the AUDITOR's findings when the auditor is the one dragging the
+    // chapter down: if the tiebreak lands the chapter at FAIL and the auditor
+    // scored no higher than the verifier, the actionable problems are the
+    // auditor's, not the verifier's more favourable set. A retranslate of this
+    // chapter must fix what the auditor flagged, or the loop re-fails on the
+    // same issues. When the auditor is the optimist (or the chapter still
+    // passes) the verifier's findings stand.
+    const auditorIsPessimist =
+      auditScore !== null && !newPass && auditScore <= verifierScore;
     sidecar.chapters[seg.id] = {
       ...e,
       score: final,
       pass: newPass,
-      tiebreak: { verifier: verifierScore, auditor: auditScore, final },
+      ...(auditorIsPessimist && auditorFindings
+        ? { findings: auditorFindings }
+        : {}),
+      tiebreak: { verifier: verifierScore, auditor: auditScore, final, auditorFindings },
       tiebreakApplied: true,
       verifiedAt: new Date().toISOString(),
     };
@@ -225,7 +238,9 @@ async function runAuditTiebreak({ volume, volumeDir, bundle, refs, systemPrompt,
     results.push({ id: seg.id, verifier: verifierScore, auditor: auditScore, final, prevPass, newPass });
     console.log(
       `  Volume ${volume.installmentNumber} ${seg.id}: tiebreak — verifier ${verifierScore}, auditor ` +
-        `${auditScore === null ? "n/a (kept the verifier score)" : auditScore} → averaged ${final}/100 → ${newPass ? "PASS" : "FAIL"}.`
+        `${auditScore === null ? "n/a (kept the verifier score)" : auditScore} → averaged ${final}/100 → ${newPass ? "PASS" : "FAIL"}` +
+        (auditorIsPessimist ? " (auditor's findings kept for retranslate)" : "") +
+        "."
     );
   });
   return results;

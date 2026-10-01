@@ -74,13 +74,56 @@ function chunkThresholdChars() {
 }
 
 /**
+ * Split a plain-text source into chapter-sized segments (the chunked fallback
+ * for a plain-text volume that is too big to process whole).
+ *
+ * Paragraph-aware: the text is split on blank lines, and whole paragraphs are
+ * greedily packed into segments of at most `targetChars`. A single paragraph
+ * longer than the target becomes a segment of its own (splitting mid-paragraph
+ * would break a sentence). Every paragraph lands in exactly one segment, so
+ * the content is preserved — only blank-line runs are normalised to one.
+ *
+ * @param {string} text - The full source text.
+ * @param {number} targetChars - The approximate size of each segment.
+ * @returns {string[]} The segments in reading order (empty array for empty input).
+ */
+function splitPlainTextSegments(text, targetChars) {
+  const target = Math.max(1000, targetChars || 0);
+  const paragraphs = (text || "").split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
+  const segments = [];
+  let current = [];
+  let currentLen = 0;
+  for (const para of paragraphs) {
+    if (para.length > target) {
+      if (current.length) {
+        segments.push(current.join("\n\n"));
+        current = [];
+        currentLen = 0;
+      }
+      segments.push(para);
+      continue;
+    }
+    if (currentLen + para.length + 2 > target && current.length) {
+      segments.push(current.join("\n\n"));
+      current = [];
+      currentLen = 0;
+    }
+    current.push(para);
+    currentLen += para.length + 2;
+  }
+  if (current.length) segments.push(current.join("\n\n"));
+  return segments;
+}
+
+/**
  * Decide whether a volume must be processed chapter by chapter (the fallback)
  * instead of as one whole installment (the default).
  *
- * The fallback only applies to epub bundles with more than one chapter, and
- * only when the whole text exceeds the threshold or chunking is forced with
- * --chunked. Everything else — every .md source and every small epub — is
- * processed whole, exactly as before epub support existed.
+ * The fallback applies to epub bundles with more than one chapter, and to
+ * plain-text sources that were split into parts because they exceed the
+ * threshold — in both cases only when the whole text exceeds the threshold or
+ * chunking is forced with --chunked. Everything else — every small plain-text
+ * source and every small epub — is processed whole.
  *
  * @param {SourceBundle} bundle - The resolved source bundle.
  * @param {{forceChunked?: boolean, thresholdChars?: number}} [opts]
@@ -90,7 +133,15 @@ function shouldProcessChunked(bundle, opts = {}) {
   const forceChunked = !!opts.forceChunked;
   const threshold =
     opts.thresholdChars !== undefined ? opts.thresholdChars : chunkThresholdChars();
-  if (!bundle || bundle.format !== "epub" || !Array.isArray(bundle.segments) || bundle.segments.length < 2) {
+  // Both epubs and split plain-text volumes can have multiple segments; a
+  // single-segment bundle (a small plain-text file, or an epub with one
+  // section) is always processed whole.
+  if (
+    !bundle ||
+    (bundle.format !== "epub" && bundle.format !== "text") ||
+    !Array.isArray(bundle.segments) ||
+    bundle.segments.length < 2
+  ) {
     return false;
   }
   if (forceChunked) return true;
@@ -972,6 +1023,70 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
  * @returns {Promise<SourceBundle>}
  * @throws {Error} When the source file is missing or the epub is unreadable.
  */
+// Target size for a plain-text part (a "synthetic chapter"). A little above
+// TRANSLATE_CHUNK_CHARS so the translation stage rarely re-splits a part, while
+// keeping each cumulative-task segment comfortably inside the context window.
+const TEXT_PART_TARGET_CHARS = 30000;
+
+/**
+ * Split an oversized plain-text source into part files inside the volume folder
+ * (the plain-text analogue of an epub's per-chapter files), cached so a re-run
+ * does not re-split an unchanged source.
+ *
+ * The cache is keyed on the source fingerprint and the target size: a re-released
+ * / errata-fixed source (or a changed SOURCE_CHUNK target) re-splits. A missing
+ * part file forces a re-split too (fail-open).
+ *
+ * @param {string} originalPath - The staged source file.
+ * @param {string} volumeDir - The volume folder (where the parts are written).
+ * @param {string} base - The source base name (no extension).
+ * @param {number} size - The source file size (bytes).
+ * @param {string} fingerprint - sha256 of the source file.
+ * @param {boolean} force - Re-split even when a valid cache exists.
+ * @returns {Promise<Array<{file: string, chars: number, cacheHit: boolean}>>}
+ */
+async function materializeTextParts(originalPath, volumeDir, base, size, fingerprint, force) {
+  const metaPath = path.join(volumeDir, `${base}-parts.meta.json`);
+  let meta = null;
+  if (!force) {
+    try {
+      meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    } catch {
+      meta = null;
+    }
+  }
+  const validCache =
+    meta &&
+    meta.fingerprint === fingerprint &&
+    meta.targetChars === TEXT_PART_TARGET_CHARS &&
+    Array.isArray(meta.parts) &&
+    meta.parts.length > 0 &&
+    meta.parts.every((p) => typeof p.file === "string") &&
+    meta.parts.every((p) => fileExists(path.join(volumeDir, p.file)));
+  if (validCache) {
+    return meta.parts.map((p) => ({ file: p.file, chars: p.chars || 0, cacheHit: true }));
+  }
+  const text = await fs.readFile(originalPath, "utf8");
+  const segments = splitPlainTextSegments(text, TEXT_PART_TARGET_CHARS);
+  const parts = [];
+  for (let i = 0; i < segments.length; i += 1) {
+    const file = `${base}-part-${String(i + 1).padStart(2, "0")}.md`;
+    await fs.writeFile(path.join(volumeDir, file), segments[i], "utf8");
+    parts.push({ file, chars: segments[i].length });
+  }
+  // Remove stale part files from a previous (different) split so they are not
+  // mistaken for the current ones on a later run.
+  const escBase = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const existing = await fs.readdir(volumeDir);
+  for (const name of existing) {
+    if (new RegExp(`^${escBase}-part-\\d+\\.md$`).test(name) && !parts.some((p) => p.file === name)) {
+      await fs.rm(path.join(volumeDir, name), { force: true });
+    }
+  }
+  await fs.writeFile(metaPath, JSON.stringify({ schema: 1, fingerprint, targetChars: TEXT_PART_TARGET_CHARS, parts }, null, 2), "utf8");
+  return parts.map((p) => ({ ...p, cacheHit: false }));
+}
+
 async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false }) {
   const originalPath = path.resolve(seriesDir, volume.sourceFile);
   if (!(await fileExists(originalPath))) {
@@ -990,6 +1105,31 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
 
   if (!isEpubPath(originalPath)) {
     const st = await fs.stat(originalPath);
+    const fingerprint = await sha256OfFile(originalPath);
+    // An oversized plain-text source (bigger than the whole-installment
+    // threshold) is split into part files in the volume folder so the
+    // chapter-by-chapter fallback can process it, exactly like a big epub.
+    // A small source stays a single "whole" segment, as before.
+    if (st.size > 0 && st.size > chunkThresholdChars()) {
+      const parts = await materializeTextParts(originalPath, volumeDir, base, st.size, fingerprint, force);
+      return {
+        format: "text",
+        originalPath,
+        base,
+        volumeDir,
+        wholePath: originalPath,
+        segments: parts.map((p, i) => ({
+          id: `part-${String(i + 1).padStart(2, "0")}`,
+          file: p.file,
+          title: `Part ${i + 1} of ${parts.length}`,
+          chars: p.chars,
+        })),
+        imagesDir: null,
+        wholeChars: st.size,
+        cacheHit: parts.every((p) => p.cacheHit),
+        sourceFingerprint: fingerprint,
+      };
+    }
     return {
       format: "text",
       originalPath,
@@ -1011,7 +1151,7 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
       // against the fingerprint persisted in the last run's rolling state so
       // a re-released / errata-fixed source invalidates the stale artifacts
       // (see isSourceStale in configs/shared.js).
-      sourceFingerprint: await sha256OfFile(originalPath),
+      sourceFingerprint: fingerprint,
     };
   }
 
@@ -1204,6 +1344,8 @@ module.exports = {
   BUNDLE_SCHEMA_VERSION,
   chunkThresholdChars,
   shouldProcessChunked,
+  splitPlainTextSegments,
+  materializeTextParts,
   classifyTitle,
   assignSegmentIds,
   xhtmlToMarkdown,

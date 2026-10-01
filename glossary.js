@@ -315,23 +315,25 @@ function buildPerTermResearchPrompt(ctx, term, index, seg = null) {
     : ctx.bundle
       ? `${ctx.chunked ? sourceSegmentListLine(ctx.bundle) : sourceMaterialLine(ctx.bundle)} — read it selectively with readFile/grep if you need disambiguation; you do not need to read it all.`
       : `Context you may consult (optional): the volume source "${ctx.folderName}.md" (same folder) — read it selectively with readFile/grep if you need disambiguation; you do not need to read it all.`;
+  const placeholder = pendingPlaceholder(term.term);
   const target = seg
-    ? `the "- (pending)" line under the "### ${term.term}" heading in the "## Chapter ${seg.id}" section`
-    : `that term's "- (pending)" line (approximately line ${approxLine})`;
+    ? `the "${placeholder}" line under the "### ${term.term}" heading in the "## Chapter ${seg.id}" section`
+    : `that term's "${placeholder}" line (approximately line ${approxLine})`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `${sourceContextLine}\n\n` +
     `Your task: research the following term and write your notes to the file ` +
     `"glossary-research.md" in your working folder:\n\n` +
     `Term: ${term.term} (${term.type}) — suggested query: ${term.query}\n\n` +
-    `The file "glossary-research.md" already exists. It contains a "- (pending)" ` +
-    `placeholder line for this term (${target}). ` +
-    `Use editFile to replace ONLY that "- (pending)" line with your final ` +
-    `research notes. Do not modify any other term's notes.\n\n` +
+    `The file "glossary-research.md" already exists. It contains the unique ` +
+    `placeholder line "${placeholder}" for this term (${target}). ` +
+    `Use editFile to replace ONLY that exact line (its oldText is ` +
+    `"${placeholder}") with your final research notes. Do not modify any other ` +
+    `term's notes.\n\n` +
     `Per-term budget: at most 2 wiki_search calls and 1 wiki_extract call. Start ` +
     `from the suggested query; search in the source language first, then English ` +
     `if useful.\n\n` +
-    `Final notes format (replacing the "- (pending)" line):\n` +
+    `Final notes format (replacing the "${placeholder}" line):\n` +
     `- <page title> (<lang>) — <URL>\n` +
     `  <1-3 sentence summary: what the term is and any established ` +
     `${values.TARGET_LANGUAGE} name>\n\n` +
@@ -444,24 +446,26 @@ function buildGlossaryResearcherTurnPrompt(ctx, terms) {
     `Working folder: the volume folder (you are in it).\n\n` +
     `${sourceContextLine}\n\n` +
     `The notes file "glossary-research.md" in your working folder already exists and ` +
-    `contains a section for each of the following terms, each with the placeholder ` +
-    `line "- (pending)":\n${termsListText}\n\n` +
+    `contains a section for each of the following terms, each with a UNIQUE placeholder ` +
+    `line of the form "- (pending: <term>)" (the term's own name inside the parentheses):\n` +
+    `${termsListText}\n\n` +
     `Your job: for each term, research it, then IMMEDIATELY use editFile to replace ` +
-    `that term's "- (pending)" line with its final notes. Do not wait until the end ` +
-    `to write anything — save progress after every term.\n\n` +
+    `that term's placeholder line (oldText "- (pending: <that term's name>)") with its final notes. ` +
+    `Each placeholder is unique to its term, so the edit can never touch another term's ` +
+    `notes. Do not wait until the end to write anything — save progress after every term.\n\n` +
     `Per-term budget: at most 2 wiki_search calls and 1 wiki_extract call. Start ` +
     `from the suggested query; search in the source language first, then English ` +
     `if useful.\n\n` +
-    `Final notes format for each term (replacing the "- (pending)" line):\n` +
+    `Final notes format for each term (replacing that term's "- (pending: <term>)" line):\n` +
     `- <page title> (<lang>) — <URL>\n` +
     `  <1-3 sentence summary: what the term is and any established ` +
     `${values.TARGET_LANGUAGE} name>\n\n` +
     `Rules:\n` +
-    `- If a term has no external reference, replace "- (pending)" with ` +
+    `- If a term has no external reference, replace its "- (pending: <term>)" line with ` +
     `"- (no external reference found)".\n` +
     `- Keep each term's notes under about 5 lines.\n` +
     `- If you are running low on steps, stop researching and make sure every ` +
-    `remaining "- (pending)" line has been replaced (a short note or ` +
+    `remaining "- (pending: <term>)" line has been replaced (a short note or ` +
     `"- (no external reference found)" is fine).`
   );
 }
@@ -1064,10 +1068,26 @@ function buildGlossarySegmentFeedbackPrompt(ctx, segment, si) {
 }
 
 /**
+/**
+ * The unique placeholder line for one term in the research skeleton.
+ *
+ * It embeds the term so a parallel agent's editFile can target EXACTLY its own
+ * line. A bare "- (pending)" is not unique: with two terms in the file, the
+ * agent's editFile oldText would match two lines and the edit is ambiguous (and
+ * fails), so the term's notes would never land.
+ *
+ * @param {string} term - The term being researched.
+ * @returns {string}
+ */
+function pendingPlaceholder(term) {
+  return `- (pending: ${term})`;
+}
+
+/**
  * Create or extend the skeleton-first research notes file with this chapter's
  * terms (chunked fallback). Chapter 1 creates the file with the volume header;
  * later chapters append a "## Chapter <id>" section. Each term gets a
- * "### <term>" heading with a "- (pending)" placeholder line.
+ * "### <term>" heading with a unique "- (pending: <term>)" placeholder line.
  *
  * @param {string} researchNotesFile - Absolute path of glossary-research.md.
  * @param {{INSTALLMENT_NUMBER: string}} values - The volume values.
@@ -1080,7 +1100,7 @@ async function appendResearchSkeleton(researchNotesFile, values, segment, terms,
   const section = [`## Chapter ${segment.id} — ${segment.title}`, ""];
   for (const t of terms) {
     section.push(`### ${t.term}`);
-    section.push("- (pending)");
+    section.push(pendingPlaceholder(t.term));
   }
   section.push("");
   const text = section.join("\n");
@@ -1491,7 +1511,7 @@ async function runVolumeAgent(ctx) {
     const skeletonLines = ["# Research Notes — Volume " + values.INSTALLMENT_NUMBER, ""];
     for (let ti = 0; ti < terms.length; ti++) {
       skeletonLines.push(`### ${terms[ti].term}`);
-      skeletonLines.push("- (pending)");
+      skeletonLines.push(pendingPlaceholder(terms[ti].term));
     }
     skeletonLines.push("");
     await fs.writeFile(researchNotesFile, skeletonLines.join("\n"), "utf8");
@@ -1517,9 +1537,10 @@ async function runVolumeAgent(ctx) {
           `(the agent deleted it?); continuing without research.`
       );
     } else {
-      const remaining = (
-        await fs.readFile(researchNotesFile, "utf8")
-      ).split("- (pending)").length - 1;
+      const remainingText = await fs.readFile(researchNotesFile, "utf8");
+      // Count the unique "- (pending: <term>)" lines still present (a bare
+      // "- (pending)" split would not match the new unique format).
+      const remaining = (remainingText.match(/^- \(pending: .+\)$/gm) || []).length;
       if (remaining > 0) {
         console.warn(
           `Volume ${values.INSTALLMENT_NUMBER}: research finished with ${remaining} ` +

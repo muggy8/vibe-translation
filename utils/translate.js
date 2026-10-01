@@ -1121,7 +1121,16 @@ async function loadVolumeReferences(volumeDir) {
     : "";
   const background = [sharedPart, wikiPart, povPart].filter(Boolean).join("\n\n");
   const voiceNotes = voiceText.trim().slice(0, 4000);
-  const contextHash = sha256(`${glossaryText}\n---\n${styleRules}\n---\n${background}\n---\n${voiceNotes}`);
+  // The idempotency key fingerprints the FULL reference artifacts (the raw
+  // files), not the truncated/derived slices that are actually injected. A
+  // hash of a slice would miss a change that landed outside the window (the
+  // draft would not invalidate even though a reference changed); a hash of the
+  // whole artifact is a stable fingerprint — regenerate any reference and every
+  // dependent draft is invalidated on the next run (safe direction: it may
+  // invalidate more than strictly necessary, never less).
+  const contextHash = sha256(
+    [glossaryText, styleGuideText, sharedWikiText, wikiText, povMapText, voiceText].join("\n\u0000--\u0000\n")
+  );
   return {
     glossaryText,
     terms,

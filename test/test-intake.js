@@ -30,6 +30,9 @@ const {
   htmlToPlainText,
   scriptCounts,
   extractEpubToBundle,
+  splitPlainTextSegments,
+  materializeTextParts,
+  shouldProcessChunked,
 } = require("../utils/source");
 const harness = require("../harness");
 const {
@@ -271,6 +274,48 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.strictEqual(bundle.segments[1].title, "第一章 出会い", "titles carried into the bundle");
   const wholeMd = await fs.promises.readFile(path.join(volumeDir, bundle.wholeFile), "utf-8");
   assert.ok(wholeMd.includes("第一章"), "the whole-volume file holds the chapters in order");
+
+  // ─── plain-text chunking: the chapter-by-chapter fallback for big .md/.txt ──
+  // Paragraph-aware, lossless, and a giant paragraph is its own segment.
+  const paras = Array.from({ length: 1200 }, (_, i) => `Paragraph number ${i} with some body text in it.`);
+  const bigText = paras.join("\n\n");
+  const parts = splitPlainTextSegments(bigText, 30000);
+  assert.ok(parts.length >= 2, `a 58KB text splits into ${parts.length} parts`);
+  assert.ok(parts.every((p) => p.length <= 30000 + 60), "each part is near the target (a whole para may overshoot slightly)");
+  const rejoined = parts.join("\n\n");
+  assert.ok(paras.every((p) => rejoined.includes(p)), "every paragraph is preserved exactly once");
+  assert.deepStrictEqual(splitPlainTextSegments("", 30000), [], "empty text → no parts");
+  const giant = splitPlainTextSegments("x".repeat(5000) + "\n\nshort para", 1000);
+  assert.strictEqual(giant.length, 2, "a giant paragraph is its own segment");
+  assert.strictEqual(giant[0].length, 5000);
+
+  // materializeTextParts writes the part files, caches by fingerprint, and
+  // re-splits when the source changes.
+  const chunkDir = makeTmpDir("ai-client-chunk-");
+  const srcPath = path.join(chunkDir, "novel.txt");
+  await fs.promises.writeFile(srcPath, bigText);
+  const { sha256OfFile } = require("../utils/source");
+  const fp = await sha256OfFile(srcPath);
+  const m1 = await materializeTextParts(srcPath, chunkDir, "novel", bigText.length, fp, false);
+  assert.ok(m1.length >= 2, "parts written");
+  assert.ok(m1.every((p) => p.cacheHit === false), "first materialisation is a miss");
+  assert.ok(await fs.promises.stat(path.join(chunkDir, m1[0].file)), "part files exist");
+  const m2 = await materializeTextParts(srcPath, chunkDir, "novel", bigText.length, fp, false);
+  assert.ok(m2.every((p) => p.cacheHit === true), "an unchanged source is a cache hit (no re-split)");
+  assert.deepStrictEqual(m2.map((p) => p.file), m1.map((p) => p.file), "same part files");
+  // A changed source (errata) re-splits and reuses the fingerprint key.
+  await fs.promises.writeFile(srcPath, bigText + "\n\nAn errata paragraph added at the end.");
+  const fp2 = await sha256OfFile(srcPath);
+  const m3 = await materializeTextParts(srcPath, chunkDir, "novel", bigText.length + 40, fp2, false);
+  assert.ok(m3.every((p) => p.cacheHit === false), "a changed source re-splits");
+  assert.ok(m3[m3.length - 1].chars > m2[m2.length - 1].chars, "the new paragraph lands in the last part");
+
+  // shouldProcessChunked: a multi-segment text bundle over the threshold chunks;
+  // a single-segment (small) text bundle never does.
+  assert.strictEqual(shouldProcessChunked({ format: "text", segments: [{}, {}], wholeChars: 40000 }, { thresholdChars: 120000 }), false, "under the threshold → whole");
+  assert.strictEqual(shouldProcessChunked({ format: "text", segments: [{}, {}], wholeChars: 400000 }, { thresholdChars: 120000 }), true, "over the threshold → chunked");
+  assert.strictEqual(shouldProcessChunked({ format: "text", segments: [{}], wholeChars: 400000 }, { thresholdChars: 120000 }), false, "a single-segment text bundle is always whole");
+  assert.strictEqual(shouldProcessChunked({ format: "epub", segments: [{}, {}], wholeChars: 400000 }, { thresholdChars: 120000 }), true, "epub behaviour is unchanged");
 
   // ─── the epub tools the intake agent uses ──────────────────────────────────
   const seriesDir = makeTmpDir("ai-client-series-");

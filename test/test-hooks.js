@@ -12,10 +12,12 @@ const {
   TASKS,
   PIPELINE_TASK,
   HOOKS_DIR_ENV,
+  hookTimeoutMs,
   getHooksDir,
   findHookFile,
   buildHookContext,
   buildEnvOverrides,
+  execHookFile,
   withHooks,
 } = require("../utils/hooks");
 
@@ -307,6 +309,39 @@ assert.strictEqual(HOOKS_DIR_ENV, "AI_CLIENT_HOOKS_DIR");
     assert.strictEqual(line.split("|")[0], "glossary");
     assert.strictEqual(line.split("|")[1], "after");
     assert.strictEqual(line.split("|")[2], "1");
+    delete process.env[HOOKS_DIR_ENV];
+  }
+
+  // hookTimeoutMs: default 30 min, overridable, 0 = disabled.
+  {
+    delete process.env.AI_CLIENT_HOOK_TIMEOUT_MS;
+    assert.strictEqual(hookTimeoutMs(), 30 * 60 * 1000, "default is 30 minutes");
+    process.env.AI_CLIENT_HOOK_TIMEOUT_MS = "5000";
+    assert.strictEqual(hookTimeoutMs(), 5000, "overridable");
+    process.env.AI_CLIENT_HOOK_TIMEOUT_MS = "0";
+    assert.strictEqual(hookTimeoutMs(), 0, "0 disables the bound");
+    process.env.AI_CLIENT_HOOK_TIMEOUT_MS = "not-a-number";
+    assert.strictEqual(hookTimeoutMs(), 30 * 60 * 1000, "an invalid value falls back to the default");
+    delete process.env.AI_CLIENT_HOOK_TIMEOUT_MS;
+  }
+
+  // A hook that hangs is killed by the timeout (a hung hook must not block an
+  // un-monitored run forever).
+  {
+    const dir = makeTmpDir();
+    writeHook(dir, "pre-glossary", "#!/usr/bin/sh\nsleep 30\n");
+    process.env[HOOKS_DIR_ENV] = dir;
+    process.env.AI_CLIENT_HOOK_TIMEOUT_MS = "700"; // 0.7 s
+    let taskRan = false;
+    const hooked = withHooks("glossary", async () => {
+      taskRan = true;
+      return "ok";
+    });
+    const started = Date.now();
+    await assert.rejects(hooked(), /timeout|killed/i);
+    assert.ok(Date.now() - started < 2500, "the hook is killed well before its own sleep");
+    assert.strictEqual(taskRan, false, "a before-hook timeout stops the task");
+    delete process.env.AI_CLIENT_HOOK_TIMEOUT_MS;
     delete process.env[HOOKS_DIR_ENV];
   }
 
