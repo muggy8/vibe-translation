@@ -41,6 +41,10 @@ yarn-error.log*
 
 # Dry-run prompt dumps
 .dry-run/
+
+# Token calibration cache (per-model measurements of the endpoint's tokenizer —
+# machine state, like hooks/.model-switch-state, not pipeline output)
+.token-calibration.json
 # Grader calibration: the fixture (test/calibration/cases/) is tracked; the
 # reports it writes are per-machine history for the drift comparison.
 test/calibration/calibration-report.md

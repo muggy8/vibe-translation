@@ -53,6 +53,7 @@ const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
 const { ON_VOLUME_ERROR, PASSING_SCORE, validateRequiredEnv, resolveRunSettings, isStructuralError, structuralError, volumeFailureError } = require("./configs/shared");
 const { fileExists } = require("./utils/fs");
+const tokens = require("./utils/tokens");
 const { resolveSourceBundle } = require("./utils/source");
 const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("./utils/prompt");
 const { writeTranslationReport } = require("./utils/translation-report");
@@ -78,6 +79,7 @@ const {
   logRunEstimate,
   countStageChapters,
   checkChapterListConsistency,
+  calibrateStageTokens,
   glossaryBlock,
   loadVerificationSidecar,
   readFileOrEmpty,
@@ -194,8 +196,12 @@ function polishReferenceBlocks({ refs, sourceText }) {
  * }} ctx
  * @returns {Promise<Array<{id: string, score: number|null, pass: boolean, findings: string}>>}
  */
-async function runAuditBatch({ volume, volumeDir, bundle, refs, systemPrompt, template, auditEndpoint, toAudit }) {
+async function runAuditBatch({ volume, volumeDir, bundle, refs, systemPrompt, template, auditEndpoint, toAudit, dryRun = false }) {
   await harness.assertModelServing({ ...auditEndpoint, label: "polish-audit stage" });
+  // The auditor is a different model from the polisher whose work it is grading,
+  // and its prompt budget is computed with these estimates — re-point them for
+  // the whole batch (cached per endpoint, so this is one probe, not one per chapter).
+  await calibrateStageTokens({ endpoint: auditEndpoint, bundle, label: "polish-audit batch", dryRun });
   console.log(
     `[polish-audit] cross-model final audit of ${toAudit.length} chapter(s) with ${auditEndpoint.model} ` +
       `(PASS ≥ ${polishVerifyPassingScore}/100)…`
@@ -264,6 +270,10 @@ async function runAuditBatch({ volume, volumeDir, bundle, refs, systemPrompt, te
  * @returns {Promise<void>}
  */
 async function runRePolish({ volume, volumeDir, bundle, refs, systemPrompt, template, endpoint, state, failed }) {
+  // The audit that just graded these candidates ran on a DIFFERENT model, and the
+  // active token calibration is process-global — re-point it at the polisher's
+  // tokenizer before budgeting this phase's prompts.
+  tokens.useCalibrationFor(endpoint);
   console.log(
     `[polish] re-polishing ${failed.length} chapter(s) with ${endpoint.model} (audit findings injected)…`
   );
@@ -669,7 +679,7 @@ async function acceptPolishCandidatesWithoutAudit(vc) {
  * @param {{verifySystemPrompt: string, verifyTemplate: string, auditEndpoint: Object}} ctx
  * @returns {Promise<number>} How many candidates failed this round.
  */
-async function runPolishAuditRound(vc, { verifySystemPrompt, verifyTemplate, auditEndpoint }) {
+async function runPolishAuditRound(vc, { verifySystemPrompt, verifyTemplate, auditEndpoint, dryRun = false }) {
   const { volume, volumeDir, bundle, refs, state, sidecar, rows } = vc;
   const auditResults = await runAuditBatch({
     volume,
@@ -680,6 +690,7 @@ async function runPolishAuditRound(vc, { verifySystemPrompt, verifyTemplate, aud
     template: verifyTemplate,
     auditEndpoint,
     toAudit: vc.auditPending,
+    dryRun,
   });
   const byId = new Map(auditResults.map((a) => [a.id, a]));
   const failed = [];
@@ -909,6 +920,10 @@ async function polish() {
     const volumeDir = path.join(seriesDir, folderName);
     try {
       const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
+      // The polisher runs on the EDIT_* role — a different model from the
+      // verifier and from the auditor that grades its work (see the polish
+      // final audit). Re-point the estimate for THIS role before budgeting.
+      await calibrateStageTokens({ endpoint, bundle, label: "polish stage", dryRun });
       // The handoff's chapter list and the extracted one must describe the same
       // book (see checkChapterListConsistency). A disagreement is reported, not
       // fatal: the extracted list is the one this stage uses.
@@ -972,7 +987,7 @@ async function polish() {
         );
         const auditBatch = withHooks("polish-audit", async () => {
           for (const vc of pending) {
-            await runPolishAuditRound(vc, { verifySystemPrompt, verifyTemplate, auditEndpoint });
+            await runPolishAuditRound(vc, { verifySystemPrompt, verifyTemplate, auditEndpoint, dryRun });
           }
         });
         await auditBatch();

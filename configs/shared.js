@@ -280,6 +280,54 @@ function isStructuralError(err) {
 }
 
 /**
+ * Build the error that means "this did not fit in a single pass" — the mirror of
+ * {@link structuralError}, and the only failure the pipeline may recover from by
+ * switching to the chapter-by-chapter path.
+ *
+ * Why the class exists: a whole-installment pass is the cheap, cache-friendly
+ * path, and the pipeline now prefers it whenever the size check says it fits.
+ * When it turns out not to fit, retrying the same volume chapter by chapter is a
+ * genuine fix rather than a retry of the same mistake. But "on any error, try
+ * chunked" would be a trap: a hang, a malformed tool call, a dead container or a
+ * missing previous artifact are not size problems, and chunking them costs the
+ * whole volume again to fix something chunking cannot fix. So only the three
+ * signatures that are actually about size get this tag:
+ *
+ *   - the server rejecting the request because prompt + output cap exceed the
+ *     context (it refuses before generating anything — see gotcha 36);
+ *   - an agent turn that hit the output cap while writing a file
+ *     (finish_reason=length on a writeFile/editFile step);
+ *   - a tool-less call that hit the output cap.
+ *
+ * A bad ACCEPTANCE score is deliberately NOT this error. That is the QA loop's
+ * problem, it is stochastic, and auto-switching processing mode on it would make
+ * which mode ran — and therefore what the artifacts look like — irreproducible
+ * between runs.
+ *
+ * @param {string} message - The error message.
+ * @param {Error} [cause] - The underlying error, if any.
+ * @returns {Error} The marked error.
+ */
+function tooBigForOnePassError(message, cause) {
+  const err = new Error(message);
+  err.tooBigForOnePass = true;
+  if (cause) err.cause = cause;
+  return err;
+}
+
+/**
+ * Whether an error means "did not fit in one pass" (see
+ * {@link tooBigForOnePassError}) — the only condition a whole→chunked fallback
+ * acts on.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isTooBigForOnePassError(err) {
+  return !!(err && typeof err === "object" && err.tooBigForOnePass === true);
+}
+
+/**
  * Build the error a task must throw when one or more of its volumes failed.
  *
  * Every per-volume loop is wrapped in a try/catch so an un-monitored run can keep
@@ -769,6 +817,8 @@ module.exports = {
   readBoolEnv,
   structuralError,
   isStructuralError,
+  tooBigForOnePassError,
+  isTooBigForOnePassError,
   volumeFailureError,
   ON_VOLUME_ERROR,
   ON_MISSING_PREVIOUS,

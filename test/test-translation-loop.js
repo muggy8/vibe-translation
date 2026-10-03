@@ -462,18 +462,37 @@ function scenarioValueFilter() {
 
   // Windowing: a volume bigger than the auditor's window is split into
   // consecutive windows, and a chapter that alone exceeds it is flagged.
+  //
+  // The sizes are chosen against the CALIBRATED estimate (utils/tokens.js): a
+  // 4,000-character Latin chapter estimates at ceil(4000 × 0.25 × 1.10) + 40 =
+  // 1,140 tokens, so three of them fit the 20,000 − 16,000 = 4,000-token budget
+  // and the fourth does not. (Under the old 0.35-per-char coefficients the same
+  // fixture packed two per window — the packing changed because the estimate got
+  // accurate, which is the point of the change.)
   const chapters = [
     { id: "ch1", text: "a".repeat(4000) },
     { id: "ch2", text: "b".repeat(4000) },
     { id: "ch3", text: "c".repeat(4000) },
-    { id: "ch4", text: "d".repeat(400000) },
+    { id: "ch4", text: "d".repeat(4000) },
+    { id: "ch5", text: "e".repeat(4000) },
+    { id: "ch6", text: "f".repeat(4000) },
+    { id: "ch7", text: "g".repeat(400000) },
   ];
   const windows = planConsistencyWindows(chapters, { maxTokens: 20000, reserve: 16000 });
   assert.strictEqual(windows.length, 3, `the volume is split rather than dropped: ${windows.length} window(s)`);
-  assert.deepStrictEqual(windows[0].chapters.map((c) => c.id), ["ch1", "ch2"], "consecutive chapters stay together (that is the point)");
-  assert.ok(windows.some((w) => w.oversized && w.chapters[0].id === "ch4"), "a chapter larger than the whole window is flagged, not silently skipped");
+  assert.deepStrictEqual(
+    windows[0].chapters.map((c) => c.id),
+    ["ch1", "ch2", "ch3"],
+    "consecutive chapters stay together (that is the point)"
+  );
+  assert.deepStrictEqual(
+    windows[1].chapters.map((c) => c.id),
+    ["ch4", "ch5", "ch6"],
+    "the split is a real packing decision, not one chapter per window"
+  );
+  assert.ok(windows.some((w) => w.oversized && w.chapters[0].id === "ch7"), "a chapter larger than the whole window is flagged, not silently skipped");
   const flat = windows.flatMap((w) => w.chapters.map((c) => c.id));
-  assert.deepStrictEqual(flat, ["ch1", "ch2", "ch3", "ch4"], "windowing loses no chapter and keeps reading order");
+  assert.deepStrictEqual(flat, ["ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7"], "windowing loses no chapter and keeps reading order");
 }
 
 // ─── 4b. The cross-chapter pass, end to end on real files ────────────────────

@@ -64,6 +64,7 @@ const {
   logRunEstimate,
   countStageChapters,
   checkChapterListConsistency,
+  calibrateStageTokens,
   runWithConcurrency,
   stageConcurrency,
   loadVerificationSidecar,
@@ -77,6 +78,12 @@ const {
   stitchParagraphs,
   buildPassageScopeLine,
   volumeFindingsText,
+  planChapterSplit,
+  translateChunkCap,
+  outputRatioFor,
+  thinkingOutputFactor,
+  measureOutputRatio,
+  estimateTokens,
   retranslateTarget,
   chapterContextHash,
   VERIFICATION_FILE,
@@ -107,8 +114,8 @@ const retranslateConcurrency = stageConcurrency("RETRANSLATE");
 /** Findings injected into the retranslate prompt (bounded — they are a
  *  numbered correction task, not a document to re-read). */
 const RETRANSLATE_FINDINGS_CHARS = 3000;
-/** Same splitting/continuity budget as the translate stage. */
-const chunkChars = translateChunkChars();
+/** Same continuity budget as the translate stage; the part SIZE is planned in
+ *  tokens per chapter (see planChapterSplit), not by one character constant. */
 const continuityChars = translateContinuityChars();
 /** (#6) How many times a chapter may be retranslated against an IDENTICAL set
  *  of verification findings before the stall guard skips it. Default 2 = the
@@ -368,6 +375,44 @@ async function processRetranslateVolume(ctx) {
   const outputReserve = endpoint.maxTokens || harness.envMaxTokens();
   const promptDrops = [];
 
+  // Chapter parts are planned in tokens, the same rule the translate task uses
+  // (see planChapterSplit) — the two tasks must not disagree about how a chapter
+  // is cut up, or a retranslate would produce a differently-shaped chapter than
+  // the one verify graded.
+  const chunkCap = translateChunkCap();
+  const measuredRatio = await measureOutputRatio(ctx.previousVolumeDirs || [], {
+    sourceLanguage,
+    targetLanguage,
+  });
+  const outputRatio = measuredRatio.ratio ?? outputRatioFor(sourceLanguage, targetLanguage);
+  const thinkingFactor = thinkingOutputFactor(thinkingMode);
+  /**
+   * Split one chapter by the token plan (character rule only as the fallback).
+   * @param {string} text
+   * @param {{continuityText?: string, terminologyLines?: string[], findingsText?: string}} [carry]
+   * @returns {{parts: string[], plan: Object}}
+   */
+  const splitChapterFor = (text, { continuityText = "", terminologyLines = [], findingsText = "" } = {}) => {
+    const plan = planChapterSplit({
+      sourceText: text,
+      referenceTokens:
+        estimateTokens(terminologyLines.join("\n")) +
+        estimateTokens(refs.background || "") +
+        estimateTokens(refs.styleRules || "") +
+        estimateTokens(refs.voiceNotes || "") +
+        estimateTokens(continuityText),
+      findingsTokens: estimateTokens(findingsText),
+      instructionsTokens: estimateTokens(template) + 400,
+      roleWindow,
+      outputReserve,
+      outputRatio,
+      thinkingFactor,
+      hardCapChars: chunkCap,
+    });
+    const limit = plan.maxChars > 0 ? plan.maxChars : translateChunkChars();
+    return { parts: splitChapter(text, limit), plan };
+  };
+
   // Chapters are INDEPENDENT here (each is retranslated from its own source
   // + findings — no cross-chapter chaining), so they can run in parallel
   // when STAGE_CONCURRENCY > 1. The continuity cues are snapshotted first so
@@ -485,10 +530,19 @@ async function processRetranslateVolume(ctx) {
     // split (TRANSLATE_CHUNK_CHARS), each part continues the previous one
     // (TRANSLATE_CONTINUITY_CHARS), and the findings — chapter-wide
     // correction tasks — are injected into every part.
-    const parts = splitChapter(sourceText, chunkChars);
     // (#7) Seed the first part's continuity from the previous chapter's
     // CURRENT draft ending (the translate stage chains chapters this way).
     const cue = continuityTails.get(seg.id) || { text: "", source: "" };
+    const { parts, plan } = splitChapterFor(sourceText, {
+      continuityText: cue.text,
+      terminologyLines: chapterTerms.lines,
+      findingsText: findingsTask,
+    });
+    if (parts.length > 1) {
+      console.log(
+        `  Volume ${volume.installmentNumber} ${seg.id}: split into ${parts.length} part(s) — ${plan.reason}.`
+      );
+    }
     if (dryRun) {
       // Dump the first part's prompt for every applicable chapter (one file
       // per chapter, no AI calls in dry-run) — the later parts differ only
@@ -810,6 +864,10 @@ async function retranslate() {
     const volumeDir = path.join(seriesDir, folderName);
     try {
       const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
+      // The retranslator runs on the TRANSLATE_* role, which is a different
+      // model from the verifier that just graded it — re-point the estimate
+      // before the prompt budget is computed (cached per endpoint).
+      await calibrateStageTokens({ endpoint, bundle, label: "retranslate stage", dryRun });
       // The handoff's chapter list and the extracted one must describe the same
       // book (see checkChapterListConsistency). A disagreement is reported, not
       // fatal: the extracted list is the one this stage uses.
@@ -835,6 +893,10 @@ async function retranslate() {
         // The first chapter of a volume continues from the previous volume's
         // published ending (same cue the translate stage uses).
         incomingTail: await previousVolumeTail(seriesDir, manifest, folderName, continuityChars),
+        // The volumes before this one — where the measured output ratio comes from.
+        previousVolumeDirs: manifest.volumes
+          .slice(0, manifest.volumes.findIndex((v) => v.folder === folderName))
+          .map((v) => path.join(seriesDir, v.folder)),
       });
       totalRetranslated += result.retranslated;
       totalSkipped += result.skipped;

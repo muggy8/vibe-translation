@@ -36,10 +36,10 @@ const { filterVolumesByInstallment } = require("./utils/manifest");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, hasRealOutput } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
-  shouldProcessChunked,
+  decideProcessingMode,
   sourceMaterialLine,
   chapterSegmentNote,
   chapterContextBlock,
@@ -348,15 +348,7 @@ async function characterVoice() {
     // are normalized once (cached) into per-chapter + whole Markdown files.
     const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
     const sourceFile = bundle.wholePath;
-    const processChunked = shouldProcessChunked(bundle, { forceChunked: chunkedArg });
-    console.log(
-      `Volume ${volume.installmentNumber}: source "${path.basename(bundle.originalPath)}" → ${bundle.format} ` +
-        `(${bundle.wholeChars} chars, ${bundle.segments.length} segment(s)) — processing ` +
-        (processChunked
-          ? "chapter by chapter (fallback: whole installment too large for one pass)"
-          : "as the whole installment (default)") +
-        "."
-    );
+    const volumeLabel = `Volume ${volume.installmentNumber}`;
     const voiceOutputFile = path.join(volumeDir, "character-voice.md");
     const povOutputFile = path.join(volumeDir, "pov-map.md");
     const validationOutputFile = path.join(volumeDir, "character-voice-validation.md");
@@ -393,6 +385,17 @@ async function characterVoice() {
         }
       }
     }
+    // Whole-installment vs chapter-by-chapter, decided against THIS stage's
+    // model window and the reference it will actually inject (the previous
+    // volume's cumulative reference — which is why this is decided per volume:
+    // it grows every volume). See planProcessingMode in utils/source.js.
+    const mode = await decideProcessingMode({
+      bundle,
+      label: volumeLabel,
+      previousArtifactFiles: previousVoiceRefFile ? [previousVoiceRefFile] : [],
+      forceChunked: chunkedArg,
+      dryRun,
+    });
     const extractSystemPrompt = await fs.readFile(extractSystemPromptFile, "utf8");
     const extractTemplate = await fs.readFile(extractUserPromptTemplateFile, "utf8");
     const authorSystemPrompt = await fs.readFile(authorSystemPromptFile, "utf8");
@@ -407,7 +410,7 @@ async function characterVoice() {
     const validatorPrompt = transformUserPrompt(validatorTemplate, values);
     const feedbackPrompt = transformUserPrompt(feedbackTemplate, values);
     const acceptancePrompt = transformUserPrompt(acceptanceTemplate, values);
-    const ctx = { values, folderName, volumeDir, sourceFile, bundle, chunked: processChunked, voiceOutputFile, povOutputFile, validationOutputFile, isFirst, previousFolderName, previousVoiceRefFile, extractPrompt, validatorPrompt, feedbackPrompt, acceptancePrompt, extractTemplate, authorTemplate, extractSystemPrompt, authorSystemPrompt, validatorSystemPrompt, acceptanceSystemPrompt, feedbackSystemPrompt, authorUserPrompt: authorTemplate, validatorUserPrompt: validatorTemplate, feedbackUserPrompt: feedbackTemplate };
+    const ctx = { values, folderName, volumeDir, sourceFile, bundle, chunked: mode.chunked, voiceOutputFile, povOutputFile, validationOutputFile, isFirst, previousFolderName, previousVoiceRefFile, extractPrompt, validatorPrompt, feedbackPrompt, acceptancePrompt, extractTemplate, authorTemplate, extractSystemPrompt, authorSystemPrompt, validatorSystemPrompt, acceptanceSystemPrompt, feedbackSystemPrompt, authorUserPrompt: authorTemplate, validatorUserPrompt: validatorTemplate, feedbackUserPrompt: feedbackTemplate };
     if (dryRun) {
       const illustrative = JSON.stringify([{ type: "voice", character: "ex", quirkType: "sentenceEnding", description: "ex", examples: ["ex"], formalityLevel: "plain", notes: "ex" }]);
       const sections = [
@@ -452,7 +455,22 @@ async function characterVoice() {
     }
     if (skip) { console.log(`Volume ${values.INSTALLMENT_NUMBER}: voice reference and POV map already exist and passed. Skipping.`); continue; }
     regeneratedAny = true;
-    await runVolume(ctx);
+    await runVolumeWithModeFallback({
+      label: volumeLabel,
+      ctx,
+      volumeDir,
+      run: () => runVolume(ctx),
+      // Everything a whole-installment pass writes, removed before the
+      // chapter-by-chapter retry so it cannot inherit a half-written attempt.
+      attemptFiles: [
+        "character-voice.md",
+        "pov-map.md",
+        "character-voice-new.json",
+        "character-voice-validation.md",
+        "character-voice-validation-rolling-state.json",
+      ],
+      attemptGlob: /^character-voice-.*\.md$/,
+    });
     } catch (err) {
       // Volume-level error isolation (ON_VOLUME_ERROR): "skip" records the
       // failure and continues with the next volume (an un-monitored run must

@@ -50,6 +50,11 @@ const {
   verdictCoversCurrentDraft,
   unverifiedMarker,
   worthRetranslating,
+  planChapterSplit,
+  translateChunkCap,
+  outputRatioFor,
+  thinkingOutputFactor,
+  measureOutputRatio,
 } = require("../utils/translate");
 
 // ─── sha256 ───────────────────────────────────────────────────────────────────
@@ -343,17 +348,35 @@ assert.strictEqual(sha256("a"), sha256("a"));
 // ─── estimateTokens / fitPromptBudget (honest trimming) ──────────────────────
 
 {
-  // Latin text: ~0.35 tokens per char. CJK: ~1 token per char. The estimate is a
-  // deliberate over-estimate, so it must never come out LOWER than the char count
-  // for CJK (a kanji is often more than one token).
-  assert.strictEqual(estimateTokens(""), 0);
-  assert.strictEqual(estimateTokens("abcdefghij"), 4, "10 latin chars × 0.35 → 4");
-  assert.strictEqual(estimateTokens("日本語です"), 5, "CJK ≈ 1 token per char");
-  assert.ok(estimateTokens("これは日本語です") >= 8, "CJK is never under-estimated");
+  // Calibrated coefficients (measured against the live server, see utils/tokens.js):
+  // ~0.69 tokens per CJK character, ~0.25 per everything else, times an explicit
+  // 1.15 safety margin. The estimate must still be an OVER-estimate: the margin is
+  // what guarantees it now that the coefficients no longer over-count by 45%.
+  assert.strictEqual(estimateTokens(""), 0, "empty text costs nothing");
+  assert.strictEqual(estimateTokens("abcdefghij"), 3, "10 latin chars × 0.25 × 1.15 → 3");
+  assert.strictEqual(estimateTokens("日本語です"), 4, "5 CJK chars × 0.69 × 1.15 → 4");
+  assert.ok(
+    estimateTokens("日本語です") >= Math.ceil(5 * 0.6),
+    "CJK is never under-estimated (measured floor: 0.588 tok/char)"
+  );
   assert.ok(
     estimateTokens("日本語です " + "hello world hello world") >
       estimateTokens("hello world hello world"),
     "adding CJK raises the estimate"
+  );
+  // The guarantee that actually matters is not "above the character count" (the
+  // measurement says a kana costs LESS than a token, so that was never true — the
+  // old coefficients were simply too high to notice). It is "above what the server
+  // actually counted": the series measured 0.588–0.622 tokens per character, and
+  // the estimate must stay clear of the top of that band.
+  const cjkHeavy = "これは日本語です";
+  assert.ok(
+    estimateTokens(cjkHeavy) >= Math.ceil(cjkHeavy.length * 0.622),
+    "the estimate stays above the highest tokens-per-character the series measured"
+  );
+  assert.ok(
+    estimateTokens("a".repeat(1000)) >= Math.ceil(1000 * 0.25),
+    "Latin text is not under-estimated either"
   );
 
   // Everything fits: nothing is dropped, nothing is rewritten.
@@ -1464,6 +1487,196 @@ const stateFile = path.join(tmp, "translation-state.json");
     const empty2 = path.join(stubDir, "empty2.md");
     fs.writeFileSync(empty2, "  \n", "utf8");
     await assert.rejects(() => assertRealOutput(empty2, "the wiki agent"), /never wrote real output/);
+  }
+
+  // ─── Chapter parts planned in tokens (planChapterSplit) ────────────────────
+  {
+    // 32,000 CJK characters ≈ 25,392 tokens with the calibrated coefficients —
+    // the shape of the real series' largest chapter (49,840 chars).
+    const chapter = "これは日本語です".repeat(4000);
+    const sourceTokens = estimateTokens(chapter);
+    assert.ok(sourceTokens > 20000 && sourceTokens < 30000, "the fixture chapter is a plausible size");
+
+    // The case that matters: the old 24,000-character rule split 55 of the real
+    // series' 133 chapters. Against a 262,144-token window with a 65,536-token
+    // output cap, this chapter fits in ONE call with room to spare.
+    const whole = planChapterSplit({
+      sourceText: chapter,
+      referenceTokens: 20000,
+      instructionsTokens: 1500,
+      roleWindow: 262144,
+      outputReserve: 65536,
+      outputRatio: 1.1,
+      hardCapChars: null,
+    });
+    assert.strictEqual(splitChapter(chapter, whole.maxChars).length, 1, "a chapter that fits is not split");
+    assert.ok(whole.expectedOutputTokens <= 65536, "the answer the part needs fits the output cap");
+    assert.strictEqual(whole.binding, "feasibility", "here it is the ANSWER that bounds the part, not the window");
+
+    // ADMISSION binds when the window is what runs out (big references, small cap).
+    const tightWindow = planChapterSplit({
+      sourceText: chapter,
+      referenceTokens: 62000,
+      roleWindow: 131072,
+      outputReserve: 20000,
+      outputRatio: 1.1,
+      hardCapChars: null,
+    });
+    assert.strictEqual(tightWindow.binding, "admission", "a small window bounds the part");
+    assert.ok(
+      tightWindow.maxTokens + 62000 + 20000 <= 131072,
+      "the request the plan allows is one the server would admit"
+    );
+
+    // An explicit TRANSLATE_CHUNK_CHARS is an operator's decision, not a suggestion
+    // the arithmetic is allowed to overrule.
+    const capped = planChapterSplit({
+      sourceText: chapter,
+      roleWindow: 262144,
+      outputReserve: 65536,
+      outputRatio: 1.1,
+      hardCapChars: 5000,
+    });
+    assert.strictEqual(capped.binding, "override");
+    assert.strictEqual(capped.maxChars, 5000);
+    assert.ok(splitChapter(chapter, capped.maxChars).length > 1, "the cap actually splits the chapter");
+
+    // No window / no cap: say so, rather than inventing a limit.
+    const blind = planChapterSplit({ sourceText: chapter, roleWindow: 0, outputReserve: 0 });
+    assert.strictEqual(blind.maxTokens, 0, "no token plan without a window");
+    assert.match(blind.reason, /no context window/);
+
+    // The character limit follows the TEXT's own script mix, not a language name:
+    // the same token allowance is far more Latin characters than CJK ones.
+    const latin = "a".repeat(40000);
+    const latinPlan = planChapterSplit({
+      sourceText: latin,
+      roleWindow: 262144,
+      outputReserve: 65536,
+      outputRatio: 1.1,
+      hardCapChars: null,
+    });
+    assert.ok(
+      latinPlan.maxChars > whole.maxChars * 2,
+      "the same token budget allows more characters of a cheaper script"
+    );
+
+    // TRANSLATE_CHUNK_CHARS is only a ceiling when it was actually set.
+    delete process.env.TRANSLATE_CHUNK_CHARS;
+    assert.strictEqual(translateChunkCap(), null, "unset — the token plan decides");
+    process.env.TRANSLATE_CHUNK_CHARS = "15000";
+    assert.strictEqual(translateChunkCap(), 15000);
+    process.env.TRANSLATE_CHUNK_CHARS = "500";
+    assert.strictEqual(translateChunkCap(), 2000, "the floor still applies");
+    process.env.TRANSLATE_CHUNK_CHARS = "";
+    assert.strictEqual(translateChunkCap(), null, "an empty value is unset, not zero");
+    delete process.env.TRANSLATE_CHUNK_CHARS;
+
+    // Thinking is billed as output, so it has to be part of the plan.
+    assert.strictEqual(thinkingOutputFactor("no_think"), 1, "the translate role's default");
+    assert.strictEqual(thinkingOutputFactor("low"), 2);
+    assert.strictEqual(thinkingOutputFactor("high"), 3);
+    const thinkingPlan = planChapterSplit({
+      sourceText: chapter,
+      roleWindow: 262144,
+      outputReserve: 65536,
+      outputRatio: 1.1,
+      thinkingFactor: 3,
+      hardCapChars: null,
+    });
+    assert.ok(
+      thinkingPlan.maxTokens < whole.maxTokens,
+      "a stage that thinks while translating gets smaller parts — the reasoning is inside the same cap"
+    );
+  }
+
+  // ─── The expected output ratio (table, override, and measurement) ──────────
+  {
+    assert.strictEqual(outputRatioFor("Japanese", "English"), 1.1, "the measured JA→EN pair, plus margin");
+    assert.strictEqual(outputRatioFor("Korean", "English"), 1.2);
+    assert.strictEqual(outputRatioFor("Japanese", "Chinese"), 1.0, "Han billed per character on both sides");
+    assert.strictEqual(outputRatioFor("French", "English"), 1.25, "an unmeasured pair gets the wide default");
+
+    process.env.TRANSLATION_OUTPUT_RATIO = "1.5";
+    assert.strictEqual(outputRatioFor("Japanese", "English"), 1.5, "a bare number applies to every pair");
+    process.env.TRANSLATION_OUTPUT_RATIO = "ja->en=0.9, ko->en=1.4";
+    assert.strictEqual(outputRatioFor("Japanese", "English"), 0.9, "a per-pair list applies per pair");
+    assert.strictEqual(outputRatioFor("Korean", "English"), 1.4);
+    assert.strictEqual(outputRatioFor("Chinese", "English"), 1.15, "unlisted pairs keep the table");
+    process.env.TRANSLATION_OUTPUT_RATIO = "nonsense";
+    assert.strictEqual(outputRatioFor("Japanese", "English"), 1.1, "a malformed override is ignored, not obeyed");
+    delete process.env.TRANSLATION_OUTPUT_RATIO;
+  }
+
+  // ─── measureOutputRatio: the pipeline's own past runs are the estimate ─────
+  {
+    const dir = path.join(tmp, "ratio-vol");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "chapters.json"),
+      JSON.stringify([
+        { id: "ch1", file: "src-ch1.md" },
+        { id: "ch2", file: "src-ch2.md" },
+      ]),
+      "utf8"
+    );
+    const src1 = "これは日本語です".repeat(100); // 800 CJK chars
+    fs.writeFileSync(path.join(dir, "src-ch1.md"), src1, "utf8");
+    fs.writeFileSync(path.join(dir, "translation-ch1.md"), "x".repeat(3200), "utf8");
+    // A chapter with a source but no draft is not evidence.
+    fs.writeFileSync(path.join(dir, "src-ch2.md"), "日本語", "utf8");
+
+    const measured = await measureOutputRatio([dir], { sourceLanguage: "Japanese", targetLanguage: "English" });
+    assert.strictEqual(measured.chapters, 1, "only chapters that actually produced a draft are measured");
+    const expectedRatio = estimateTokens(fs.readFileSync(path.join(dir, "translation-ch1.md"), "utf8")) / estimateTokens(src1);
+    assert.ok(Math.abs(measured.ratio - expectedRatio) < 1e-9, "the ratio is what the pipeline really produced");
+
+    // A measurement can make the plan LOOSER, so it is clamped: one lucky volume
+    // is not a property of the series.
+    const wildDir = path.join(tmp, "ratio-wild");
+    fs.mkdirSync(wildDir, { recursive: true });
+    fs.writeFileSync(path.join(wildDir, "chapters.json"), JSON.stringify([{ id: "ch1", file: "src-ch1.md" }]), "utf8");
+    fs.writeFileSync(path.join(wildDir, "src-ch1.md"), src1, "utf8");
+    fs.writeFileSync(path.join(wildDir, "translation-ch1.md"), "x".repeat(40000), "utf8");
+    const wild = await measureOutputRatio([wildDir], { sourceLanguage: "Japanese", targetLanguage: "English" });
+    assert.ok(wild.ratio <= 1.1 * 1.5 + 1e-9, "an implausible measured ratio is clamped, not trusted");
+
+    // No history (the first volume): fail-open to the table — the same assumption
+    // the old code made unconditionally.
+    const none = await measureOutputRatio([], { sourceLanguage: "Japanese", targetLanguage: "English" });
+    assert.strictEqual(none.ratio, null, "no earlier chapters, no measurement");
+    assert.strictEqual(none.chapters, 0);
+  }
+
+  // ─── fitPromptBudget bills the chat wrapper ONCE (both budgets agree) ──────
+  {
+    const block = "a".repeat(3304); // exactly 950 tokens with the calibrated coefficients
+    assert.strictEqual(estimateTokens(block), 950);
+    const free = fitPromptBudget({
+      blocks: [{ name: "glossary", text: block, priority: 5 }],
+      fixedTokens: 0,
+      roleWindow: 1000,
+      outputReserve: 0,
+      templateOverhead: 0,
+    });
+    assert.deepStrictEqual(free.dropped, [], "with no wrapper charged, 950 tokens fit a 1,000-token window");
+    const charged = fitPromptBudget({
+      blocks: [{ name: "glossary", text: block, priority: 5 }],
+      fixedTokens: 0,
+      roleWindow: 1000,
+      outputReserve: 0,
+      templateOverhead: 100,
+    });
+    assert.strictEqual(charged.dropped.length, 1, "the wrapper is part of the request, so it is part of the budget");
+    assert.strictEqual(charged.templateOverhead, 100, "and the charge is reported, not hidden in the arithmetic");
+    const byDefault = fitPromptBudget({
+      blocks: [],
+      fixedTokens: 10,
+      roleWindow: 1000,
+      outputReserve: 0,
+    });
+    assert.strictEqual(byDefault.templateOverhead, 52, "the default is the calibrated wrapper, the same one tokenBudgetFor bills");
+    assert.strictEqual(byDefault.estimatedTokens, 62, "the estimate includes it exactly once");
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

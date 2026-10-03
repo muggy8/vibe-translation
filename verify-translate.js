@@ -91,6 +91,7 @@ const {
   logRunEstimate,
   countStageChapters,
   checkChapterListConsistency,
+  calibrateStageTokens,
   previousVolumeTail,
   tailOf,
   resolvePublishedChapterTexts,
@@ -431,7 +432,7 @@ async function runVolumeConsistencyPass({
  * @returns {Promise<Array<{id: string, verifier: number, auditor: number|null, final: number, prevPass: boolean, newPass: boolean}>>}
  *   The tiebroken chapters (empty when there is nothing to tiebreak).
  */
-async function runAuditTiebreak({ volume, volumeDir, bundle, refs, systemPrompt, template, sidecar, sidecarPath, auditEndpoint }) {
+async function runAuditTiebreak({ volume, volumeDir, bundle, refs, systemPrompt, template, sidecar, sidecarPath, auditEndpoint, dryRun = false }) {
   const eligible = [];
   for (const seg of bundle.segments) {
     const e = sidecar.chapters[seg.id] || {};
@@ -443,6 +444,10 @@ async function runAuditTiebreak({ volume, volumeDir, bundle, refs, systemPrompt,
   if (eligible.length === 0) return [];
 
   await harness.assertModelServing({ ...auditEndpoint, label: "verify-audit tiebreak" });
+  // The auditor is a DIFFERENT model from the verifier, and the cross-chapter
+  // audit windowing in this same batch budgets with these estimates — so the
+  // coefficients are re-pointed at the audit model for the whole batch.
+  await calibrateStageTokens({ endpoint: auditEndpoint, bundle, label: "verify-audit batch", dryRun });
   console.log(
     `[verify-audit] ${eligible.length} borderline chapter(s) (score within ±${tiebreakBand} of ${passingScore}) — ` +
       `tiebreaking with the audit endpoint (${auditEndpoint.model}).`
@@ -1235,6 +1240,9 @@ async function verifyTranslate() {
     const volumeDir = path.join(seriesDir, folderName);
     try {
       const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
+      // The verifier's own model is what the prompt budget is measured against
+      // (once per run — the lookup is cached per endpoint).
+      await calibrateStageTokens({ endpoint, bundle, label: "verify-translate stage", dryRun });
       // The handoff's chapter list and the extracted one must describe the same
       // book (see checkChapterListConsistency). A disagreement is reported, not
       // fatal: the extracted list is the one this stage uses.
@@ -1328,6 +1336,7 @@ async function verifyTranslate() {
             sidecar,
             sidecarPath,
             auditEndpoint,
+            dryRun,
           });
         }
         // ── PHASE 3b — the cross-chapter audit, in the SAME audit batch ──────

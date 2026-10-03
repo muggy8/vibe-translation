@@ -62,13 +62,13 @@ const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, writeProvenanceSidecar } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const { writeVolumeHandoff } = require("./utils/handoff");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir, filterVolumesByInstallment } = require("./utils/manifest");
 const {
   resolveSourceBundle,
-  shouldProcessChunked,
+  decideProcessingMode,
   sourceMaterialLine,
   chapterSegmentNote,
   chapterContextBlock,
@@ -555,15 +555,7 @@ async function jumpInWiki() {
     // are normalized once (cached) into per-chapter + whole Markdown files.
     const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
     const sourceFile = bundle.wholePath;
-    const processChunked = shouldProcessChunked(bundle, { forceChunked: chunkedArg });
-    console.log(
-      `Volume ${volume.installmentNumber}: source "${path.basename(bundle.originalPath)}" → ${bundle.format} ` +
-        `(${bundle.wholeChars} chars, ${bundle.segments.length} segment(s)) — processing ` +
-        (processChunked
-          ? "chapter by chapter (fallback: whole installment too large for one pass)"
-          : "as the whole installment (default)") +
-        "."
-    );
+    const volumeLabel = `Volume ${volume.installmentNumber}`;
     const wikiOutputFile = path.join(volumeDir, "wiki.md");
     const sharedWikiOutputFile = path.join(volumeDir, "shared-wiki.md");
 
@@ -674,6 +666,18 @@ async function jumpInWiki() {
       }
     }
 
+    // Whole-installment vs chapter-by-chapter, decided against THIS stage's
+    // model window and the reference it will actually inject (the previous
+    // volume's wiki + the living shared wiki — decided per volume because they
+    // grow every volume). See planProcessingMode in utils/source.js.
+    const mode = await decideProcessingMode({
+      bundle,
+      label: volumeLabel,
+      previousArtifactFiles: [previousWikiOutputFile, previousSharedWikiOutputFile].filter(Boolean),
+      forceChunked: chunkedArg,
+      dryRun,
+    });
+
     // generating the initial wiki is expensive, so we gotta check if it's already
     // been generated and if so, we can skip the initial generation step.
     // "The wiki already exists" must mean "real wiki text exists". A crashed
@@ -693,7 +697,7 @@ async function jumpInWiki() {
       volumeDir,
       sourceFile,
       bundle,
-      chunked: processChunked,
+      chunked: mode.chunked,
       wikiOutputFile,
       sharedWikiOutputFile,
       validationOutputFile,
@@ -807,7 +811,21 @@ async function jumpInWiki() {
       continue;
     }
 
-    await runVolumeAgent(ctx);
+    await runVolumeWithModeFallback({
+      label: volumeLabel,
+      ctx,
+      volumeDir,
+      run: () => runVolumeAgent(ctx),
+      attemptFiles: [
+        "wiki.md",
+        "shared-wiki.md",
+        `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}.md`,
+        `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}-rolling-state.json`,
+      ],
+      // The chunked path's per-chapter section files, plus the stale classic
+      // names the workflow already cleans up.
+      attemptGlob: /^wiki-.+\.md$/,
+    });
     // This volume's wiki was (re)written, so every later volume's wiki — which
     // was built on it — is now stale and must be rebuilt too.
     regeneratedAny = true;

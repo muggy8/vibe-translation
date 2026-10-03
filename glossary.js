@@ -60,10 +60,10 @@ const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WI
 const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, hasRealOutput } = require("./utils/fs");
 const { loadGlossaryDisputes } = require("./utils/disputes");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
-  shouldProcessChunked,
+  decideProcessingMode,
   sourceMaterialLine,
   sourceSegmentListLine,
   chapterSegmentNote,
@@ -777,15 +777,7 @@ async function glossary() {
     // volume folder. The pipelines then work on plain text only.
     const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
     const sourceFile = bundle.wholePath;
-    const processChunked = shouldProcessChunked(bundle, { forceChunked: chunkedArg });
-    console.log(
-      `Volume ${volume.installmentNumber}: source "${path.basename(bundle.originalPath)}" → ${bundle.format} ` +
-        `(${bundle.wholeChars} chars, ${bundle.segments.length} segment(s)) — processing ` +
-        (processChunked
-          ? "chapter by chapter (fallback: whole installment too large for one pass)"
-          : "as the whole installment (default)") +
-        "."
-    );
+    const volumeLabel = `Volume ${volume.installmentNumber}`;
     const glossaryOutputFile = path.join(volumeDir, "glossary.md");
     const validationOutputFile = path.join(volumeDir, "glossary-validation.md");
     const researchNotesFile = path.join(volumeDir, "glossary-research.md");
@@ -871,6 +863,18 @@ async function glossary() {
       );
     }
 
+    // Whole-installment vs chapter-by-chapter, decided against THIS stage's
+    // model window and the reference it will actually inject (the previous
+    // volume's cumulative glossary — decided per volume because it grows every
+    // volume). See planProcessingMode in utils/source.js.
+    const mode = await decideProcessingMode({
+      bundle,
+      label: volumeLabel,
+      previousArtifactFiles: previousGlossaryFile ? [previousGlossaryFile] : [],
+      forceChunked: chunkedArg,
+      dryRun,
+    });
+
     // Transform the prompts that use only the standard placeholders.
     const termsPrompt = transformUserPrompt(termsTemplate, values) + unusedEntriesNote;
     const validatorPrompt = transformUserPrompt(validatorTemplate, values);
@@ -883,7 +887,7 @@ async function glossary() {
       volumeDir,
       sourceFile,
       bundle,
-      chunked: processChunked,
+      chunked: mode.chunked,
       glossaryOutputFile,
       validationOutputFile,
       researchNotesFile,
@@ -1010,11 +1014,27 @@ async function glossary() {
     // A volume is being (re)generated; later volumes depend on it.
     regeneratedAny = true;
 
-    await runVolumeAgent(ctx);
-
-    // Deterministic term-coverage audit of the finished glossary (no AI) —
-    // also the per-volume "terms used here" index for the translation stage.
-    await writeGlossaryCoverageReport(ctx);
+    await runVolumeWithModeFallback({
+      label: volumeLabel,
+      ctx,
+      volumeDir,
+      run: async () => {
+        await runVolumeAgent(ctx);
+        // Deterministic term-coverage audit of the finished glossary (no AI) —
+        // also the per-volume "terms used here" index for the translation stage.
+        await writeGlossaryCoverageReport(ctx);
+      },
+      attemptFiles: [
+        "glossary.md",
+        "glossary-new-terms.json",
+        "glossary-research.md",
+        "glossary-validation.md",
+        "glossary-validation-rolling-state.json",
+        "glossary-coverage.md",
+        "glossary-coverage.json",
+      ],
+      attemptGlob: /^glossary-.*\.md$/,
+    });
     } catch (err) {
       // Volume-level error isolation (ON_VOLUME_ERROR): "skip" records the
       // failure and continues with the next volume (an un-monitored run must

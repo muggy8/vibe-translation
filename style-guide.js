@@ -45,10 +45,10 @@ const { filterVolumesByInstallment } = require("./utils/manifest");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
 const { fileExists, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, hasRealOutput } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
-  shouldProcessChunked,
+  decideProcessingMode,
   sourceMaterialLine,
   chapterSegmentNote,
   chapterContextBlock,
@@ -358,15 +358,7 @@ async function styleGuide() {
     // are normalized once (cached) into per-chapter + whole Markdown files.
     const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
     const sourceFile = bundle.wholePath;
-    const processChunked = shouldProcessChunked(bundle, { forceChunked: chunkedArg });
-    console.log(
-      `Volume ${volume.installmentNumber}: source "${path.basename(bundle.originalPath)}" → ${bundle.format} ` +
-        `(${bundle.wholeChars} chars, ${bundle.segments.length} segment(s)) — processing ` +
-        (processChunked
-          ? "chapter by chapter (fallback: whole installment too large for one pass)"
-          : "as the whole installment (default)") +
-        "."
-    );
+    const volumeLabel = `Volume ${volume.installmentNumber}`;
     const styleOutputFile = path.join(volumeDir, "style-guide.md");
     const validationOutputFile = path.join(volumeDir, "style-guide-validation.md");
     // The previous volume's guide (the in-progress guide). Absent for the
@@ -402,6 +394,17 @@ async function styleGuide() {
         }
       }
     }
+    // Whole-installment vs chapter-by-chapter, decided against THIS stage's
+    // model window and the reference it will actually inject (the previous
+    // volume's cumulative guide — decided per volume because it grows every
+    // volume). See planProcessingMode in utils/source.js.
+    const mode = await decideProcessingMode({
+      bundle,
+      label: volumeLabel,
+      previousArtifactFiles: previousStyleGuideFile ? [previousStyleGuideFile] : [],
+      forceChunked: chunkedArg,
+      dryRun,
+    });
     const extractSystemPrompt = await fs.readFile(extractSystemPromptFile, "utf8");
     const extractTemplate = await fs.readFile(extractUserPromptTemplateFile, "utf8");
     const authorSystemPrompt = await fs.readFile(authorSystemPromptFile, "utf8");
@@ -416,7 +419,7 @@ async function styleGuide() {
     const validatorPrompt = transformUserPrompt(validatorTemplate, values);
     const feedbackPrompt = transformUserPrompt(feedbackTemplate, values);
     const acceptancePrompt = transformUserPrompt(acceptanceTemplate, values);
-    const ctx = { values, folderName, volumeDir, sourceFile, bundle, chunked: processChunked, styleOutputFile, validationOutputFile, isFirst, previousFolderName, previousStyleGuideFile, extractPrompt, validatorPrompt, feedbackPrompt, acceptancePrompt, extractTemplate, authorTemplate, extractSystemPrompt, authorSystemPrompt, validatorSystemPrompt, acceptanceSystemPrompt, feedbackSystemPrompt, authorUserPrompt: authorTemplate, validatorUserPrompt: validatorTemplate, feedbackUserPrompt: feedbackTemplate };
+    const ctx = { values, folderName, volumeDir, sourceFile, bundle, chunked: mode.chunked, styleOutputFile, validationOutputFile, isFirst, previousFolderName, previousStyleGuideFile, extractPrompt, validatorPrompt, feedbackPrompt, acceptancePrompt, extractTemplate, authorTemplate, extractSystemPrompt, authorSystemPrompt, validatorSystemPrompt, acceptanceSystemPrompt, feedbackSystemPrompt, authorUserPrompt: authorTemplate, validatorUserPrompt: validatorTemplate, feedbackUserPrompt: feedbackTemplate };
 
     if (dryRun) {
       const illustrative = JSON.stringify([{ category: "honorific", pattern: "ex", description: "ex", examples: ["ex"], frequency: "high", notes: "ex" }]);
@@ -462,7 +465,19 @@ async function styleGuide() {
     }
     if (skip) { console.log(`Volume ${values.INSTALLMENT_NUMBER}: style guide already exists and passed. Skipping.`); continue; }
     regeneratedAny = true;
-    await runVolume(ctx);
+    await runVolumeWithModeFallback({
+      label: volumeLabel,
+      ctx,
+      volumeDir,
+      run: () => runVolume(ctx),
+      attemptFiles: [
+        "style-guide.md",
+        "style-guide-new.json",
+        "style-guide-validation.md",
+        "style-guide-validation-rolling-state.json",
+      ],
+      attemptGlob: /^style-guide-.*\.md$/,
+    });
     } catch (err) {
       // Volume-level error isolation (ON_VOLUME_ERROR): "skip" records the
       // failure and continues with the next volume (an un-monitored run must

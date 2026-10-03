@@ -79,6 +79,7 @@ const {
   logRunEstimate,
   countStageChapters,
   checkChapterListConsistency,
+  calibrateStageTokens,
   EMPTY_SOURCE_CHARS,
   loadVerificationSidecar,
   verdictCoversCurrentDraft,
@@ -90,6 +91,12 @@ const {
   MERGED_FILE,
   VERIFICATION_FILE,
   buildPolishGuardFindings,
+  planChapterSplit,
+  translateChunkCap,
+  outputRatioFor,
+  thinkingOutputFactor,
+  measureOutputRatio,
+  estimateTokens,
 } = require("./utils/translate");
 
 // ─── Paths & config ──────────────────────────────────────────────────────────
@@ -107,6 +114,11 @@ const translateTemplateFile = path.join(clientDir, "user-prompts", "translate.md
 
 /**
  * Chapter text longer than this (chars) is split and translated per part.
+ *
+ * Only the FALLBACK now: the size rule is planChapterSplit (tokens, against this
+ * role's window and output cap). This number stands in when the token rule has
+ * nothing to work with, and TRANSLATE_CHUNK_CHARS remains a hard ceiling when an
+ * operator sets it explicitly (see translateChunkCap).
  * @returns {number} TRANSLATE_CHUNK_CHARS (default 24000, minimum 2000).
  */
 function translateChunkChars() {
@@ -123,7 +135,6 @@ function translateContinuityChars() {
   return Number.isFinite(parsed) ? Math.max(0, parsed) : 400;
 }
 
-const chunkChars = translateChunkChars();
 const continuityChars = translateContinuityChars();
 
 /**
@@ -189,6 +200,59 @@ async function processTranslateVolume(ctx) {
   // never be invisible.
   const roleWindow = endpoint.contextWindow || harness.envContextWindow();
   const outputReserve = endpoint.maxTokens || harness.envMaxTokens();
+
+  // ─── How big a chapter part may be (tokens, not characters) ───────────────
+  // The old rule was one character constant for every chapter, every model and
+  // every language. Measured against the real series it split 55 of 133 chapters
+  // for no reason the numbers supported — and every split is a seam where the
+  // continuity tail has to rebuild the join and a name can drift between parts.
+  // planChapterSplit bounds a part by BOTH limits that actually exist: the
+  // request the server will admit, and the answer the output cap can hold.
+  const chunkCap = translateChunkCap();
+  // The answer-size ratio, measured from this series' own earlier volumes when
+  // it has any (their sources and drafts are both on disk), else the per-pair
+  // table. Fail-open: the first volume gets the same assumption the old code made.
+  const measuredRatio = await measureOutputRatio(ctx.previousVolumeDirs || [], {
+    sourceLanguage,
+    targetLanguage,
+  });
+  const outputRatio = measuredRatio.ratio ?? outputRatioFor(sourceLanguage, targetLanguage);
+  const thinkingFactor = thinkingOutputFactor(thinkingMode);
+  /**
+   * Split one chapter using the token plan, falling back to the character rule
+   * only when the token rule has nothing to work with.
+   * @param {string} text - The chapter source text.
+   * @param {{continuityText?: string, terminologyLines?: string[], findingsText?: string}} [carry] - The reference material this chapter's prompt will carry.
+   * @returns {{parts: string[], plan: Object}}
+   */
+  const splitChapterFor = (text, { continuityText = "", terminologyLines = [], findingsText = "" } = {}) => {
+    const plan = planChapterSplit({
+      sourceText: text,
+      referenceTokens:
+        estimateTokens(terminologyLines.join("\n")) +
+        estimateTokens(refs.background || "") +
+        estimateTokens(refs.styleRules || "") +
+        estimateTokens(refs.voiceNotes || "") +
+        estimateTokens(continuityText),
+      findingsTokens: estimateTokens(findingsText),
+      instructionsTokens: estimateTokens(template) + 400,
+      roleWindow,
+      outputReserve,
+      outputRatio,
+      thinkingFactor,
+      hardCapChars: chunkCap,
+    });
+    const limit = plan.maxChars > 0 ? plan.maxChars : translateChunkChars();
+    return { parts: splitChapter(text, limit), plan };
+  };
+  console.log(
+    `  Volume ${volume.installmentNumber}: chapter parts planned in tokens — ` +
+      `expect ${outputRatio.toFixed(2)}× output per source token ` +
+      `${measuredRatio.ratio ? `(measured from ${measuredRatio.chapters} already-translated chapter(s): ` +
+        `${measuredRatio.sourceTokens.toLocaleString()} source → ${measuredRatio.draftTokens.toLocaleString()} draft)` : "(from the per-pair table: no earlier volume to measure)"}` +
+      `, thinking factor ${thinkingFactor}` +
+      `${chunkCap ? `, capped at ${chunkCap} chars by TRANSLATE_CHUNK_CHARS` : " (TRANSLATE_CHUNK_CHARS unset — the token plan decides)"}.`
+  );
   /** Every chapter whose prompt had to be trimmed, recorded for the QA report. */
   const promptDrops = [];
   /**
@@ -310,11 +374,23 @@ async function processTranslateVolume(ctx) {
       continue;
     }
 
+    // The part plan is computed ONCE, before the dry-run branch, so a preview
+    // shows the same cut a live run would make (a dry run that silently split
+    // differently from the real one would be a preview of a different book).
+    const { parts, plan } = splitChapterFor(sourceText, {
+      continuityText: prevChapterTail.text,
+      terminologyLines: chapterTerms.lines,
+    });
+    if (parts.length > 1) {
+      console.log(
+        `  Volume ${volume.installmentNumber} ${seg.id}: split into ${parts.length} part(s) — ${plan.reason}.`
+      );
+    }
+
     if (dryRun) {
       // Dump the first part's prompt for every chapter a live run would
       // translate (up-to-date chapters were skipped above) — one file per
       // chapter, no AI calls in dry-run.
-      const parts = splitChapter(sourceText, chunkChars);
       const { tasks } = buildBudgetedTaskLines({
         terminologyLines: chapterTerms.lines,
         background: refs.background,
@@ -356,7 +432,6 @@ async function processTranslateVolume(ctx) {
     // so a re-run retries it. prevChapterTail keeps the last good chapter's
     // ending for the next chapter's continuity context.
     try {
-    const parts = splitChapter(sourceText, chunkChars);
     const partTexts = [];
     let continuity = prevChapterTail.text;
     for (let i = 0; i < parts.length; i++) {
@@ -815,7 +890,7 @@ async function translate() {
 
   console.log(
     `[translate] ${sorted.length} volume folder(s); endpoint ${describeEndpoint(endpoint)}; ` +
-      `thinking=${thinkingMode}; chunk=${chunkChars} chars; continuity=${continuityChars} chars.`
+      `thinking=${thinkingMode}; chunk=${translateChunkCap() ? `${translateChunkCap()} chars (TRANSLATE_CHUNK_CHARS)` : "planned in tokens per chapter"}; continuity=${continuityChars} chars.`
   );
   // What this stage is about to cost, printed before it starts (see
   // logRunEstimate): chapters, model calls, and — when a previous run exists —
@@ -842,6 +917,9 @@ async function translate() {
     const volumeDir = path.join(seriesDir, folderName);
     try {
       const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
+      // The prompt budget is measured against THIS role's model, so the estimate
+      // is calibrated here (once per run — the lookup is cached per endpoint).
+      await calibrateStageTokens({ endpoint, bundle, label: "translate stage", dryRun });
       // The handoff's chapter list and the extracted one must describe the same
       // book (see checkChapterListConsistency). A disagreement is reported, not
       // fatal: the extracted list is the one this stage uses.
@@ -870,6 +948,11 @@ async function translate() {
         // that starts mid-series does not translate the first chapter as if the
         // story began there).
         incomingTail: await previousVolumeTail(seriesDir, manifest, folderName, continuityChars),
+        // The volumes BEFORE this one, in reading order — the source of the
+        // measured output ratio (their sources and drafts are on disk).
+        previousVolumeDirs: manifest.volumes
+          .slice(0, manifest.volumes.findIndex((v) => v.folder === folderName))
+          .map((v) => path.join(seriesDir, v.folder)),
       });
       totalTranslated += result.translated;
       totalSkipped += result.skipped;
