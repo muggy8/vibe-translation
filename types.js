@@ -55,8 +55,11 @@
  * One readable segment of a volume's source, in reading order.
  * @property {string} id    — "whole" | "ch0" | "chN" | "chN.K" (interlude/epilogue K after chapter N).
  * @property {string} file  — File name inside the volume folder.
- * @property {string} title — The chapter title (or the file name for text sources).
+ * @property {string} title — The title the BOOK gave this section; a placeholder ("Untitled section N", the file name for text sources) when the book gave it none.
  * @property {number} chars — Character count of the segment file.
+ * @property {number} [bodyChars] — Characters of text the section converted to (undefined when the extraction did not measure it).
+ * @property {boolean} [empty] — True when the section converted to (almost) nothing: a blank page, an image-only page, text in a structure the converter does not map.
+ * @property {boolean} [syntheticTitle] — True when `title` is the pipeline's placeholder, not a title the book prints.
  * @property {string} [path] — Absolute path (set by materializeBundle).
  */
 
@@ -69,6 +72,7 @@
  * @property {string} volumeDir         — The volume folder.
  * @property {string} wholePath         — The text file covering the whole volume.
  * @property {SourceSegment[]} segments — In reading order (authoritative — chN.K interlude files do not sort by name).
+ * @property {Array<{title: string, reason: string, pages: number, bodyChars: number, textChars: number}>|null} packaging — epub bundles only: the page groups that are the book's packaging rather than a chapter (cover, inserted illustrations, notices, contents page, colophon), and why each was skipped. null for plain-text sources.
  * @property {string|null} imagesDir    — The images/ folder (epub bundles with images).
  * @property {number} wholeChars        — Character count of the whole-volume text.
  * @property {boolean} cacheHit         — True when a cached epub bundle was reused.
@@ -108,6 +112,8 @@
  * @property {Array<{id: string, href: string, mediaType: string}>} spine — Items in reading order.
  * @property {Array<{index: number, zipPath: string, href: string, mediaType: string}>} textItems — Readable sections, 1-based.
  * @property {Map<string, string>} titles — zip path → section title (from the nav/NCX).
+ * @property {Array<{zipPath: string, title: string, order: number, inToc: boolean, types: string[]}>} navEntries — the same nav links IN DOCUMENT ORDER: the book's own declaration of where its sections begin. `inToc` is false for a landmarks-only pointer ("this is where the main text starts"); `types` collects any `epub:type` the book declared on that link.
+ * @property {{textBytes: number, otherBytes: number}} payload — Uncompressed archive bytes, split by the zip central directory: XHTML pages vs everything else (images, fonts, css). 0 when the archive does not report sizes.
  * @property {number} imageCount      — Images declared in the OPF manifest.
  * @property {number} entryCount      — Entries in the archive.
  */

@@ -1219,6 +1219,7 @@ assert.deepStrictEqual(buildChaptersJson(handoffBundle)[2], {
   chars: 78,
   bodyChars: 12,
   empty: true,
+  syntheticTitle: false,
 });
 // A segment the extraction did not measure keeps `bodyChars` unknown (undefined)
 // rather than inventing a number, and is never marked empty.
@@ -1229,7 +1230,16 @@ assert.deepStrictEqual(buildChaptersJson(handoffBundle)[0], {
   chars: 123,
   bodyChars: undefined,
   empty: false,
+  syntheticTitle: false,
 });
+// A title the pipeline invented (a file name, "Section 3") is marked as such:
+// the merge prints no heading for it, and the reports must not present it as a
+// title the book actually has.
+assert.strictEqual(
+  buildChaptersJson({ segments: [{ id: "ch2", file: "t-ch2.md", title: "Untitled section 3", chars: 900, syntheticTitle: true }] })[0]
+    .syntheticTitle,
+  true
+);
 assert.deepStrictEqual(buildChaptersJson({ segments: [] }), []);
 assert.strictEqual(renderNewEntry({ term: "ソラ", type: "character" }), "- ソラ (character)");
 assert.strictEqual(renderNewEntry({ type: "voice", character: "ソラ", quirkType: "sentenceEnding", description: "formal" }), "- ソラ — sentenceEnding: formal");

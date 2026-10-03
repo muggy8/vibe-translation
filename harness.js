@@ -853,7 +853,7 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
   }
   const fsp = require("fs").promises;
   const crypto = require("crypto");
-  const { openEpub, readEpubSection, scriptCounts, isEpubPath } = require("./utils/source");
+  const { openEpub, readEpubSection, scriptCounts, isEpubPath, classifyNavEntry } = require("./utils/source");
   const allowed = allowedDirs.map((dir) => path.resolve(dir));
   const inside = (p) => {
     const resolved = path.resolve(cwd, p);
@@ -892,7 +892,11 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
         "Open an .epub file and report what it is: its catalog card (title, " +
         "author, language tag, publisher, identifier, and the series name and " +
         "book number the reading app embedded), how many readable sections it " +
-        "has with their titles, its text size and its image count.",
+        "has with their titles, its text size and its image count. Note that " +
+        "readableSections counts PAGES: a reflowable book gives every page its " +
+        "own entry (cover, illustration plates, notices), so 'contentsList' is " +
+        "the book's own list of its sections — that is the chapter count, not " +
+        "readableSections.",
       inputSchema: z.object({
         filePath: z
           .string()
@@ -909,6 +913,14 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
             bytes: entryBytes(opened.zip.file(it.zipPath)),
           }));
           const textBytes = sections.reduce((n, s) => n + (s.bytes || 0), 0);
+          // A spine item is a PAGE, not a chapter (see utils/source.js
+          // groupSpineIntoChapters): this series' books have 35 pages and 10
+          // chapters. Reporting only the page count made the intake agent
+          // describe books as "35 sections", so the book's own contents list is
+          // reported beside it.
+          const contentsList = (opened.navEntries || [])
+            .filter((e) => e.inToc !== false && classifyNavEntry(e).chapter)
+            .map((e) => e.title);
           return JSON.stringify(
             {
               file: filePath,
@@ -916,6 +928,7 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
               entries: opened.entryCount,
               images: opened.imageCount,
               readableSections: sections.length,
+              contentsList,
               textBytes,
               metadata: opened.metadata,
               sections,

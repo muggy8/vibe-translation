@@ -57,7 +57,7 @@ const SERIES_REFERENCES = [
  * Build the machine-readable chapter list for a volume (pure).
  *
  * @param {SourceBundle} bundle - The resolved source bundle.
- * @returns {Array<{id: string, file: string, title: string, chars: number}>}
+ * @returns {Array<{id: string, file: string, title: string, chars: number, bodyChars: number|undefined, empty: boolean, syntheticTitle: boolean}>}
  *   One entry per segment, in reading order (the bundle's authoritative order).
  */
 function buildChaptersJson(bundle) {
@@ -72,6 +72,7 @@ function buildChaptersJson(bundle) {
     // nobody bothered to translate.
     bodyChars: s.bodyChars,
     empty: s.empty === true,
+    syntheticTitle: s.syntheticTitle === true,
   }));
 }
 
@@ -112,7 +113,7 @@ function renderNewEntry(entry) {
  *   installmentNumber: string,
  *   sourceLanguage: string,
  *   targetLanguage: string,
- *   chapters: Array<{id: string, file: string, title: string, chars: number}>,
+ *   chapters: Array<{id: string, file: string, title: string, chars: number, bodyChars: number|undefined, empty: boolean, syntheticTitle: boolean}>,
  *   newTerms: Array<Object>|null,
  *   newQuirks: Array<Object>|null,
  *   newStyle: Array<Object>|null,
@@ -176,8 +177,12 @@ function buildTranslationBriefMarkdown(p) {
     // A section that converted to nothing is called out here too: the brief is
     // what a human reads before translation, and a hole in the book belongs in
     // the first page they see, not buried in an extraction log line.
+    const title = c.empty === true ? `${c.title} **(EMPTY IN SOURCE)**` : c.title;
+    // A title the pipeline invented (the book's own contents list never named
+    // this section) is marked, so the brief never reads like the book has a
+    // chapter with that name.
     lines.push(
-      `| ${c.id} | ${c.empty === true ? `${c.title} **(EMPTY IN SOURCE)**` : c.title} | ` +
+      `| ${c.id} | ${c.syntheticTitle === true ? `${title} **(untitled in source)**` : title} | ` +
         `${c.chars} | ${c.file} |`
     );
   }

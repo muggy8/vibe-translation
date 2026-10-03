@@ -79,6 +79,7 @@ const { polish } = require("./polish");
 const { writeTranslationReport } = require("./utils/translation-report");
 const { getTranslationTarget } = require("./get-translation-target");
 const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
+const { isStructuralError } = require("./configs/shared");
 
 // Wrap each step so its optional per-machine hooks fire around it. The task
 // functions themselves are unchanged — the hook runner (utils/hooks.js) does
@@ -165,6 +166,14 @@ const PIPELINE_STEPS = [
  * Each step's own before/after hooks still fire (they are part of the wrapped
  * task functions).
  *
+ * A STRUCTURAL failure is never continued past, whatever ON_TASK_ERROR says:
+ * the remaining steps are guaranteed to fail on the same missing foundation
+ * (no plan of record, no source file), and attempting them costs a model
+ * container switch each. (Observed live: a rejected intake plan made all nine
+ * steps re-run the intake — three attempts apiece — the last ones against the
+ * translator container the translate hook had just switched in, which cannot
+ * act as an agent and answered with nothing.)
+ *
  * @returns {Promise<void>}
  */
 async function runPipeline() {
@@ -177,7 +186,7 @@ async function runPipeline() {
       await step.run();
     } catch (err) {
       failures.push({ name: step.name, error: err });
-      if (onTaskError !== "continue") throw err;
+      if (onTaskError !== "continue" || isStructuralError(err)) throw err;
       console.error(
         `[pipeline] ${step.name} failed: ${err.message} — continuing with ` +
           `the remaining steps (ON_TASK_ERROR=continue).`

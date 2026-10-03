@@ -122,6 +122,18 @@ for (const [file, taskName] of TASK_FILES) {
   );
 }
 
+// The same rule at the STEP level: the default run's ON_TASK_ERROR=continue must
+// not walk past a structural failure (no plan of record, vanished source) — every
+// remaining step would fail on the same missing foundation, and each attempt
+// costs a model container switch.
+{
+  const src = fs.readFileSync(path.join(__dirname, "..", "gulpfile.js"), "utf8");
+  assert.ok(
+    /require\("\.\/configs\/shared"\)/.test(src) && /isStructuralError\(err\)/.test(src),
+    "gulpfile.js stops the default run on a structural step failure even with ON_TASK_ERROR=continue"
+  );
+}
+
 // ─── live scenarios (spawned: the policies are read at module load) ──────────
 
 /**

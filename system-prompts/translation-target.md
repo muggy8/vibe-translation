@@ -18,7 +18,11 @@ you say why.
 2. For every file that could be a book, call `epubInfo` to read its catalog
    card — the title, author, language tag, the series name and book number the
    reading app embedded inside the file, how many readable sections it has and
-   what they are called, how much text and how many pictures.
+   what they are called, how much text and how many pictures. `readableSections`
+   counts PAGES, not chapters: a reflowable book gives the cover, every
+   illustration plate and every notice its own page, so a 10-chapter novel can
+   report 35 sections. `contentsList` is the book's own list of its sections —
+   that is the chapter count, and it is the number to quote.
 3. `readEpubText` to **sample** a book's opening (a bounded slice, not the
    whole book). Sample enough books to be sure, and sample more when two books
    look alike. Each call costs context — sample, do not read the series.
@@ -166,7 +170,9 @@ fences:
   not in `volumes`. An art book, a preview, a drama transcript, or a file that
   opens but contains almost no prose must be excluded, not listed.
   `basis` must be specific ("opening 1500 characters are continuous prose with
-  chapter headings; 41 text sections, 2 images"); a vague one is rejected.
+  chapter headings; the book's own contents list names 10 sections — プロローグ,
+  第一章…第七章, エピローグ, あとがき"); a vague one is rejected. Do not report a
+  page count as a chapter count.
 - `confidence` is **required**, with a number for each decision you made
   (`seriesName`, `sourceLanguage`, `order` at minimum). A plan that reports no
   confidence is rejected outright — the run refuses to build a whole series on

@@ -18,6 +18,13 @@
  *                             interludes — no special id.
  *   images/                  every embedded image + manifest.json
  *   <base>-bundle.meta.json  cache key (mtime/size/sha256) + segment order
+ *                            + the packaging pages that were NOT made into
+ *                            chapters (see groupSpineIntoChapters)
+ *
+ * A chapter is what the BOOK says is a chapter: the spine is grouped by the
+ * book's own table of contents, so an inserted illustration that the packager
+ * gave its own spine item is folded into the chapter it illustrates instead of
+ * becoming a phantom chapter (see groupSpineIntoChapters).
  *
  * The chapter split exists for the FALLBACK path: when a volume's whole text
  * is too large for a single AI pass (see shouldProcessChunked /
@@ -59,11 +66,15 @@ const DEFAULT_CHUNK_THRESHOLD_CHARS = 120000;
  * epilogue is "chN.epilogue"; v3: epilogues are named like interludes,
  * continuing the chN.K counter after their anchor chapter; v4: segments carry
  * `bodyChars` and an `empty` flag, so a section that converted to nothing is
- * recorded as an empty chapter instead of a silent zero-length one).
+ * recorded as an empty chapter instead of a silent zero-length one; v5: the
+ * spine is grouped by the book's own table of contents, so an inserted
+ * illustration page or a chapter the packager split across two files is ONE
+ * chapter, and cover / contents / notice / colophon pages are recorded as
+ * packaging instead of being handed downstream as chapters).
  *
  * @type {number}
  */
-const BUNDLE_SCHEMA_VERSION = 4;
+const BUNDLE_SCHEMA_VERSION = 5;
 
 /**
  * A converted section with fewer than this many characters of text is recorded
@@ -179,9 +190,12 @@ function classifyTitle(title) {
   if (typeof title !== "string") return "chapter";
   const t = title.trim().toLowerCase();
   if (!t) return "chapter";
-  if (/(prologue|prelude)/i.test(t) || /序章|序文|^序$/.test(t)) return "prologue";
+  if (/(prologue|prelude)/i.test(t) || /序章|序文|^序$|プロローグ/.test(t)) return "prologue";
   if (/(interlude|intermezzo|intermission)/i.test(t) || /間奏|間の物語|間の話/.test(t)) return "interlude";
-  if (/(epilogue|coda|postscript|afterword|colophon)/i.test(t) || /終章|エピローグ|結語/.test(t)) return "epilogue";
+  // あとがき (the author's afterword) is a real section of the book and is
+  // translated; it is not packaging. It sits after the last chapter, so it
+  // belongs in the chN.K space alongside the epilogue.
+  if (/(epilogue|coda|postscript|afterword|colophon)/i.test(t) || /終章|エピローグ|結語|あとがき|後書き|後記/.test(t)) return "epilogue";
   return "chapter";
 }
 
@@ -233,6 +247,251 @@ function assignSegmentIds(titles) {
     }
   }
   return ids;
+}
+
+/**
+ * How much STORY text an unnamed page group must hold before it is treated as a
+ * section of the book rather than as packaging.
+ *
+ * This is the same question EMPTY_SEGMENT_CHARS asks ("did this convert to
+ * nothing?"), asked of a group instead of a page — and it is measured only on
+ * pages that did NOT declare themselves packaging, so a legal notice or a
+ * colophon never has to be out-sized. A genuine opening scene the contents list
+ * forgot can be under 600 characters (volumes 11 and 12 of the observed series
+ * both have one); publisher boilerplate is excluded by its own declaration
+ * rather than by length. SOURCE_UNDECLARED_SECTION_MIN_CHARS overrides it.
+ *
+ * @type {number}
+ */
+const UNDECLARED_SECTION_MIN_CHARS = (() => {
+  const n = parseInt(process.env.SOURCE_UNDECLARED_SECTION_MIN_CHARS, 10);
+  return Number.isFinite(n) ? Math.max(0, n) : EMPTY_SEGMENT_CHARS;
+})();
+
+/**
+ * Body-class names that declare what a PAGE is: a piece of the book's packaging,
+ * not a page of its story. Matched against the class the file itself carries.
+ *
+ * `p-text` (a page of the story) does not match. The list is the Kadokawa /
+ * BOOK☆WALKER "文章型" vocabulary (p-cover, p-image, p-toc, p-caution,
+ * p-colophon, p-colophon2, p-fmatter, p-bmatter, p-titlepage, p-allcover) plus
+ * the equivalent words other packagers use.
+ *
+ * @type {RegExp}
+ */
+const PACKAGING_CLASS_RE =
+  /(cover|title-?page|half-?title|frontispiece|image|illustration|plate|toc|contents|caution|notice|disclaimer|copyright|colophon|imprint|advert|frontmatter|backmatter|fmatter|bmatter|series-?page|survey|profile)/i;
+
+/**
+ * Characters of actual TEXT in a converted page — headings and Markdown image
+ * references removed, whitespace removed.
+ *
+ * Counting the raw Markdown instead counts `![](images/img-0002-k001.jpg)` as
+ * 33 characters of prose, and five illustration pages then look like a 165-char
+ * section worth translating (observed: a run of cover plates plus a legal notice
+ * became a phantom chapter that way).
+ *
+ * @param {string} md - Converted Markdown.
+ * @returns {number}
+ */
+function textCharsOf(md) {
+  return (md || "")
+    .replace(/^#{1,6}\s+.*$/gm, "")
+    .replace(/!?\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/\s+/g, "")
+    .length;
+}
+
+/**
+ * `epub:type` values that name the book's PACKAGING — a page the reader is not
+ * meant to read as part of the story. Standard EPUB3 landmark types.
+ *
+ * @type {Set<string>}
+ */
+const PACKAGING_EPUB_TYPES = new Set([
+  "cover", "frontmatter", "backmatter", "toc", "landmarks", "list", "index",
+  "colophon", "imprint", "copyright-page", "preamble", "notice", "acknowledgments",
+]);
+
+/**
+ * Navigation titles that name packaging. Matched against the WHOLE title,
+ * because a chapter is never named merely "目次" — a real chapter title is
+ * longer and specific.
+ *
+ * The list is deliberately short and errs in ONE direction: an unrecognized
+ * label stays a chapter and gets translated. Translating a colophon is a
+ * blemish in the output; mistaking a chapter for packaging deletes it from the
+ * book. Add to this list only for a label you have actually seen in a real file.
+ *
+ * @type {RegExp}
+ */
+const PACKAGING_TITLE_RE = new RegExp(
+  "^(?:" +
+    "表紙|カバー|前扉|扉|扉ページ|タイトルページ|本編|目次|もくじ|次頁|奥付|書誌情報|" +
+    "著作権|ご注意|ご利用上の注意|注意|広告|宣伝|書籍紹介|特設サイト|刊行詞|" +
+    "cover|title[ -]?page|half[ -]?title|frontispiece|table of contents|contents|" +
+    "copyright|colophon|imprint|notice|advertisement|index|series page" +
+  ")$",
+  "i"
+);
+
+/**
+ * Decide, from the navigation entry alone, whether the book is naming a CHAPTER
+ * or naming a piece of its own PACKAGING.
+ *
+ * @param {{title: string, inToc: boolean, types: string[]}} entry - One navigation entry.
+ * @returns {{chapter: boolean, reason: string}}
+ */
+function classifyNavEntry(entry) {
+  const typed = (entry.types || []).map((t) => String(t).toLowerCase());
+  const packagingType = typed.find((t) => PACKAGING_EPUB_TYPES.has(t));
+  if (packagingType) return { chapter: false, reason: `declared as epub:type="${packagingType}"` };
+  const title = (entry.title || "").trim();
+  if (PACKAGING_TITLE_RE.test(title)) return { chapter: false, reason: `"${title}" names packaging, not a chapter` };
+  // Named only by the landmarks list ("this is where the main text starts") —
+  // a structural pointer, not a section of the book.
+  if (entry.inToc === false) return { chapter: false, reason: "a navigation landmark, not a contents entry" };
+  return { chapter: true, reason: "" };
+}
+
+/**
+ * Group an epub's readable spine sections into the sections the BOOK says it
+ * has, using its own table of contents as the boundary marker.
+ *
+ * Why the table of contents and not the spine: a reflowable Japanese light
+ * novel (the Kadokawa / BOOK☆WALKER "文章型" spec) gives EVERY page its own
+ * spine item — the cover, five half-title illustrations, a full-colour insert
+ * in front of every chapter, the chapter's text, the legal notice, the table of
+ * contents, the author's profile, a reader-survey page, an advertisement, the
+ * colophon. Volume 1 of a real 17-volume series has 35 spine items and 10
+ * chapters. Taking the spine literally therefore produced 35 "chapters": the
+ * pipeline translated the copyright notice and the table of contents, spent
+ * research-agent turns on blank illustration pages, and reported 25 phantom
+ * "empty in source" holes in a book that has none.
+ *
+ * The book's own contents list is the honest boundary: it names 表紙, 目次, the
+ * ten real sections and 奥付, and it does NOT name the illustration pages. So a
+ * named page OPENS a section and every unnamed page after it belongs to that
+ * section. That also repairs the other half of the same packing quirk — a long
+ * chapter whose text the packager split across two files (第四章 is p-010 +
+ * p-011, the epilogue is p-019 + p-020) becomes ONE chapter again, instead of
+ * one chapter plus a mystery fragment that starts mid-scene.
+ *
+ * One rule keeps that from eating real text: an unnamed page only ever joins an
+ * OPEN CHAPTER. A page that follows packaging (a short story sitting between the
+ * contents page and the first chapter's title page — volumes 5 and 13 of this
+ * series both have one) starts its own group, so "the contents list forgot it"
+ * can never turn a section into the cover's fine print.
+ *
+ * @param {Array<{zipPath: string}>} sections - Readable sections in spine (reading) order.
+ * @param {Array<{zipPath: string, title: string, inToc: boolean, types: string[]}>} navEntries - The book's navigation entries, in document order.
+ * @returns {Array<{title: string, declared: boolean, inToc: boolean, types: string[], kind: "chapter"|"packaging"|"undeclared", reason: string, zipPath: string, indices: number[]}>|null} The groups, in reading order, or null when the book's navigation names none of its pages. `indices` are positions in `sections`.
+ */
+function groupSpineIntoChapters(sections, navEntries) {
+  const declared = new Map();
+  for (const e of navEntries || []) {
+    if (!e || !e.zipPath) continue;
+    if (!declared.has(e.zipPath)) declared.set(e.zipPath, e);
+  }
+  // Grouping is only as good as the evidence for it. A book whose nav names none
+  // of its readable pages (no nav file, an empty nav, a nav that only lists
+  // cover/contents/colophon) gives us no boundary to group BY — merging every
+  // page into one "section" would turn a whole book into a single chapter. The
+  // caller then falls back to one chapter per page and says so loudly.
+  if (![...(sections || [])].some((s) => s && declared.has(s.zipPath))) return null;
+  const groups = [];
+  for (let i = 0; i < (sections || []).length; i++) {
+    const section = sections[i];
+    const entry = declared.get(section.zipPath);
+    const open = groups[groups.length - 1];
+    if (entry) {
+      const verdict = classifyNavEntry(entry);
+      groups.push({
+        title: entry.title || "",
+        declared: true,
+        inToc: entry.inToc !== false,
+        types: entry.types || [],
+        kind: verdict.chapter ? "chapter" : "packaging",
+        reason: verdict.reason,
+        zipPath: entry.zipPath,
+        indices: [i],
+      });
+    } else if (open && (open.kind === "chapter" || open.kind === "undeclared")) {
+      // Not named in the contents: it continues whatever chapter is open (a
+      // chapter body page, a split chapter, an inserted illustration).
+      open.indices.push(i);
+    } else {
+      // After packaging, or before anything was named: an undeclared section.
+      // classifySectionGroup() decides it by what it actually holds.
+      groups.push({
+        title: "",
+        declared: false,
+        inToc: false,
+        types: [],
+        kind: "undeclared",
+        reason: "not named in the book's contents",
+        zipPath: section.zipPath,
+        indices: [i],
+      });
+    }
+  }
+  return groups;
+}
+
+/**
+ * Decide whether a grouped section is a chapter the pipeline should translate,
+ * or packaging it should record and skip.
+ *
+ * A section the contents list names is decided by the naming. A section it does
+ * NOT name is decided by what it holds: text means it is kept (losing a real
+ * chapter is the worse mistake), an illustration or an empty page means it is
+ * packaging.
+ *
+ * @param {{title: string, declared: boolean, inToc: boolean, types: string[], kind: string, reason: string}} group - One group from groupSpineIntoChapters().
+ * @param {number} textChars - Characters of real text the group's pages hold (illustrations and markup not counted).
+ * @returns {{chapter: boolean, reason: string}} The verdict and why, so the reason can be printed and persisted.
+ */
+function classifySectionGroup(group, textChars = 0) {
+  if (!group) return { chapter: false, reason: "no group" };
+  if (group.declared) {
+    const typed = (group.types || []).map((t) => String(t).toLowerCase());
+    const packagingType = typed.find((t) => PACKAGING_EPUB_TYPES.has(t));
+    if (packagingType) return { chapter: false, reason: `declared as epub:type="${packagingType}"` };
+    const title = (group.title || "").trim();
+    if (PACKAGING_TITLE_RE.test(title)) return { chapter: false, reason: `"${title}" names packaging, not a chapter` };
+    if (group.inToc === false) return { chapter: false, reason: "a navigation landmark, not a contents entry" };
+    return { chapter: true, reason: "" };
+  }
+  if (textChars >= UNDECLARED_SECTION_MIN_CHARS) {
+    return { chapter: true, reason: "not named in the book's contents, but it holds real text" };
+  }
+  return { chapter: false, reason: "not named in the book's contents and holds no section of text" };
+}
+
+/**
+ * The title an unnamed section prints for itself, if it prints one.
+ *
+ * These books set a sub-section heading as a short centred line — 【俺とあいつが
+ * 出会うまで】 — not as an <h1>, so the heading scan finds nothing and the only
+ * honest source left is the line the page actually prints first. A long first
+ * line is prose, not a title, and the section is then left untitled (the merge
+ * prints no heading for a synthetic title) rather than given its opening
+ * sentence as a name.
+ *
+ * @param {Array<string>} pageHeadings - Headings found in the group's pages, in order.
+ * @param {string} body - The group's converted text.
+ * @returns {{title: string, synthetic: boolean}}
+ */
+function titleOfUnnamedSection(pageHeadings, body) {
+  const heading = (pageHeadings || []).find((h) => h && h.trim());
+  if (heading) return { title: heading.trim(), synthetic: false };
+  for (const line of (body || "").split("\n")) {
+    const t = line.trim();
+    if (!t || /^!?\[.*\]\(/.test(t)) continue;
+    if (t.length <= 60 && /[【［「『]/.test(t)) return { title: t, synthetic: false };
+    break;
+  }
+  return { title: "", synthetic: true };
 }
 // ─── XHTML → Markdown (pure) ────────────────────────────────────────────────
 
@@ -429,6 +688,29 @@ function firstHeadingText($) {
   return "";
 }
 
+/**
+ * Drop a page's leading heading when it merely repeats the title the book's
+ * contents already gave the section.
+ *
+ * Some packagers repeat the chapter title as an `<h1>` on every page of the
+ * chapter; when several pages are merged into one chapter that repeats the same
+ * line two or three times inside one file, and the merge then prints it again as
+ * the chapter heading. Only an exact (case-insensitive) repeat is removed — a
+ * heading that says something else is a real sub-heading and stays.
+ *
+ * @param {string} md - The converted page.
+ * @param {string} title - The title the section already carries.
+ * @returns {string} The page without its duplicated leading heading.
+ */
+function stripRepeatedHeading(md, title) {
+  const body = (md || "").trim();
+  if (!body || !title) return body;
+  const firstLine = body.split("\n", 1)[0] || "";
+  if (!/^#{1,6}\s+/.test(firstLine)) return body;
+  if (firstLine.replace(/^#{1,6}\s+/, "").trim().toLowerCase() !== title.trim().toLowerCase()) return body;
+  return body.slice(firstLine.length).trim();
+}
+
 // ─── Epub extraction ────────────────────────────────────────────────────────
 
 /**
@@ -485,6 +767,21 @@ async function readJsonOrNull(filePath) {
   } catch {
     return null;
   }
+}
+
+/**
+ * The uncompressed size of one zip entry, as recorded in the archive's central
+ * directory. JSZip parses the central directory when the archive is loaded, so
+ * this is available for every entry WITHOUT decompressing it — which is the
+ * whole point: weighing a book's images against its prose must not read the
+ * images.
+ *
+ * @param {Object} entry - A JSZip zip object.
+ * @returns {number} Its uncompressed byte size, or 0 when the archive does not say.
+ */
+function zipEntryUncompressedSize(entry) {
+  const size = entry && entry._data ? entry._data.uncompressedSize : 0;
+  return Number.isFinite(size) && size > 0 ? size : 0;
 }
 
 /**
@@ -642,6 +939,22 @@ async function openEpub(epubPath) {
     });
   }
 
+  // Payload accounting, read straight off the zip central directory: JSZip
+  // records every entry's uncompressed size when it parses the archive, so the
+  // text-vs-images split costs nothing (no image is ever decompressed). The
+  // intake's "is this an art book?" check needs these two numbers IN BYTES —
+  // comparing an archive's byte size against a character count is a category
+  // error that calls every illustrated book an art book (observed live: 17 real
+  // novels, 9–20 MB each with 19–31 plates, all rejected).
+  const payload = { textBytes: 0, otherBytes: 0 };
+  for (const entry of Object.values(zip.files)) {
+    if (!entry || entry.dir) continue;
+    const size = zipEntryUncompressedSize(entry);
+    if (/\.(x?html?)$/i.test(entry.name || "")) payload.textBytes += size;
+    else payload.otherBytes += size;
+  }
+
+  const nav = await loadNavStructure(zip, opfDir, manifestItems);
   return {
     epubPath,
     zip,
@@ -651,12 +964,13 @@ async function openEpub(epubPath) {
     manifestItems,
     spine,
     textItems,
-    titles: await loadNavTitles(zip, opfDir, manifestItems),
+    titles: nav.titles,
+    navEntries: nav.entries,
+    payload,
     imageCount: manifestItems.filter((it) => (it.mediaType || "").startsWith("image/")).length,
     entryCount: Object.keys(zip.files).length,
   };
 }
-
 /**
  * Read one readable section of an opened epub as plain text (no Markdown
  * markup — this is for sampling a book's opening, not for producing the
@@ -811,16 +1125,68 @@ function scriptCounts(text) {
 
 
 /**
- * Collect chapter titles from the epub's navigation documents (EPUB3 nav,
- * then NCX). Keys are zip entry paths.
+ * Drop the fragment/query from an internal epub href.
+ *
+ * A real table of contents points at an ANCHOR inside a page
+ * (`xhtml/p-003.xhtml#toc-002`), while the page's own zip path has no fragment
+ * (`item/xhtml/p-003.xhtml`). Keying one side with the fragment still attached
+ * means the two sides never match (observed live: every chapter of a 17-volume
+ * series lost its real title, because the extractor's nav lookup missed all 10
+ * fragment-carrying entries of volume 1 and fell back to each page's `<title>`,
+ * which in the Kadokawa/BOOK☆WALKER template is the SERIES TITLE on every page
+ * — so a 10-chapter book came back as 35 sections all named after the series).
+ *
+ * @param {string} href - An internal href, possibly with `#anchor` or `?query`.
+ * @returns {string} The href with any fragment/query suffix removed.
+ */
+function stripHrefFragment(href) {
+  return (href || "").replace(/[#?].*$/, "");
+}
+
+/**
+ * Read the book's own table of contents (EPUB3 nav, then EPUB2 NCX).
+ *
+ * Two views of the same document come back, because two different jobs need it:
+ *   `titles`  — zip path → the title the book gives that page. A lookup table,
+ *               used when one section is being sampled on its own.
+ *   `entries` — the same pairs IN DOCUMENT ORDER, tagged with whether the link
+ *               came from the contents list or the landmarks list and with any
+ *               `epub:type` the book declared. That ordered list is the book's
+ *               own statement of where its sections begin, which is what
+ *               groupSpineIntoChapters() needs to tell a chapter apart from an
+ *               inserted illustration page.
  *
  * @param {JSZip} zip
  * @param {string} opfDir - The OPF file's zip directory.
  * @param {Array<{href: string, mediaType: string, properties: string}>} manifestItems
- * @returns {Promise<Map<string, string>>}
+ * @returns {Promise<{titles: Map<string, string>, entries: Array<{zipPath: string, title: string, order: number, inToc: boolean, types: string[]}>}>}
  */
-async function loadNavTitles(zip, opfDir, manifestItems) {
+async function loadNavStructure(zip, opfDir, manifestItems) {
   const titles = new Map();
+  const entries = [];
+  const byPath = new Map();
+
+  /**
+   * Record one navigation link. The same file is usually named twice (the
+   * contents list and the landmarks list), so links are merged per path: the
+   * first title wins, and the `epub:type` values and the "named in the contents
+   * list" flag accumulate across every link that names it.
+   */
+  const record = (zipPath, title, { inToc, type }) => {
+    if (!zipPath || !title) return;
+    let entry = byPath.get(zipPath);
+    if (!entry) {
+      entry = { zipPath, title, order: entries.length, inToc: Boolean(inToc), types: [] };
+      byPath.set(zipPath, entry);
+      entries.push(entry);
+    } else if (inToc) {
+      entry.inToc = true;
+    }
+    const t = String(type || "").toLowerCase();
+    if (t && !entry.types.includes(t)) entry.types.push(t);
+    if (!titles.has(zipPath)) titles.set(zipPath, title);
+  };
+
   // EPUB3 nav document.
   const navItem = manifestItems.find((it) => (it.properties || "").includes("nav"));
   if (navItem) {
@@ -833,17 +1199,26 @@ async function loadNavTitles(zip, opfDir, manifestItems) {
         scope.find("a[href]").each((i, a) => {
           const href = $(a).attr("href");
           const t = normalizeSpaces($(a).text());
-          if (href && t) {
-            const key = normalizeZipPath(path.posix.join(path.posix.dirname(p), href));
-            if (!titles.has(key)) titles.set(key, t);
-          }
+          if (!href || !t) return;
+          const key = normalizeZipPath(
+            path.posix.join(path.posix.dirname(p), stripHrefFragment(href))
+          );
+          // A link inside <nav epub:type="landmarks"> is a pointer to a structural
+          // role ("this is where the main text starts"), not a chapter in the
+          // contents list. A nav document with no typed <nav> sections is treated
+          // as one contents list.
+          const navType = String($(a).parents("nav").first().attr("epub:type") || "").toLowerCase();
+          record(key, t, {
+            inToc: !navType || navType === "toc",
+            type: $(a).attr("epub:type"),
+          });
         });
       } catch {
         // unreadable nav — fall through to NCX / headings
       }
     }
   }
-  // EPUB2 NCX.
+  // EPUB2 NCX. Every navPoint is a contents entry.
   const ncxItem = manifestItems.find(
     (it) => (it.mediaType || "").includes("dtbncx") || /\.ncx$/i.test(it.href || "")
   );
@@ -856,17 +1231,16 @@ async function loadNavTitles(zip, opfDir, manifestItems) {
         $("navPoint").each((i, el) => {
           const src = $(el).find("content").attr("src");
           const t = normalizeSpaces($(el).find("text").text());
-          if (src && t) {
-            const key = normalizeZipPath(path.posix.join(opfDir, src));
-            if (!titles.has(key)) titles.set(key, t);
-          }
+          if (!src || !t) return;
+          const key = normalizeZipPath(path.posix.join(opfDir, stripHrefFragment(src)));
+          record(key, t, { inToc: true, type: "" });
         });
       } catch {
         // unreadable NCX — fall back to in-chapter headings
       }
     }
   }
-  return titles;
+  return { titles, entries };
 }
 
 /**
@@ -953,27 +1327,49 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
   // One shared container read (openEpub) — the same helper the intake agent's
   // epub tools use, so "what a valid epub is" lives in exactly one place.
   const opened = await openEpub(epubPath);
-  const { zip, opfDir, manifestItems, textItems, titles: navTitles } = opened;
+  const { zip, opfDir, manifestItems, textItems, titles: navTitles, navEntries } = opened;
   const registry = new ImageRegistry(zip, volumeDir);
   const chapterImageRef = (chapterZipPath) => (src) =>
     registry.reference(normalizeZipPath(path.posix.join(path.posix.dirname(chapterZipPath), src)));
 
-  // Convert each readable section (in spine/reading order — openEpub resolved
-  // every section's zip path and already dropped the non-text items).
-  const chapters = [];
+  // Convert every readable section (in spine/reading order — openEpub resolved
+  // every section's zip path and already dropped the non-text items). Sections
+  // are NOT chapters yet: the grouping pass below decides that.
+  const sections = [];
   for (const item of textItems) {
     const zipPath = item.zipPath;
     const html = await zip.file(zipPath).async("string");
     const $ = cheerio.load(html);
+    // The page's OWN heading, kept separate from the fallback chain: a group the
+    // contents list did not name is titled from this, not from the page's
+    // <title>, which in this template is the series title on every single page.
+    const heading = firstHeadingText($);
+    const pageTitle = normalizeSpaces($.root().find("title").first().text());
+    const bodyClass = normalizeSpaces($("body").attr("class") || "");
+    // The page declaring what it IS — a cover plate, the contents page, the
+    // legal notice, the colophon. This is the book's own wording, not a guess
+    // about length: it is what separates a 568-character copyright notice from
+    // the 586-character opening scene the contents list forgot to mention.
+    const declaresPackaging =
+      PACKAGING_CLASS_RE.test(bodyClass) || PACKAGING_TITLE_RE.test(pageTitle);
     const title =
       navTitles.get(zipPath) ||
-      firstHeadingText($) ||
-      normalizeSpaces($.root().find("title").first().text()) ||
-      `Chapter ${chapters.length + 1}`;
+      heading ||
+      pageTitle ||
+      `Section ${sections.length + 1}`;
     const md = xhtmlToMarkdown(html, chapterImageRef(zipPath));
-    chapters.push({ title, md });
+    sections.push({
+      zipPath,
+      title,
+      heading,
+      bodyClass,
+      declaresPackaging,
+      textChars: textCharsOf(md),
+      declaredInNav: navTitles.has(zipPath),
+      md,
+    });
   }
-  if (chapters.length === 0) {
+  if (sections.length === 0) {
     throw new Error(`No readable text chapters found in the spine of ${epubPath}.`);
   }
 
@@ -984,7 +1380,7 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
   const skippedFromSpine = opened.spine.length - textItems.length;
   console.log(
     `[source] ${base}: spine lists ${opened.spine.length} item(s), ${textItems.length} readable ` +
-      `section(s) extracted, ${opened.entryCount} file(s) in the archive` +
+      `section(s), ${opened.entryCount} file(s) in the archive` +
       (skippedFromSpine > 0 ? ` — ${skippedFromSpine} non-text item(s) skipped.` : ".")
   );
   if (skippedFromSpine > 0) {
@@ -994,14 +1390,142 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
     if (skipped.length > 0) console.log(`[source]   skipped: ${skipped.join(", ")}`);
   }
 
+  // ── Sections → chapters, using the book's own contents list ───────────────
+  // A spine item is a PAGE, not a chapter. Treating one as the other is what
+  // turned a 10-chapter book into 35 "chapters" (see groupSpineIntoChapters).
+  // When the book's nav names none of its pages there is nothing to group by, so
+  // each page stands alone — the pre-grouping behaviour, and it is reported
+  // loudly below because the chapter count the rest of the pipeline uses is then
+  // a guess.
+  const grouped = groupSpineIntoChapters(sections, navEntries);
+  const groups =
+    grouped ||
+    sections.map((s, i) => ({
+      title: s.title,
+      declared: false,
+      inToc: false,
+      types: [],
+      kind: "single",
+      reason: "the book's contents list names none of its pages",
+      zipPath: s.zipPath,
+      indices: [i],
+    }));
+  const chapterGroups = [];
+  const packaging = [];
+  for (const group of groups) {
+    const pages = group.indices.map((i) => sections[i]);
+    const body = pages
+      .map((s) => stripRepeatedHeading(s.md, group.title || s.title))
+      .filter(Boolean)
+      .join("\n\n")
+      .trim();
+    // The decision is made on characters of STORY text: Markdown image markup is
+    // not text (five illustration pages carry 33 characters of markup each, and
+    // counting them turns a run of plates into a "section worth translating"),
+    // and a page that declares itself a notice / colophon / cover plate does not
+    // count towards "this group is a section of the book".
+    const storyTextChars = pages.reduce(
+      (n, s) => n + (s.declaresPackaging ? 0 : s.textChars),
+      0
+    );
+    const verdict = classifySectionGroup(group, storyTextChars);
+    if (verdict.chapter) {
+      // A chapter the contents list named carries that name. One it did not
+      // name is titled from the heading the page itself prints, and left
+      // untitled (synthetic) when it prints none.
+      const unnamed = !group.declared;
+      const own = unnamed
+        ? group.kind === "single"
+          ? { title: pages[0].title, synthetic: !pages[0].heading }
+          : titleOfUnnamedSection(pages.map((s) => s.heading).filter(Boolean), body)
+        : { title: group.title, synthetic: false };
+      // A section with no name of its own gets a readable placeholder, NOT its
+      // file name: this title ends up in chapters.json and every report, and
+      // "p-001.xhtml" there reads like a chapter the book actually has (observed
+      // on volumes 8 and 11 of the real series).
+      const title = own.title || `Untitled section ${chapterGroups.length + 1}`;
+      if (unnamed && group.kind !== "single") {
+        console.warn(
+          `[source] ${base}: "${title}" is NOT named in the book's contents but holds ${storyTextChars} ` +
+            `character(s) of story text on ${pages.length} page(s) — kept as a chapter. ` +
+            `The book's contents list is incomplete; check it against the packaging list below.`
+        );
+      }
+      chapterGroups.push({ title, body, syntheticTitle: own.synthetic });
+    } else {
+      packaging.push({
+        title: group.title || path.posix.basename(group.zipPath || ""),
+        reason: verdict.reason,
+        pages: group.indices.length,
+        bodyChars: body.length,
+        textChars: storyTextChars,
+      });
+    }
+  }
+
+  // Fail-open, two cases, both reported loudly because the chapter count the
+  // rest of the pipeline uses is then a guess:
+  //   (a) the nav names none of the readable pages → nothing to group BY, so
+  //       every page stands alone (the pre-grouping behaviour);
+  //   (b) the nav names pages but every one of them is packaging → the book
+  //       cannot be zero chapters, so the same fallback runs.
+  if (!grouped) {
+    console.warn(
+      `[source] ${base}: the book's own contents list names NONE of its ${sections.length} readable ` +
+        `page(s) (no nav file, an empty nav, or a nav that points only at pages outside the text). ` +
+        `Falling back to one chapter per spine page — ${chapterGroups.length} chapter(s), which may ` +
+        `include cover / notice / illustration pages.`
+    );
+  }
+  if (chapterGroups.length === 0) {
+    console.warn(
+      `[source] ${base}: the book's own contents list names NO chapters ` +
+        `(${groups.length} group(s) from ${sections.length} readable section(s)). ` +
+        `Falling back to one chapter per spine page — ${sections.length} chapter(s), ` +
+        `which may include cover / notice / illustration pages.`
+    );
+    chapterGroups.push(
+      ...sections.map((s) => ({
+        title: s.title,
+        body: stripRepeatedHeading(s.md, s.title),
+        syntheticTitle: !s.heading,
+      }))
+    );
+    packaging.length = 0;
+  } else {
+    const chapterChars = chapterGroups.reduce((n, c) => n + c.body.length, 0);
+    const packagingChars = packaging.reduce((n, p) => n + p.bodyChars, 0);
+    console.log(
+      `[source] ${base}: ${sections.length} spine page(s) group into ${chapterGroups.length} ` +
+        `chapter(s)${grouped ? " using the book's own contents list" : " (one per page)"}; ` +
+        `${packaging.length} page group(s) are packaging and are NOT translated ` +
+        `(${packagingChars} character(s) of front/back matter).`
+    );
+    for (const p of packaging) {
+      console.log(
+        `[source]   packaging: "${p.title}" — ${p.pages} page(s), ${p.bodyChars} char(s) — ${p.reason}`
+      );
+    }
+    // The one case where this rule could cut a real chapter out of the book: a
+    // contents list that simply does not mention it. Packaging holding a lot of
+    // prose is the tell, so it is reported instead of trusted.
+    if (chapterChars > 0 && packagingChars > chapterChars * 0.1) {
+      console.warn(
+        `[source] ${base}: ${packagingChars} character(s) were classified as packaging — that is ` +
+          `${Math.round((packagingChars / chapterChars) * 100)}% of the chapters' text. If any of it ` +
+          `is a real chapter the book's contents list is incomplete; check the list above.`
+      );
+    }
+  }
+
   // Assign ids, then write the per-chapter files (each starts with its title
   // as an H1; a duplicate leading heading in the chapter body is dropped).
-  const ids = assignSegmentIds(chapters.map((c) => c.title));
+  const ids = assignSegmentIds(chapterGroups.map((c) => c.title));
   const segments = [];
   const contents = [];
-  for (let i = 0; i < chapters.length; i++) {
-    let body = chapters[i].md;
-    const title = chapters[i].title;
+  for (let i = 0; i < chapterGroups.length; i++) {
+    let body = chapterGroups[i].body;
+    const title = chapterGroups[i].title;
     const firstLine = body.split("\n", 1)[0] || "";
     if (
       /^#{1,6}\s+/.test(firstLine) &&
@@ -1023,7 +1547,15 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
     const content = `# ${title}\n\n${body}`.trim() + "\n";
     const file = `${base}-${ids[i]}.md`;
     await fs.writeFile(path.join(volumeDir, file), content, "utf-8");
-    segments.push({ id: ids[i], file, title, chars: content.length, bodyChars: body.trim().length, empty });
+    segments.push({
+      id: ids[i],
+      file,
+      title,
+      chars: content.length,
+      bodyChars: body.trim().length,
+      empty,
+      syntheticTitle: chapterGroups[i].syntheticTitle === true,
+    });
     contents.push(content.trim());
   }
 
@@ -1033,12 +1565,17 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
   await fs.writeFile(path.join(volumeDir, wholeFile), whole + "\n", "utf-8");
 
   // Lossless check: the whole-volume file must be the chapters, not a subset of
-  // them. A mismatch means the extraction dropped text somewhere.
-  const wholeBodyChars = whole.replace(/^#{1,6}\s+.*$/gm, "").replace(/\s+/g, "").length;
-  const segmentBodyChars = segments.reduce((n, s) => n + (s.bodyChars || 0), 0);
-  if (segmentBodyChars > 0 && wholeBodyChars < segmentBodyChars * 0.98) {
+  // them. A mismatch means the extraction dropped text somewhere. Both sides are
+  // measured the same way — headings removed and whitespace removed — because
+  // comparing a whitespace-stripped file against whitespace-counting character
+  // counts reports a loss that is only the paragraph breaks (observed: every
+  // volume of a real series tripped this on a perfectly intact extraction).
+  const bodyCharsOf = (text) => text.replace(/^#{1,6}\s+.*$/gm, "").replace(/\s+/g, "").length;
+  const wholeBodyChars = bodyCharsOf(whole);
+  const chapterBodyChars = contents.reduce((n, c) => n + bodyCharsOf(c), 0);
+  if (chapterBodyChars > 0 && wholeBodyChars < chapterBodyChars * 0.98) {
     console.warn(
-      `[source] ${base}: LOSSLESS CHECK — the chapters hold ${segmentBodyChars} character(s) but ` +
+      `[source] ${base}: LOSSLESS CHECK — the chapters hold ${chapterBodyChars} character(s) but ` +
         `${wholeFile} holds ${wholeBodyChars}: the whole-volume file is missing text.`
     );
   }
@@ -1059,6 +1596,12 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
     base,
     wholeFile,
     segments,
+    // The pages the book's own contents list did not name as chapters (cover,
+    // inserted illustrations, the legal notice, the contents page itself, the
+    // colophon). Recorded so a re-run and the reports can see exactly what was
+    // left out and why — a chapter silently dropped and a cover page silently
+    // skipped look identical in the output if nobody writes down the difference.
+    packaging,
     images,
     wholeChars: whole.length,
   };
@@ -1282,9 +1825,9 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
       cached.mtimeMs === st.mtimeMs &&
       cached.size === st.size &&
       cached.sha256 === sha &&
-      // Caches written under an older segment-id naming scheme (see
+      // Caches written under an older extraction schema (see
       // BUNDLE_SCHEMA_VERSION) are re-extracted so the files on disk match
-      // the current scheme.
+      // the current one.
       cached.schema === BUNDLE_SCHEMA_VERSION;
     if (fresh) {
       const missing = [];
@@ -1307,7 +1850,8 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
       const reason =
         cached.schema === BUNDLE_SCHEMA_VERSION
           ? "source changed"
-          : `schema ${cached.schema === undefined ? "1 (pre-versioning)" : cached.schema} → ${BUNDLE_SCHEMA_VERSION} (segment id scheme changed)`;
+          : `schema ${cached.schema === undefined ? "1 (pre-versioning)" : cached.schema} → ${BUNDLE_SCHEMA_VERSION} ` +
+            `(chapters now come from the book's own contents list, not one per spine page)`;
       console.log(
         `[source] bundle for "${path.basename(originalPath)}" is stale (${reason}) — re-extracting.`
       );
@@ -1361,8 +1905,17 @@ function materializeBundle(meta, { originalPath, volumeDir, cacheHit }) {
       file: s.file,
       title: s.title,
       chars: s.chars,
+      // Carried through so "this chapter is empty IN THE SOURCE" is visible in
+      // the translation stage and the handoff, not only in the cache file.
+      bodyChars: s.bodyChars,
+      empty: s.empty,
+      // True when the extraction could not give this chapter a real title (the
+      // book's contents did not name it and it prints no heading of its own) —
+      // the merge then prints no heading rather than inventing one.
+      syntheticTitle: s.syntheticTitle === true,
       path: path.join(volumeDir, s.file),
     })),
+    packaging: meta.packaging || null,
     imagesDir: (meta.images || []).length > 0 ? path.join(volumeDir, "images") : null,
     wholeChars: meta.wholeChars || 0,
     cacheHit,
@@ -1464,6 +2017,13 @@ module.exports = {
   materializeTextParts,
   classifyTitle,
   assignSegmentIds,
+  stripHrefFragment,
+  groupSpineIntoChapters,
+  classifyNavEntry,
+  classifySectionGroup,
+  titleOfUnnamedSection,
+  textCharsOf,
+  stripRepeatedHeading,
   xhtmlToMarkdown,
   isEpubPath,
   normalizeZipPath,

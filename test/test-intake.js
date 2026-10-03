@@ -40,7 +40,7 @@ const {
   normalizeInstallmentNumber,
   filterVolumesByInstallment,
 } = require("../utils/manifest");
-const { resolveRunSettings } = require("../configs/shared");
+const { resolveRunSettings, isStructuralError } = require("../configs/shared");
 const {
   buildDeterministicManifest,
   readCommittedLayout,
@@ -58,6 +58,7 @@ const {
   checkVolumeSourceShape,
   volumeIntegrityProblems,
   minVolumeTextChars,
+  artbookMaxTextChars,
 } = require("../get-translation-target");
 
 // ─── temp-dir helpers ─────────────────────────────────────────────────────────
@@ -78,10 +79,10 @@ process.on("exit", () => {
  * Build a minimal but real epub: container.xml + OPF (Dublin Core + a Calibre
  * series marker + an EPUB3 collection) + an EPUB3 nav + XHTML sections.
  *
- * @param {{title: string, series?: string, seriesIndex?: string, language?: string, sections: Array<{file: string, title: string, text: string}>, images?: number}} spec
+ * @param {{title: string, series?: string, seriesIndex?: string, language?: string, sections: Array<{file: string, title: string, text: string}>, images?: number, imageBytes?: number}} spec
  * @returns {Promise<Buffer>} The .epub bytes.
  */
-async function buildEpub({ title, series, seriesIndex, language = "ja", sections, images = 0 }) {
+async function buildEpub({ title, series, seriesIndex, language = "ja", sections, images = 0, imageBytes = 4 }) {
   const zip = new JSZip();
   zip.file("mimetype", "application/epub+zip");
   zip.file(
@@ -153,6 +154,99 @@ async function writeEpub(dir, name, spec) {
   const file = path.join(dir, name);
   await fs.promises.writeFile(file, buf);
   return file;
+}
+
+/** Create (and return) a volume folder inside a temp dir. */
+async function makeVolumeDir(dir, name) {
+  const volumeDir = path.join(dir, name);
+  await fs.promises.mkdir(volumeDir, { recursive: true });
+  return volumeDir;
+}
+
+/**
+ * Build an epub packed the way a real Japanese light novel is packed (the
+ * Kadokawa / BOOK☆WALKER "文章型" reflowable spec), because that packing is
+ * what the chapter split has to survive:
+ *
+ *   - EVERY page is its own spine item — the cover, a full-colour insert in
+ *     front of each chapter, the chapter text, the legal notice, the contents
+ *     page, the colophon, an advertisement;
+ *   - the chapter's TITLE lives on the insert page, and the insert page's own
+ *     <title> is the SERIES title (so a page's own title is useless);
+ *   - the contents list points at the INSERT page with an anchor
+ *     (`p-003.xhtml#toc-002`), while the chapter's prose is the NEXT file;
+ *   - a long chapter is split across two files, neither of which is named.
+ *
+ * @param {{title: string, pages: Array<{file: string, text?: string, image?: boolean, navTitle?: string, anchor?: string, landmark?: string}>, images?: number}} spec
+ * @returns {Promise<Buffer>} The .epub bytes.
+ */
+async function buildPackedEpub({ title, pages, images = 0 }) {
+  const zip = new JSZip();
+  zip.file("mimetype", "application/epub+zip");
+  zip.file(
+    "META-INF/container.xml",
+    `<?xml version="1.0"?>` +
+      `<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">` +
+      `<rootfiles><rootfile full-path="item/standard.opf" media-type="application/oebps-package+xml"/></rootfiles>` +
+      `</container>`
+  );
+  const items = pages
+    .map((p, i) => `<item media-type="application/xhtml+xml" id="p${i}" href="xhtml/${p.file}.xhtml"/>`)
+    .join("");
+  const imageItems = Array.from({ length: images }, (_, i) =>
+    `<item media-type="image/jpeg" id="i${i}" href="image/i${i}.jpg"/>`
+  ).join("");
+  const itemrefs = pages.map((_, i) => `<itemref linear="yes" idref="p${i}"/>`).join("");
+  zip.file(
+    "item/standard.opf",
+    `<?xml version="1.0" encoding="UTF-8"?>` +
+      `<package version="3.0" unique-identifier="id">` +
+      `<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">` +
+      `<dc:identifier id="id">urn:uuid:packed</dc:identifier>` +
+      `<dc:title>${title}</dc:title><dc:creator>Author</dc:creator>` +
+      `<dc:language>ja</dc:language><dc:publisher>KADOKAWA</dc:publisher>` +
+      `</metadata>` +
+      `<manifest>` +
+      `<item media-type="application/xhtml+xml" id="nav" href="navigation-documents.xhtml" properties="nav"/>` +
+      items +
+      imageItems +
+      `</manifest>` +
+      `<spine page-progression-direction="rtl">${itemrefs}</spine>` +
+      `</package>`
+  );
+  // The contents list names a page with an anchor; the landmarks list carries
+  // the epub:type values (cover / toc / bodymatter).
+  const tocLinks = pages
+    .filter((p) => p.navTitle)
+    .map((p) => `<li><a href="xhtml/${p.file}.xhtml${p.anchor || ""}">${p.navTitle}</a></li>`)
+    .join("");
+  const landmarkLinks = pages
+    .filter((p) => p.landmark)
+    .map((p) => `<li><a epub:type="${p.landmark}" href="xhtml/${p.file}.xhtml">${p.landmarkTitle || p.landmark}</a></li>`)
+    .join("");
+  zip.file(
+    "item/navigation-documents.xhtml",
+    `<?xml version="1.0" encoding="UTF-8"?>` +
+      `<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="ja">` +
+      `<head><title>Navigation</title></head><body>` +
+      `<nav epub:type="toc" id="toc"><h1>Navigation</h1><ol>${tocLinks}</ol></nav>` +
+      `<nav epub:type="landmarks" id="guide"><h1>Guide</h1><ol>${landmarkLinks}</ol></nav>` +
+      `</body></html>`
+  );
+  pages.forEach((p, i) => {
+    // Every page's own <title> is the SERIES title — exactly what the real
+    // template does, and the reason a page's own title cannot name a chapter.
+    const body = p.image
+      ? `<body class="p-image"><div class="main align-center"><p><img class="fit" src="../image/i${i}.jpg" alt=""/></p></div></body>`
+      : `<body class="p-text"><div class="main"><p>${p.text}</p></div></body>`;
+    zip.file(
+      `item/xhtml/${p.file}.xhtml`,
+      `<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja">` +
+        `<head><title>${title}</title></head>${body}</html>`
+    );
+  });
+  for (let i = 0; i < images; i++) zip.file(`item/image/i${i}.jpg`, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  return zip.generateAsync({ type: "nodebuffer" });
 }
 
 const JP_TEXT = "その日、教室で出会った彼女はこう言った。今日からあなたと私は敵同士よ。";
@@ -274,6 +368,193 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.strictEqual(bundle.segments[1].title, "第一章 出会い", "titles carried into the bundle");
   const wholeMd = await fs.promises.readFile(path.join(volumeDir, bundle.wholeFile), "utf-8");
   assert.ok(wholeMd.includes("第一章"), "the whole-volume file holds the chapters in order");
+
+  // ─── the real packing: an inserted illustration is not a chapter ───────────
+  // Kadokawa / BOOK☆WALKER "文章型": every PAGE is a spine item, the chapter
+  // title lives on a full-colour insert page whose own <title> is the series
+  // title, the contents list points at that insert with an #anchor, and a long
+  // chapter is split across two files. Reading the spine literally produced 35
+  // "chapters" for a 10-chapter book — the pipeline translated the copyright
+  // notice and the table of contents, and reported 25 phantom holes.
+  const packedPages = [
+    { file: "p-cover", image: true, navTitle: "表紙", landmark: "cover", landmarkTitle: "表紙" },
+    { file: "p-fmatter-001", image: true, landmark: "bodymatter", landmarkTitle: "本編" },
+    { file: "p-fmatter-002", image: true },
+    { file: "p-caution", text: "本書の著作権は株式会社KADOKAWAおよび正当な権利を有する第三者に帰属しています。" },
+    { file: "p-toc-001", text: "contents プロローグ 第一章 第二章", navTitle: "目次", landmark: "toc", landmarkTitle: "目次" },
+    { file: "p-001", image: true },
+    { file: "p-002", text: "プロローグの本文です。" + "昼休みに図書室のドアを開けた。".repeat(30), navTitle: "プロローグ 俺はお前と会いたくない", anchor: "#toc-001" },
+    { file: "p-003", image: true, navTitle: "第一章 僕ってほんと、どこにでもいる平凡なヤツなんだ", anchor: "#toc-002" },
+    { file: "p-004", text: "第一章の本文。" + "如月雨露は高校二年生である。".repeat(40) },
+    { file: "p-005", image: true, navTitle: "第二章 僕と俺のバトンタッチ", anchor: "#toc-003" },
+    { file: "p-006", text: "第二章の前半。" + "土曜日がやってきた。".repeat(40) },
+    { file: "p-007", text: "第二章の後半。" + "公園でひまわりが話した。".repeat(40) },
+    { file: "p-colophon", text: "発行 2016年3月10日 発行所 株式会社KADOKAWA", navTitle: "奥付" },
+    { file: "p-ad", image: true },
+  ];
+  const packedPath = path.join(dir, "packed.epub");
+  await fs.promises.writeFile(packedPath, await buildPackedEpub({ title: "俺を好きなのはお前だけかよ", pages: packedPages, images: packedPages.filter((p) => p.image).length }));
+
+  const packedOpened = await openEpub(packedPath);
+  assert.strictEqual(packedOpened.textItems.length, packedPages.length, "every page is its own spine item");
+  // The anchor is the whole point: the contents list names p-003.xhtml#toc-002,
+  // the page is item/xhtml/p-003.xhtml. They must still match.
+  assert.strictEqual(
+    packedOpened.titles.get("item/xhtml/p-003.xhtml"),
+    "第一章 僕ってほんと、どこにでもいる平凡なヤツなんだ",
+    "a nav entry with an #anchor still resolves to its page"
+  );
+  assert.strictEqual(packedOpened.titles.get("item/xhtml/p-003.xhtml#toc-002"), undefined, "the anchor is not kept as a key");
+  const bodymatterEntry = packedOpened.navEntries.find((e) => e.zipPath === "item/xhtml/p-fmatter-001.xhtml");
+  assert.ok(bodymatterEntry && bodymatterEntry.inToc === false, "a landmarks-only pointer is not a contents entry");
+  assert.deepStrictEqual(bodymatterEntry.types, ["bodymatter"], "epub:type is carried through");
+
+  // What the intake agent sees: the PAGE count and the book's own chapter list are
+  // different numbers, and the tool says so (a 14-page book is a 3-chapter book).
+  const packedTools = await harness.createEpubTools({ cwd: dir, allowedDirs: [dir], sampleChars: 40 });
+  const packedInfo = JSON.parse(await packedTools.tools.epubInfo.execute({ filePath: "packed.epub" }));
+  assert.strictEqual(packedInfo.readableSections, packedPages.length, "readableSections counts pages");
+  assert.strictEqual(packedInfo.contentsList.length, 3, "contentsList names the book's real sections, not its pages");
+  assert.ok(!packedInfo.contentsList.some((t) => /表紙|目次|奥付|本編/.test(t)), "packaging is not in the contents list");
+
+  const packedDir = path.join(dir, "Packed(01)");
+  await fs.promises.mkdir(packedDir, { recursive: true });
+  const packed = await extractEpubToBundle(packedPath, packedDir, "packed");
+
+  assert.deepStrictEqual(
+    packed.segments.map((s) => s.id),
+    ["ch0", "ch1", "ch2"],
+    "14 spine pages → 3 chapters (prologue + 2 chapters), not 14"
+  );
+  assert.deepStrictEqual(
+    packed.segments.map((s) => s.title),
+    [
+      "プロローグ 俺はお前と会いたくない",
+      "第一章 僕ってほんと、どこにでもいる平凡なヤツなんだ",
+      "第二章 僕と俺のバトンタッチ",
+    ],
+    "the real chapter titles are recovered (not the series title on every page)"
+  );
+  assert.ok(packed.segments.every((s) => !s.empty), "no phantom 'empty in source' chapters");
+
+  // The chapter the packager split across two files is ONE chapter.
+  const ch2Text = await fs.promises.readFile(path.join(packedDir, "packed-ch2.md"), "utf-8");
+  assert.ok(ch2Text.includes("第二章の前半。"), "the first half is in the chapter");
+  assert.ok(ch2Text.includes("第二章の後半。"), "the second half is in the SAME chapter");
+  assert.ok(!ch2Text.includes("第一章の本文。"), "the halves are not merged across a chapter boundary");
+
+  // Front and back matter are recorded, not translated.
+  const packagingTitles = packed.packaging.map((p) => p.title);
+  assert.ok(packagingTitles.includes("表紙"), "the cover is recorded as packaging");
+  assert.ok(packagingTitles.includes("目次"), "the contents page is recorded as packaging");
+  assert.ok(packagingTitles.includes("奥付"), "the colophon is recorded as packaging");
+  const packedWhole = await fs.promises.readFile(path.join(packedDir, packed.wholeFile), "utf-8");
+  assert.ok(!packedWhole.includes("著作権は株式会社KADOKAWA"), "the legal notice is not published as part of the book");
+  assert.ok(!packedWhole.includes("発行 2016年3月10日"), "the colophon is not published as part of the book");
+  assert.ok(packedWhole.includes("第一章の本文。"), "the chapter text IS published");
+
+  // Fail-open: a book whose navigation names no chapters falls back to one
+  // chapter per page rather than silently producing a zero-chapter volume.
+  const noNavPath = path.join(dir, "nonav.epub");
+  await fs.promises.writeFile(
+    noNavPath,
+    await buildPackedEpub({
+      title: "No Nav",
+      pages: [
+        { file: "a", text: "最初の章の本文。" + "本文本文本文。".repeat(30) },
+        { file: "b", text: "二番目の章の本文。" + "本文本文本文。".repeat(30) },
+      ],
+    })
+  );
+  const noNav = await extractEpubToBundle(noNavPath, await makeVolumeDir(dir, "NoNav(01)"), "nonav");
+  assert.strictEqual(noNav.segments.length, 2, "no usable contents list → one chapter per page (fail-open)");
+  assert.deepStrictEqual(noNav.packaging, [], "the fallback does not throw pages away");
+
+  // ─── the grouping + classification rules, in isolation ─────────────────────
+  const {
+    stripHrefFragment,
+    groupSpineIntoChapters,
+    classifyNavEntry,
+    classifySectionGroup,
+    titleOfUnnamedSection,
+    textCharsOf,
+    stripRepeatedHeading,
+  } = require("../utils/source");
+  assert.strictEqual(stripHrefFragment("xhtml/p-003.xhtml#toc-002"), "xhtml/p-003.xhtml");
+  assert.strictEqual(stripHrefFragment("xhtml/p-003.xhtml?a=1"), "xhtml/p-003.xhtml");
+  assert.strictEqual(stripHrefFragment("xhtml/p-003.xhtml"), "xhtml/p-003.xhtml");
+
+  const fakeSections = [{ zipPath: "a" }, { zipPath: "b" }, { zipPath: "c" }, { zipPath: "d" }];
+  const fakeNav = [
+    { zipPath: "a", title: "第一章", inToc: true, types: [] },
+    { zipPath: "c", title: "第二章", inToc: true, types: [] },
+  ];
+  const fakeGroups = groupSpineIntoChapters(fakeSections, fakeNav);
+  assert.deepStrictEqual(
+    fakeGroups.map((g) => [g.title, g.indices]),
+    [["第一章", [0, 1]], ["第二章", [2, 3]]],
+    "an unnamed page joins the open chapter"
+  );
+  assert.strictEqual(classifySectionGroup(fakeGroups[0]).chapter, true, "a named contents entry is a chapter");
+  assert.strictEqual(classifySectionGroup({ title: "目次", declared: true, inToc: true, types: [] }).chapter, false, "a contents label is packaging");
+  assert.strictEqual(classifySectionGroup({ title: "Something", declared: true, inToc: true, types: ["cover"] }).chapter, false, "epub:type=cover is packaging");
+  assert.strictEqual(classifySectionGroup({ title: "本編", declared: true, inToc: false, types: ["bodymatter"] }).chapter, false, "a landmarks pointer is packaging");
+  assert.strictEqual(classifySectionGroup({ title: "", declared: false, inToc: false, types: [] }).chapter, false, "an undeclared page is packaging");
+  assert.strictEqual(
+    classifySectionGroup({ title: "Chapter 1", declared: true, inToc: true, types: [] }).chapter,
+    true,
+    "an unrecognized label stays a chapter (the safe direction)"
+  );
+  assert.strictEqual(stripRepeatedHeading("# 第一章 出会い\n\n本文", "第一章 出会い"), "本文", "a repeated heading is dropped");
+  assert.strictEqual(stripRepeatedHeading("# 小さな間\n\n本文", "第一章"), "# 小さな間\n\n本文", "a real sub-heading survives");
+
+  // An unnamed page joins a CHAPTER, never packaging — the rule that keeps a real
+  // story (volumes 5 and 13) from becoming the cover's fine print.
+  const mixedGroups = groupSpineIntoChapters(
+    [{ zipPath: "cover" }, { zipPath: "story" }, { zipPath: "more" }, { zipPath: "ch1" }],
+    [{ zipPath: "cover", title: "表紙", inToc: true, types: ["cover"] }, { zipPath: "ch1", title: "第一章", inToc: true, types: [] }]
+  );
+  assert.deepStrictEqual(
+    mixedGroups.map((g) => [g.kind, g.indices]),
+    [["packaging", [0]], ["undeclared", [1, 2]], ["chapter", [3]]],
+    "an unnamed page after packaging starts its own group instead of joining the cover"
+  );
+  // A book whose nav names NONE of its readable pages gives no boundary to group
+  // by: null, so the caller falls back to one chapter per page.
+  assert.strictEqual(
+    groupSpineIntoChapters([{ zipPath: "a" }, { zipPath: "b" }], [{ zipPath: "somewhere-else", title: "x", inToc: true, types: [] }]),
+    null,
+    "a nav that names none of the pages is not a grouping"
+  );
+  assert.strictEqual(groupSpineIntoChapters([{ zipPath: "a" }], []), null, "no nav at all is not a grouping");
+
+  // What a page DECLARES itself to be decides before any length does.
+  assert.strictEqual(classifyNavEntry({ title: "奥付", inToc: true, types: [] }).chapter, false, "a colophon title is packaging");
+  assert.strictEqual(classifyNavEntry({ title: "目次", inToc: true, types: ["toc"] }).chapter, false, "a toc entry is packaging");
+  assert.strictEqual(classifyNavEntry({ title: "プロローグ", inToc: true, types: [] }).chapter, true, "a prologue is a chapter");
+  assert.strictEqual(classifyNavEntry({ title: "第一章", inToc: false, types: [] }).chapter, false, "a landmark pointer is not a contents entry");
+
+  // An unnamed section's title comes from what the page prints, and a long first
+  // line is prose — the section stays untitled rather than being named after its
+  // opening sentence.
+  assert.deepStrictEqual(titleOfUnnamedSection(["【俺とあいつが出会うまで】"], ""), { title: "【俺とあいつが出会うまで】", synthetic: false });
+  assert.deepStrictEqual(titleOfUnnamedSection([], "【小さな章】\n\n本文。"), { title: "【小さな章】", synthetic: false });
+  assert.strictEqual(titleOfUnnamedSection([], "どうして、こんなことになっちまったんだよ……。").synthetic, true, "an opening line is not a title");
+  assert.strictEqual(titleOfUnnamedSection([], "![img](images/i.jpg)\n\n【章】").title, "【章】", "image markup is not a title");
+
+  // Markdown image markup is not text: five illustration pages are not a section.
+  assert.strictEqual(textCharsOf("![illustration](images/i1.jpg)\n\n![plate](images/i2.jpg)"), 0, "image markup counts as nothing");
+  assert.ok(textCharsOf("本文がここにあります。") > 0, "real text counts");
+  assert.strictEqual(
+    classifySectionGroup({ title: "", declared: false, inToc: false, types: [] }, textCharsOf("![i](images/i.jpg)")).chapter,
+    false,
+    "a run of plates is packaging"
+  );
+  assert.strictEqual(
+    classifySectionGroup({ title: "", declared: false, inToc: false, types: [] }, 8539).chapter,
+    true,
+    "an unnamed group holding real text is a chapter"
+  );
 
   // ─── plain-text chunking: the chapter-by-chapter fallback for big .md/.txt ──
   // Paragraph-aware, lossless, and a giant paragraph is its own segment.
@@ -572,6 +853,10 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   // story is. It can override the agent when the file is objectively not a book.
   process.env.DISCOVER_MIN_VOLUME_TEXT_CHARS = "200";
   assert.strictEqual(minVolumeTextChars(), 200, "the floor is env-driven");
+  assert.strictEqual(artbookMaxTextChars(), 20000, "the art-book prose ceiling has a default");
+  process.env.DISCOVER_ARTBOOK_MAX_TEXT_CHARS = "500";
+  assert.strictEqual(artbookMaxTextChars(), 500, "and that ceiling is env-driven too");
+  delete process.env.DISCOVER_ARTBOOK_MAX_TEXT_CHARS;
 
   const shapeDir = makeTmpDir("ai-client-shape-");
   // A real epub with one short section → too thin by the (raised) floor.
@@ -596,19 +881,45 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.strictEqual(noText.ok, false, "an archive with no text section is rejected");
   assert.ok(/no readable text/.test(noText.problem), "and why");
 
-  // An art book: plenty of text, overwhelmingly images → rejected.
+  // An art book: a real image payload and no book's worth of prose → rejected.
   await fs.promises.mkdir(path.join(shapeDir, "Art(01)"), { recursive: true });
   const artZip = new JSZip();
   artZip.file("META-INF/container.xml", `<?xml version="1.0"?><container version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>`);
   const artOpf = `<?xml version="1.0"?><package xmlns="http://www.idli.org/2007/ops" version="3.0"><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/><item id="img" href="big.png" media-type="image/png"/></manifest><spine><itemref idref="c1"/><itemref idref="img"/></spine></package>`;
   artZip.file("OEBPS/content.opf", artOpf);
-  artZip.file("OEBPS/c1.xhtml", `<html><body><p>${"a ".repeat(200)}prose that clears the floor so the image test is the one that fires.</p></body></html>`);
-  // ~300KB of "image" bytes — 200KB of text × 4 is 800KB, so this must trip.
-  artZip.file("OEBPS/big.png", Buffer.alloc(300 * 1024, 0x00));
+  artZip.file("OEBPS/c1.xhtml", `<html><body><p>${"a ".repeat(600)}captions that clear the floor so the art-book test is the one that fires.</p></body></html>`);
+  // 6 MB of image bytes against ~1.2 KB of text pages: an archive that is a
+  // picture book, whatever the intake agent called it.
+  artZip.file("OEBPS/big.png", Buffer.alloc(6 * 1024 * 1024, 0x00));
   await fs.promises.writeFile(path.join(shapeDir, "Art(01)", "art.epub"), await artZip.generateAsync({ type: "nodebuffer" }));
   let art = await checkVolumeSourceShape(shapeDir, { folder: "Art(01)", sourceFile: "Art(01)/art.epub" });
-  assert.strictEqual(art.ok, false, "an image-dominated archive is rejected");
-  assert.ok(/overwhelmingly non-text/.test(art.problem), "and it is called an art book");
+  assert.strictEqual(art.ok, false, "an image-dominated archive with thin prose is rejected");
+  assert.ok(/art book/.test(art.problem), "and it is called an art book");
+
+  // The regression that mattered: a REAL illustrated novel. Most of the archive
+  // is image bytes, the first sections are cover/colophon/caution/table-of-
+  // contents with almost no text, and the prose is enormous. Sampling the opening
+  // sections and comparing the file's bytes against a character count rejected
+  // every volume of a real 17-book series as an art book (observed live).
+  await fs.promises.mkdir(path.join(shapeDir, "Novel(01)"), { recursive: true });
+  await writeEpub(path.join(shapeDir, "Novel(01)"), "novel.epub", {
+    title: "Novel",
+    series: "S",
+    seriesIndex: 1,
+    sections: [
+      ...["cover", "fmatter", "caution", "toc"].map((f) => ({ file: `p-${f}.xhtml`, title: f, text: "短" })),
+      ...Array.from({ length: 12 }, (_, i) => ({
+        file: `p-${i + 1}.xhtml`,
+        title: `Chapter ${i + 1}`,
+        text: JP_TEXT.repeat(400), // ~12k characters of real prose per chapter
+      })),
+    ],
+    images: 24,
+    imageBytes: 500 * 1024, // 12 MB of illustration plates: most of the archive
+  });
+  let novel = await checkVolumeSourceShape(shapeDir, { folder: "Novel(01)", sourceFile: "Novel(01)/novel.epub" });
+  assert.strictEqual(novel.ok, true, "an illustrated book with a book's worth of prose is NOT an art book");
+  assert.ok(novel.stats.textChars > 20000, "and its prose is measured across the book, not sampled from the front matter");
 
   // A sound book: text clears the floor, images are modest.
   await fs.promises.mkdir(path.join(shapeDir, "Good(01)"), { recursive: true });
@@ -1114,7 +1425,13 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   setSeriesEnv(liveDir);
   stubIntakeAgent([{ manifest: { schema: MANIFEST_SCHEMA, seriesName: "Broken" } }]);
   const before = await fs.promises.readFile(path.join(liveDir, intake.MANIFEST_FILE_NAME), "utf-8");
-  await assert.rejects(() => intake.getTranslationTarget({ forceIntake: true }), /intake failed/i);
+  const failedIntake = await intake.getTranslationTarget({ forceIntake: true }).catch((err) => err);
+  assert.ok(failedIntake && /intake failed/i.test(failedIntake.message), "a failed intake fails loudly");
+  assert.strictEqual(
+    isStructuralError(failedIntake),
+    true,
+    "and it is tagged STRUCTURAL: with no plan of record no later step can run, so ON_TASK_ERROR=continue must not walk into it"
+  );
   assert.strictEqual(
     await fs.promises.readFile(path.join(liveDir, intake.MANIFEST_FILE_NAME), "utf-8"),
     before,

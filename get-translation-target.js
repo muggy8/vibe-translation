@@ -86,7 +86,8 @@ const {
 const { fileExists } = require("./utils/fs");
 const { transformUserPrompt } = require("./utils/prompt");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { sha256OfFile, openEpub, isEpubPath, readEpubSection } = require("./utils/source");
+const { sha256OfFile, openEpub, isEpubPath, htmlToPlainText } = require("./utils/source");
+const { structuralError } = require("./configs/shared");
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -376,7 +377,21 @@ function validateVolumeIntegrity(integrity, where) {
 }
 
 /**
- * The objective half of "is this a book?" placeholder-removed
+ * How thin a book's prose has to be before the archive's composition is allowed
+ * to override the intake agent's judgment with "this is an art book".
+ *
+ * NOT a length rule for volumes — a real volume sits far above it (observed: a
+ * 17-volume series whose books run 128k–176k characters each). It is only the
+ * ceiling under which an image-dominated archive may be rejected.
+ *
+ * Read from .env (DISCOVER_ARTBOOK_MAX_TEXT_CHARS, default 20000).
+ *
+ * @returns {number}
+ */
+function artbookMaxTextChars() {
+  const n = parseInt(process.env.DISCOVER_ARTBOOK_MAX_TEXT_CHARS, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 20000;
+}
 
 /**
  * The objective half of "is this a book?" — the checks that need no guessing
@@ -388,12 +403,12 @@ function validateVolumeIntegrity(integrity, where) {
  *   - an archive with no readable text section is not a book;
  *   - a file that yields essentially no text is binary junk or a stub;
  *   - a text file that is mostly undecodable bytes is a binary file renamed;
- *   - an archive dominated by images is an art book by construction, whatever
+ *   - an archive whose images dwarf a thin prose count is an art book, whatever
  *     the agent called it.
  *
  * @param {string} seriesDir - The series location.
  * @param {TranslationTargetVolume} volume - The volume (sourceFile resolved against seriesDir).
- * @returns {Promise<{ok: boolean, problem?: string, stats: {textChars: number, imageBytes: number, sections: number}}>}  
+ * @returns {Promise<{ok: boolean, problem?: string, stats: {textChars: number, imageBytes: number, sections: number}}>}
  *   `ok` false = a hard structural problem; `problem` explains it.
  */
 async function checkVolumeSourceShape(seriesDir, volume) {
@@ -416,15 +431,21 @@ async function checkVolumeSourceShape(seriesDir, volume) {
         problem: `"${volume.sourceFile}" has no readable text sections at all — an archive with nothing to read is not a volume.`,
       };
     }
-    // Bounded sampling: a 17-book intake must not read every book whole.
+    // Count the prose ACROSS THE BOOK, stopping as soon as it is obvious the book
+    // is a book. Sampling the first N sections is not a measurement: for a real
+    // novel those sections are the cover, the colophon, the caution page and the
+    // table of contents (observed live: a 151,245-character book sampled to
+    // 8,419, and all 17 volumes of a real series were rejected as art books).
+    const ceiling = artbookMaxTextChars();
     let textChars = 0;
-    for (const section of sections.slice(0, 12)) {
+    for (const section of sections) {
       try {
-        const slice = await readEpubSection(book, section.index, { offset: 0, limit: 4000 });
-        textChars += (slice && slice.text ? slice.text.length : 0);
+        const html = await book.zip.file(section.zipPath).async("string");
+        textChars += htmlToPlainText(html).length;
       } catch {
         /* an unreadable section just contributes nothing; the floors below catch it */
       }
+      if (textChars > ceiling) break; // both checks below are already satisfied
     }
     stats.textChars = textChars;
     const floor = minVolumeTextChars();
@@ -438,33 +459,32 @@ async function checkVolumeSourceShape(seriesDir, volume) {
           `"this file contains a readable text at all".`,
       };
     }
-    // Art-book signal: the whole file's bytes against its text. A text book
-    // compresses to roughly its text size; an art book is almost all image
-    // bytes, so its file is many times larger than its prose. (JSZip does not
-    // expose per-entry uncompressed sizes until each file is read, and reading
-    // every image of a 17-book intake to weigh them is exactly the cost this
-    // check exists to avoid.)
-    let fileSize = 0;
-    try {
-      fileSize = (await fs.stat(sourcePath)).size;
-    } catch {
-      fileSize = 0;
-    }
-    stats.imageBytes = fileSize; // the archive-byte total
-    // A real art book is a LARGE file with proportionally little prose. A tiny
-    // text book (one short chapter) is dominated by the archive's fixed
-    // overhead — container, OPF, XHTML wrapper — not by images, so the ratio
-    // is only trusted once the file is big enough to actually hold images.
-    const MIN_ARTBOOK_FILE_BYTES = 50 * 1024;
-    if (fileSize > MIN_ARTBOOK_FILE_BYTES && fileSize > textChars * 30) {
+    // Art-book signal: BYTES compared against BYTES, and only when the prose is
+    // thin enough for the archive's composition to outweigh the agent's judgment.
+    // "the file is far bigger than its text" identifies nothing — a real light
+    // novel IS mostly image bytes (observed: a 9.6 MB book holding 575 KB of
+    // XHTML and 9.2 MB of illustration plates), so that rule called every
+    // illustrated book an art book. The sizes come from the zip's central
+    // directory, so no image is ever decompressed.
+    const payload = book.payload || { textBytes: 0, otherBytes: 0 };
+    stats.imageBytes = payload.otherBytes;
+    const MIN_ARTBOOK_IMAGE_BYTES = 5 * 1024 * 1024; // below this the archive holds no real image payload
+    const ARTBOOK_IMAGE_RATIO = 20; // images at least this many times the text pages
+    if (
+      payload.textBytes > 0 &&
+      payload.otherBytes >= MIN_ARTBOOK_IMAGE_BYTES &&
+      payload.otherBytes >= ARTBOOK_IMAGE_RATIO * payload.textBytes &&
+      textChars <= ceiling
+    ) {
       return {
         ok: false,
         stats,
         problem:
-          `"${volume.sourceFile}" is ${(fileSize / 1024).toFixed(0)} KB of archive for only ` +
-          `${textChars} characters of text — overwhelmingly non-text, i.e. an art book, ` +
-          `whatever the intake agent reported. Exclude it, or lower DISCOVER_MIN_VOLUME_TEXT_CHARS ` +
-          `if this book really is thin.`,
+          `"${volume.sourceFile}" carries ${(payload.otherBytes / 1024 / 1024).toFixed(1)} MB of images ` +
+          `against ${(payload.textBytes / 1024).toFixed(0)} KB of text pages, and only ${textChars} ` +
+          `characters of prose — an image-dominated archive with no book's worth of text in it, i.e. ` +
+          `an art book, whatever the intake agent reported. Exclude it, or raise ` +
+          `DISCOVER_ARTBOOK_MAX_TEXT_CHARS (now ${ceiling}) if this book really is that thin.`,
       };
     }
     return { ok: true, stats };
@@ -1591,7 +1611,13 @@ async function getTranslationTarget({ forceIntake = false, dryRun = false } = {}
     }
   }
   if (!manifest) {
-    throw new Error(
+    // Structural: without a plan of record there is nothing any later step can
+    // do, so ON_TASK_ERROR=continue must not walk the rest of the pipeline into
+    // the same wall (observed live: a rejected plan made all nine steps re-run
+    // the intake, three attempts each, the last ones against the translator
+    // container the translate hook had just switched in — which cannot act as an
+    // agent at all, so it answered with nothing).
+    throw structuralError(
       `Series intake failed after ${attempts} attempt(s): ` +
         `${lastError ? lastError.message : "unknown error"} Inspect ${manifestPath}, ` +
         `${planPath}, and the run log under .logs/, then re-run with --force.`
@@ -1673,6 +1699,7 @@ module.exports = {
   checkVolumeSourceShape,
   volumeIntegrityProblems,
   minVolumeTextChars,
+  artbookMaxTextChars,
   confidenceGate,
   createIntakeApprove,
   buildDiscoveryTurnPrompt,
