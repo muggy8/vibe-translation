@@ -1404,32 +1404,85 @@ const stateFile = path.join(tmp, "translation-state.json");
     const { assertWroteWithFallback, assertRealOutput, isPlaceholderContent } = require("../utils/fs");
     const fbDir = path.join(tmp, "fb");
     fs.mkdirSync(fbDir, { recursive: true });
+
+    // A plausible artifact: a headed Markdown document over the fallback floor.
+    // Every "written from the chat reply" case below has to hand the gate a real
+    // document, because the gate is what stopped a 164-character planning
+    // sentence from becoming a volume's character-voice reference (gotcha 58).
+    const plausibleDoc = `# Recovered Artifact\n\nSection body. ${"body text. ".repeat(300)}`;
+
     const okFile = path.join(fbDir, "ok.md");
     fs.writeFileSync(okFile, "already written\n", "utf8");
     // File exists → false (the caller must NOT send a recovery turn).
-    assert.strictEqual(await assertWroteWithFallback(okFile, "the test agent", "chat reply"), false);
+    assert.strictEqual(await assertWroteWithFallback(okFile, "the test agent", plausibleDoc), false);
     assert.strictEqual(fs.readFileSync(okFile, "utf8"), "already written\n"); // untouched
 
-    // File missing + content → true, and the file is written from the content.
+    // File missing + a plausible document → true, and the file is written from it.
     const missingFile = path.join(fbDir, "missing.md");
     assert.strictEqual(
-      await assertWroteWithFallback(missingFile, "the test agent", "recovered content"),
+      await assertWroteWithFallback(missingFile, "the test agent", plausibleDoc),
       true
     );
-    assert.strictEqual(fs.readFileSync(missingFile, "utf8"), "recovered content");
+    assert.strictEqual(fs.readFileSync(missingFile, "utf8"), plausibleDoc);
+
+    // File missing + a chat reply that is NOT the document → true (recovery still
+    // needed) but NOTHING written. This is the corruption gate: observed live, an
+    // author agent's 164-character note about splitting two long lines became the
+    // volume's character voice reference, and then the series-level one.
+    const chatFile = path.join(fbDir, "chat-only.md");
+    assert.strictEqual(
+      await assertWroteWithFallback(
+        chatFile,
+        "the test agent",
+        "I need the full content of two very long lines in the previous reference. " +
+          "Let me temporarily split them (and restore them afterwards) so I can read them completely."
+      ),
+      true
+    );
+    assert.ok(!fs.existsSync(chatFile), "a sentence about a plan is never written as an artifact");
 
     // File missing + no content → true (recovery still needed), nothing written.
     const noContentFile = path.join(fbDir, "nocontent.md");
     assert.strictEqual(await assertWroteWithFallback(noContentFile, "the test agent", ""), true);
     assert.ok(!fs.existsSync(noContentFile));
 
-    // Multiple files: all present → false; one missing → true (and written).
+    // Multiple files: all present → false; one missing + a plausible document →
+    // true (and written).
     const a = path.join(fbDir, "a.md");
     const b = path.join(fbDir, "b.md");
     fs.writeFileSync(a, "a\n", "utf8");
-    assert.strictEqual(await assertWroteWithFallback([a, b], "the test agent", "content"), true);
-    assert.strictEqual(fs.readFileSync(b, "utf8"), "content");
-    assert.strictEqual(await assertWroteWithFallback([a, b], "the test agent", "content"), false);
+    assert.strictEqual(await assertWroteWithFallback([a, b], "the test agent", plausibleDoc), true);
+    assert.strictEqual(fs.readFileSync(b, "utf8"), plausibleDoc);
+    assert.strictEqual(await assertWroteWithFallback([a, b], "the test agent", plausibleDoc), false);
+
+    // TWO missing outputs + one chat reply → NOTHING is written. One reply cannot
+    // be the content of two different documents; observed live, the same reply
+    // was written into both a character voice reference and a POV map, turning one
+    // missing artifact into two wrong ones.
+    const c = path.join(fbDir, "c.md");
+    const d = path.join(fbDir, "d.md");
+    assert.strictEqual(await assertWroteWithFallback([c, d], "the test agent", plausibleDoc), true);
+    assert.ok(!fs.existsSync(c) && !fs.existsSync(d), "one reply is not duplicated across two artifacts");
+  }
+
+  // ─── looksLikeArtifact: the plausibility gate itself (utils/fs.js) ───────────
+  {
+    const { looksLikeArtifact, FALLBACK_MIN_CONTENT_CHARS } = require("../utils/fs");
+    assert.ok(FALLBACK_MIN_CONTENT_CHARS >= 500, "the floor is sized above planning narration");
+
+    // The two live cases, verbatim in shape: both refused.
+    assert.strictEqual(looksLikeArtifact("I need the full content of two very long lines in the previous reference. Let me temporarily split them (and restore them afterwards) so I can read them completely.").ok, false, "164 chars of planning narration");
+    assert.strictEqual(looksLikeArtifact(null).ok, false, "no reply at all");
+    assert.strictEqual(looksLikeArtifact("   ").ok, false, "whitespace");
+
+    // A headed document of substance is accepted; so is a table-only one (the
+    // glossary's shape).
+    assert.strictEqual(looksLikeArtifact(`# Glossary — Series\n\n| Source | Target | Notes |\n|---|---|---|\n${"| a | b | c |\n".repeat(120)}`).ok, true, "headed table document");
+    assert.strictEqual(looksLikeArtifact(`## Plot Summary\n\n${"x".repeat(1500)}`).ok, true, "headed prose document");
+    // Long, but not a document: still refused (size alone is not evidence).
+    const longNarration = looksLikeArtifact(`${"I will now write the file with the complete reference. ".repeat(40)}`);
+    assert.strictEqual(longNarration.ok, false, "a long reply with no heading and no table");
+    assert.match(longNarration.reason, /no Markdown heading/);
   }
 
   // ─── empty / scaffold-stub output is NOT "written" (utils/fs.js) ───────────
@@ -1437,6 +1490,7 @@ const stateFile = path.join(tmp, "translation-state.json");
     const { assertWroteWithFallback, assertRealOutput, isPlaceholderContent } = require("../utils/fs");
     const stubDir = path.join(tmp, "stub");
     fs.mkdirSync(stubDir, { recursive: true });
+    const plausibleDoc = `# Recovered Artifact\n\nSection body. ${"body text. ".repeat(300)}`;
 
     // The pure detector.
     assert.strictEqual(isPlaceholderContent(null), true, "absent file");
@@ -1451,21 +1505,30 @@ const stateFile = path.join(tmp, "translation-state.json");
     const emptyFile = path.join(stubDir, "empty.md");
     fs.writeFileSync(emptyFile, "", "utf8");
     assert.strictEqual(
-      await assertWroteWithFallback(emptyFile, "the test agent", "recovered"),
+      await assertWroteWithFallback(emptyFile, "the test agent", plausibleDoc),
       true,
       "an empty file counts as missing"
     );
-    assert.strictEqual(fs.readFileSync(emptyFile, "utf8"), "recovered");
+    assert.strictEqual(fs.readFileSync(emptyFile, "utf8"), plausibleDoc);
+
+    // …but an empty file is NOT filled with a reply that is not a document: it is
+    // left empty so assertRealOutput can fail the volume loudly after the
+    // recovery turn, instead of a plausible-looking wrong file being audited and
+    // published.
+    const emptyShort = path.join(stubDir, "empty-short.md");
+    fs.writeFileSync(emptyShort, "", "utf8");
+    assert.strictEqual(await assertWroteWithFallback(emptyShort, "the test agent", "too short"), true);
+    assert.strictEqual(fs.readFileSync(emptyShort, "utf8"), "", "left empty for the recovery turn");
 
     // A scaffold stub must be OVERWRITTEN by the fallback, not left alone.
     const stubFile = path.join(stubDir, "wiki.md");
     fs.writeFileSync(stubFile, "(stub — the agent replaces this with the complete volume wiki)\n", "utf8");
     assert.strictEqual(
-      await assertWroteWithFallback(stubFile, "the wiki agent", "# Wiki\nreal content"),
+      await assertWroteWithFallback(stubFile, "the wiki agent", plausibleDoc),
       true,
       "a stub counts as missing"
     );
-    assert.strictEqual(fs.readFileSync(stubFile, "utf8"), "# Wiki\nreal content");
+    assert.strictEqual(fs.readFileSync(stubFile, "utf8"), plausibleDoc);
     // …and once it holds real content, it is no longer missing.
     assert.strictEqual(await assertWroteWithFallback(stubFile, "the wiki agent", "x"), false);
 

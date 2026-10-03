@@ -607,6 +607,11 @@ async function polishVolumePhaseA(ctx) {
   // Phase A is done: the candidates and the findings are on disk. Phase B (the
   // cross-model audit) is driven by the TASK, across every volume at once, so
   // the container switch happens once per round for the whole run.
+  // The languages travel with the volume context: Phase B (finishPolishVolume)
+  // re-merges the volume, and the merge needs the pair to decide which chapters
+  // look truncated. Handing them back here is what keeps Phase A's ctx and
+  // Phase B's vc the same object — they used to disagree, and the merge died
+  // with `sourceLanguage is not defined` on every volume of every run.
   return {
     volume,
     volumeDir,
@@ -620,6 +625,8 @@ async function polishVolumePhaseA(ctx) {
     rejected,
     noDraft,
     auditPending,
+    sourceLanguage,
+    targetLanguage,
   };
 }
 
@@ -767,12 +774,25 @@ async function runPolishRepairRound(vc, { systemPrompt, template, endpoint }) {
  * merge publishes the draft), re-merge translation.md, and write the polish
  * report.
  *
- * @param {Object} vc - The volume context.
+ * `vc` is the object {@link polishVolumePhaseA} returns — the merge at the end
+ * needs the language pair out of it, so it is named here rather than left as an
+ * untyped bag (the missing pair was a run-killing ReferenceError).
+ *
+ * @param {{
+ *   volume: {installmentNumber: string, folder: string},
+ *   volumeDir: string,
+ *   bundle: {segments: Array<{id: string, file: string, title: string}>},
+ *   state: Object,
+ *   rows: Array<Object>,
+ *   auditPending: Array<{id: string, draftHash: string}>,
+ *   sourceLanguage: string,
+ *   targetLanguage: string,
+ * }} vc - The volume context from Phase A.
  * @param {number} auditRounds - How many audit rounds ran (for the report wording).
  * @returns {Promise<{polished: number, skipped: number, rejected: number, noDraft: number, missing: Array}>}
  */
 async function finishPolishVolume(vc, auditRounds) {
-  const { volume, volumeDir, bundle, state, rows } = vc;
+  const { volume, volumeDir, bundle, state, rows, sourceLanguage, targetLanguage } = vc;
   // Any still-pending candidate failed every round — keep the DRAFT (drop the
   // polished file so the merge publishes the draft) and persist the findings
   // (the next run re-audits/re-polishes with them).
@@ -810,6 +830,13 @@ async function finishPolishVolume(vc, auditRounds) {
         `text after the polish pass: ${merged.missing.map((m) => m.id).join(", ")}.`
     );
   }
+  // Persist the rejection bookkeeping (the cleared polish hashes + the kept
+  // findings). The audit rounds saved the state before this phase, but the
+  // decision to DROP a candidate is made here — without this save the state file
+  // would still describe the polished text as the volume's latest word, and the
+  // promise that "the findings persist for the next run" would depend on some
+  // other phase having happened to save.
+  await saveTranslationState(path.join(volumeDir, STATE_FILE), state);
   const lines = [
     `# Polish QA — Volume ${volume.installmentNumber} (${volume.folder})`,
     "",

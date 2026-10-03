@@ -60,7 +60,7 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, writeProvenanceSidecar } = require("./utils/fs");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, isPublishableArtifact, writeProvenanceSidecar } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const { writeVolumeHandoff } = require("./utils/handoff");
@@ -888,11 +888,12 @@ async function jumpInWiki() {
     let lastSharedWiki = null;
     for (let i = sortedFolderWithSourceMaterial.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sortedFolderWithSourceMaterial[i], "shared-wiki.md");
-      // "Last EXISTING" must mean last REAL one. A volume whose author turn
-      // threw still leaves its scaffold stub on disk (the stub is created before
-      // the turn), and a plain fileExists() check published "(stub — the merge
-      // pass replaces this…)" as the series' living wiki.
-      if (await hasRealOutput(candidate)) {
+      // "Last EXISTING" must mean last REAL, PUBLISHABLE one. A volume whose author
+      // turn threw still leaves its scaffold stub on disk (the stub is created
+      // before the turn), and a plain fileExists() check published "(stub — the
+      // merge pass replaces this…)" as the series' living wiki. A file that is not
+      // a document at all is not publishable either (gotcha 58).
+      if (await isPublishableArtifact(candidate, "shared wiki")) {
         lastSharedWiki = candidate;
         break;
       }

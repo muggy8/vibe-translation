@@ -43,7 +43,7 @@ const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validat
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
-const { fileExists, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, hasRealOutput } = require("./utils/fs");
+const { fileExists, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const {
@@ -502,9 +502,10 @@ async function styleGuide() {
     let lastStyle = null;
     for (let i = sorted.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sorted[i], "style-guide.md");
-      // Last REAL snapshot: an empty or stubbed one left by a failed volume is
-      // not the series' current style guide.
-      if (await hasRealOutput(candidate)) { lastStyle = candidate; break; }
+      // Last REAL, PUBLISHABLE snapshot: an empty or stubbed one left by a failed
+      // volume is not the series' current style guide, and neither is a file that
+      // is not a document at all (gotcha 58).
+      if (await isPublishableArtifact(candidate, "style guide")) { lastStyle = candidate; break; }
     }
     if (lastStyle) { await fs.copyFile(lastStyle, finalStyleFile); await writeProvenanceSidecar(finalStyleFile, lastStyle); console.log(`\nCopied the final style guide to: ${finalStyleFile}`); }
     else { console.log("\nNo style guide snapshots found; nothing to copy."); }

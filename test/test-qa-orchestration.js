@@ -169,8 +169,14 @@ function writeReport(volumeDir, marker) {
  * - agent: the compile author writes the artifacts (marker "v1"; "recovered"
  *   on its recovery turn) and returns compileText; the validator writes the
  *   report; the feedback author rewrites the artifacts (marker "revised").
+ *
+ * `recoveryWritesFiles` defaults to `compileWritesFiles`. A scenario that makes
+ * the compile turn reply in chat instead of writing must say whether the
+ * recovery turn writes: the fallback no longer copies one chat reply into two
+ * different artifacts (utils/fs.js), so a two-file gap is repaired by the
+ * recovery turn or not at all.
  */
-function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = true, compileText = "wrote both files", confirmationReplies = [] } = {}) {
+function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = true, recoveryWritesFiles = compileWritesFiles, compileText = "wrote both files", confirmationReplies = [] } = {}) {
   let acceptanceIndex = 0;
   let confirmationIndex = 0;
   return {
@@ -198,8 +204,9 @@ function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = 
     agent(name, prompt, entry) {
       if (name.startsWith("author-voice-") && !name.includes("feedback")) {
         // Compile author (or its recovery turn).
-        if (compileWritesFiles) {
-          writeArtifacts(volumeDir, entry.label && entry.label.includes("recovery") ? "recovered" : "v1");
+        const isRecovery = Boolean(entry.label && entry.label.includes("recovery"));
+        if (compileWritesFiles || (isRecovery && recoveryWritesFiles)) {
+          writeArtifacts(volumeDir, isRecovery ? "recovered" : "v1");
         }
         return { text: compileText };
       }
@@ -358,15 +365,24 @@ async function scenarioLimitFailPolicy() {
 
 /**
  * Recovery turn gating: the compile agent replies in chat WITHOUT writing
- * the files → assertWroteWithFallback falls back (writes the chat reply),
- * returns true, and the recovery turn fires.
+ * the files → the fallback REFUSES to use that reply (one chat reply cannot be
+ * the content of two different documents), returns true, and the recovery turn
+ * fires and writes both files.
+ *
+ * The refused reply must never reach the disk. Observed live: the fallback wrote
+ * one 164-character planning sentence into BOTH character-voice.md and
+ * pov-map.md, and the volume passed every "was the work done?" check on it.
  */
 async function scenarioRecoveryWhenFileMissing() {
   const v = makeVolumeDir();
   const ctx = makeCtx(v);
+  // A reply big enough to clear the size floor, so what refuses it is the
+  // two-missing-outputs rule and not the length check.
+  const chatReply = `# Character Voice Reference\n\n${"carried-forward voice quirk entry. ".repeat(200)}`;
   script = makeDefaultScript(v.volumeDir, [jsonReply(90), jsonReply(95)], {
     compileWritesFiles: false,
-    compileText: "Here is the full reference content, written in chat instead of a file.",
+    recoveryWritesFiles: true,
+    compileText: chatReply,
   });
   callLog = [];
   try {
@@ -375,8 +391,13 @@ async function scenarioRecoveryWhenFileMissing() {
     assert.strictEqual(compile.length, 2, "compile + recovery turns");
     assert.strictEqual(compile[0].label, "character-voice-compile-01");
     assert.strictEqual(compile[1].label, "character-voice-compile-recovery-01", "recovery turn label kept");
-    assert.ok(fs.existsSync(ctx.voiceOutputFile), "artifact exists (fallback or recovery wrote it)");
+    assert.ok(fs.existsSync(ctx.voiceOutputFile), "artifact exists (the recovery turn wrote it)");
     assert.ok(fs.existsSync(ctx.povOutputFile), "POV map exists");
+    const voice = fs.readFileSync(ctx.voiceOutputFile, "utf8");
+    const pov = fs.readFileSync(ctx.povOutputFile, "utf8");
+    assert.ok(!voice.includes("carried-forward voice quirk entry"), "the refused chat reply never became character-voice.md");
+    assert.ok(!pov.includes("carried-forward voice quirk entry"), "the refused chat reply never became pov-map.md");
+    assert.ok(pov.includes("POV Map"), "the POV map is the recovery turn's own file, not a copy of the voice reference");
     assert.strictEqual(acceptanceLabels().length, 2, "QA loop still ran to acceptance");
   } finally {
     cleanup(v.root);
@@ -384,9 +405,11 @@ async function scenarioRecoveryWhenFileMissing() {
 }
 
 /**
- * Recovery DISABLED (AGENT_RECOVERY_ENABLED=false, read at call time): the
- * same missing-file situation falls back to the chat reply but runs NO
- * recovery turn.
+ * Recovery DISABLED (AGENT_RECOVERY_ENABLED=false, read at call time): no
+ * recovery turn runs, and because the fallback will not duplicate one chat
+ * reply across two artifacts, the volume FAILS LOUDLY instead of publishing a
+ * plausible-looking wrong pair. Turning recovery off means the hard stop is the
+ * only thing left.
  */
 async function scenarioRecoveryDisabled() {
   const prev = process.env.AGENT_RECOVERY_ENABLED;
@@ -395,14 +418,16 @@ async function scenarioRecoveryDisabled() {
   const ctx = makeCtx(v);
   script = makeDefaultScript(v.volumeDir, [jsonReply(90), jsonReply(95)], {
     compileWritesFiles: false,
-    compileText: "Reference content in chat.",
+    recoveryWritesFiles: true,
+    compileText: `# Character Voice Reference\n\n${"carried-forward voice quirk entry. ".repeat(200)}`,
   });
   callLog = [];
   try {
-    await cv.runVolume(ctx);
+    await assert.rejects(() => cv.runVolume(ctx), /never wrote real output/);
     const compile = agentCalls("author-voice-01");
     assert.strictEqual(compile.length, 1, "no recovery turn when AGENT_RECOVERY_ENABLED=false");
-    assert.ok(fs.existsSync(ctx.voiceOutputFile), "fallback still wrote the artifact from the chat reply");
+    assert.ok(!fs.existsSync(ctx.voiceOutputFile), "the chat reply was not written as the artifact");
+    assert.ok(!fs.existsSync(ctx.povOutputFile), "nor duplicated into the POV map");
   } finally {
     process.env.AGENT_RECOVERY_ENABLED = prev;
     cleanup(v.root);

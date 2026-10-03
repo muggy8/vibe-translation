@@ -637,6 +637,40 @@ function agentMaxSteps() {
 }
 
 /**
+ * Longest line an agent's readFile/grep may see (AGENT_MAX_LINE_LENGTH env,
+ * default 8000). The open-harness file tools default to 2000.
+ *
+ * The default was a lie for this pipeline's cumulative artifacts. A compiled
+ * character-voice reference holds one long line per character (2,344 chars at
+ * volume 02, 2,863 at volume 03), so an agent asked to preserve it could not read
+ * it: every read answered with a `[… truncated …]` marker. Observed consequence —
+ * an author agent split the artifact's long lines to get at them, never restored
+ * them, and its final chat reply about that plan became the artifact itself.
+ *
+ * 8000 is comfortably above the longest line any artifact has produced, and the
+ * source bundles top out at 326 chars, so this changes nothing about reading the
+ * books.
+ */
+function envMaxLineLength() {
+  const n = parseInt(process.env.AGENT_MAX_LINE_LENGTH, 10);
+  return Number.isInteger(n) && n >= 200 ? n : 8000;
+}
+
+/**
+ * Largest readFile/listFiles/grep answer in bytes (AGENT_MAX_READ_BYTES env,
+ * default 65536). The open-harness file tools default to 32 KB.
+ *
+ * Doubling it is about token cost, not convenience: reading a 150 KB artifact in
+ * five paged calls means the accumulated transcript is re-sent five times, and
+ * each re-send is billed. Fewer, larger reads is fewer billed turns — which is
+ * what made the character-voice stage cost 173M tokens for five volumes.
+ */
+function envMaxReadBytes() {
+  const n = parseInt(process.env.AGENT_MAX_READ_BYTES, 10);
+  return Number.isInteger(n) && n >= 4096 ? n : 65536;
+}
+
+/**
  * Runaway-generation guard threshold (AGENT_TEXT_GUARD_CHARS env, default 30000).
  * When an agent produces more than this many characters of text with fewer
  * than 3 tool calls, the stream is aborted. This catches models that emit
@@ -1102,7 +1136,9 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
  * Build the filesystem tools (readFile/listFiles/grep/writeFile/editFile/
  * deleteFile) with an open-harness approve() gate:
  *
- * - reads (readFile, listFiles, grep) are always allowed;
+ * - reads (readFile, listFiles, grep) are always allowed, with the line and byte
+ *   caps raised from the library defaults (see {@link envMaxLineLength} and
+ *   {@link envMaxReadBytes}) so an agent can read a whole cumulative artifact;
  * - writes/edits are confined to `allowedDirs` (paths resolved relative to
  *   `cwd`), so a wandering agent cannot clobber the rest of the series;
  * - deleteFile is denied outright (no workflow needs it).
@@ -1115,7 +1151,14 @@ async function createGatedFsTools({ cwd = process.cwd(), allowedDirs }) {
     throw new Error("createGatedFsTools requires a non-empty allowedDirs array.");
   }
   const { core } = await loadEsm();
-  const fsTools = core.createFsTools(new core.NodeFsProvider({ cwd }));
+  // The caps are raised from the library defaults (2000 chars/line, 32 KB/read):
+  // the cumulative artifacts hold lines longer than 2000 chars, and an agent that
+  // cannot faithfully re-read what it must preserve starts rewriting it from
+  // memory. See envMaxLineLength / envMaxReadBytes.
+  const fsTools = core.createFsTools(new core.NodeFsProvider({ cwd }), {
+    maxLineLength: envMaxLineLength(),
+    maxOutputBytes: envMaxReadBytes(),
+  });
   const allowed = allowedDirs.map((dir) => path.resolve(dir));
   const approve = (call) => {
     const mutating =
@@ -2079,6 +2122,8 @@ module.exports = {
   envContextWindow,
   envThinkingLevel,
   agentMaxSteps,
+  envMaxLineLength,
+  envMaxReadBytes,
   // Run logging (workflows log alongside the harness run log).
   logLine,
 };

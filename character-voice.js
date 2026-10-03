@@ -34,7 +34,7 @@ const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validat
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, hasRealOutput } = require("./utils/fs");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const {
@@ -495,9 +495,10 @@ async function characterVoice() {
     let lastVoice = null;
     for (let i = sorted.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sorted[i], "character-voice.md");
-      // Last REAL snapshot: an empty or stubbed one left by a failed volume is
-      // not the series' current voice reference.
-      if (await hasRealOutput(candidate)) { lastVoice = candidate; break; }
+      // Last REAL, PUBLISHABLE snapshot: an empty or stubbed one left by a failed
+      // volume is not the series' current voice reference, and neither is a file
+      // that is not a document at all (gotcha 58).
+      if (await isPublishableArtifact(candidate, "character voice reference")) { lastVoice = candidate; break; }
     }
     if (lastVoice) { await fs.copyFile(lastVoice, finalVoiceFile); await writeProvenanceSidecar(finalVoiceFile, lastVoice); console.log(`\nCopied the final character voice reference to: ${finalVoiceFile}`); }
     else { console.log("\nNo character voice snapshots found; nothing to copy."); }

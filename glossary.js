@@ -57,7 +57,7 @@ const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validat
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
 const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, hasRealOutput } = require("./utils/fs");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact } = require("./utils/fs");
 const { loadGlossaryDisputes } = require("./utils/disputes");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
@@ -1065,9 +1065,10 @@ async function glossary() {
     let lastGlossary = null;
     for (let i = sorted.length - 1; i >= 0; i--) {
       const candidate = path.join(seriesDir, sorted[i], "glossary.md");
-      // "Last EXISTING" means last REAL one: an empty or scaffold-stub snapshot
-      // left by a failed volume is not the series' current glossary.
-      if (await hasRealOutput(candidate)) {
+      // "Last EXISTING" means last REAL, PUBLISHABLE one: an empty or
+      // scaffold-stub snapshot left by a failed volume is not the series' current
+      // glossary, and neither is a file that is not a document at all (gotcha 58).
+      if (await isPublishableArtifact(candidate, "glossary")) {
         lastGlossary = candidate;
         break;
       }

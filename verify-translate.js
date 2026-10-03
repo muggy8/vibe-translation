@@ -104,6 +104,7 @@ const {
   VOLUME_CONSISTENCY_REPORT,
   loadTranslationState,
   STATE_FILE,
+  MERGED_FILE,
   VERIFICATION_FILE,
   VERIFICATION_REPORT,
 } = require("./utils/translate");
@@ -959,6 +960,8 @@ async function runVerificationSamples({ volume, volumeDir, bundle, refs, systemP
  *   volume: {installmentNumber: string, folder: string},
  *   volumeDir: string,
  *   bundle: {segments: Array<{id: string, file: string, title: string}>},
+ *   refs: Object,
+ *   targetLanguage?: string,
  * }} ctx
  * @returns {Promise<{rows: Array<Object>, passed: number, failed: number, noDraft: number, verified: number, skipped: number}>}
  */
