@@ -223,7 +223,12 @@ async function scenarioAgentWritesThroughRealTools() {
     const agentReq = backend.requests[0];
     const names = (agentReq.tools || []).map((t) => t.function?.name || t.name);
     assert.ok(names.includes("writeFile") && names.includes("grep"), `tools advertised: ${names.join(", ")}`);
-    assert.ok(agentReq.tools.length >= 6, `the full fs tool set is advertised (${agentReq.tools.length})`);
+    assert.deepStrictEqual(
+      [...names].sort(),
+      ["editFile", "grep", "listFiles", "readFile", "writeFile"],
+      `the agent is advertised exactly the five tools the prompt promises (got: ${names.join(", ")})`
+    );
+    assert.ok(!names.includes("deleteFile"), "deleteFile is not advertised — the gate would refuse it every time (gotcha 8)");
     ok("the agent was handed the real tool schemas (a stub that fakes tools would not get this far)");
 
     // The sandbox still applies: a write outside the allowed dirs is refused by

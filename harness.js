@@ -1406,7 +1406,9 @@ function applyFsToolContract(fsTools, cwd) {
  *   `cwd`), so a wandering agent cannot clobber the rest of the series, and never
  *   over an archive — a staged book is the source the pipeline exists to
  *   translate, and the volume folder is where the book lives;
- * - deleteFile is denied outright (no workflow needs it).
+ * - deleteFile is NOT offered at all (see {@link withoutDeleteFile}) and the gate
+ *   refuses it outright if anything still reaches for it — no workflow lets an
+ *   agent delete.
  *
  * @param {{cwd?: string, allowedDirs: string[]}} cfg
  * @returns {Promise<{tools: Object, approve: Function}>}
@@ -1443,7 +1445,32 @@ async function createGatedFsTools({ cwd = process.cwd(), allowedDirs }) {
       (dir) => resolved === dir || resolved.startsWith(dir + path.sep)
     );
   };
-  return { tools: applyFsToolContract(fsTools, cwd), approve };
+  return { tools: withoutDeleteFile(applyFsToolContract(fsTools, cwd)), approve };
+}
+
+/**
+ * Drop `deleteFile` from a tool set handed to an agent.
+ *
+ * The approve gate refuses it every time (the WORKFLOW deletes stale strays,
+ * never the agent — gotcha 8), so offering it is a promise the sandbox will not
+ * keep: the model reaches for it, gets a denial, and spends a step of a capped
+ * budget learning that it cannot (observed in the live agent transcripts: turns
+ * that reason "could I use deleteFile? No." instead of writing the artifact).
+ * It also contradicts {@link AGENT_TOOLS_NOTE}, which names the five tools the
+ * agent actually has.
+ *
+ * The gate's refusal is KEPT: a caller that composes its own tool set (the
+ * intake gate) still gets the denial, and a tool that is not advertised can
+ * still be refused if a future library version injects it.
+ *
+ * @param {Object} tools - The wrapped tool map.
+ * @returns {Object} The same map without `deleteFile`.
+ */
+function withoutDeleteFile(tools) {
+  if (!tools || !Object.prototype.hasOwnProperty.call(tools, "deleteFile")) return tools;
+  const kept = { ...tools };
+  delete kept.deleteFile;
+  return kept;
 }
 
 // ─── Event consumption ──────────────────────────────────────────────────────

@@ -561,17 +561,25 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount }) {
       offered.get(tool.name).count += 1;
     }
   }
-  // `deleteFile` is in the tool set the harness hands an agent, and the approve
-  // gate denies it every time (the workflow deletes stale strays, never the agent).
-  // Offering it is not dangerous — it is a wasted step and a confusing promise.
+  // `deleteFile` used to be in the tool set the harness hands an agent while the
+  // approve gate denied it every time (the workflow deletes stale strays, never
+  // the agent). Offering it is not dangerous — it is a wasted step and a promise
+  // the sandbox will not keep, so the harness no longer advertises it
+  // (`withoutDeleteFile` in harness.js). This rule is what keeps it from coming
+  // back: any tool offered to an agent that the pipeline's own gate refuses.
   const refused = [...offered.entries()].filter(([name]) => name === "deleteFile");
   if (refused.length) {
     findings.push({
       rule: "advertised-but-refused-tool",
       severity: "info",
       detail: `${refused[0][1].count} agent request(s) advertise \`deleteFile\`, which the approve gate denies every time. The model can reach for it, get refused, and spend a step of a capped budget learning that it cannot.`,
-      items: ["Not a bug: the denial is the sandbox (gotcha 8). The improvement is not advertising a tool the agent may never use."],
+      items: ["Not a bug: the denial is the sandbox (gotcha 8). The fix is not advertising a tool the agent may never use."],
     });
+  } else {
+    pass(
+      "advertised-but-refused-tool",
+      `the tool list and the sandbox agree: ${offered.size} distinct tool(s) offered, none of them one the gate would refuse.`
+    );
   }
 
   const stats = {

@@ -528,6 +528,17 @@ async function scenarioFileToolContract() {
     assert.strictEqual(approve({ toolName: "editFile", input: { filePath: "Series(1).epub" } }), false, "nor patch it");
     assert.strictEqual(approve({ toolName: "writeFile", input: { filePath: "glossary.md" } }), true, "the volume's own artifacts are still writable");
 
+    // A tool the sandbox will never allow is not offered at all: advertising it
+    // costs the agent a step of a capped budget learning that it cannot, and
+    // contradicts the prompt, which names only the five tools it really has.
+    assert.ok(!("deleteFile" in tools), "deleteFile is not in the tool set an agent is handed");
+    assert.deepStrictEqual(
+      Object.keys(tools).sort(),
+      ["editFile", "grep", "listFiles", "readFile", "writeFile"],
+      "the agent's tool set is exactly the five the prompt promises"
+    );
+    assert.strictEqual(approve({ toolName: "deleteFile", input: { filePath: "glossary.md" } }), false, "the gate still refuses it if anything reaches for it anyway");
+
     // The normalization rules themselves, without a filesystem in the way.
     const norm = (input) => harness.normalizeDirToolInput({ input, cwd: volumeDir, toolName: "grep" });
     assert.strictEqual((await norm({ dirPath: ".", glob: "**/*.md" })).input.glob, ".md", "a path-shaped glob reduces to its ending");
