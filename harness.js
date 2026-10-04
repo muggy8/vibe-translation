@@ -48,7 +48,7 @@ const { fileTypeFromBuffer } = require("file-type");
 const { Agent: UndiciAgent, fetch: undiciFetch } = require("undici");
 const { tool, generateText } = require("ai");
 const { z } = require("zod");
-const { readBoolEnv, tooBigForOnePassError } = require("./configs/shared");
+const { readBoolEnv, tooBigForOnePassError, isTooBigForOnePassError } = require("./configs/shared");
 
 // Local LLM servers (e.g. llama.cpp) can take many minutes to prefill a huge
 // prompt and to generate a long answer. undici's default fetch timeouts
@@ -1756,6 +1756,23 @@ async function consumeEvents(
   if (result.result === "error") {
     throw result.error ?? new Error(`The ${label} run ended in an error.`);
   }
+  // A failed model call reaches this loop as an `error` EVENT, and openharness
+  // closes the turn WITHOUT ever emitting `done` when the stream dies (it forwards
+  // `turn.start` … `error` … `turn.done`). So `result.result` stays null, nothing
+  // above looked at `result.error`, and the server's own message was thrown away:
+  // every one-shot failure — a dead container, a refused request, a provider
+  // error — surfaced as "The model returned no content". Two consequences, both
+  // observed against the scripted endpoint in test/test-fake-backend.js:
+  //   - `tagSizeOverflowError` never saw the server's "prompt + max tokens exceeds
+  //     the context" wording, so the whole-installment → chapter-by-chapter
+  //     fallback (gotcha 55) never fired for the one failure it exists to repair;
+  //   - an overnight run's log blamed the model for what was a container that was
+  //     not running.
+  // A run that reached a normal completion (`complete`, or `max_steps`) is left
+  // alone: this is for streams that ended without one.
+  if (result.error && result.result !== "complete" && result.result !== "max_steps") {
+    throw result.error;
+  }
   return result;
 }
 
@@ -1954,6 +1971,10 @@ async function runOneShot({
       // task above can act on it (a whole-installment pass may be retried
       // chapter by chapter) instead of re-running the same oversized request.
       streamError = tagSizeOverflowError(streamError, label);
+      // A request the server refused for being too large fails the same way
+      // without streaming (identical prompt, identical output cap), so the
+      // non-streaming retry would only pay for a second doomed request.
+      if (isTooBigForOnePassError(streamError)) throw streamError;
       // The streaming path failed (API error, parse error, a server that
       // does not actually stream, ...). Fall back to one non-streaming
       // call, mirroring the old call-ai.js behaviour. If the fallback also
