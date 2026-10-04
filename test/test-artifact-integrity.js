@@ -19,6 +19,17 @@
  * not read what it was required to preserve, and one such turn ended by replying
  * in chat about splitting the long lines, and that reply became the artifact.
  *
+ * The sixth block proves those same tools match how a model actually reaches for
+ * them: grep pointed at a FILE (40 ENOTDIR crashes in the live runs), grep with
+ * the wildcard every model writes — `glob: "*.md"`, which is a filename ENDING
+ * in this library and matched NOTHING, 398 times, silently — and a staged
+ * `.epub` decoded as text. Pinned both ways: the library still does all three.
+ *
+ * The seventh block pins the agent-turn log: the library's `tool.done` event is
+ * consumed (a transcript without tool RESULTS cannot tell "found nothing" from
+ * "never ran"), calls pair with their results by id, and a tool input serializes
+ * instead of printing `[object Object]`.
+ *
  * No network, no endpoint. Run with `npm test` (or standalone:
  * `node test/test-artifact-integrity.js`).
  */
@@ -411,6 +422,163 @@ async function scenarioRootCopyRefusesANonDocument() {
   }
 }
 
+// ─── 6. the file tools match how agents actually reach for them ───────────────
+
+/**
+ * The library's file tools are stricter than the way a model naturally uses
+ * them, and nothing validated the gap — the schema is "some string", so the
+ * mismatch was only discovered while a run was live. Observed on the live
+ * series (1030 logged grep calls):
+ *
+ *   - 40 calls passed a FILE as grep's `dirPath`, which the tool walks, and died
+ *     with `ENOTDIR: not a directory`. The pipeline's own prompts caused it:
+ *     they name one file and say "read it selectively with readFile/grep".
+ *   - 398 calls passed `glob: "*whole.md"` or `"*.md"`. grep's glob is a
+ *     filename ENDING (the implementation is `file.endsWith(glob)`), so those
+ *     matched NOTHING and answered "No matches found" — silently. An agent then
+ *     reports the term as absent from the source, which is the difference
+ *     between a wasted step and a wrong artifact.
+ *
+ * Pinned both ways, like the read caps above: the library still does the wrong
+ * thing, and the tools an agent is handed do not.
+ */
+async function scenarioFileToolContract() {
+  const { root, volumeDir } = makeVolumeDir();
+  try {
+    const whole = "Series(1)-whole.md";
+    fs.writeFileSync(
+      path.join(volumeDir, whole),
+      "# 俺を好きなのはお前だけかよ\n\nジョーロがそこにある。\nひまわり理論の話。\n",
+      "utf8"
+    );
+    fs.writeFileSync(path.join(volumeDir, "glossary.md"), "# Glossary\n\n| ジョーロ | Watering Can |\n", "utf8");
+    // A staged book sitting in the volume folder. The library's binary-file list
+    // knows .zip but not .epub, so a folder search used to decode it as text.
+    fs.writeFileSync(path.join(volumeDir, "Series(1).epub"), "PK\u0003\u0004ジョーロ zip noise\u0000\u0001", "utf8");
+
+    const { tools } = await harness.createGatedFsTools({ cwd: volumeDir, allowedDirs: [volumeDir] });
+
+    // The library, unpatched: both failures are real.
+    const core = await import("@openharness/core");
+    const raw = core.createFsTools(new core.NodeFsProvider({ cwd: volumeDir }), {});
+    await assert.rejects(
+      () => raw.grep.execute({ pattern: "ジョーロ", dirPath: whole }),
+      /ENOTDIR/,
+      "grep pointed at a file dies in the library (the bug)"
+    );
+    const rawStar = await raw.grep.execute({ pattern: "ひまわり", dirPath: ".", glob: "*.md" });
+    assert.strictEqual(rawStar.matchCount, 0, "glob \"*.md\" matches nothing in the library (the silent bug)");
+    assert.ok(!rawStar.error, "and it reports success while doing so");
+    const rawBooks = await raw.grep.execute({ pattern: "ジョーロ", dirPath: "." });
+    assert.ok(
+      rawBooks.matches.some((m) => m.file.endsWith(".epub")),
+      "the library reads a staged book as text and matches its zip bytes (the bug)"
+    );
+
+    // 1. grep pointed AT a file: works, and says what it did.
+    const onFile = await tools.grep.execute({ pattern: "ジョーロ", dirPath: whole });
+    assert.ok(!onFile.error, `grep on a file errored: ${onFile.error}`);
+    assert.strictEqual(onFile.matchCount, 1, "the agent's file-scoped search finds its line");
+    assert.ok(onFile.matches.every((m) => m.file === whole), "and it stayed scoped to that file");
+    assert.ok(String(onFile.status).includes("takes a FOLDER"), "the agent is told what was corrected");
+
+    // 2. the wildcard an agent writes still searches the Markdown files.
+    const star = await tools.grep.execute({ pattern: "ひまわり", dirPath: ".", glob: "*.md" });
+    assert.ok(!star.error, `grep with glob "*.md" errored: ${star.error}`);
+    assert.strictEqual(star.matchCount, 1, "the search actually ran (it used to answer zero matches)");
+    assert.ok(String(star.status).includes("filename ENDING"), "and the agent is told glob is not a wildcard");
+
+    // 3. a file name as glob narrows to that file, with no correction needed.
+    const named = await tools.grep.execute({ pattern: "ジョーロ", dirPath: ".", glob: whole });
+    assert.strictEqual(named.matchCount, 1, "glob naming one file works");
+    assert.ok(named.matches.every((m) => m.file === whole), "and only that file was searched");
+
+    // 4. a pattern from another regex dialect is explained, not thrown.
+    const badPattern = await tools.grep.execute({ pattern: "(?i)vice", dirPath: "." });
+    assert.ok(badPattern.error, "an uncompilable pattern is an answer, not a crash");
+    assert.ok(/ignoreCase/.test(badPattern.error), "and the answer names the flag the tool actually has");
+
+    // 5. listFiles on a file lists its folder instead of crashing.
+    const listed = await tools.listFiles.execute({ dirPath: whole });
+    assert.ok(!listed.error, `listFiles on a file errored: ${listed.error}`);
+    assert.ok(listed.entries.some((e) => e.name === whole), "the folder's contents came back");
+
+    // 6. a book is never searched or read as text.
+    const overFolder = await tools.grep.execute({ pattern: "ジョーロ", dirPath: "." });
+    assert.ok(
+      overFolder.matches.every((m) => !m.file.endsWith(".epub")),
+      "the folder search skips the staged book"
+    );
+    const bookRead = await tools.readFile.execute({ filePath: "Series(1).epub" });
+    assert.ok(bookRead.error && /archive, not a text file/.test(bookRead.error), "reading a book as text is refused with a reason");
+    const textRead = await tools.readFile.execute({ filePath: whole });
+    assert.ok(!textRead.error, "plain text is still readable");
+
+    // The contract is stated where the model reads it: the tool description.
+    assert.ok(/DIRECTORY/.test(tools.grep.description) && /NOT a wildcard/i.test(tools.grep.description), "grep's description states the contract");
+    assert.ok(/DIRECTORY/.test(tools.listFiles.description), "listFiles' description states the contract");
+    assert.ok(/Archives/.test(tools.readFile.description), "readFile's description says an archive is not text");
+
+    // A repair must never smuggle a path past a gate that judged the agent's own
+    // path: the gate wraps this execute and sees the input before normalization.
+    const approve = (await harness.createGatedFsTools({ cwd: volumeDir, allowedDirs: [volumeDir] })).approve;
+    assert.strictEqual(approve({ toolName: "grep", input: { dirPath: "Series(1).epub" } }), true, "reads stay allowed");
+    assert.strictEqual(approve({ toolName: "writeFile", input: { filePath: "../outside.md" } }), false, "the write gate is untouched");
+    assert.strictEqual(approve({ toolName: "writeFile", input: { filePath: "Series(1).epub" } }), false, "an agent cannot overwrite the staged book — the volume folder is where the source lives");
+    assert.strictEqual(approve({ toolName: "editFile", input: { filePath: "Series(1).epub" } }), false, "nor patch it");
+    assert.strictEqual(approve({ toolName: "writeFile", input: { filePath: "glossary.md" } }), true, "the volume's own artifacts are still writable");
+
+    // The normalization rules themselves, without a filesystem in the way.
+    const norm = (input) => harness.normalizeDirToolInput({ input, cwd: volumeDir, toolName: "grep" });
+    assert.strictEqual((await norm({ dirPath: ".", glob: "**/*.md" })).input.glob, ".md", "a path-shaped glob reduces to its ending");
+    assert.strictEqual((await norm({ dirPath: ".", glob: "*" })).input.glob, undefined, "a bare \"*\" is dropped rather than matching nothing");
+    assert.strictEqual((await norm({ dirPath: ".", glob: "-whole.md" })).input.glob, "-whole.md", "a suffix the agent got right is left alone");
+    assert.strictEqual((await norm({ dirPath: ".", glob: "sub/notes.md" })).input.glob, "notes.md", "a nested glob keeps its file name");
+    assert.strictEqual((await norm({ dirPath: ".", pattern: "x" })).input.dirPath, ".", "a correct call is not rewritten");
+    assert.strictEqual((await norm({})).input.dirPath, undefined, "a call with no dirPath is left alone (the tool's own default fills it)");
+  } finally {
+    cleanup(root);
+  }
+}
+
+// ─── 7. an agent turn's tool results survive into the chat log ────────────────
+
+/**
+ * The library emits tool.start / tool.done / tool.error. consumeEvents had no
+ * case for tool.done, so every agent transcript recorded each tool CALL and none
+ * of their answers — 0 output lines across 526 logged turns, while AGENTS.md
+ * promised "tool calls + results". That is the difference between reading "the
+ * search found nothing" and "the search could not run".
+ *
+ * escapeInline is the other half: it ran String() on a tool input, which answers
+ * "[object Object]" — every logged call was unreadable.
+ *
+ * Pairing is by toolCallId, not "the last call seen": a step fires several calls
+ * at once, and an error used to be pinned onto a call that succeeded.
+ */
+function scenarioToolCallLogging() {
+  const src = fs.readFileSync(path.join(__dirname, "..", "harness.js"), "utf8");
+  assert.ok(/case "tool\.done":/.test(src), 'consumeEvents handles the "tool.done" event (the missing case)');
+  assert.ok(/toolCallId: event\.toolCallId/.test(src), "a collected tool call carries the id that pairs it with its result");
+
+  const calls = [
+    { toolCallId: "a", name: "grep", input: { pattern: "x" }, output: null, error: null },
+    { toolCallId: "b", name: "grep", input: { pattern: "y" }, output: null, error: null },
+  ];
+  assert.strictEqual(harness.findToolCall(calls, "b"), calls[1], "a result finds its own call");
+  assert.strictEqual(harness.findToolCall(calls, "nope"), null, "an unknown id matches nothing");
+  assert.strictEqual(harness.findToolCall(calls, undefined), null, "an event without an id matches nothing");
+
+  assert.strictEqual(
+    harness.escapeInline({ pattern: "ジョーロ", dirPath: "." }),
+    '{"pattern":"ジョーロ","dirPath":"."}',
+    "a tool input is serialized, not \"[object Object]\""
+  );
+  assert.strictEqual(harness.escapeInline("plain text"), "plain text", "strings pass through");
+  assert.strictEqual(harness.escapeInline(null), "", "nothing is empty");
+  assert.strictEqual(harness.escapeInline({ a: 1, b: { c: 2 } }).length <= 500, true, "and the log line stays bounded");
+}
+
 // ─── run ─────────────────────────────────────────────────────────────────────
 
 (async function main() {
@@ -419,5 +587,7 @@ async function scenarioRootCopyRefusesANonDocument() {
   await scenarioAgentReadCaps();
   await scenarioChatReplyIsNotAnArtifact();
   await scenarioRootCopyRefusesANonDocument();
+  await scenarioFileToolContract();
+  scenarioToolCallLogging();
   console.log("artifact-integrity: all checks passed.");
 })();

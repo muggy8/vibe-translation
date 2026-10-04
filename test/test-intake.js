@@ -698,6 +698,11 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.strictEqual(intakeGate({ toolName: "readFile", input: { filePath: "loose01.epub" } }), false, "a book is not readable as text");
   assert.strictEqual(intakeGate({ toolName: "writeFile", input: { filePath: "loose01.epub" } }), false, "a book can never be overwritten");
   assert.strictEqual(intakeGate({ toolName: "editFile", input: { filePath: "Loose(01)/loose01.epub" } }), false);
+  // grep names its path `dirPath`, and "grep this book" is exactly what a prompt
+  // that names a file invites — the gate has to look at the argument the tool
+  // actually has, not only the one readFile has.
+  assert.strictEqual(intakeGate({ toolName: "grep", input: { dirPath: "loose01.epub", pattern: "x" } }), false, "grep cannot search a book");
+  assert.strictEqual(intakeGate({ toolName: "grep", input: { dirPath: "Loose(01)", pattern: "x" } }), true, "grep can still search a folder");
   assert.strictEqual(intakeGate({ toolName: "readFile", input: { filePath: "notes.txt" } }), true, "plain text is still readable");
   assert.strictEqual(intakeGate({ toolName: "writeFile", input: { filePath: "translation-target.json" } }), true, "the outputs are still writable");
   assert.strictEqual(intakeGate({ toolName: "writeFile", input: { filePath: "../outside/x.md" } }), false, "the write gate still applies");

@@ -42,7 +42,9 @@ const AGENT_TOOLS_NOTE = `
 You have file tools: readFile, listFiles, grep, writeFile, and editFile.
 - Your working folder is the volume folder; use paths relative to it (e.g. "wiki.md").
 - Read every material listed in the request with readFile before doing anything. Large files may need several reads (use offset/limit to page through).
-- Write your output files with writeFile (complete contents) or editFile (targeted fixes).
+- **grep and listFiles take a FOLDER, never a file.** To search one specific file, search its folder ("." is your working folder) and narrow with grep's "glob" — which is a filename ENDING (".md", "whole.md"), NOT a wildcard: "*.md" and "*whole.md" match NOTHING and will look like an empty source. To search one named file, pass its exact name as glob.
+- grep cannot see inside a .epub (it is an archive, not text).
+- Write your output files with writeFile (complete contents) or editFile (targeted fixes). editFile takes "oldString" (the exact text to find) and "newString".
 - When writing a complete output file (not a targeted fix), always use writeFile to **overwrite** the file entirely. Never append to an existing file.
 - For the wiki task: write to wiki.md and shared-wiki.md. For the glossary task: write to glossary.md.
 - **CRITICAL: You MUST write your output using writeFile or editFile. Do NOT output the file contents in your chat reply — the chat reply is NOT saved to disk. If you output the full content in your chat message instead of calling writeFile, the file will not exist and the run will fail.**

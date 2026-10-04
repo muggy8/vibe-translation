@@ -142,13 +142,26 @@ function escapeCodeBlock(text) {
 }
 
 /**
- * Escape text for inline code (prevents backtick issues).
- * @param {string} text - The text to escape.
+ * Escape text for inline code (prevents backtick issues). Non-strings are
+ * serialized: a tool input or a tool result is an object, and String() on one
+ * answers "[object Object]" — which made every logged tool call unreadable.
+ * @param {unknown} text - The text (or value) to escape.
  * @returns {string} The escaped text.
  */
 function escapeInline(text) {
-  if (!text) return "";
-  return String(text).replace(/`/g, "\u200B`").slice(0, 500);
+  if (text === null || text === undefined) return "";
+  let s;
+  if (typeof text === "string") {
+    s = text;
+  } else {
+    try {
+      s = JSON.stringify(text);
+    } catch {
+      s = String(text);
+    }
+    if (s === undefined) s = String(text);
+  }
+  return s.replace(/`/g, "\u200B`").slice(0, 500);
 }
 
 // Triple-backtick delimiter for Markdown code blocks (avoiding template literal syntax issues).
@@ -1132,15 +1145,267 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
   return { tools, approve };
 }
 
+// ─── File-tool contract (what the library's tools actually accept) ───────────
+//
+// The open-harness file tools are stricter than the way a language model
+// naturally reaches for them, and nothing in the request validates the gap — the
+// schema is "some string", so a wrong shape is only discovered when the tool
+// runs. Two shapes bit the live series:
+//
+// 1. grep and listFiles take `dirPath`, and the tool WALKS it. This pipeline's
+//    own prompts hand an agent a single file and say "read it selectively with
+//    readFile/grep" (glossary.js), so the agent passes that file and the walk
+//    dies: `ENOTDIR: not a directory, scandir '<base>-whole.md'`. Observed: 40
+//    such failures across the logged runs. Recoverable (the model sees the error
+//    and retries), but every one is a wasted step out of a validator's capped
+//    budget.
+// 2. grep's `glob` is a filename SUFFIX — the implementation is
+//    `file.endsWith(glob)` — but the word "glob" makes every model write
+//    "*.md". That matches NOTHING and answers "No matches found for /*.md/."
+//    Observed: 398 of 1030 logged grep calls. This one is worse than a crash:
+//    it is silent, and the agent reports the term as absent from the source.
+//
+// So the tools an agent is handed are RE-DESCRIBED (the description is the half
+// the model actually reads) and their input is REPAIRED when it lands on the
+// wrong side of the contract. The repair is reported in the answer's `status`
+// line, so the agent learns the correct shape instead of being quietly
+// redirected.
+
+/** The grep contract, stated where the model will read it. */
+const GREP_TOOL_DESCRIPTION =
+  "Search file contents with a regex pattern. dirPath is a DIRECTORY to search " +
+  "from (defaults to your working folder) and must NOT be a file path — to " +
+  "search one file, pass its folder and narrow with glob. glob is a filename " +
+  "ENDING (e.g. \".md\" or \"whole.md\"), NOT a wildcard pattern: \"*.md\" " +
+  "matches nothing. Searches recursively, skipping node_modules and .git. " +
+  "Returns matching lines with file paths and line numbers. Large result sets " +
+  "are paginated automatically; use offset and limit to continue.";
+
+/** The listFiles contract, stated where the model will read it. */
+const LIST_FILES_TOOL_DESCRIPTION =
+  "List files and directories at the given path. dirPath is a DIRECTORY " +
+  "(defaults to your working folder) and must NOT be a file path. Set recursive " +
+  "to true to walk subdirectories. Large results are paginated automatically; " +
+  "use offset and limit to continue.";
+
+/**
+ * Repair the two ways an agent misuses a directory-taking file tool (see the
+ * contract note above). Pure about shape; it only inspects the filesystem to
+ * tell a file from a folder.
+ *
+ * @param {{input: Object, cwd: string, toolName: string}} cfg
+ * @returns {Promise<{input: Object, notes: string[]}>} The input to hand the
+ *   library tool, plus the notes that must be shown to the agent.
+ */
+async function normalizeDirToolInput({ input, cwd, toolName }) {
+  const out = { ...(input || {}) };
+  const notes = [];
+  const rawDir = typeof out.dirPath === "string" ? out.dirPath.trim() : "";
+  const resolved = path.resolve(cwd, rawDir || ".");
+
+  let st = null;
+  try {
+    st = await fs.promises.stat(resolved);
+  } catch {
+    st = null; // a missing path is the library's problem to report, not ours
+  }
+  if (st && st.isFile()) {
+    const name = path.basename(resolved);
+    out.dirPath = path.dirname(resolved);
+    if (toolName === "grep") out.glob = name;
+    notes.push(
+      `Note: ${toolName} takes a FOLDER, not a single file — "${rawDir}" is a ` +
+        `file, so it ran over that file's folder` +
+        (toolName === "grep" ? ` limited to "${name}".` : ".")
+    );
+  }
+
+  // grep's glob is a suffix. Take the last path segment and drop a leading
+  // wildcard, which is the shape every model reaches for.
+  if (toolName === "grep" && typeof out.glob === "string" && out.glob.trim() !== "") {
+    const raw = out.glob.trim();
+    const suffix = raw.split(/[\\/]/).pop().replace(/^\*+/, "");
+    if (suffix === "") {
+      delete out.glob;
+      notes.push(
+        `Note: grep's glob matches a filename ENDING, so "${raw}" would match ` +
+          `nothing; the search ran over every file in the folder.`
+      );
+    } else if (suffix !== raw) {
+      out.glob = suffix;
+      notes.push(
+        `Note: grep's glob matches a filename ENDING, not a wildcard pattern — ` +
+          `"${raw}" was read as the suffix "${suffix}".`
+      );
+    }
+  }
+
+  return { input: out, notes };
+}
+
+/**
+ * Pre-flight an agent's grep pattern. The library compiles it with `new
+ * RegExp`, so a pattern using another dialect's inline flags (the common one is
+ * `(?i)`) throws a raw SyntaxError at the agent. Answer with the usable form
+ * instead, naming the flag the tool actually has.
+ *
+ * @param {Object} input - The normalized grep input.
+ * @returns {{error: string}|null} The error to return instead of searching, or
+ *   null when the pattern compiles.
+ */
+function grepPatternError(input) {
+  const pattern = typeof input?.pattern === "string" ? input.pattern : null;
+  if (pattern === null) return null; // the library reports the missing argument
+  try {
+    new RegExp(pattern, input.ignoreCase ? "i" : undefined);
+    return null;
+  } catch (err) {
+    return {
+      error:
+        `grep could not compile /${pattern}/ (${err.message}). This tool uses ` +
+        `JavaScript regular expressions: there is no inline (?i) flag — pass ` +
+        `ignoreCase: true instead. To search a literal string, escape it.`,
+      pattern,
+      matchCount: 0,
+      matches: [],
+    };
+  }
+}
+
+/**
+ * Archive formats the plain file tools must not decode as text. The library's
+ * own binary list knows about `.zip` but NOT about `.epub`, which is the format
+ * this whole pipeline works in.
+ */
+const ARCHIVE_EXTENSIONS = new Set([".epub", ".zip", ".7z", ".rar", ".tar", ".gz", ".pdf"]);
+
+/**
+ * True for a path the plain file tools must not treat as text.
+ * @param {unknown} filePath
+ * @returns {boolean}
+ */
+function isArchivePath(filePath) {
+  return ARCHIVE_EXTENSIONS.has(path.extname(String(filePath || "")).toLowerCase());
+}
+
+/**
+ * Wrap an fs provider so the plain text tools cannot read a book archive as
+ * text. The library's binary-file list does not know about `.epub`, so a grep
+ * over a volume folder (which holds the staged book) or the series root (which
+ * holds all 17 of them) would decode zip bytes as UTF-8 and report matches from
+ * the noise. This is the rule the intake brief already states ("the file tools
+ * REFUSE .epub paths"), enforced where it can actually be enforced.
+ *
+ * A refused read is what the library's grep wants: it catches the failure and
+ * skips the file, so a folder search simply stops seeing books.
+ *
+ * @param {import("@openharness/core").FsProvider} provider
+ * @returns {import("@openharness/core").FsProvider} The same provider with a
+ *   book-aware readFile.
+ */
+function withBookAwareReads(provider) {
+  return {
+    resolvePath: (p) => provider.resolvePath(p),
+    readFile: async (p) => {
+      if (isArchivePath(p)) {
+        throw new Error(archiveReadMessage(p));
+      }
+      return provider.readFile(p);
+    },
+    writeFile: (p, content) => provider.writeFile(p, content),
+    exists: (p) => provider.exists(p),
+    stat: (p) => provider.stat(p),
+    readdir: (p) => provider.readdir(p),
+    mkdir: (p, options) => provider.mkdir(p, options),
+    remove: (p, options) => provider.remove(p, options),
+    rename: (from, to) => provider.rename(from, to),
+  };
+}
+
+/**
+ * The refusal a text tool gives for a book archive, phrased as the fix.
+ * @param {string} filePath
+ * @returns {string}
+ */
+function archiveReadMessage(filePath) {
+  return (
+    `"${filePath}" is an archive, not a text file — the plain file tools read ` +
+    `text only. A staged book is read through the epub tools (epubInfo / ` +
+    `readEpubText), never as text.`
+  );
+}
+
+/**
+ * Re-describe and repair the read tools. Applied BEFORE the approve gate sees
+ * the call (the gate wraps this execute), so a repaired path can never slip past
+ * a gate that judged the agent's original path.
+ *
+ * @param {Object} fsTools - The tools from core.createFsTools.
+ * @param {string} cwd - The folder the library resolves relative paths against.
+ * @returns {Object} The same tool set with grep, listFiles and readFile replaced.
+ */
+function applyFsToolContract(fsTools, cwd) {
+  const wrapped = { ...fsTools };
+  for (const [toolName, description] of [
+    ["grep", GREP_TOOL_DESCRIPTION],
+    ["listFiles", LIST_FILES_TOOL_DESCRIPTION],
+  ]) {
+    const original = fsTools[toolName];
+    if (!original || typeof original.execute !== "function") continue;
+    wrapped[toolName] = {
+      ...original,
+      description,
+      execute: async (input, options) => {
+        const fixed = await normalizeDirToolInput({ input, cwd, toolName });
+        if (toolName === "grep") {
+          const bad = grepPatternError(fixed.input);
+          if (bad) return bad;
+        }
+        const result = await original.execute(fixed.input, options);
+        if (fixed.notes.length > 0 && result && typeof result === "object") {
+          result.status = [fixed.notes.join(" "), result.status].filter(Boolean).join(" ");
+        }
+        return result;
+      },
+    };
+  }
+  // readFile: an archive answers with the reason it cannot be read, rather than
+  // the provider's throw (which the library re-raises as a tool error).
+  const readFile = fsTools.readFile;
+  if (readFile && typeof readFile.execute === "function") {
+    wrapped.readFile = {
+      ...readFile,
+      description:
+        "Read the contents of a TEXT file. Returns the text content with line " +
+        "numbers. Archives (.epub, .zip) are not text files and cannot be read " +
+        "with this tool. For large files, use offset and limit to read specific " +
+        "line ranges.",
+      execute: async (input, options) => {
+        if (isArchivePath(input && input.filePath)) {
+          return { error: archiveReadMessage(String(input.filePath)) };
+        }
+        return readFile.execute(input, options);
+      },
+    };
+  }
+
+  return wrapped;
+}
+
 /**
  * Build the filesystem tools (readFile/listFiles/grep/writeFile/editFile/
  * deleteFile) with an open-harness approve() gate:
  *
  * - reads (readFile, listFiles, grep) are always allowed, with the line and byte
  *   caps raised from the library defaults (see {@link envMaxLineLength} and
- *   {@link envMaxReadBytes}) so an agent can read a whole cumulative artifact;
+ *   {@link envMaxReadBytes}) so an agent can read a whole cumulative artifact,
+ *   and with the file-tool contract applied (see the note above: grep and
+ *   listFiles take a FOLDER, grep's glob is a filename ending, and an archive is
+ *   not a text file);
  * - writes/edits are confined to `allowedDirs` (paths resolved relative to
- *   `cwd`), so a wandering agent cannot clobber the rest of the series;
+ *   `cwd`), so a wandering agent cannot clobber the rest of the series, and never
+ *   over an archive — a staged book is the source the pipeline exists to
+ *   translate, and the volume folder is where the book lives;
  * - deleteFile is denied outright (no workflow needs it).
  *
  * @param {{cwd?: string, allowedDirs: string[]}} cfg
@@ -1155,7 +1420,7 @@ async function createGatedFsTools({ cwd = process.cwd(), allowedDirs }) {
   // the cumulative artifacts hold lines longer than 2000 chars, and an agent that
   // cannot faithfully re-read what it must preserve starts rewriting it from
   // memory. See envMaxLineLength / envMaxReadBytes.
-  const fsTools = core.createFsTools(new core.NodeFsProvider({ cwd }), {
+  const fsTools = core.createFsTools(withBookAwareReads(new core.NodeFsProvider({ cwd })), {
     maxLineLength: envMaxLineLength(),
     maxOutputBytes: envMaxReadBytes(),
   });
@@ -1169,12 +1434,16 @@ async function createGatedFsTools({ cwd = process.cwd(), allowedDirs }) {
     if (call.toolName === "deleteFile") return false;
     const raw = call.input?.filePath;
     if (typeof raw !== "string" || raw.length === 0) return false;
+    // A staged book is the source the whole pipeline exists to translate. The
+    // volume folder is where the book lives, so this gate — not only the intake
+    // gate — has to refuse writing over it.
+    if (isArchivePath(raw)) return false;
     const resolved = path.resolve(cwd, raw);
     return allowed.some(
       (dir) => resolved === dir || resolved.startsWith(dir + path.sep)
     );
   };
-  return { tools: fsTools, approve };
+  return { tools: applyFsToolContract(fsTools, cwd), approve };
 }
 
 // ─── Event consumption ──────────────────────────────────────────────────────
@@ -1209,6 +1478,17 @@ function summarizeInput(input) {
     s = String(input);
   }
   return s.length > 120 ? s.slice(0, 117) + "..." : s;
+}
+
+/**
+ * Find the collected tool call an event belongs to.
+ * @param {Array<Object>} toolCalls - The calls collected so far in a turn.
+ * @param {string} toolCallId - The id carried by tool.done / tool.error.
+ * @returns {Object|null} The matching call, or null.
+ */
+function findToolCall(toolCalls, toolCallId) {
+  if (!toolCallId) return null;
+  return toolCalls.find((tc) => tc.toolCallId === toolCallId) ?? null;
 }
 
 /**
@@ -1359,24 +1639,40 @@ async function consumeEvents(
           logLine(
             `  …[agent] ${event.toolName} ${summarizeInput(event.input)}`
           );
-          // Collect tool call for chat log.
+          // Collect tool call for chat log. toolCallId is what pairs the result
+          // with its call — a step may fire several calls at once, so "the last
+          // one" misattributes an error to a call that succeeded.
           result.toolCalls.push({
+            toolCallId: event.toolCallId,
             name: event.toolName,
             input: event.input,
             output: null,
             error: null,
           });
           break;
-        case "tool.error":
+        case "tool.done": {
+          // The library's answer for a call. Without this case the agent chat
+          // logs recorded every tool CALL and none of their results — 0 output
+          // lines across 526 logged turns, while AGENTS.md promised "tool calls +
+          // results". The result is what tells a reader (or a debugging agent)
+          // whether a search found nothing or found nothing it could see.
+          const done = findToolCall(result.toolCalls, event.toolCallId);
+          if (done && done.output === null) done.output = event.output;
+          break;
+        }
+        case "tool.error": {
           logLine(
             `  …[agent] ${event.toolName} errored: ${String(event.error).slice(0, 160)}`
           );
-          // Mark the last unfinished tool call with the error.
-          const lastTool = result.toolCalls[result.toolCalls.length - 1];
-          if (lastTool && lastTool.output === null && lastTool.error === null) {
-            lastTool.error = String(event.error).slice(0, 500);
+          // Mark the call that actually failed.
+          const failed =
+            findToolCall(result.toolCalls, event.toolCallId) ??
+            result.toolCalls[result.toolCalls.length - 1];
+          if (failed && failed.output === null && failed.error === null) {
+            failed.error = String(event.error).slice(0, 500);
           }
           break;
+        }
         case "retry":
           logLine(
             `  [call-ai] attempt failed (${event.error.message}); ` +
@@ -2108,6 +2404,10 @@ module.exports = {
   createWikiTools,
   createGatedFsTools,
   createEpubTools,
+  // The file-tool contract applied to grep/listFiles/readFile (exported for the
+  // tests that pin the agent-facing shape of those tools).
+  applyFsToolContract,
+  normalizeDirToolInput,
   // Lower-level pieces (used by workflows/CLI/tests).
   createChatModel,
   thinkingExtraBody,
@@ -2115,6 +2415,10 @@ module.exports = {
   assertModelServing,
   measurePromptTokens,
   tagSizeOverflowError,
+  // Agent-turn log plumbing (the tests pin what a tool call looks like in the
+  // chat log, because a missing tool.done case once made every result vanish).
+  findToolCall,
+  escapeInline,
   // Env helpers (workflows read the same settings through these).
   envRetry,
   envMaxTokens,

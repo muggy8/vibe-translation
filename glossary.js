@@ -405,10 +405,10 @@ function buildPerTermResearchPrompt(ctx, term, index, seg = null) {
   // Approximate line number: each term in the skeleton gets ~3 lines
   const approxLine = 4 + index * 3;
   const sourceContextLine = seg
-    ? `Context you may consult (optional): the chapter source "${seg.file}" (same folder) — read it selectively with readFile/grep if you need disambiguation; you do not need to read it all.`
+    ? `Context you may consult (optional): the chapter source "${seg.file}" (same folder) — search it with grep (dirPath "." and glob "${seg.file}") or read it selectively with readFile if you need disambiguation; you do not need to read it all.`
     : ctx.bundle
-      ? `${ctx.chunked ? sourceSegmentListLine(ctx.bundle) : sourceMaterialLine(ctx.bundle)} — read it selectively with readFile/grep if you need disambiguation; you do not need to read it all.`
-      : `Context you may consult (optional): the volume source "${ctx.folderName}.md" (same folder) — read it selectively with readFile/grep if you need disambiguation; you do not need to read it all.`;
+      ? `${ctx.chunked ? sourceSegmentListLine(ctx.bundle) : sourceMaterialLine(ctx.bundle)} — search it with grep (dirPath "." and glob set to the file's name) or read it selectively with readFile if you need disambiguation; you do not need to read it all.`
+      : `Context you may consult (optional): the volume source "${ctx.folderName}.md" (same folder) — search it with grep (dirPath "." and glob "${ctx.folderName}.md") or read it selectively with readFile if you need disambiguation; you do not need to read it all.`;
   const placeholder = pendingPlaceholder(term.term);
   const target = seg
     ? `the "${placeholder}" line under the "### ${term.term}" heading in the "## Chapter ${seg.id}" section`
@@ -421,7 +421,7 @@ function buildPerTermResearchPrompt(ctx, term, index, seg = null) {
     `Term: ${term.term} (${term.type}) — suggested query: ${term.query}\n\n` +
     `The file "glossary-research.md" already exists. It contains the unique ` +
     `placeholder line "${placeholder}" for this term (${target}). ` +
-    `Use editFile to replace ONLY that exact line (its oldText is ` +
+    `Use editFile to replace ONLY that exact line (its oldString is ` +
     `"${placeholder}") with your final research notes. Do not modify any other ` +
     `term's notes.\n\n` +
     `Per-term budget: at most 2 wiki_search calls and 1 wiki_extract call. Start ` +
@@ -534,8 +534,8 @@ function buildGlossaryResearcherTurnPrompt(ctx, terms) {
     .map((t) => `- ${t.term} (${t.type}) — suggested query: ${t.query}`)
     .join("\n");
   const sourceContextLine = ctx.bundle
-    ? `${ctx.chunked ? sourceSegmentListLine(ctx.bundle) : sourceMaterialLine(ctx.bundle)} — read it selectively with readFile/grep if a term needs disambiguation; you do not need to read it all.`
-    : `Context you may consult (optional): the volume source "${ctx.folderName}.md" (same folder) — read it selectively with readFile/grep if a term needs disambiguation; you do not need to read it all.`;
+    ? `${ctx.chunked ? sourceSegmentListLine(ctx.bundle) : sourceMaterialLine(ctx.bundle)} — search it with grep (dirPath "." and glob set to the file's name) or read it selectively with readFile if a term needs disambiguation; you do not need to read it all.`
+    : `Context you may consult (optional): the volume source "${ctx.folderName}.md" (same folder) — search it with grep (dirPath "." and glob "${ctx.folderName}.md") or read it selectively with readFile if a term needs disambiguation; you do not need to read it all.`;
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
     `${sourceContextLine}\n\n` +
@@ -544,7 +544,7 @@ function buildGlossaryResearcherTurnPrompt(ctx, terms) {
     `line of the form "- (pending: <term>)" (the term's own name inside the parentheses):\n` +
     `${termsListText}\n\n` +
     `Your job: for each term, research it, then IMMEDIATELY use editFile to replace ` +
-    `that term's placeholder line (oldText "- (pending: <that term's name>)") with its final notes. ` +
+    `that term's placeholder line (oldString "- (pending: <that term's name>)") with its final notes. ` +
     `Each placeholder is unique to its term, so the edit can never touch another term's ` +
     `notes. Do not wait until the end to write anything — save progress after every term.\n\n` +
     `Per-term budget: at most 2 wiki_search calls and 1 wiki_extract call. Start ` +
@@ -1230,7 +1230,7 @@ function buildGlossarySegmentFeedbackPrompt(ctx, segment, si) {
  *
  * It embeds the term so a parallel agent's editFile can target EXACTLY its own
  * line. A bare "- (pending)" is not unique: with two terms in the file, the
- * agent's editFile oldText would match two lines and the edit is ambiguous (and
+ * agent's editFile oldString would match two lines and the edit is ambiguous (and
  * fails), so the term's notes would never land.
  *
  * @param {string} term - The term being researched.

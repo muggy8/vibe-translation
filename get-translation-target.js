@@ -1022,8 +1022,8 @@ const INTAKE_TOOLS_NOTE = `
 ## Tools (agent mode)
 
 Your working folder is the series location; always use paths relative to it.
-- listFiles(dirPath, recursive: true) — inspect the folder. Pass recursive: true, or you only see the top level and miss books inside subfolders.
-- readFile / grep — plain-text files only. The file tools REFUSE .epub paths: an epub is a zip, and reading one as text returns binary junk, so readFile on a book is blocked rather than wasted.
+- listFiles(dirPath, recursive: true) — inspect the folder. Pass recursive: true, or you only see the top level and miss books inside subfolders. dirPath is a FOLDER, never a file.
+- readFile / grep — plain-text files only. grep searches a FOLDER (dirPath), not one file; narrow it with glob, which is a filename ENDING (".md"), not a wildcard ("*.md" matches nothing). The file tools REFUSE .epub paths: an epub is a zip, and reading one as text returns binary junk, so readFile or grep on a book is blocked rather than wasted.
 - epubInfo(filePath) — open a book: its catalog card (title, author, language tag, the series name and book number stored inside it) and its section list.
 - readEpubText(filePath, section, offset, limit) — sample a bounded slice of one section's text.
 - stageVolume({ sourceFile, folder, as }) — create a volume folder and copy a source into it. It never touches the original.
@@ -1228,8 +1228,18 @@ function createIntakeApprove(fsGate, epubGate) {
   const FILE_TOOLS = new Set(["readFile", "grep", "writeFile", "editFile", "deleteFile"]);
   return (call) => {
     const input = (call && call.input) || {};
+    // grep and listFiles name their path `dirPath`; readFile/writeFile/editFile
+    // name it `filePath`. Checking only filePath left `grep(dirPath: "book.epub")`
+    // — the exact call an agent makes when a prompt says "grep this book" —
+    // outside the refusal this gate exists to make.
     const target =
-      typeof input.filePath === "string" ? input.filePath : typeof input.path === "string" ? input.path : "";
+      typeof input.filePath === "string"
+        ? input.filePath
+        : typeof input.dirPath === "string"
+          ? input.dirPath
+          : typeof input.path === "string"
+            ? input.path
+            : "";
     if (FILE_TOOLS.has(call && call.toolName) && /\.(epub|zip)$/i.test(target)) {
       return false;
     }
