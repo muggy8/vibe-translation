@@ -233,6 +233,39 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount }) {
   if (translatorGaps.length) fail("translator-contract", "the translation call is not the shape the translator model is configured for.", translatorGaps);
   else pass("translator-contract", `${translator.length} translation call(s): no system message, no_think, temperature 0.7 / top_p 1.0 / top_k -1 / repetition_penalty 1.0, official task lines present.`);
 
+  // ─── 3b. A call that GRADES must not sample like a call that WRITES ─────────
+  // Reasoning tokens are billed out of the same reply budget as the answer, so a
+  // grader that thinks too hard does not produce a worse score — it produces no
+  // score (gotcha 59: one call spent 131,072 reasoning tokens and answered with
+  // 0 characters). The pipeline's rule is that every tool-less call whose whole
+  // job is to produce a number runs at JUDGE_TEMPERATURE + STAGE_THINKING_LEVEL;
+  // only the authoring AGENT turns follow AI_THINKING_LEVEL (default xhigh),
+  // because an author writing a 150 KB artifact is the call that needs the thinking.
+  const JUDGING_KINDS = new Set(["acceptance", "verify", "polish-audit", "volume-consistency"]);
+  const AUTHORING_LEVELS = new Set(["xhigh", "high"]);
+  const dialectGaps = [];
+  let judgingCalls = 0;
+  for (const { entry, kind } of identified) {
+    if (!JUDGING_KINDS.has(kind)) continue;
+    judgingCalls += 1;
+    if (AUTHORING_LEVELS.has(entry.sampling.reasoningEffort)) {
+      dialectGaps.push(
+        `#${entry.index} ${kind}: reasoning_effort ${JSON.stringify(entry.sampling.reasoningEffort)} is the AUTHORING level — ` +
+          `this grader can spend the whole reply budget thinking and answer with nothing (gotcha 59)`
+      );
+    }
+    const temperature = entry.sampling.temperature;
+    if (typeof temperature === "number" && temperature > 0.2) {
+      dialectGaps.push(`#${entry.index} ${kind}: temperature ${temperature} — a grading call runs at JUDGE_TEMPERATURE (0.2 or lower)`);
+    }
+  }
+  if (dialectGaps.length) fail("judging-dialect", "a call that grades text is sampling like a call that writes it.", dialectGaps);
+  else
+    pass(
+      "judging-dialect",
+      `${judgingCalls} grading call(s) all run at the judging temperature and the calmer thinking level; the authoring agent turns keep ${"AI_THINKING_LEVEL"}.`
+    );
+
   // ─── 4. The polisher must NOT see the source text ──────────────────────────
   const polishCalls = byKind("polish");
   const leaked = [];

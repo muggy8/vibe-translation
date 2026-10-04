@@ -246,6 +246,35 @@ function judgeTemperature() {
 }
 
 /**
+ * The THINKING dialect for a call that grades text — the other half of the same
+ * decision as `judgeTemperature()`.
+ *
+ * A reasoning phase is billed out of the same reply budget as the answer, so a
+ * grader that thinks too hard does not produce a worse score, it produces NO
+ * score (observed live: one call spent 131,072 reasoning tokens and answered
+ * with 0 characters — gotcha 59). The translation stage's judging calls already
+ * pair the calm temperature with the calm thinking level via `stageThinking()`;
+ * this is the same rule for the calls that live OUTSIDE the translation stage,
+ * which had no way to reach it and inherited the AUTHORING level
+ * (`AI_THINKING_LEVEL`, default xhigh) instead.
+ *
+ * `<PREFIX>_THINKING` / `<PREFIX>_THINKING_LEVEL` override for one kind of call
+ * (e.g. `ACCEPTANCE_THINKING_LEVEL`); otherwise `AI_THINKING` decides whether it
+ * thinks at all and `STAGE_THINKING_LEVEL` (default `medium`) how hard.
+ *
+ * @param {string} [prefix] - The call's own knob prefix (default "JUDGE").
+ * @returns {{thinking: boolean, thinkingLevel: string}} The thinking dialect to pass to the call.
+ */
+function judgeThinking(prefix = "JUDGE") {
+  const thinking = readBoolEnv(`${prefix}_THINKING`, readBoolEnv("AI_THINKING", true));
+  const level = process.env[`${prefix}_THINKING_LEVEL`] ?? process.env.STAGE_THINKING_LEVEL;
+  return {
+    thinking,
+    thinkingLevel: typeof level === "string" && level.trim() !== "" ? level.trim() : "medium",
+  };
+}
+
+/**
  * Build a STRUCTURAL error: the pipeline's inputs or outputs are broken, as
  * opposed to a model that had a bad run.
  *
@@ -837,6 +866,7 @@ module.exports = {
   meetsExceptionalCriteria,
   isExceptionalScore,
   judgeTemperature,
+  judgeThinking,
   isAcceptedState,
   isSourceStale,
   saveRollingState,

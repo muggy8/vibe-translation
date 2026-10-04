@@ -56,7 +56,7 @@ const harness = require("./harness");
 const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, isStructuralError, volumeFailureError } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact } = require("./utils/fs");
 const { loadGlossaryDisputes } = require("./utils/disputes");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
@@ -1111,8 +1111,11 @@ async function acceptanceCheck(ctx, iteration, temperature) {
       { text: acceptancePrompt },
     ],
     // A grader, not a writer: JUDGE_TEMPERATURE (the house writing temperature
-    // used to apply here, which made the acceptance score needlessly noisy).
+    // used to apply here, which made the acceptance score needlessly noisy) and
+    // STAGE_THINKING_LEVEL (the authoring level spent whole reply budgets
+    // thinking on these calls and answered with nothing — gotcha 59).
     temperature: temperature ?? judgeTemperature(),
+    ...judgeThinking("ACCEPTANCE"),
     label: `glossary-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
   });
   const reply = parseAcceptanceReply(acceptanceOutput);

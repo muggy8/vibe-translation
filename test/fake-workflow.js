@@ -717,8 +717,17 @@ function classify(req) {
   if (kind === "unknown" && req.userText.includes("Translate the [Source Text]")) {
     kind = req.userText.includes("MUST fix all of them") ? "retranslate" : "translate";
   }
-  const installmentMatch = req.allText.match(/[Vv]olume\s+(?:being\s+(?:processed|validated)[:* ]*)?(\d{1,2})\b/);
-  const volume = installmentMatch ? volumeByInstallment.get(installmentMatch[1].padStart(2, "0")) || null : null;
+  // Which volume is this request about? Match the SOURCE TEXT it carries first: a
+  // translate prompt has no "Volume: NN" header at all (its identity is the book
+  // text), and its continuity tail quotes the PREVIOUS volume's ending — so the
+  // first "volume NN" string in it can name the wrong one. The number is the
+  // fallback for the calls that never see the source (polish, acceptance).
+  const volume =
+    volumeForText(req.userText) ||
+    (() => {
+      const installmentMatch = req.allText.match(/[Vv]olume\s+(?:being\s+(?:processed|validated)[:* ]*)?(\d{1,2})\b/);
+      return installmentMatch ? volumeByInstallment.get(installmentMatch[1].padStart(2, "0")) || null : null;
+    })();
   const toolStepsDone = (req.messages || []).filter((m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0).length;
   return { kind, volume, toolStepsDone, systemText };
 }

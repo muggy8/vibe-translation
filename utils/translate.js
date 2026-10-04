@@ -1307,7 +1307,7 @@ function stageConcurrency(prefix) {
  *
  * @returns {number}
  */
-const { judgeTemperature, readBoolEnv } = require("../configs/shared");
+const { judgeTemperature, judgeThinking } = require("../configs/shared");
 
 /**
  * Thinking dialect for a translation-stage call: the global AI_THINKING switch
@@ -1319,21 +1319,16 @@ const { judgeTemperature, readBoolEnv } = require("../configs/shared");
  * separation while dropping the bookkeeping; the legacy names
  * (`<PREFIX>_THINKING` / `<PREFIX>_THINKING_LEVEL`) are still honored.
  *
+ * Delegates to `judgeThinking()` (configs/shared.js) so the rule "a call that
+ * grades does not spend the reply budget thinking" has ONE implementation for
+ * the whole pipeline, not one for the translation stage and none for the
+ * acceptance graders (gotcha 59).
+ *
  * @param {"VERIFY"|"AUDIT"|"EDIT"} prefix - The legacy per-stage prefix.
  * @returns {{thinking: boolean, thinkingLevel: string}}
  */
 function stageThinking(prefix) {
-  // The legacy per-stage prefix wins when set; otherwise the global AI_THINKING
-  // decides. Both go through the shared readBoolEnv so the semantics match the
-  // harness (previously the two readers disagreed on values like "0").
-  const thinking = readBoolEnv(`${prefix}_THINKING`, readBoolEnv("AI_THINKING", true));
-  const level =
-    process.env[`${prefix}_THINKING_LEVEL`] ?? process.env.STAGE_THINKING_LEVEL;
-  return {
-    thinking,
-    thinkingLevel:
-      typeof level === "string" && level.trim() !== "" ? level.trim() : "medium",
-  };
+  return judgeThinking(prefix);
 }
 
 /**

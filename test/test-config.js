@@ -225,6 +225,7 @@ assert.strictEqual(
 
 {
   const { judgeTemperature, stageThinking, writerTemperature } = require("../utils/translate");
+  const { judgeThinking } = require("../configs/shared");
   const clean = {
     JUDGE_TEMPERATURE: undefined,
     VERIFY_TEMPERATURE: undefined,
@@ -238,6 +239,8 @@ assert.strictEqual(
     EDIT_THINKING_LEVEL: undefined,
     AUDIT_THINKING: undefined,
     AUDIT_THINKING_LEVEL: undefined,
+    ACCEPTANCE_THINKING: undefined,
+    ACCEPTANCE_THINKING_LEVEL: undefined,
     EDIT_TEMPERATURE: undefined,
     AI_TEMPERATURE: undefined,
   };
@@ -270,6 +273,30 @@ assert.strictEqual(
   assert.strictEqual(stageThinking("EDIT").thinkingLevel, "low", "…only for its own stage");
   delete process.env.STAGE_THINKING_LEVEL;
   delete process.env.AUDIT_THINKING_LEVEL;
+
+  // The four pre-production acceptance graders live OUTSIDE the translation stage
+  // and used to inherit the AUTHORING level (AI_THINKING_LEVEL, xhigh) — the gap
+  // behind 22 empty replies on the live run (gotcha 59). Same rule, one knob set.
+  assert.deepStrictEqual(
+    judgeThinking("ACCEPTANCE"),
+    { thinking: true, thinkingLevel: "medium" },
+    "an acceptance grader thinks at the calmer level, not the authoring xhigh"
+  );
+  process.env.STAGE_THINKING_LEVEL = "low";
+  assert.strictEqual(judgeThinking("ACCEPTANCE").thinkingLevel, "low", "STAGE_THINKING_LEVEL covers it too");
+  process.env.ACCEPTANCE_THINKING_LEVEL = "high";
+  assert.strictEqual(judgeThinking("ACCEPTANCE").thinkingLevel, "high", "its own name overrides");
+  assert.strictEqual(judgeThinking("VERIFY").thinkingLevel, "low", "…only for its own kind of call");
+  delete process.env.STAGE_THINKING_LEVEL;
+  delete process.env.ACCEPTANCE_THINKING_LEVEL;
+  process.env.AI_THINKING = "false";
+  assert.strictEqual(judgeThinking("ACCEPTANCE").thinking, false, "AI_THINKING=false turns it off too");
+  delete process.env.AI_THINKING;
+  assert.deepStrictEqual(
+    judgeThinking("VERIFY"),
+    stageThinking("VERIFY"),
+    "one implementation of the rule, not one for the translation stage and none for the graders"
+  );
 
   process.env.AI_TEMPERATURE = "0.6";
   assert.strictEqual(writerTemperature("EDIT", 0.6), 0.6, "a writer follows the house temperature");

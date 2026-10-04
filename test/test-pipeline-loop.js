@@ -167,6 +167,14 @@ function childEnv(endpoint) {
     AI_RETRY: "0",
     AI_CALL_DEADLINE_MS: "120000",
 
+    // Thinking, pinned to the committed defaults: authoring agents at xhigh, the
+    // judging calls calmer. Pinned because this machine's untracked `.env` sets
+    // `AI_THINKING_LEVEL=medium` (gotcha 59), and a run that inherits it silently
+    // tests a configuration the code does not have.
+    AI_THINKING: "true",
+    AI_THINKING_LEVEL: "xhigh",
+    STAGE_THINKING_LEVEL: "medium",
+
     // The one stage the stub genuinely cannot cover: `wiki_search` /
     // `wiki_extract` are not model calls, they are HTTP calls to Wikipedia made
     // by the harness tools. Everything else runs for real.
@@ -666,6 +674,20 @@ function runAuditSelfTest() {
   // 11. A request that matches no stage prompt at all.
   log.push(entry(i++, { stage: "translate", model: "stub-translate", user: "Please summarize this series for me.", answer: { text: "A story." } }));
 
+  // 12. An acceptance grader running at the AUTHORING thinking level: a reasoning
+  //     phase is billed out of the same reply budget as the score, so a grader
+  //     that thinks at xhigh answers with nothing (gotcha 59).
+  log.push(
+    entry(i++, {
+      stage: "glossary",
+      system: sys("glossary-acceptance.md"),
+      user: `Volume being processed: 01\n\n${workflow.glossaryMarkdown(vol01)}\n\n**Recommendation:** Pass`,
+      temperature: 0.2,
+      reasoningEffort: "xhigh",
+      answer: { text: '{"score":80,"band":"Pass","note":"ok"}' },
+    })
+  );
+
   const audit = auditPromptLog(log, { workflow, seriesDir: selfDir });
   const reported = new Set(audit.findings.map((f) => f.rule));
   const expected = [
@@ -676,6 +698,8 @@ function runAuditSelfTest() {
     "translation-shape",
     "cumulative-reference-path",
     "cross-volume-continuity",
+    "translator-context",
+    "judging-dialect",
     "placeholder-leak",
     "stage-ordering",
     "answer-shape",
