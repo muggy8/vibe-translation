@@ -57,10 +57,10 @@ const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validat
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
 const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact } = require("./utils/fs");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("./utils/fs");
 const { loadGlossaryDisputes } = require("./utils/disputes");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
   decideProcessingMode,
@@ -921,6 +921,12 @@ async function glossary() {
       // the author turn (seedGlossaryFromPrevious), so from volume 02 on the
       // author is told to edit that file in place — not to recreate it.
       ctx.glossarySeeded = !isFirst;
+      // …and it shows the term map that copy produces, because a preview that
+      // promises "amend it in place" while hiding the map the agent uses to find
+      // the row is a preview of a different prompt.
+      ctx.glossaryIndex = previousGlossaryFile
+        ? buildGlossaryIndex(await fs.readFile(previousGlossaryFile, "utf8").catch(() => ""))
+        : "";
       // The term-dependent prompts carry an illustrative term list (the real
       // list only exists after the extraction call, which dry-run skips).
       const illustrativeTerms = [
@@ -1576,7 +1582,26 @@ async function runChunkedQaLoop(ctx) {
       break;
     }
 
+    // A grade that already passes earns the window's remaining samples by
+    // re-grading this glossary, not by paying for a per-chapter feedback round
+    // plus a second full round of per-chapter validators (see confirmPassingScore).
+    const passing = await confirmPassingScore({
+      score,
+      recentRollingScores,
+      confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+      stateFile: stateFilePath,
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
+    if (passing.accepted) {
+      ctx.acceptedBy = "passing-consensus";
+      break;
+    }
+
     // Per-chapter feedback (fresh agent per chapter, chapter-tagged findings).
+    // Fingerprinted first: a feedback round that changed nothing is not progress,
+    // and another iteration would re-audit an unchanged glossary.
+    const beforeFeedback = await fingerprintFiles(glossaryOutputFile);
     for (let si = 0; si < bundle.segments.length; si++) {
       const segment = bundle.segments[si];
       const feedbackAuthor = await harness.createAgentHandle({
@@ -1641,6 +1666,27 @@ async function runChunkedQaLoop(ctx) {
           "the glossary as of the previous chapter"
         );
       }
+    }
+
+    if ((await fingerprintFiles(glossaryOutputFile)) === beforeFeedback) {
+      console.error(
+        `Volume ${values.INSTALLMENT_NUMBER}: the per-chapter feedback round changed NOTHING — ` +
+          `glossary.md is byte-identical to what it was before it. Stopping the QA loop here rather ` +
+          `than paying for another round of per-chapter validators over an unchanged glossary. Check ` +
+          `the feedback agents' turn logs in .logs/ for turns that only read (the usual shape: step ` +
+          `cap reached before anything was written).`
+      );
+      ctx.limitReached = true;
+      await saveRollingState(stateFilePath, recentRollingScores, {
+        sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+        stalled: true,
+      });
+      if (ON_QA_LIMIT === "fail") {
+        throw new Error(
+          `Volume ${values.INSTALLMENT_NUMBER}: the feedback round applied nothing (ON_QA_LIMIT=fail).`
+        );
+      }
+      break;
     }
 
     if (iteration === maxValidationIterations) {
@@ -1970,7 +2016,7 @@ async function guardCarryForwardAgainst(ctx, baselineText, stageLabel, baselineL
   if (diff.missing.length === 0) {
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: carry-forward check passed ` +
-        `(${diff.previousCount} terms carried, ${diff.added.length} added).`
+        `(${diff.previousCount} terms carried${diff.restructured ? `, ${diff.restructured} of them reworded` : ""}, ${diff.added.length} added).`
     );
     return;
   }
@@ -2321,6 +2367,9 @@ async function runQaLoop(ctx) {
     confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
     feedbackLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: applying validation feedback (fresh author agent)...`,
     runFeedback: (iteration) => runGlossaryFeedback(ctx, iteration),
+    // The loop stops when a feedback pass leaves this byte-identical: a turn that
+    // only read is not an iteration (see fingerprintFiles in utils/fs.js).
+    feedbackArtifactFiles: [ctx.glossaryOutputFile],
     limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`,
   });
   ctx.limitReached = result.limitReached;
@@ -2465,6 +2514,39 @@ function parseGlossaryTableTerms(markdown) {
 }
 
 /**
+ * The separate spellings named inside ONE glossary row's term column.
+ *
+ * A row's first column is often several source-language spellings of one entry
+ * written as a slash-separated list: `三つ編み魔王 / 三つ編み悪魔 / 呪われし姫君`.
+ * The carry-forward gate has to compare entries at THAT resolution, because an
+ * agent that widens an existing row with a new alias changes the cell without
+ * losing the entry. Observed live: volume 02's glossary was quarantined for
+ * "dropping" two terms that were both still in the file, each one widened —
+ * `三つ編み魔王 / 三つ編み悪魔 / 呪われし姫君` became
+ * `三つ編み魔王 / 三つ編み悪魔 / 魔王 / 呪われし姫君`, and
+ * `鈍感系巻き込まれ型主人公` became
+ * `鈍感系巻き込まれ型主人公 / 鈍感純情ＢＯＹ / やれやれ巻き込まれＢＯＹ`. The guard
+ * compared whole cells as exact strings, called an improvement a loss, and threw
+ * away a glossary that had grown from 88 terms to 140.
+ *
+ * @param {string} term - One row's term column.
+ * @returns {string[]} The trimmed spellings it names (empty for an empty cell).
+ */
+function glossaryTermSpans(term) {
+  if (!term || typeof term !== "string") return [];
+  return term
+    .split("/")
+    .map((span) =>
+      span
+        .replace(/^`+|`+$/g, "")
+        .replace(/^\*+|\*+$/g, "")
+        .replace(/^_+|_+$/g, "")
+        .trim()
+    )
+    .filter((span) => span.length > 0);
+}
+
+/**
  * Compare two glossary snapshots and report what the newer one LOST.
  *
  * The glossary is cumulative: volume N's file must hold every term volume
@@ -2476,36 +2558,88 @@ function parseGlossaryTableTerms(markdown) {
  * carried 411 of the 769 terms volume 05 had, and every later volume would
  * have been translated against a terminology law missing 59% of its entries.
  *
+ * An entry counts as carried when every spelling its term column named is still
+ * present in some current row (see glossaryTermSpans) — the same entry may now
+ * be one widened row or several separate rows, and both are legitimate edits.
+ * The gate is deliberately about SPELLINGS, not cell text: what must survive is
+ * the terminology, not the formatting of the row that held it.
+ *
  * Pure and deterministic — no model call, so it can run after every amend pass
  * for the price of two file reads.
  *
  * @param {string} previousMarkdown - The previous volume's glossary content.
  * @param {string} currentMarkdown - The glossary just produced for this volume.
- * @returns {{previousCount: number, currentCount: number, missing: Array<{term: string, section: string}>, added: string[]}}
+ * @returns {{previousCount: number, currentCount: number, missing: Array<{term: string, section: string}>, added: string[], restructured: number}}
  *   `missing` is every term the previous glossary held that the new one does
  *   not (in previous-file order, with the section it came from); `added` is
- *   this volume's new terms.
+ *   this volume's new or widened rows; `restructured` counts the carried
+ *   entries whose term column was rewritten (an alias added, or one row split
+ *   into several) and so is NOT a loss.
  */
 function compareGlossaryCarryForward(previousMarkdown, currentMarkdown) {
   const previous = parseGlossaryTableTerms(previousMarkdown);
   const current = parseGlossaryTableTerms(currentMarkdown);
-  const currentTerms = new Set(current.map((e) => e.term));
-  const previousTerms = new Set(previous.map((e) => e.term));
+
+  const currentCells = current.map((e) => e.term);
+  const currentExact = new Set(currentCells);
+  const currentSpans = new Set();
+  for (const cell of currentCells) {
+    for (const span of glossaryTermSpans(cell)) currentSpans.add(span);
+  }
+  // One haystack for the substring half of the test: a widened row keeps the old
+  // spelling inside a longer cell, and a split row keeps it inside a shorter one.
+  const currentHaystack = `\n${currentCells.join("\n")}\n`;
+
+  const previousCells = new Set(previous.map((e) => e.term));
+  const previousSpans = new Set();
+  for (const cell of previousCells) {
+    for (const span of glossaryTermSpans(cell)) previousSpans.add(span);
+  }
+
+  // Carried when every spelling the old row named still appears somewhere in the
+  // new file — as its own row, or inside a longer one.
+  const isCarried = (cell) =>
+    currentExact.has(cell) ||
+    glossaryTermSpans(cell).every((span) => currentSpans.has(span) || currentHaystack.includes(span));
 
   const seen = new Set();
   const missing = [];
+  let restructured = 0;
   for (const entry of previous) {
-    if (currentTerms.has(entry.term) || seen.has(entry.term)) continue;
+    if (seen.has(entry.term)) continue;
     seen.add(entry.term);
+    if (currentExact.has(entry.term)) continue;
+    if (isCarried(entry.term)) {
+      restructured++;
+      continue;
+    }
     missing.push(entry);
   }
-  const added = current.filter((e) => !previousTerms.has(e.term)).map((e) => e.term);
+
+  // The other direction: the rows that are NOT a carried-forward entry in any of
+  // the three legitimate forms — unchanged, widened into one longer row, or split
+  // into several. Those are this volume's new work. Counting a widened row as both
+  // carried and added would make the two numbers mean different things depending
+  // on how the agent happened to format the row.
+  const previousCellSpans = [...previousCells].map((cell) => glossaryTermSpans(cell));
+  const isCarriedForm = (cell) => {
+    if (previousCells.has(cell)) return true;
+    const spans = glossaryTermSpans(cell);
+    if (spans.length === 0) return false;
+    const spanSet = new Set(spans);
+    // This row is the widened form of some previous entry.
+    if (previousCellSpans.some((old) => old.length > 0 && old.every((s) => spanSet.has(s)))) return true;
+    // …or every spelling in it was already named somewhere (a split row).
+    return spans.every((s) => previousSpans.has(s));
+  };
+  const added = current.filter((e) => !isCarriedForm(e.term)).map((e) => e.term);
 
   return {
-    previousCount: previousTerms.size,
-    currentCount: currentTerms.size,
+    previousCount: previousCells.size,
+    currentCount: currentExact.size,
     missing,
     added,
+    restructured,
   };
 }
 

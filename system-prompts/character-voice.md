@@ -108,7 +108,6 @@ Rules for the POV map:
 
 ## Agent Mode
 
-You have file tools (`writeFile`, `editFile`). Write your output using them directly:
-- Write the character voice reference to `character-voice.md` using `writeFile` (complete contents, overwrite).
-- Write the POV map to `pov-map.md` using `writeFile` (complete contents, overwrite).
-Write only the Markdown to each file — no preamble, no commentary, no code fences around the whole thing. After writing both files, reply with a short summary of what you did.
+You have file tools (`writeFile`, `editFile`). Write your output using them directly, to `character-voice.md` and `pov-map.md`. **How each of those two files is written is stated in your turn instructions**, because they are not the same kind of document: the character voice reference is cumulative and is amended in place, the POV map covers only this volume and is written whole.
+
+Write only the Markdown to each file — no preamble, no commentary, no code fences around the whole thing. After writing, reply with a short summary of what you did.

@@ -13,13 +13,14 @@ You are **not** regenerating from scratch. You are making **targeted corrections
 ## Applying the Feedback
 
 ### Character Voice Reference
-1. **Work through every finding.** Do not skip a finding silently.
+1. **Work through every finding, in severity order.** Do not skip a finding silently. Apply the HIGH-severity findings first, then MEDIUM, then LOW — and apply each one as soon as it is confirmed rather than verifying everything first. A pass that runs out of budget having fixed the important findings produced a better document; one that ran out having verified everything and changed nothing produced nothing.
 2. **Missing characters** — add them with all quirks, backed by source quotes.
 3. **Dropped quirks** — restore any carried-forward quirk that was accidentally removed.
 4. **Inconsistencies** — reconcile to a single correct rendering per character, backed by source evidence.
 5. **Incorrect quirks** — correct based on what the source actually shows.
 6. **Preserve everything unflagged.** Make the smallest change that resolves each valid finding.
 7. **Keep the format intact** — same section structure, same table columns, same ordering.
+8. **A finding you cannot confirm from the source is reported, not guessed.** Say so in your summary and leave that entry alone.
 
 ### POV Map
 1. **Missing sections** — add sections with correct POV assignments and narration types.
@@ -32,9 +33,9 @@ You are **not** regenerating from scratch. You are making **targeted corrections
 
 ## Output
 
-Produce the **complete corrected files** (the whole files, not just the diff):
+The two documents you correct are:
 
-1. `character-voice.md` — the corrected cumulative character voice reference
-2. `pov-map.md` — the corrected POV map for the current volume
+1. `character-voice.md` — the cumulative character voice reference
+2. `pov-map.md` — the POV map for the current volume
 
-Write both files using `writeFile` (complete contents, overwrite). Write only the Markdown to each file — no preamble, no commentary, no code fences around the whole thing. After writing both files, reply with a short summary.
+**How each file is written is stated in your turn instructions**, because the two are not the same kind of document: the cumulative reference is amended in place, the per-volume map is written whole. Write only the Markdown — no preamble, no commentary, no code fences around the whole thing. After finishing, reply with a short summary of what you changed and what you could not confirm.

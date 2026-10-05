@@ -37,8 +37,9 @@ Following the system prompt, produce **one output file** for volume {{INSTALLMEN
 Produce exactly this file:
 1. `style-guide.md` — the complete cumulative style guide
 
-Write the style guide to `style-guide.md` using `writeFile` (complete contents, overwrite).
-After writing the file, reply with a short summary.
+Write it to `style-guide.md`. **How it is written is stated in your turn instructions** — the guide is cumulative, so from the second volume on it is amended in place rather than rewritten.
+
+After writing, reply with a short summary.
 
 ## Constraints
 

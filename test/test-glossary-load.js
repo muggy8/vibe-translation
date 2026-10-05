@@ -658,6 +658,43 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(compareGlossaryCarryForward("", prevGlossary).missing, [], "no baseline, nothing to carry");
 
+// An entry is a SET OF SPELLINGS, not a cell of text. This is the live false
+// positive that quarantined a good volume 02: the agent widened two rows with a
+// new alias, the guard compared whole cells as exact strings, called an
+// improvement a loss, and threw away a glossary that had grown 88 terms → 140.
+const aliasPrev =
+  "## Characters\n| Src | Tgt | Notes |\n|---|---|---|\n" +
+  "| 三つ編み魔王 / 三つ編み悪魔 / 呪われし姫君 | the Braided Demon King | a |\n" +
+  "| 鈍感系巻き込まれ型主人公 | the Oblivious Protagonist | b |";
+const aliasWidened =
+  "## Characters\n| Src | Tgt | Notes |\n|---|---|---|\n" +
+  "| 三つ編み魔王 / 三つ編み悪魔 / 魔王 / 呪われし姫君 | the Braided Demon King | a, widened |\n" +
+  "| 鈍感系巻き込まれ型主人公 / 鈍感純情ＢＯＹ | the Oblivious Protagonist | b, widened |";
+const aliasDiff = compareGlossaryCarryForward(aliasPrev, aliasWidened);
+assert.deepStrictEqual(aliasDiff.missing, [], "widening a row with a new alias is NOT a lost term");
+assert.strictEqual(aliasDiff.restructured, 2, "and it is reported as reworded, not as an addition");
+assert.deepStrictEqual(aliasDiff.added, [], "a widened row is not a new entry");
+assert.doesNotThrow(
+  () => reportCarryForwardLoss("02", aliasDiff, "the amend pass", "the previous volume's glossary"),
+  "the guard that rejected volume 02 now passes it"
+);
+// One row SPLIT into several still carries every spelling it named.
+assert.deepStrictEqual(
+  compareGlossaryCarryForward(aliasPrev, "## Characters\n| Src | Tgt |\n|---|---|\n| 三つ編み魔王 | X |\n| 三つ編み悪魔 | Y |\n| 呪われし姫君 | Z |\n| 鈍感系巻き込まれ型主人公 | W |").missing,
+  [],
+  "splitting one alias row into several is not a loss"
+);
+// …but a spelling that is genuinely gone is still caught, alias row or not.
+const aliasLost = compareGlossaryCarryForward(
+  aliasPrev,
+  "## Characters\n| Src | Tgt |\n|---|---|\n| 三つ編み魔王 / 三つ編み悪魔 | X |\n| 鈍感系巻き込まれ型主人公 | W |"
+);
+assert.deepStrictEqual(
+  aliasLost.missing.map((e) => e.term),
+  ["三つ編み魔王 / 三つ編み悪魔 / 呪われし姫君"],
+  "dropping one spelling out of an alias row IS a loss — the gate is about spellings"
+);
+
 assert.doesNotThrow(() => reportCarryForwardLoss("02", grownDiff, "the amend pass", "the previous volume's glossary"), "no loss, no failure");
 assert.throws(
   () => reportCarryForwardLoss("06", shrunkDiff, "the amend pass", "the previous volume's glossary"),
@@ -812,7 +849,21 @@ assert.ok(perTermPrompt.includes("- (pending: "), "per-term prompt mentions the 
 assert.ok(perTermPrompt.includes("editFile"), "per-term prompt instructs editFile");
 
 // ─── character-voice: parseVoiceQuirks ──────────────────────────────────────
-const { parseVoiceQuirks, truncateVoiceRef, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt } = require("../character-voice");
+const {
+  parseVoiceQuirks,
+  truncateVoiceRef,
+  emittedToolCallAsText,
+  buildExtractTurnPrompt,
+  buildAuthorTurnPrompt,
+  buildValidatorTurnPrompt,
+  buildFeedbackTurnPrompt,
+  parseVoiceSections,
+  voicePrimaryName,
+  buildVoiceIndex,
+  voiceWriteInstruction,
+  voiceRecoveryPrompt,
+  compareVoiceCarryForward,
+} = require("../character-voice");
 
 // Empty/null input
 assert.deepStrictEqual(parseVoiceQuirks(""), []);
@@ -999,6 +1050,12 @@ const {
   buildValidatorTurnPrompt: styleBuildValidatorTurnPrompt,
   buildFeedbackTurnPrompt: styleBuildFeedbackTurnPrompt,
   truncateStyleGuide,
+  parseStyleSections,
+  countStyleRules,
+  buildStyleIndex,
+  styleWriteInstruction,
+  styleRecoveryPrompt,
+  compareStyleCarryForward,
 } = require("../style-guide");
 
 // ─── style-guide: truncateStyleGuide ─────────────────────────────────────────
@@ -1111,6 +1168,149 @@ for (const [name, prompt] of [
 ]) {
   assert.ok(prompt.includes("../test_story(1)/style-guide.md"), `${name} prompt (volume 02) names the previous guide at its real path`);
 }
+
+// ─── the cumulative-document rules the glossary established, now in the other
+//     two cumulative stages (gotcha 64) ───────────────────────────────────────
+//
+// The character voice reference and the style guide hit the same wall the glossary
+// did: the document outgrows one reply, the agent pages it, runs out of steps, and
+// rebuilds it from memory. Volume 01's character-voice feedback turn made 46 tool
+// calls — 29 reads, 15 searches, ZERO writes — and hit its flat step cap while
+// still verifying findings, because the one write it had been told to do was the
+// last thing in its instructions.
+
+// voicePrimaryName: the part of a heading that says WHO the section is about.
+assert.strictEqual(voicePrimaryName("如月雨露（ジョーロ）【俺人格】"), "如月雨露", "primary name drops the alias and persona tags");
+assert.strictEqual(voicePrimaryName("山田（生徒会会計）"), "山田", "primary name drops a bracketed role");
+assert.strictEqual(voicePrimaryName("ジョーロの母"), "ジョーロの母", "a heading with no brackets is its own primary name");
+
+const voiceRefPrev =
+  "# Character Voice Reference\n\n## Characters\n\n" +
+  "### 如月雨露（ジョーロ）【俺人格】\n- quirk A\n\n" +
+  "### 如月雨露（ジョーロ）【僕人格】\n- quirk B\n\n" +
+  "### 日向葵（ひまわり）\n- quirk C\n";
+assert.strictEqual(parseVoiceSections(voiceRefPrev).length, 3, "parseVoiceSections counts the ### character sections");
+assert.deepStrictEqual(
+  parseVoiceSections(voiceRefPrev).map((s) => s.primary),
+  ["如月雨露", "如月雨露", "日向葵"],
+  "and keys each one on its character, not its full heading"
+);
+
+// A reworded heading is NOT a lost character — the persona tag is the half a
+// feedback pass is most likely to reword, and treating that as a deletion is the
+// false positive that cost the glossary a good volume 02.
+const voiceRenamed = voiceRefPrev
+  .replace("【俺人格】", "【俺】")
+  .replace("日向葵（ひまわり）", "日向葵（ひまわりちゃん）");
+const voiceRenamedDiff = compareVoiceCarryForward(voiceRefPrev, voiceRenamed);
+assert.deepStrictEqual(voiceRenamedDiff.missing, [], "rewording a character heading is not losing the character");
+assert.strictEqual(voiceRenamedDiff.restructured, 2, "and it is reported as reworded, so a mass rename is visible");
+
+// The reference is cumulative: a character who only ever appeared in volume 2 is
+// invisible to this volume's validator, so nothing else in the stage can see it go.
+const voiceLost = compareVoiceCarryForward(
+  voiceRefPrev,
+  voiceRefPrev.replace("### 日向葵（ひまわり）\n- quirk C\n", "")
+);
+assert.deepStrictEqual(voiceLost.missing.map((m) => m.name), ["日向葵"], "a dropped character section is a loss");
+assert.strictEqual(voiceLost.missing[0].expected, 1);
+assert.strictEqual(voiceLost.missing[0].found, 0);
+
+// Three personas of one character, then two: "the heading was renamed" cannot
+// explain a COUNT dropping, so the merged-away persona is reported.
+const voiceMergedPersonas = compareVoiceCarryForward(
+  voiceRefPrev,
+  voiceRefPrev.replace("### 如月雨露（ジョーロ）【僕人格】\n- quirk B\n\n", "")
+);
+assert.deepStrictEqual(
+  voiceMergedPersonas.missing.map((m) => `${m.name} ${m.found}/${m.expected}`),
+  ["如月雨露 1/2"],
+  "one of two same-named sections disappearing is a loss, not a rename"
+);
+
+// A new character is an addition, and no baseline means nothing to carry.
+const voiceGrown = compareVoiceCarryForward(voiceRefPrev, voiceRefPrev + "\n### 山田（生徒会会計）\n- quirk D\n");
+assert.deepStrictEqual(voiceGrown.missing, [], "a grown reference loses nothing");
+assert.deepStrictEqual(voiceGrown.added, ["山田"], "and the guard reports what the volume added");
+assert.deepStrictEqual(compareVoiceCarryForward("", voiceRefPrev).missing, [], "no baseline, nothing to carry");
+
+// The write instruction follows the file, exactly as glossaryWriteInstruction does.
+const voiceSeeded = voiceWriteInstruction(true, "amend");
+assert.ok(voiceSeeded.includes("ALREADY holds"), "a seeded reference is described as already there");
+assert.ok(voiceSeeded.includes("editFile"), "and amended IN PLACE with editFile");
+assert.ok(voiceSeeded.includes('Do NOT rewrite "character-voice.md" with writeFile'), "the whole-file write is forbidden by name");
+assert.ok(voiceSeeded.includes("pov-map.md"), "the per-volume map is still written whole — the two files are not the same kind");
+assert.ok(voiceSeeded.includes("HIGH"), "and the pass works in severity order so a capped turn still leaves a better document");
+const voiceUnseeded = voiceWriteInstruction(false, "amend");
+assert.ok(voiceUnseeded.includes("does not exist yet") || voiceUnseeded.includes("neither file exists yet"), "the first volume really does write both files whole");
+assert.ok(!voiceUnseeded.includes("Do NOT rewrite"), "and is not told to edit a file that is not there");
+assert.ok(voiceWriteInstruction(true, "correct").includes("Correct"), "the feedback wording says correct, not amend");
+
+// The recovery turn must not demand the instruction that broke the file.
+const voiceRecovery = voiceRecoveryPrompt(true, true);
+assert.ok(voiceRecovery.includes("editFile"), "the recovery turn edits");
+assert.ok(!/rewrite both files using writeFile/.test(voiceRecovery), "and never demands the whole-file rewrite that destroyed it");
+assert.ok(voiceRecoveryPrompt(true, false).includes("writeFile"), "with no seeded file, writing it whole is the right ask");
+
+// The index is a map, not the document, and it says when it truncates (gotcha 43).
+assert.ok(buildVoiceIndex(voiceRefPrev).includes("日向葵（ひまわり）"), "the voice index lists the sections");
+assert.strictEqual(buildVoiceIndex("no sections here"), "", "voice index: no sections, no index");
+process.env.VOICE_INDEX_MAX_CHARS = "40";
+const cappedVoiceIndex = buildVoiceIndex(voiceRefPrev);
+assert.ok(cappedVoiceIndex.includes("are not listed here"), "capped voice index SAYS it truncated");
+assert.ok(cappedVoiceIndex.includes("grep"), "capped voice index names the way to check anyway");
+delete process.env.VOICE_INDEX_MAX_CHARS;
+
+// The turn prompts carry the instruction, so the agent is never handed a prompt
+// that contradicts it.
+const voiceCtxSeeded = { ...voiceCtx, isFirst: false, previousFolderName: "test_story(1)", voiceSeeded: true };
+assert.ok(buildAuthorTurnPrompt(voiceCtxSeeded, "[]").includes("editFile"), "the compile turn says amend in place");
+assert.ok(buildFeedbackTurnPrompt(voiceCtxSeeded).includes("editFile"), "the feedback turn says patch, not rewrite");
+assert.ok(!buildFeedbackTurnPrompt(voiceCtxSeeded).includes("write the complete corrected files"), "and no leftover demand to rewrite everything");
+assert.ok(buildFeedbackTurnPrompt(voiceCtxSeeded).includes("ONE grep"), "the feedback turn batches its source checks instead of one search per finding");
+assert.ok(buildAuthorTurnPrompt(voiceCtx, "[]").includes("neither file exists yet"), "the first volume's compile turn writes both files whole");
+
+// ─── style-guide: the same rules, on a document whose unit is a section ──────
+const styleRefPrev =
+  "# Style Guide\n\n## Address & Honorifics\n- rule one\n- rule two\n\n" +
+  "## Pronouns\n- rule three\n\n## Open Questions\n- undecided thing\n";
+assert.deepStrictEqual(
+  parseStyleSections(styleRefPrev).map((s) => s.name),
+  ["Address & Honorifics", "Pronouns", "Open Questions"],
+  "parseStyleSections reads the guide's category sections"
+);
+assert.strictEqual(countStyleRules(styleRefPrev), 4, "countStyleRules counts the bullet rules");
+
+// A missing CATEGORY means every rule inside it is gone — that is the half this
+// document specifies exactly, so it is the half the guard may fail on.
+const styleLost = compareStyleCarryForward(styleRefPrev, styleRefPrev.replace("## Pronouns\n- rule three\n\n", ""));
+assert.deepStrictEqual(styleLost.missing.map((s) => s.name), ["Pronouns"], "a dropped category is a loss");
+
+// Fewer bullets is REPORTED, not failed: a guide that says the same thing in
+// fewer words is not damaged, and a guard that compares prose starts calling an
+// improvement a loss (the mistake that cost the glossary a good volume 02).
+const styleReworded = compareStyleCarryForward(
+  styleRefPrev,
+  styleRefPrev.replace("- rule one\n- rule two", "- one rule covering both")
+);
+assert.deepStrictEqual(styleReworded.missing, [], "rewording rules within a kept category is not a loss");
+assert.strictEqual(styleReworded.currentRules, 3, "two rules collapsed into one is fewer rules…");
+assert.strictEqual(styleReworded.previousRules, 4, "…and the guard reports the drop without failing the volume over it");
+
+const styleGrown = compareStyleCarryForward(styleRefPrev, `${styleRefPrev}\n## Tense & Aspect\n- new rule\n`);
+assert.deepStrictEqual(styleGrown.missing, [], "a grown guide loses nothing");
+assert.deepStrictEqual(styleGrown.added, ["Tense & Aspect"], "and the guard reports what the volume added");
+
+const styleSeeded = styleWriteInstruction(true, "amend");
+assert.ok(styleSeeded.includes("ALREADY holds"), "a seeded guide is described as already there");
+assert.ok(styleSeeded.includes("editFile"), "and amended IN PLACE with editFile");
+assert.ok(styleSeeded.includes('Do NOT rewrite the whole file with writeFile'), "the whole-file write is forbidden by name");
+assert.ok(styleSeeded.includes("Open Questions"), "the guide's own escape hatch is named");
+assert.ok(!styleWriteInstruction(false, "amend").includes("editFile"), "the first volume writes the guide whole");
+assert.ok(styleRecoveryPrompt(true, true).includes("editFile"), "the recovery turn edits");
+assert.ok(!/rewrite the file using writeFile/.test(styleRecoveryPrompt(true, true)), "and never demands the whole-file rewrite");
+assert.ok(styleBuildAuthorTurnPrompt({ ...styleCtx, isFirst: false, previousFolderName: "test_story(1)", styleSeeded: true }, "[]").includes("editFile"), "the style compile turn says amend in place");
+assert.ok(styleBuildFeedbackTurnPrompt({ ...styleCtx, isFirst: false, previousFolderName: "test_story(1)", styleSeeded: true }).includes("editFile"), "the style feedback turn says patch, not rewrite");
 
 // ─── Source bundle: segment id assignment (utils/source.js) ─────────────────
 const { assignSegmentIds, classifyTitle, shouldProcessChunked } = require("../utils/source");

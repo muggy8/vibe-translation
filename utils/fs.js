@@ -8,6 +8,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 // ─── Filesystem helpers ───────────────────────────────────────────────────────
 
@@ -389,6 +390,45 @@ async function inlineReferenceMessage(filePath, name, { truncate } = {}) {
   return { text: `File: ${name}\nContent:\n\n${content}` };
 }
 
+/**
+ * A cheap content fingerprint for a set of files, so a caller can ask afterwards
+ * whether anything actually changed.
+ *
+ * Why this exists: a QA loop's feedback pass is only worth its cost if it moves
+ * the artifact. Observed live on the 17-volume series — the character-voice
+ * feedback pass on volume 01 made 46 tool calls (29 reads, 15 searches, ZERO
+ * writes), spent 2.63M tokens, and left `character-voice.md` and `pov-map.md`
+ * byte-identical to what the compile pass had written. Both files existed and
+ * were real, so `assertWroteWithFallback` reported no gap, no recovery turn ran,
+ * `assertRealOutput` passed, and the loop cheerfully started another iteration
+ * that re-audited the unchanged document for another 8.4M tokens. Every existing
+ * check asks "is the file there?"; none asks "did this pass do anything?".
+ *
+ * Content hashes, not mtimes: an agent that rewrites a file with identical text
+ * is exactly the no-op this detects, and a tool that touched mtime without
+ * touching content would hide it.
+ *
+ * Fail-soft: an unreadable file fingerprints as `missing`, so a read error cannot
+ * masquerade as "nothing changed".
+ *
+ * @param {string|string[]} filePaths - The file(s) to fingerprint.
+ * @returns {Promise<string>} A stable string that differs whenever any listed
+ *   file's content (or presence) differs.
+ */
+async function fingerprintFiles(filePaths) {
+  const list = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean);
+  const parts = [];
+  for (const filePath of list) {
+    try {
+      const buf = await fs.promises.readFile(filePath);
+      parts.push(`${filePath}:${buf.length}:${crypto.createHash("sha256").update(buf).digest("hex")}`);
+    } catch (err) {
+      parts.push(`${filePath}:missing:${err.code || err.message}`);
+    }
+  }
+  return parts.join("|");
+}
+
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
 /**
@@ -457,5 +497,6 @@ module.exports = {
   FALLBACK_MIN_CONTENT_CHARS,
   inlineReferenceMessage,
   writeProvenanceSidecar,
+  fingerprintFiles,
   wipeAttemptOutputs,
 };

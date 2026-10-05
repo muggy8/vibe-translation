@@ -222,6 +222,31 @@ const ACCEPTANCE_CONFIRMATION_MIN_SCORE = Math.max(
 );
 
 /**
+ * Whether a grade that ALREADY passes can earn the window's remaining samples by
+ * re-grading the same artifact, instead of running a full feedback round and a
+ * second full validator turn (ACCEPTANCE_CONFIRM_ON_PASSING, default true).
+ *
+ * Why this exists: acceptance needs `ACCEPTANCE_MIN_SAMPLES` scores, so a first
+ * grade of 76 against a passing score of 69 cannot accept yet — and the only way
+ * the loop had to obtain the second sample was to rewrite the artifact and
+ * re-audit it. Measured on the live 17-volume run, that cost 2.63M tokens for a
+ * feedback pass that changed NOTHING (46 tool calls, all reads, zero writes) plus
+ * an 8.4M-token validator turn over the unchanged document. Re-grading is the
+ * same evidence for ~55k tokens per sample.
+ *
+ * It is deliberately NOT a lower copy of the exceptional path. The exceptional
+ * path asks "is this great grade real?" and keeps its confirmations OUT of the
+ * window. This one is collecting the samples the window is missing, so its
+ * grades go IN — including one that fails, which is the signal that the artifact
+ * really does need the feedback round.
+ *
+ * Set it to `false` to restore the old behavior exactly.
+ *
+ * @type {boolean}
+ */
+const ACCEPTANCE_CONFIRM_ON_PASSING = readBoolEnv("ACCEPTANCE_CONFIRM_ON_PASSING", true);
+
+/**
  * Sampling temperature for every call that GRADES text rather than writes it:
  * the acceptance graders of the four volume artifacts, chapter verification, the
  * verify tiebreak audit and the polish final audit. A judgment call wants a
@@ -742,6 +767,11 @@ async function saveRollingState(filePath, scores, extra = {}) {
   if (Array.isArray(extra.rejectedConfirmations) && extra.rejectedConfirmations.length > 0) {
     data.rejectedConfirmations = extra.rejectedConfirmations;
   }
+  // A QA loop that stopped because a feedback pass applied nothing (see
+  // fingerprintFiles in utils/fs.js). Recorded so a re-run and the run summary can
+  // tell \"ran out of iterations\" apart from \"the rewrite produced nothing\", which
+  // are different problems with different fixes.
+  if (extra.stalled === true) data.stalled = true;
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
 }
 
@@ -777,9 +807,9 @@ async function loadRollingState(filePath) {
           ? data.sourceFingerprint
           : undefined,
       // Persisted by saveRollingState: HOW the volume was accepted
-      // ("rolling-window" or "exceptional-consensus"). Diagnostic only —
-      // isAcceptedState re-derives the decision from the scores, so an old
-      // state file without it still skips correctly.
+      // ("rolling-window", "exceptional-consensus" or "passing-consensus").
+      // Diagnostic only — isAcceptedState re-derives the decision from the
+      // scores, so an old state file without it still skips correctly.
       acceptedBy:
         typeof data.acceptedBy === "string" && data.acceptedBy
           ? data.acceptedBy
@@ -792,6 +822,12 @@ async function loadRollingState(filePath) {
       rejectedConfirmations: Array.isArray(data.rejectedConfirmations)
         ? data.rejectedConfirmations
         : undefined,
+      // The loop stopped because a feedback pass applied nothing rather than
+      // because it ran out of iterations (diagnostic only — it does not change
+      // the accept/skip decision, but it is the difference between \"the grades
+      // never agreed\" and \"the rewrite produced nothing\", which need different
+      // fixes).
+      stalled: data.stalled === true ? true : undefined,
     };
   } catch {
     // File missing, unreadable, or JSON parse error — degrade safely.
@@ -843,6 +879,7 @@ module.exports = {
   ACCEPTANCE_SAMPLE_FLOOR,
   ACCEPTANCE_CONFIRMATION_CHECKS,
   ACCEPTANCE_CONFIRMATION_MIN_SCORE,
+  ACCEPTANCE_CONFIRM_ON_PASSING,
   // Un-monitored run policies (see the section above).
   normalizePolicy,
   readBoolEnv,

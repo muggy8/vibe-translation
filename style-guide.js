@@ -39,13 +39,13 @@ const fs = require("fs").promises;
 const path = require("path");
 require("./types");
 const harness = require("./harness");
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump, selectSectionsByRelevance } = require("./utils/prompt");
+const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, authorMaxStepsFor, findingsMergeMaxStepsFor, writePromptDump, selectSectionsByRelevance } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError } = require("./configs/shared");
-const { fileExists, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact } = require("./utils/fs");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("./configs/shared");
+const { fileExists, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
   decideProcessingMode,
@@ -102,6 +102,348 @@ const feedbackSystemPromptFile = path.join(clientDir, "system-prompts", "style-g
 const feedbackUserPromptTemplateFile = path.join(clientDir, "user-prompts", "style-guide-feedback.md");
 
 const maxValidationIterations = Math.max(1, parseInt(process.env.QA_MAX_ITERATIONS, 10) || 10);
+
+// ─── Cumulative-document rules (the same shape glossary.js established) ───────
+//
+// The style guide is cumulative and grows volume by volume, so it hits the same
+// wall the glossary did (AGENTS.md gotcha 64) and the character-voice reference
+// was about to hit: "writeFile, complete contents" becomes impossible, the agent
+// pages the file, runs out of steps, and rebuilds the document from memory. The
+// stage carried a flat `maxSteps: 30` for its author and feedback agents — the
+// same flat cap that stopped volume 01's character-voice feedback turn at 46 tool
+// calls with zero writes.
+
+/**
+ * Seed this volume's style guide with the previous volume's, verbatim, before any
+ * agent touches it. "Carry forward every existing rule" is a file copy, not a
+ * model task; with the baseline in place the compile pass amends a real file and
+ * `styleWriteInstruction` can say so.
+ *
+ * @param {StyleGuideVolumeCtx} ctx - The volume context.
+ * @returns {Promise<boolean>} True when the volume's guide now starts from the
+ *   previous volume's copy.
+ */
+async function seedStyleGuideFromPrevious(ctx) {
+  const { values, isFirst, previousStyleGuideFile, styleOutputFile } = ctx;
+  if (isFirst || !previousStyleGuideFile) return false;
+
+  let previousText;
+  try {
+    previousText = await fs.readFile(previousStyleGuideFile, "utf8");
+  } catch (err) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: could not read the previous style guide ` +
+        `(${previousStyleGuideFile}: ${err.message}) — the author agent will write this ` +
+        `volume's guide from scratch.`
+    );
+    return false;
+  }
+  if (!previousText || previousText.trim().length === 0) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: the previous style guide is empty — the author ` +
+        `agent will write this volume's guide from scratch.`
+    );
+    return false;
+  }
+
+  let replaced = false;
+  try {
+    const existing = await fs.readFile(styleOutputFile, "utf8");
+    replaced = existing.trim() !== previousText.trim();
+  } catch {
+    replaced = true;
+  }
+
+  await fs.writeFile(styleOutputFile, previousText, "utf8");
+  ctx.styleSeeded = true;
+  ctx.styleIndex = buildStyleIndex(previousText);
+  if (replaced) {
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: seeded style-guide.md from ` +
+        `../${path.basename(path.dirname(previousStyleGuideFile))}/style-guide.md ` +
+        `(${parseStyleSections(previousText).length} section(s), ` +
+        `${countStyleRules(previousText)} rule(s) carried forward verbatim; the author agent ` +
+        `amends it in place).`
+    );
+  }
+  return true;
+}
+
+/**
+ * The `##` sections of a style guide, in file order.
+ *
+ * The guide's category set is fixed by `system-prompts/style-guide.md` (Address &
+ * Honorifics, Pronouns, …, Open Questions), which makes the category headings the
+ * one cumulative unit this document can be compared on. Individual rules are free
+ * prose bullets, and comparing prose is how a guard starts calling an improvement
+ * a loss (the mistake that cost the glossary a good volume 02).
+ *
+ * @param {string} markdown - The guide file content.
+ * @returns {Array<{name: string}>} The section names, in file order.
+ */
+function parseStyleSections(markdown) {
+  if (!markdown || typeof markdown !== "string") return [];
+  const sections = [];
+  for (const rawLine of markdown.split("\n")) {
+    const line = rawLine.trim();
+    const heading = line.match(/^##\s+(.+)$/);
+    if (!heading) continue;
+    const name = heading[1].replace(/\*\*?/g, "").replace(/`/g, "").trim();
+    if (!name) continue;
+    sections.push({ name });
+  }
+  return sections;
+}
+
+/**
+ * Count the rule bullets in a style guide (a size signal, reported, never a
+ * threshold — a guide that says the same thing in fewer words is not damaged).
+ *
+ * @param {string} markdown - The guide file content.
+ * @returns {number} The number of top-level bullet lines.
+ */
+function countStyleRules(markdown) {
+  if (!markdown || typeof markdown !== "string") return 0;
+  return markdown.split("\n").filter((line) => /^\s*[-*] \S/.test(line)).length;
+}
+
+/**
+ * The compact "what the guide already holds" map for an agent turn: each section
+ * and how many rules it has. Enough to place a new rule without paging a document
+ * too big to read whole, and small enough to inline.
+ *
+ * @param {string} markdown - The guide content.
+ * @returns {string} The index, or "" for an empty document.
+ */
+function buildStyleIndex(markdown) {
+  const sections = parseStyleSections(markdown);
+  if (sections.length === 0) return "";
+  const body = sections.map((s) => `- ${s.name}`).join("\n");
+  const rules = countStyleRules(markdown);
+  return `${body}\n(${rules} bullet rule(s) across ${sections.length} section(s).)`.trim();
+}
+
+/**
+ * Compare two style-guide snapshots and report what the newer one LOST.
+ *
+ * The unit is the category section, because that is the part this document
+ * specifies exactly. A missing category means every rule inside it is gone.
+ *
+ * @param {string} previousMarkdown - The previous volume's guide content.
+ * @param {string} currentMarkdown - The guide just produced for this volume.
+ * @returns {{previousCount: number, currentCount: number, missing: Array<{name: string}>, added: string[], previousRules: number, currentRules: number}}
+ */
+function compareStyleCarryForward(previousMarkdown, currentMarkdown) {
+  const previous = parseStyleSections(previousMarkdown);
+  const current = parseStyleSections(currentMarkdown);
+  const currentNames = new Set(current.map((s) => s.name));
+  const previousNames = new Set(previous.map((s) => s.name));
+  const missing = previous.filter((s) => !currentNames.has(s.name));
+  const added = current.filter((s) => !previousNames.has(s.name)).map((s) => s.name);
+  return {
+    previousCount: previous.length,
+    currentCount: current.length,
+    missing,
+    added,
+    previousRules: countStyleRules(previousMarkdown),
+    currentRules: countStyleRules(currentMarkdown),
+  };
+}
+
+/**
+ * The carry-forward gate for the style guide: after a pass, check that this
+ * volume's guide still holds every category section the previous volume's held.
+ *
+ * Deliberately narrower than the glossary's and character-voice's gates: a style
+ * guide's content is free prose, and a guard that compares prose calls an
+ * improvement a loss. What it CAN check honestly is the section set the prompt
+ * specifies — a guide missing "Address & Honorifics" has lost everything in it.
+ * A drop in the rule count is reported, not failed, for the same reason.
+ *
+ * @param {StyleGuideVolumeCtx} ctx - The volume context.
+ * @param {string} [stageLabel] - Which pass produced the guide.
+ * @returns {Promise<void>}
+ * @throws {Error} When category sections disappeared (unless the guard is
+ *   disabled with STYLE_CARRY_FORWARD_GUARD=false).
+ */
+async function assertStyleCarryForward(ctx, stageLabel = "the compile pass") {
+  const { values, isFirst, previousStyleGuideFile } = ctx;
+  if (isFirst || !previousStyleGuideFile) return;
+  if (!readBoolEnv("STYLE_CARRY_FORWARD_GUARD", true)) return;
+
+  let previousText;
+  try {
+    previousText = await fs.readFile(previousStyleGuideFile, "utf8");
+  } catch (err) {
+    console.warn(`Volume ${values.INSTALLMENT_NUMBER}: carry-forward check skipped (${err.message}).`);
+    return;
+  }
+  await guardStyleCarryForwardAgainst(ctx, previousText, stageLabel, "the previous volume's style guide");
+}
+
+/**
+ * The same gate against an arbitrary baseline — the previous volume's guide, or
+ * this volume's own guide as of the previous chapter (chunked mode).
+ *
+ * @param {StyleGuideVolumeCtx} ctx - The volume context.
+ * @param {string} baselineText - The document the newer one must not shrink.
+ * @param {string} stageLabel - Which pass produced the newer snapshot.
+ * @param {string} baselineLabel - What the older snapshot was.
+ * @returns {Promise<void>}
+ * @throws {Error} When category sections disappeared.
+ */
+async function guardStyleCarryForwardAgainst(ctx, baselineText, stageLabel, baselineLabel) {
+  if (!readBoolEnv("STYLE_CARRY_FORWARD_GUARD", true)) return;
+  const { values, styleOutputFile } = ctx;
+
+  let currentText;
+  try {
+    currentText = await fs.readFile(styleOutputFile, "utf8");
+  } catch (err) {
+    console.warn(`Volume ${values.INSTALLMENT_NUMBER}: carry-forward check skipped (${err.message}).`);
+    return;
+  }
+
+  const diff = compareStyleCarryForward(baselineText, currentText);
+  if (diff.missing.length === 0) {
+    const ruleNote =
+      diff.currentRules < diff.previousRules
+        ? `, ${diff.previousRules - diff.currentRules} fewer bullet rule(s) — reported, not failed`
+        : "";
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: carry-forward check passed ` +
+        `(${diff.previousCount} section(s) carried, ${diff.added.length} added, ` +
+        `${diff.currentRules} rule(s)${ruleNote}).`
+    );
+    return;
+  }
+
+  const quarantineFile = `${styleOutputFile}.rejected`;
+  try {
+    await fs.rename(styleOutputFile, quarantineFile);
+    console.error(
+      `Volume ${values.INSTALLMENT_NUMBER}: moved the damaged style guide (${diff.currentCount} of ` +
+        `${diff.previousCount} sections) to "${path.basename(quarantineFile)}" so the next volume ` +
+        `cannot build on it. Re-running this volume starts from ../${ctx.previousFolderName}/style-guide.md.`
+    );
+  } catch (err) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: could not move the damaged guide aside (${err.message}) ` +
+        `— it is still a failure, but the next volume may read it.`
+    );
+  }
+
+  throw new Error(
+    `Volume ${values.INSTALLMENT_NUMBER}: ${stageLabel} dropped style-guide section(s) that ` +
+      `${baselineLabel} held — ${diff.missing.map((s) => s.name).join(", ")}. The guide is ` +
+      `cumulative: every later volume is built on it, and its copy has been moved to ` +
+      `"${path.basename(quarantineFile)}" so no later volume can read a partial one. Amend ` +
+      `"style-guide.md" in place with editFile instead of rewriting it (see ` +
+      `styleWriteInstruction), or set STYLE_CARRY_FORWARD_GUARD=false to allow a shrinking guide.`
+  );
+}
+
+/**
+ * The "what the guide already holds" block for a style-guide agent turn.
+ * @param {StyleGuideVolumeCtx} ctx - The volume context; `styleIndex` is set by
+ *   seedStyleGuideFromPrevious.
+ * @returns {string} The block, or "" when there is no index. Ends with a blank line.
+ */
+function styleIndexBlock(ctx) {
+  if (!ctx.styleIndex) return "";
+  return (
+    `What "style-guide.md" already holds, by section:\n` +
+    `${ctx.styleIndex}\n\n` +
+    `Use this to choose the section a new rule belongs in. It is an index, not the document: ` +
+    `read the rules you are about to change before changing them.\n\n`
+  );
+}
+
+/**
+ * The write instruction for a style-guide pass — shared by the compile and
+ * feedback passes, whole and per-chapter. See voiceWriteInstruction /
+ * glossaryWriteInstruction: the cumulative document is edited IN PLACE, and the
+ * whole-file write is only for a file that does not exist yet.
+ *
+ * @param {boolean} hasExistingFile - Whether "style-guide.md" already holds the
+ *   document to change.
+ * @param {"amend"|"correct"} [mode] - "amend" adds rules; "correct" applies a report.
+ * @returns {string} The instruction block, ending with a blank line.
+ */
+function styleWriteInstruction(hasExistingFile, mode = "amend") {
+  const doVerb = mode === "correct" ? "Correct" : "Amend";
+  if (!hasExistingFile) {
+    return (
+      `How to write it: the file "style-guide.md" in your working folder does not exist yet, ` +
+      `so write the complete guide to it with writeFile (complete contents), in the exact ` +
+      `section format from the system prompt.\n\n`
+    );
+  }
+  return (
+    `How to write it — "style-guide.md" in your working folder ALREADY holds the guide as of ` +
+    `the step before this one (the workflow put the current version of it there). ` +
+    `${doVerb} it IN PLACE with editFile:\n\n` +
+    `- Add each new rule as ONE new bullet inside the right existing section.\n` +
+    `- Replace an existing rule only when the source text shows it is wrong, and keep the rest ` +
+    `of its section.\n` +
+    `- Add to the "Open Questions" section rather than guessing an undecidable construct.\n` +
+    `- Update the "current through volume" header line.\n\n` +
+    `Do NOT rewrite the whole file with writeFile. This guide is larger than one reply can ` +
+    `produce, and a write cut off part-way destroys every rule it did not reach. Never delete a ` +
+    `section, and never retype a rule you have not just read — rules that fall out of this file ` +
+    `are lost from every later volume.\n\n` +
+    `Work in priority order, and write as you go: apply the HIGH-severity findings first with ` +
+    `editFile, then MEDIUM, then LOW. A turn that runs out of steps having changed nothing ` +
+    `produced nothing; one that applied the important fixes first produced a better guide even ` +
+    `if it never reached the minor ones.\n\n`
+  );
+}
+
+/**
+ * The recovery turn for a style-guide pass that answered in chat instead of using
+ * the file tools. It edits, because demanding a whole-file rewrite of a document
+ * larger than one reply is how a recovery turn destroys what it was sent to fix.
+ *
+ * @param {boolean} hasContent - Whether the agent produced content in its chat reply.
+ * @param {boolean} hasExistingFile - Whether "style-guide.md" is the seeded guide.
+ * @returns {string} The recovery prompt.
+ */
+function styleRecoveryPrompt(hasContent, hasExistingFile) {
+  const guidePart = hasExistingFile
+    ? `Apply your changes to "style-guide.md" with editFile — add each new rule as a bullet in ` +
+      `the right section and edit existing rules in place. Do NOT rewrite "style-guide.md" from ` +
+      `scratch with writeFile: every section and rule that is in it now must still be there when ` +
+      `you finish.`
+    : `Write the complete style guide to "style-guide.md" with writeFile.`;
+  if (hasContent) {
+    return `You produced your answer as a chat message instead of changing the file.\n\n${guidePart}\n\nRead "style-guide.md" before editing it.`;
+  }
+  return `You produced no output. Read the materials, then: ${guidePart}`;
+}
+
+/**
+ * The step cap for this stage's author / feedback agent on this volume or chapter
+ * (see authorMaxStepsFor — a flat 30 is what stopped the sibling stage's feedback
+ * turn at 46 tool calls with zero writes).
+ *
+ * @param {StyleGuideVolumeCtx} ctx - The volume context.
+ * @param {SourceSegment|null} [seg] - The chapter being processed (chunked mode).
+ * @returns {Promise<number>} The step cap.
+ */
+async function styleAuthorMaxSteps(ctx, seg = null) {
+  const sizeOf = async (p) => {
+    try {
+      return (await fs.stat(p)).size;
+    } catch {
+      return 0;
+    }
+  };
+  const artifactBytes = await sizeOf(ctx.styleOutputFile);
+  const sourceBytes = seg
+    ? await sizeOf(path.join(ctx.volumeDir, seg.file))
+    : await sizeOf(ctx.sourceFile);
+  return authorMaxStepsFor(artifactBytes, sourceBytes);
+}
 
 /**
  * Parse the AI's extraction output into an array of style-construct entries.
@@ -185,7 +527,8 @@ function buildAuthorTurnPrompt(ctx, extractionResults, seg = null, si = null) {
     `- "glossary.md" — the current glossary snapshot (canonical names)\n` +
     `- "character-voice.md" — the current character voice reference (formality and voice data)\n` +
     `\n` +
-    `Write the complete style guide to the file "style-guide.md" in your working folder (writeFile, complete contents).\n\n` +
+    styleIndexBlock(ctx) +
+    styleWriteInstruction(Boolean(ctx.styleSeeded), "amend") +
     amendPrompt
   );
 }
@@ -266,7 +609,17 @@ function buildFeedbackTurnPrompt(ctx, seg = null, si = null) {
     `- The current style guide to correct: "style-guide.md" (same folder)\n` +
     previousGuideLine +
     `\n` +
-    `Apply the report's findings and write the complete corrected guide back to "style-guide.md" using writeFile (complete contents).\n\n` +
+    styleIndexBlock(ctx) +
+    styleWriteInstruction(true, "correct") +
+    `Verifying the report's findings against the source is part of the job, but it is not the ` +
+    `job. The report already quotes the source lines it is complaining about, so:\n` +
+    `- Check a batch of findings with ONE grep (its pattern may be several phrases separated by ` +
+    `|) instead of one search per finding, and read the quoted line ranges in as few readFile ` +
+    `calls as the layout allows.\n` +
+    `- Apply each fix with editFile as soon as it is confirmed. Do not verify everything first ` +
+    `and then start editing: if you run out of steps, the fixes you already applied still stand.\n` +
+    `- If a finding cannot be confirmed from the source, say so in your final summary and leave ` +
+    `that rule alone rather than spending more steps on it.\n\n` +
     transformUserPrompt(ctx.feedbackUserPrompt, ctx.values)
   );
 }
@@ -422,6 +775,14 @@ async function styleGuide() {
     const ctx = { values, folderName, volumeDir, sourceFile, bundle, chunked: mode.chunked, styleOutputFile, validationOutputFile, isFirst, previousFolderName, previousStyleGuideFile, extractPrompt, validatorPrompt, feedbackPrompt, acceptancePrompt, extractTemplate, authorTemplate, extractSystemPrompt, authorSystemPrompt, validatorSystemPrompt, acceptanceSystemPrompt, feedbackSystemPrompt, authorUserPrompt: authorTemplate, validatorUserPrompt: validatorTemplate, feedbackUserPrompt: feedbackTemplate };
 
     if (dryRun) {
+      // Preview the instruction a live run would give: the live run seeds
+      // style-guide.md from the previous volume whenever there is one.
+      ctx.styleSeeded = !isFirst && Boolean(previousStyleGuideFile) && (await fileExists(previousStyleGuideFile));
+      // …and it shows the section map that copy produces (see the same note in
+      // glossary.js and character-voice.js).
+      ctx.styleIndex = ctx.styleSeeded
+        ? buildStyleIndex(await fs.readFile(previousStyleGuideFile, "utf8").catch(() => ""))
+        : "";
       const illustrative = JSON.stringify([{ category: "honorific", pattern: "ex", description: "ex", examples: ["ex"], frequency: "high", notes: "ex" }]);
       const sections = [
         { title: "One-shot — extraction system prompt", prompt: extractSystemPrompt },
@@ -592,7 +953,7 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
     extractionResults = extractionOutput;
   }
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running style-guide compilation${seg ? ` for chapter ${seg.id}` : ""}...`);
-  const author = await harness.createAgentHandle({ name: `author-style-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: 30 });
+  const author = await harness.createAgentHandle({ name: `author-style-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: await styleAuthorMaxSteps(ctx, seg) });
   try {
     const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults, seg, si), { label: `style-guide-compile-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
     assertRealToolCalls(compileResult, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
@@ -601,8 +962,7 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
     // fallback — never over a file the agent already wrote correctly.
     if (compileFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = compileResult?.text && compileResult.text.trim().length > 0;
-      const recoveryPrompt = hasContent ? `You were asked to write "style-guide.md" using writeFile, but you replied in chat. Please rewrite the file using writeFile now with the exact same content.` : `You produced no output. Please read the materials and write "style-guide.md" using writeFile now.`;
-      const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `style-guide-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
+      const recoveryResult = await author.sendTurn(styleRecoveryPrompt(hasContent, Boolean(ctx.styleSeeded)), { label: `style-guide-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
       assertRealToolCalls(recoveryResult, `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, recoveryResult?.text);
     }
@@ -642,6 +1002,9 @@ async function runQaLoop(ctx) {
     confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
     feedbackLogLine: () => "Calling the AI to apply the validation feedback (author agent)...",
     runFeedback: (iteration) => runFeedback(ctx),
+    // The loop stops when a feedback pass leaves this byte-identical: a turn
+    // that only read is not an iteration (see fingerprintFiles in utils/fs.js).
+    feedbackArtifactFiles: [ctx.styleOutputFile],
     limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`,
   });
   ctx.limitReached = result.limitReached;
@@ -660,7 +1023,7 @@ async function runQaLoop(ctx) {
 async function runFeedback(ctx, seg = null, si = null) {
   const { values, volumeDir, fsGate } = ctx;
   const labelSuffix = seg ? `-${seg.id}` : "";
-  const author = await harness.createAgentHandle({ name: `author-style-feedback-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: 30 });
+  const author = await harness.createAgentHandle({ name: `author-style-feedback-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: await styleAuthorMaxSteps(ctx, seg) });
   try {
     const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx, seg, si), { label: `style-guide-feedback-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
     assertRealToolCalls(feedbackResult, `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
@@ -669,12 +1032,14 @@ async function runFeedback(ctx, seg = null, si = null) {
     // fallback — never over a file the agent already wrote correctly.
     if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-      const recoveryPrompt = hasContent ? `You were asked to write "style-guide.md" using writeFile, but you replied in chat. Please rewrite the file using writeFile now.` : `You produced no output. Please read the materials and write "style-guide.md" using writeFile now.`;
-      const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `style-guide-feedback-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
+      const recoveryResult = await author.sendTurn(styleRecoveryPrompt(hasContent, true), { label: `style-guide-feedback-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
       assertRealToolCalls(recoveryResult, `the author agent (feedback recovery${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (feedback recovery${seg ? `, chapter ${seg.id}` : ""})`, recoveryResult?.text);
     }
     await assertRealOutput(ctx.styleOutputFile, `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`);
+    // The cumulative invariant, re-checked after every rewrite: a feedback pass
+    // that rewrote the guide from memory is how sections disappear from it.
+    await assertStyleCarryForward(ctx, "the feedback pass");
   } finally { await author.close(); }
 }
 
@@ -720,6 +1085,9 @@ async function runChunkedVolume(ctx) {
   // Create fsGate BEFORE any compile so the author agent has file tools.
   const fsGate = await harness.createGatedFsTools({ cwd: ctx.volumeDir, allowedDirs: [ctx.volumeDir] });
   ctx.fsGate = fsGate;
+  // Same rule as whole mode: the previous volume's guide is copied in first, so
+  // each chapter's compile pass amends the current state instead of reproducing it.
+  await seedStyleGuideFromPrevious(ctx);
   const chunkedExtractions = [];
   for (let si = 0; si < bundle.segments.length; si++) {
     const segment = bundle.segments[si];
@@ -738,11 +1106,17 @@ async function runChunkedVolume(ctx) {
       // Unparseable chapter output — runCompile falls back to the raw text;
       // nothing structured to persist for this chapter.
     }
+    // The baseline this chapter must not shrink below: the guide as of the
+    // previous chapter (or the previous volume's, for chapter 0).
+    const chapterBaseline = await fs.readFile(ctx.styleOutputFile, "utf8").catch(() => null);
     try {
       await runCompile(ctx, extractionOutput, segment, si);
     } catch (err) {
       console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed for chapter ${segment.id}: ${err.message}. Check .logs/ for details.`);
       throw err;
+    }
+    if (chapterBaseline !== null) {
+      await guardStyleCarryForwardAgainst(ctx, chapterBaseline, `the compile pass (chapter ${segment.id})`, "the guide as of the previous chapter");
     }
   }
   // Persist the volume's extraction results (the new style constructs) so
@@ -792,7 +1166,7 @@ async function runChunkedQaLoop(ctx) {
       } finally { await validator.close(); }
     }
     // Findings merge: consolidate the partials into the standard report.
-    const merger = await harness.createAgentHandle({ name: `validator-merge-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: 20 });
+    const merger = await harness.createAgentHandle({ name: `validator-merge-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: findingsMergeMaxStepsFor(bundle.segments.length, (await fs.stat(ctx.styleOutputFile).catch(() => ({ size: 0 }))).size) });
     try {
       const mergeResult = await merger.sendTurn(buildStyleFindingsMergePrompt(ctx), { label: `style-guide-validate-merge-${values.INSTALLMENT_NUMBER}-${iteration}` });
       assertRealToolCalls(mergeResult, "the findings-merge agent", values.INSTALLMENT_NUMBER);
@@ -833,9 +1207,47 @@ async function runChunkedQaLoop(ctx) {
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 (${recentRollingScores.length} checks) meets the passing score ${ACCEPTANCE_PASSING_SCORE}. Accepted.`);
       break;
     }
-    // Per-chapter feedback (chapter-tagged findings only).
+    // A grade that already passes earns the window's remaining samples by
+    // re-grading this guide, not by paying for a per-chapter feedback round plus
+    // a second full round of per-chapter validators (see confirmPassingScore).
+    const passing = await confirmPassingScore({
+      score,
+      recentRollingScores,
+      confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+      stateFile: stateFilePath,
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
+    if (passing.accepted) {
+      ctx.acceptedBy = "passing-consensus";
+      break;
+    }
+    // Per-chapter feedback (chapter-tagged findings only). Fingerprinted first: a
+    // feedback round that changed nothing is not progress, and another iteration
+    // would re-audit an unchanged document.
+    const beforeFeedback = await fingerprintFiles(ctx.styleOutputFile);
     for (let si = 0; si < bundle.segments.length; si++) {
       await runFeedback(ctx, bundle.segments[si], si);
+    }
+    if ((await fingerprintFiles(ctx.styleOutputFile)) === beforeFeedback) {
+      console.error(
+        `Volume ${values.INSTALLMENT_NUMBER}: the per-chapter feedback round changed NOTHING — ` +
+          `style-guide.md is byte-identical to what it was before it. Stopping the QA loop here rather ` +
+          `than paying for another round of per-chapter validators over an unchanged document. Check the ` +
+          `feedback agents' turn logs in .logs/ for turns that only read (the usual shape: step cap ` +
+          `reached before anything was written).`
+      );
+      ctx.limitReached = true;
+      await saveRollingState(stateFilePath, recentRollingScores, {
+        sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+        stalled: true,
+      });
+      if (ON_QA_LIMIT === "fail") {
+        throw new Error(
+          `Volume ${values.INSTALLMENT_NUMBER}: the feedback round applied nothing (ON_QA_LIMIT=fail).`
+        );
+      }
+      break;
     }
     if (iteration === maxValidationIterations) {
       ctx.limitReached = true;
@@ -879,10 +1291,15 @@ async function runVolume(ctx) {
   // created with no tools at all.
   const fsGate = await harness.createGatedFsTools({ cwd: ctx.volumeDir, allowedDirs: [ctx.volumeDir] });
   ctx.fsGate = fsGate;
+  // The previous volume's guide is copied in BEFORE any agent touches the folder,
+  // so the compile pass amends a real file instead of reproducing a document too
+  // large for one reply (see seedStyleGuideFromPrevious).
+  await seedStyleGuideFromPrevious(ctx);
   try { await runCompile(ctx, extractionOutput); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed: ${err.message}. Check .logs/ for details.`); throw err; }
+  await assertStyleCarryForward(ctx, "the compile pass");
   await runQaLoop(ctx);
 }
 
 // Export
-module.exports = { styleGuide, parseStyleObservations, truncateStyleGuide, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildStyleFindingsMergePrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runExtract, runCompile, runQaLoop, runFeedback, runChunkedVolume, runChunkedQaLoop, acceptanceCheck };
+module.exports = { styleGuide, parseStyleObservations, truncateStyleGuide, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildStyleFindingsMergePrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runExtract, runCompile, runQaLoop, runFeedback, runChunkedVolume, runChunkedQaLoop, acceptanceCheck, seedStyleGuideFromPrevious, parseStyleSections, countStyleRules, buildStyleIndex, styleIndexBlock, styleWriteInstruction, styleRecoveryPrompt, styleAuthorMaxSteps, compareStyleCarryForward, assertStyleCarryForward, guardStyleCarryForwardAgainst };
 

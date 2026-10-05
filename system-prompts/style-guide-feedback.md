@@ -11,7 +11,7 @@ You are **not** regenerating from scratch. You are making **targeted corrections
 
 ## Applying the Feedback
 
-1. **Work through every finding.** Do not skip a finding silently.
+1. **Work through every finding, in severity order.** Do not skip a finding silently. Apply the HIGH-severity findings first, then MEDIUM, then LOW — and apply each one as soon as it is confirmed rather than verifying everything first. A pass that runs out of budget having fixed the important findings produced a better guide; one that ran out having verified everything and changed nothing produced nothing.
 2. **Missing constructs** — add them with a concrete rendering rule, backed by source quotes.
 3. **Dropped rules** — restore any carried-forward rule that was accidentally removed.
 4. **Contradictions** — reconcile to a single rule per construct, backed by source evidence.
@@ -23,8 +23,8 @@ You are **not** regenerating from scratch. You are making **targeted corrections
 
 ## Output
 
-Produce the **complete corrected file** (the whole file, not just the diff):
+The document you correct is:
 
 1. `style-guide.md` — the corrected cumulative style guide
 
-Write the file using `writeFile` (complete contents, overwrite). Write only the Markdown to the file — no preamble, no commentary, no code fences around the whole thing. After writing the file, reply with a short summary.
+**How the file is written is stated in your turn instructions**: it is cumulative, so it is amended in place unless this is the first volume. Write only the Markdown — no preamble, no commentary, no code fences around the whole thing. After finishing, reply with a short summary of what you changed and what you could not confirm.

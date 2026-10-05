@@ -25,6 +25,7 @@ const { execFileSync } = require("child_process");
 // in the parent (the child gets ON_QA_LIMIT=fail via the spawn env below).
 const childFailLimit = process.argv.includes("--child-fail-limit");
 const childConsensus = process.argv.includes("--child-consensus");
+const childPassingConsensus = process.argv.includes("--child-passing-consensus");
 
 // Pin the acceptance config so the loop tests are deterministic regardless of
 // the local .env (the values below are also the current code defaults: window
@@ -42,6 +43,11 @@ if (!childConsensus) {
 }
 process.env.ACCEPTANCE_SCORE_TOLERANCE = "3";
 process.env.ACCEPTANCE_CONFIRMATION_CHECKS = "2";
+// The "a passing grade earns its second sample by re-grading" path is pinned OFF
+// in the parent so the scenarios below keep exercising the rolling-window route
+// (one feedback pass between the two samples). It is exercised in a spawned child
+// with its own pins — see scenarioPassingConsensusInChild.
+process.env.ACCEPTANCE_CONFIRM_ON_PASSING = childPassingConsensus ? "true" : "false";
 process.env.QA_MAX_ITERATIONS = "4";
 process.env.AGENT_RECOVERY_ENABLED = "true";
 if (!childFailLimit) {
@@ -151,9 +157,20 @@ function makeCtx(v) {
 }
 
 /** The agent stub's file writers (real fs — the deterministic gates see them). */
+let feedbackWriteCount = 0;
 function writeArtifacts(volumeDir, marker) {
   fs.writeFileSync(path.join(volumeDir, "character-voice.md"), `# Character Voice (${marker})\n`, "utf8");
   fs.writeFileSync(path.join(volumeDir, "pov-map.md"), `# POV Map (${marker})\n`, "utf8");
+}
+/**
+ * The feedback author's writers. Each pass writes DIFFERENT bytes, because that is
+ * what a real feedback pass does — and the loop's no-op detector (fingerprintFiles)
+ * is exactly what a stub that rewrote identical text would make untestable.
+ */
+function writeRevisedArtifacts(volumeDir) {
+  feedbackWriteCount += 1;
+  fs.writeFileSync(path.join(volumeDir, "character-voice.md"), `# Character Voice (revised ${feedbackWriteCount})\n`, "utf8");
+  fs.writeFileSync(path.join(volumeDir, "pov-map.md"), `# POV Map (revised ${feedbackWriteCount})\n`, "utf8");
 }
 function writeReport(volumeDir, marker) {
   fs.writeFileSync(
@@ -176,9 +193,10 @@ function writeReport(volumeDir, marker) {
  * different artifacts (utils/fs.js), so a two-file gap is repaired by the
  * recovery turn or not at all.
  */
-function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = true, recoveryWritesFiles = compileWritesFiles, compileText = "wrote both files", confirmationReplies = [] } = {}) {
+function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = true, recoveryWritesFiles = compileWritesFiles, compileText = "wrote both files", confirmationReplies = [], feedbackWritesFiles = true } = {}) {
   let acceptanceIndex = 0;
   let confirmationIndex = 0;
+  feedbackWriteCount = 0;
   return {
     oneShot(label) {
       if (label.startsWith("character-voice-extract-")) return "[]";
@@ -215,7 +233,10 @@ function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = 
         return { text: "" };
       }
       if (name.startsWith("author-voice-feedback-")) {
-        writeArtifacts(volumeDir, "revised");
+        // `feedbackWritesFiles: false` scripts the live failure shape: a feedback
+        // turn that spent its whole step budget reading and wrote nothing, leaving
+        // the artifacts exactly as the compile pass wrote them.
+        if (feedbackWritesFiles) writeRevisedArtifacts(volumeDir);
         return { text: "" };
       }
       throw new Error(`Unexpected agent name: ${name}`);
@@ -580,6 +601,113 @@ async function scenarioExceptionalConsensus() {
   }
 }
 
+/**
+ * A feedback pass that changed NOTHING stops the loop instead of buying another
+ * full iteration over an unchanged document.
+ *
+ * This is the live failure it was written for: volume 01's character-voice
+ * feedback turn made 46 tool calls (29 reads, 15 searches, zero writes), spent
+ * 2.63M tokens, and left both artifacts byte-identical. Every existing gate
+ * passed — the files were there and real — so the loop started iteration 2 and
+ * paid 8.4M tokens to re-audit a document that had not moved.
+ */
+async function scenarioFeedbackNoOpStopsLoop() {
+  const v = makeVolumeDir();
+  const ctx = makeCtx(v);
+  // Iteration 1 grades 55 (fails) → feedback runs and writes nothing → the loop
+  // must stop there rather than validate the same text four times.
+  script = makeDefaultScript(v.volumeDir, [jsonReply(55), jsonReply(56)], {
+    feedbackWritesFiles: false,
+  });
+  callLog = [];
+  try {
+    await cv.runVolume(ctx);
+    assert.strictEqual(agentCalls("author-voice-feedback-").length, 1, "exactly one feedback pass (the no-op is not retried)");
+    assert.strictEqual(agentCalls("validator-voice-").length, 1, "no second validator turn over an unchanged document");
+    assert.strictEqual(acceptanceLabels().length, 1, "no second grade of the unchanged document");
+    const state = await loadState(ctx.validationOutputFile);
+    assert.strictEqual(state.stalled, true, "the state records that the loop stalled");
+    // The artifact is still the compile pass's, not a phantom "revised" one.
+    const artifact = fs.readFileSync(ctx.voiceOutputFile, "utf8");
+    assert.ok(artifact.includes("v1") && !artifact.includes("revised"), "the unchanged artifact is what the compile pass wrote");
+  } finally {
+    cleanup(v.root);
+  }
+}
+
+/**
+ * The passing-grade re-grade path, exercised in a spawned child so
+ * configs/shared.js loads with ACCEPTANCE_CONFIRM_ON_PASSING ON (the parent pins
+ * it OFF so the scenarios above keep exercising the rolling-window route).
+ *
+ * A. 76 first (above the 70 line, below the 85 exceptional floor) with re-grades
+ *    78 and 76 → accepted with NO feedback pass and NO second validator turn.
+ *    This is the exact shape measured live on volume 01, where the old route cost
+ *    2.63M + 8.4M tokens for the second sample.
+ * B. 76 first, but a re-grade says 41 → the window disagrees with itself, so the
+ *    feedback round runs. A passing grade is confirmed, never laundered.
+ */
+function scenarioPassingConsensusInChild() {
+  const out = execFileSync(process.execPath, [__filename, "--child-passing-consensus"], {
+    encoding: "utf8",
+    env: { ...process.env, ACCEPTANCE_CONFIRM_ON_PASSING: "true" },
+  });
+  assert.ok(out.includes("CHILD-OK"), "child printed CHILD-OK (got: " + out.trim().slice(-400) + ")");
+}
+
+/** The child's entry point (passing-consensus path). */
+async function scenarioPassingConsensus() {
+  // A. confirmed → accepted without rewriting the artifact.
+  {
+    const v = makeVolumeDir();
+    const ctx = makeCtx(v);
+    script = makeDefaultScript(v.volumeDir, [jsonReply(76)], {
+      confirmationReplies: [jsonReply(78), jsonReply(76)],
+    });
+    callLog = [];
+    try {
+      await cv.runVolume(ctx);
+      const labels = acceptanceLabels();
+      assert.strictEqual(labels.length, 3, `first grade + 2 re-grades (got ${labels.length})`);
+      assert.ok(labels.some((l) => l.includes("confirm1")), "the independent re-grade ran");
+      assert.ok(labels.some((l) => l.includes("confirm2")), "the temperature-0 anchor ran");
+      assert.strictEqual(agentCalls("author-voice-feedback-").length, 0, "no feedback pass — the samples came from re-grading");
+      assert.strictEqual(agentCalls("validator-voice-").length, 1, "no second full validator turn");
+      const state = await loadState(ctx.validationOutputFile);
+      assert.strictEqual(state.acceptedBy, "passing-consensus", "the state records HOW it was accepted");
+      assert.deepStrictEqual(state.results, [76, 78, 76].slice(-2), "the re-grades went INTO the window (unlike the exceptional path)");
+      assert.strictEqual(state.deterministicScore, 76, "the temperature-0 grade is persisted");
+      assert.ok(isAcceptedState(state), "the persisted state still reads as accepted (no-AI skip check)");
+      // The artifact is the compile pass's: nothing rewrote it.
+      const artifact = fs.readFileSync(ctx.voiceOutputFile, "utf8");
+      assert.ok(artifact.includes("v1") && !artifact.includes("revised"), "the artifact was never rewritten to collect a sample");
+    } finally {
+      cleanup(v.root);
+    }
+  }
+
+  // B. a re-grade fails → the feedback round is the right answer, and the loop
+  //    does not accept on the strength of the first passing grade alone.
+  {
+    const v = makeVolumeDir();
+    const ctx = makeCtx(v);
+    script = makeDefaultScript(v.volumeDir, [jsonReply(76), jsonReply(88)], {
+      confirmationReplies: [jsonReply(41), jsonReply(77)],
+    });
+    callLog = [];
+    try {
+      await cv.runVolume(ctx);
+      assert.strictEqual(agentCalls("author-voice-feedback-").length, 1, "the feedback pass ran — a re-grade disagreed with the passing grade");
+      assert.strictEqual(agentCalls("validator-voice-").length, 2, "the normal second validation iteration ran");
+      const state = await loadState(ctx.validationOutputFile);
+      assert.ok(state.results.every((s) => s >= 70), "the failing re-grade was counted, then the window was rebuilt by real iterations");
+      assert.strictEqual(state.acceptedBy, "rolling-window", "accepted by the normal criterion instead");
+    } finally {
+      cleanup(v.root);
+    }
+  }
+}
+
 // ─── confirmExceptionalScore (the helper the four chunked loops call) ─────────
 // The chunked (chapter-by-chapter) QA loops keep their own inline loop, so they
 // cannot use runSharedQaLoop — but they must run the SAME exceptional-score
@@ -663,6 +791,8 @@ async function main() {
   await scenarioUnparseableAcceptanceFailsClosed();
   await scenarioSkipDecision();
   scenarioExceptionalConsensusInChild();
+  scenarioPassingConsensusInChild();
+  await scenarioFeedbackNoOpStopsLoop();
   await scenarioConfirmExceptionalScore();
   console.log("qa-orchestration: all checks passed.");
 }
@@ -678,6 +808,14 @@ if (childFailLimit) {
 } else if (childConsensus) {
   installStubs();
   scenarioExceptionalConsensus()
+    .then(() => console.log("CHILD-OK"))
+    .catch((err) => {
+      console.error("CHILD-FAIL:", err && err.stack || err);
+      process.exit(1);
+    });
+} else if (childPassingConsensus) {
+  installStubs();
+  scenarioPassingConsensus()
     .then(() => console.log("CHILD-OK"))
     .catch((err) => {
       console.error("CHILD-FAIL:", err && err.stack || err);

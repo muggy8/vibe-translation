@@ -60,9 +60,9 @@ require("./types"); // JSDoc type definitions
 const harness = require("./harness");
 const { getTranslationTarget } = require("./get-translation-target");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, isPublishableArtifact, writeProvenanceSidecar } = require("./utils/fs");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, isPublishableArtifact, writeProvenanceSidecar, fingerprintFiles } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const { writeVolumeHandoff } = require("./utils/handoff");
 const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { installmentNumberFromDir, filterVolumesByInstallment } = require("./utils/manifest");
@@ -1190,7 +1190,27 @@ async function runChunkedQaLoop(ctx) {
       break;
     }
 
-    // Per-chapter feedback (fresh author agent per chapter, chapter-tagged findings).
+    // A grade that already passes earns the window's remaining samples by
+    // re-grading this wiki, not by paying for a per-chapter feedback round plus a
+    // second full round of per-chapter validators (see confirmPassingScore).
+    const passing = await confirmPassingScore({
+      score: reply ? reply.score : null,
+      recentRollingScores,
+      confirmationCheck: ({ index, temperature }) => wikiAcceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+      stateFile: wikiStateFile,
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
+    if (passing.accepted) {
+      ctx.acceptedBy = "passing-consensus";
+      break;
+    }
+
+    // Per-chapter feedback (fresh author agent per chapter, chapter-tagged
+    // findings). Fingerprinted first: a feedback round that changed nothing is
+    // not progress, and another iteration would re-audit an unchanged wiki.
+    const watchedWikiFiles = [wikiOutputFile, sharedWikiOutputFile];
+    const beforeFeedback = await fingerprintFiles(watchedWikiFiles);
     for (let si = 0; si < bundle.segments.length; si++) {
       const segment = bundle.segments[si];
       const feedbackAuthor = await harness.createAgentHandle({
@@ -1215,6 +1235,27 @@ async function runChunkedQaLoop(ctx) {
       } finally {
         await feedbackAuthor.close();
       }
+    }
+
+    if ((await fingerprintFiles(watchedWikiFiles)) === beforeFeedback) {
+      console.error(
+        `Volume ${values.INSTALLMENT_NUMBER}: the per-chapter feedback round changed NOTHING — ` +
+          `wiki.md and shared-wiki.md are byte-identical to what they were before it. Stopping the QA ` +
+          `loop here rather than paying for another round of per-chapter validators over an unchanged ` +
+          `wiki. Check the feedback agents' turn logs in .logs/ for turns that only read (the usual ` +
+          `shape: step cap reached before anything was written).`
+      );
+      ctx.limitReached = true;
+      await saveRollingState(wikiStateFile, recentRollingScores, {
+        sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+        stalled: true,
+      });
+      if (ON_QA_LIMIT === "fail") {
+        throw new Error(
+          `Volume ${values.INSTALLMENT_NUMBER}: the feedback round applied nothing (ON_QA_LIMIT=fail).`
+        );
+      }
+      break;
     }
 
     if (iteration === maxValidationIterations) {
@@ -1408,6 +1449,9 @@ async function runQaLoop(ctx, author) {
     confirmationCheck: ({ index, temperature }) => wikiAcceptanceCheck(ctx, `confirm${index + 1}`, temperature),
     feedbackLogLine: () => "Calling the AI to apply the validation feedback (author agent)...",
     runFeedback: (iteration) => runWikiFeedback(ctx, author, iteration),
+    // The loop stops when a feedback pass leaves these byte-identical: a turn
+    // that only read is not an iteration (see fingerprintFiles in utils/fs.js).
+    feedbackArtifactFiles: [ctx.wikiOutputFile, ctx.sharedWikiOutputFile],
     limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade. The last feedback pass is unvalidated; re-run the task to validate it.`,
   });
   ctx.limitReached = result.limitReached;

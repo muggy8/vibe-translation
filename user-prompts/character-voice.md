@@ -43,9 +43,9 @@ Produce exactly these files:
 
 All content written in **{{SOURCE_LANGUAGE}}** — the same language as the source material, including headings, labels, and example quotes.
 
-Write the character voice reference to `character-voice.md` using `writeFile` (complete contents, overwrite).
-Write the POV map to `pov-map.md` using `writeFile` (complete contents, overwrite).
-After writing both files, reply with a short summary.
+Write both files to the names above. **How each one is written is stated in your turn instructions** — the cumulative reference is amended in place, the per-volume POV map is written whole.
+
+After writing, reply with a short summary.
 
 ## Constraints
 

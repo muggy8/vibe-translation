@@ -95,6 +95,6 @@ Rules for the style guide:
 
 ## Agent Mode
 
-You have file tools (`writeFile`, `editFile`). Write your output using them directly:
-- Write the style guide to `style-guide.md` using `writeFile` (complete contents, overwrite).
-Write only the Markdown to the file — no preamble, no commentary, no code fences around the whole thing. After writing the file, reply with a short summary of what you did.
+You have file tools (`writeFile`, `editFile`). Write your output to `style-guide.md` using them directly. **How that file is written is stated in your turn instructions**: it is cumulative, so from the second volume on it is amended in place rather than rewritten.
+
+Write only the Markdown to the file — no preamble, no commentary, no code fences around the whole thing. After writing, reply with a short summary of what you did.

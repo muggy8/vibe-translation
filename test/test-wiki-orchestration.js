@@ -39,6 +39,13 @@ process.env.PASSING_SCORE = "70";
 process.env.ACCEPTANCE_PASSING_SCORE = "70";
 process.env.ACCEPTANCE_WINDOW_SIZE = "2";
 process.env.ACCEPTANCE_EXCEPTIONAL_SCORE = "100";
+// Pinned OFF so the scenarios below keep exercising the rolling-window route (a
+// passing first grade still earns its second sample through a feedback round).
+// The "a passing grade earns its samples by re-grading" path is the shared loop's
+// (utils/qa-loop.js) and is pinned in test-qa-orchestration.js; what is pinned
+// HERE is that the wiki reaches it too — see childPassingConsensus.
+process.env.ACCEPTANCE_CONFIRM_ON_PASSING =
+  (process.argv.find((a) => a.startsWith("--child=")) || "") === "--child=passing" ? "true" : "false";
 process.env.QA_MAX_ITERATIONS = "4";
 process.env.ON_QA_LIMIT = "accept";
 process.env.ON_VOLUME_ERROR = "skip";
@@ -453,6 +460,28 @@ async function childCascade() {
 }
 
 /**
+ * The wiki reaches the shared loop's passing-grade re-grade path too.
+ *
+ * A first grade of 88 (above the 70 line, and the parent pins the exceptional
+ * floor at 100 so the exceptional path cannot fire) used to mean: run a feedback
+ * pass through the reused author session, then a fresh validator, to obtain the
+ * window's second sample. Now the second sample comes from re-grading the same
+ * wiki, and the feedback round — the expensive half of a wiki iteration — does
+ * not run at all.
+ */
+async function childPassingConsensus() {
+  installTaskStubs(childManifest);
+  await wiki.jumpInWiki();
+
+  const feedback = taskLabels.filter((l) => l.startsWith("jump-in-wiki-feedback-"));
+  assert.strictEqual(feedback.length, 0, `a passing first grade was confirmed by re-grading, so no feedback pass should run (got: ${feedback.join(", ")})`);
+  const grades = taskLabels.filter((l) => l.startsWith("jump-in-wiki-acceptance-"));
+  assert.ok(grades.length >= 3, `the window's samples came from re-grades (acceptance labels: ${grades.join(", ")})`);
+  assert.ok(grades.some((l) => l.includes("confirm")), `the re-grades are labelled as confirmations (got: ${grades.join(", ")})`);
+  console.log("passing ok");
+}
+
+/**
  * A partially failed run: the last volume's model call throws, the policy skips
  * it, the root copy falls back to the LAST EXISTING snapshot (volume 01), and
  * the task STILL REJECTS.
@@ -486,13 +515,14 @@ async function main() {
 
   if (childScenario === "cascade") return childCascade();
   if (childScenario === "partial") return childPartialRun();
+  if (childScenario === "passing") return childPassingConsensus();
   if (childScenario) throw new Error(`unknown --child=${childScenario}`);
 
   await scenarioGenerationSkipped();
   await scenarioStubIsNotAnArtifact();
   await scenarioSessionShape();
 
-  for (const name of ["cascade", "partial"]) {
+  for (const name of ["cascade", "partial", "passing"]) {
     const out = execFileSync(process.execPath, [__filename, `--child=${name}`], { encoding: "utf8" });
     assert.ok(/ok$/.test(out.trim().split("\n").pop()), `child ${name} reported failure:\n${out}`);
   }

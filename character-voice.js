@@ -30,13 +30,13 @@ const fs = require("fs").promises;
 const path = require("path");
 require("./types");
 const harness = require("./harness");
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump, selectSectionsByRelevance } = require("./utils/prompt");
+const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, authorMaxStepsFor, findingsMergeMaxStepsFor, writePromptDump, selectSectionsByRelevance } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError } = require("./configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact } = require("./utils/fs");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("./configs/shared");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
+const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("./utils/qa-loop");
 const {
   resolveSourceBundle,
   decideProcessingMode,
@@ -112,6 +112,465 @@ function truncateVoiceRef(content, sourceText) {
   return picked.content;
 }
 
+// ─── Cumulative-document rules (the same shape glossary.js established) ───────
+//
+// The character voice reference is cumulative, and it grows the way the glossary
+// did. Asking a model to reproduce it with "writeFile, complete contents" is the
+// mistake that broke the glossary (AGENTS.md gotcha 64), and this stage was
+// never given the fix. Observed on the live 17-volume run: the volume-01
+// character-voice feedback turn made 46 tool calls — 29 reads, 15 searches, ZERO
+// writes — spent 2.63M tokens, and hit its step cap while still verifying
+// findings, because the one write it had been told to do was the last thing in
+// its instructions.
+
+/**
+ * Seed this volume's character voice reference with the previous volume's,
+ * verbatim, before any agent touches it.
+ *
+ * "Carry forward every previous entry" was never a job for a model: it is a file
+ * copy. Copying it in makes the compile pass what the prompt always said it was
+ * — the previous reference PLUS this volume's new characters and quirks — and it
+ * makes `voiceWriteInstruction` able to say "edit it in place", which is the only
+ * instruction that works once the reference is bigger than one reply.
+ *
+ * Only `character-voice.md` is seeded. `pov-map.md` is PER-VOLUME (this volume's
+ * POV map), not cumulative, so it is written fresh every volume and a stale copy
+ * of the previous volume's map would be worse than none.
+ *
+ * @param {CharacterVoiceVolumeCtx} ctx - The volume context.
+ * @returns {Promise<boolean>} True when the volume's reference now starts from the
+ *   previous volume's copy (so the prompts can say "edit it in place").
+ */
+async function seedVoiceReferenceFromPrevious(ctx) {
+  const { values, isFirst, previousVoiceRefFile, voiceOutputFile } = ctx;
+  if (isFirst || !previousVoiceRefFile) return false;
+
+  let previousText;
+  try {
+    previousText = await fs.readFile(previousVoiceRefFile, "utf8");
+  } catch (err) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: could not read the previous character voice reference ` +
+        `(${previousVoiceRefFile}: ${err.message}) — the author agent will write this volume's ` +
+        `reference from scratch.`
+    );
+    return false;
+  }
+  if (!previousText || previousText.trim().length === 0) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: the previous character voice reference is empty — ` +
+        `the author agent will write this volume's reference from scratch.`
+    );
+    return false;
+  }
+
+  let replaced = false;
+  try {
+    const existing = await fs.readFile(voiceOutputFile, "utf8");
+    replaced = existing.trim() !== previousText.trim();
+  } catch {
+    replaced = true; // No file yet — the copy creates it.
+  }
+
+  await fs.writeFile(voiceOutputFile, previousText, "utf8");
+  ctx.voiceSeeded = true;
+  // The map the compile and feedback passes need in order to find a character's
+  // section without paging the whole document (see buildVoiceIndex).
+  ctx.voiceIndex = buildVoiceIndex(previousText);
+  if (replaced) {
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: seeded character-voice.md from ` +
+        `../${path.basename(path.dirname(previousVoiceRefFile))}/character-voice.md ` +
+        `(${parseVoiceSections(previousText).length} character section(s) carried forward ` +
+        `verbatim; the author agent amends it in place).`
+    );
+  }
+  return true;
+}
+
+/**
+ * The character sections of a voice reference, in file order.
+ *
+ * The unit the cumulative invariant is stated in — `system-prompts/character-voice.md`
+ * specifies `### [Character Name]` under `## Characters`, one section per
+ * character (and one per persona of a character whose narration changes).
+ *
+ * @param {string} markdown - The reference file content.
+ * @returns {Array<{name: string, heading: string, primary: string}>} `primary` is
+ *   the heading with its bracketed aliases and persona tags removed — the part
+ *   that identifies WHO the section is about.
+ */
+function parseVoiceSections(markdown) {
+  if (!markdown || typeof markdown !== "string") return [];
+  const sections = [];
+  for (const rawLine of markdown.split("\n")) {
+    const line = rawLine.trim();
+    const heading = line.match(/^###\s+(.+)$/);
+    if (!heading) continue;
+    const text = heading[1].replace(/\*\*?/g, "").replace(/`/g, "").trim();
+    if (!text || /^:?-{3,}:?$/.test(text)) continue;
+    sections.push({ name: text, heading: line, primary: voicePrimaryName(text) });
+  }
+  return sections;
+}
+
+/**
+ * The part of a character section heading that identifies the CHARACTER, with the
+ * bracketed aliases and persona tags removed.
+ *
+ * `如月雨露（ジョーロ）【俺人格】` → `如月雨露`. The persona tag is what a
+ * feedback pass is most likely to reword (「俺人格」 → 「俺」) while leaving the
+ * entry intact, so the carry-forward gate must not read a reworded tag as a
+ * deleted character — that is the false positive that cost the glossary a good
+ * volume 02 (see glossaryTermSpans in glossary.js).
+ *
+ * @param {string} heading - One `### ` heading's text.
+ * @returns {string} The primary name (the heading itself when it has no brackets).
+ */
+function voicePrimaryName(heading) {
+  const primary = String(heading || "")
+    .split(/[（(【\[\/]/)[0]
+    .trim();
+  return primary || String(heading || "").trim();
+}
+
+/**
+ * Compare two voice-reference snapshots and report what the newer one LOST.
+ *
+ * The reference is cumulative: volume N's file must hold every character section
+ * volume N-1's held. Nothing else in the stage can see a loss — the validator
+ * audits this volume's source against this volume's reference, so a character who
+ * only ever appeared in volume 2 is invisible to it.
+ *
+ * The unit is the character, counted by primary name, because a cumulative
+ * reference legitimately reworded a heading but may not quietly drop a character.
+ * A primary name whose section COUNT falls is a loss: 如月雨露 appearing three
+ * times (俺人格 / 僕人格 / the transition) and then twice means one of those
+ * entries is gone, and "the heading was renamed" cannot explain a count dropping.
+ *
+ * Pure and deterministic — no model call, so it runs after every pass for the
+ * price of two file reads.
+ *
+ * @param {string} previousMarkdown - The previous volume's reference content.
+ * @param {string} currentMarkdown - The reference just produced for this volume.
+ * @returns {{previousCount: number, currentCount: number, missing: Array<{name: string, expected: number, found: number}>, added: string[], restructured: number}}
+ */
+function compareVoiceCarryForward(previousMarkdown, currentMarkdown) {
+  const previous = parseVoiceSections(previousMarkdown);
+  const current = parseVoiceSections(currentMarkdown);
+
+  const countBy = (sections) => {
+    const map = new Map();
+    for (const s of sections) map.set(s.primary, (map.get(s.primary) || 0) + 1);
+    return map;
+  };
+  const previousCounts = countBy(previous);
+  const currentCounts = countBy(current);
+  const currentNames = new Set(current.map((s) => s.primary));
+
+  const missing = [];
+  let restructured = 0;
+  for (const [primary, expected] of previousCounts) {
+    const found = currentCounts.get(primary) || 0;
+    if (found >= expected) {
+      // The character is still here. If no heading matches the old one exactly,
+      // the section was reworded — legitimate, and worth reporting separately so
+      // a mass rename is visible rather than silently counted as a loss.
+      if (!current.some((s) => s.name === previous.find((p) => p.primary === primary)?.name)) restructured++;
+      continue;
+    }
+    missing.push({ name: primary, expected, found });
+  }
+
+  const previousNames = new Set(previous.map((s) => s.primary));
+  const added = [...new Set(current.map((s) => s.primary))].filter((n) => !previousNames.has(n));
+
+  return {
+    previousCount: previous.length,
+    currentCount: current.length,
+    missing,
+    added,
+    restructured,
+  };
+}
+
+/**
+ * The carry-forward gate for the character voice reference: after a pass, check
+ * that this volume's reference still holds every character section the previous
+ * volume's held.
+ *
+ * It fails the VOLUME, not the run (with ON_VOLUME_ERROR=skip the series
+ * continues and the volume is named in the task's failure summary), and it moves
+ * the damaged reference to `character-voice.md.rejected` so the next volume
+ * cannot build on it — which is what makes the ON_MISSING_PREVIOUS cascade
+ * actually fire. A failed cumulative volume normally stops the next one only
+ * when its artifact is MISSING; a present-but-short one is the case
+ * ON_MISSING_PREVIOUS cannot see, and every later volume would read it as the
+ * series' character state.
+ *
+ * @param {CharacterVoiceVolumeCtx} ctx - The volume context.
+ * @param {string} [stageLabel] - Which pass produced the reference.
+ * @returns {Promise<void>}
+ * @throws {Error} When character sections disappeared (unless the guard is
+ *   disabled with VOICE_CARRY_FORWARD_GUARD=false).
+ */
+async function assertVoiceCarryForward(ctx, stageLabel = "the compile pass") {
+  const { values, isFirst, previousVoiceRefFile } = ctx;
+  if (isFirst || !previousVoiceRefFile) return;
+  if (!readBoolEnv("VOICE_CARRY_FORWARD_GUARD", true)) return;
+
+  let previousText;
+  try {
+    previousText = await fs.readFile(previousVoiceRefFile, "utf8");
+  } catch (err) {
+    // A missing previous reference is already handled by the volume loop's
+    // ON_MISSING_PREVIOUS policy; the guard must not mask it with a different
+    // message.
+    console.warn(`Volume ${values.INSTALLMENT_NUMBER}: carry-forward check skipped (${err.message}).`);
+    return;
+  }
+  await guardVoiceCarryForwardAgainst(ctx, previousText, stageLabel, "the previous volume's character voice reference");
+}
+
+/**
+ * The same gate against an arbitrary baseline — the previous volume's reference,
+ * or this volume's own reference as of the previous chapter.
+ *
+ * The chunked flow needs the per-chapter form: a character lost at chapter 3
+ * silently becomes the base of chapters 4–10, and catching it there costs one
+ * chapter of rework instead of seven built on a reference that is already
+ * missing someone.
+ *
+ * @param {CharacterVoiceVolumeCtx} ctx - The volume context.
+ * @param {string} baselineText - The document the newer one must not shrink.
+ * @param {string} stageLabel - Which pass produced the newer snapshot.
+ * @param {string} baselineLabel - What the older snapshot was.
+ * @returns {Promise<void>}
+ * @throws {Error} When character sections disappeared.
+ */
+async function guardVoiceCarryForwardAgainst(ctx, baselineText, stageLabel, baselineLabel) {
+  if (!readBoolEnv("VOICE_CARRY_FORWARD_GUARD", true)) return;
+  const { values } = ctx;
+
+  let currentText;
+  try {
+    currentText = await fs.readFile(ctx.voiceOutputFile, "utf8");
+  } catch (err) {
+    // A missing/empty reference is already the hard stop in assertRealOutput;
+    // the guard adds nothing there and must not report it as a lost character.
+    console.warn(`Volume ${values.INSTALLMENT_NUMBER}: carry-forward check skipped (${err.message}).`);
+    return;
+  }
+
+  const diff = compareVoiceCarryForward(baselineText, currentText);
+  if (diff.missing.length === 0) {
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: carry-forward check passed ` +
+        `(${diff.previousCount} character section(s) carried${diff.restructured ? `, ${diff.restructured} reworded` : ""}, ${diff.added.length} added).`
+    );
+    return;
+  }
+
+  const quarantineFile = `${ctx.voiceOutputFile}.rejected`;
+  try {
+    await fs.rename(ctx.voiceOutputFile, quarantineFile);
+    console.error(
+      `Volume ${values.INSTALLMENT_NUMBER}: moved the damaged character voice reference ` +
+        `(${diff.currentCount} of ${diff.previousCount} sections) to "${path.basename(quarantineFile)}" ` +
+        `so the next volume cannot build on it. Re-running this volume starts from ` +
+        `../${ctx.previousFolderName}/character-voice.md.`
+    );
+  } catch (err) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: could not move the damaged reference aside (${err.message}) ` +
+        `— it is still a failure, but the next volume may read it.`
+    );
+  }
+
+  const preview = diff.missing
+    .slice(0, 12)
+    .map((m) => `${m.name} (${m.found} of ${m.expected})`)
+    .join(", ");
+  throw new Error(
+    `Volume ${values.INSTALLMENT_NUMBER}: ${stageLabel} dropped character section(s) that ` +
+      `${baselineLabel} held — ${diff.missing.length} of ${diff.previousCount} section(s) gone ` +
+      `(${preview}${diff.missing.length > 12 ? ", …" : ""}). The reference is cumulative: every ` +
+      `later volume is built on it, and its copy has been moved to ` +
+      `"${path.basename(quarantineFile)}" so no later volume can read a partial one. Amend ` +
+      `"character-voice.md" in place with editFile instead of rewriting it (see ` +
+      `voiceWriteInstruction), or set VOICE_CARRY_FORWARD_GUARD=false to allow a shrinking reference.`
+  );
+}
+
+/**
+ * The "who is already in the reference" block for a character-voice agent turn.
+ *
+ * Same reason as the glossary's index: the cumulative reference is too big to
+ * read whole from the middle volumes on, and a `grep` hunt for "is ひまわり
+ * already here?" is what eats a capped step budget.
+ *
+ * @param {CharacterVoiceVolumeCtx} ctx - The volume context; `voiceIndex` is set by
+ *   seedVoiceReferenceFromPrevious.
+ * @returns {string} The block, or "" when there is no index. Ends with a blank line.
+ */
+function voiceIndexBlock(ctx) {
+  if (!ctx.voiceIndex) return "";
+  return (
+    `What "character-voice.md" already holds (one line per character section):\n` +
+    `${ctx.voiceIndex}\n\n` +
+    `Use this to find the section you are about to change and to avoid starting a second ` +
+    `section for a character who is already here under another name. It is an index, not the ` +
+    `document: read the section you are about to change before changing it.\n\n`
+  );
+}
+
+/**
+ * The compact section map built from a voice reference (see voiceIndexBlock).
+ * Capped, and it says when it truncates — a prompt that silently truncates is a
+ * prompt that silently ignores part of the rules (AGENTS.md gotcha 43).
+ *
+ * @param {string} markdown - The reference content.
+ * @returns {string} The index, or "" for an empty document.
+ */
+function buildVoiceIndex(markdown) {
+  const sections = parseVoiceSections(markdown);
+  if (sections.length === 0) return "";
+  const cap = Number.parseInt(process.env.VOICE_INDEX_MAX_CHARS || "12000", 10);
+  const lines = sections.map((s) => s.name);
+  const body = lines.join("\n");
+  if (Number.isFinite(cap) && cap > 0 && body.length > cap) {
+    const kept = [];
+    let used = 0;
+    for (const line of lines) {
+      if (used + line.length + 1 > cap) break;
+      kept.push(line);
+      used += line.length + 1;
+    }
+    return (
+      kept.join("\n") +
+      `\n(${sections.length - kept.length} later section(s) are not listed here — the index is ` +
+      `capped at ${cap} chars. Search "character-voice.md" with grep before assuming a character ` +
+      `is absent.)`
+    );
+  }
+  return body;
+}
+
+/**
+ * The write instruction for a character-voice pass — ONE implementation shared by
+ * the compile and feedback passes, whole and per-chapter.
+ *
+ * `character-voice.md` is cumulative and is seeded from the previous volume, so
+ * from volume 02 on it is amended IN PLACE. `pov-map.md` is this volume's own
+ * document and is always written whole. Getting these two the same way is what
+ * broke the stage: the whole-file demand put the only write at the END of the
+ * turn, so a pass that ran out of steps produced nothing at all.
+ *
+ * @param {boolean} hasExistingFile - Whether "character-voice.md" already holds the
+ *   document to change (see seedVoiceReferenceFromPrevious).
+ * @param {"amend"|"correct"} [mode] - "amend" adds entries; "correct" applies a
+ *   validation report. Only the wording differs.
+ * @returns {string} The instruction block, ending with a blank line.
+ */
+function voiceWriteInstruction(hasExistingFile, mode = "amend") {
+  const doVerb = mode === "correct" ? "Correct" : "Amend";
+  if (!hasExistingFile) {
+    return (
+      `How to write it — neither file exists yet in your working folder, so write both ` +
+      `whole with writeFile (complete contents), in the exact section format from the system ` +
+      `prompt:\n\n` +
+      `- "character-voice.md" — the character voice reference.\n` +
+      `- "pov-map.md" — this volume's POV map.\n\n`
+    );
+  }
+  return (
+    `How to write it — the two files are NOT the same kind of document, and they are not ` +
+    `written the same way:\n\n` +
+    `1. "character-voice.md" ALREADY holds the reference as of the step before this one (the ` +
+    `workflow put the current version of it there). ${doVerb} it IN PLACE with editFile:\n` +
+    `   - Add a new character as ONE new \`### Name\` section at the end of the Characters part.\n` +
+    `   - Edit an existing character's section in place when the source shows a quirk is wrong ` +
+    `or missing, and keep the rest of that section.\n` +
+    `   - Update the "current through volume" header line.\n` +
+    `   Do NOT rewrite "character-voice.md" with writeFile. This reference is larger than one ` +
+    `reply can produce, and a write cut off part-way destroys every character it did not reach. ` +
+    `Never delete a section, and never retype a section you have not just read — characters ` +
+    `that fall out of this file are lost from every later volume.\n\n` +
+    `2. "pov-map.md" describes ONLY this volume, so it is written whole with writeFile ` +
+    `(complete contents, overwrite).\n\n` +
+    `Work in priority order, and write as you go: apply the HIGH-severity findings first with ` +
+    `editFile, then MEDIUM, then LOW. Do not spend the whole turn reading and verifying and ` +
+    `leave the editing for the end — a turn that runs out of steps having changed nothing has ` +
+    `produced nothing, while one that applied the important fixes first produced a better ` +
+    `document even if it did not reach the minor ones.\n\n`
+  );
+}
+
+/**
+ * The recovery turn for a character-voice pass that answered in chat instead of
+ * using the file tools.
+ *
+ * It deliberately does NOT demand a whole-file rewrite of the cumulative
+ * reference — that is the instruction that broke the stage (see
+ * voiceWriteInstruction), and `assertWroteWithFallback` has already put the reply
+ * on disk, so there is a file to edit.
+ *
+ * @param {boolean} hasContent - Whether the agent produced content in its chat reply.
+ * @param {boolean} hasExistingFile - Whether "character-voice.md" is the seeded,
+ *   cumulative document (true) or one the agent must create (false).
+ * @returns {string} The recovery prompt.
+ */
+function voiceRecoveryPrompt(hasContent, hasExistingFile) {
+  const voicePart = hasExistingFile
+    ? `Apply your changes to "character-voice.md" with editFile — add each new character as a ` +
+      `new "### Name" section and edit existing sections in place. Do NOT rewrite ` +
+      `"character-voice.md" from scratch with writeFile: every section that is in it now must ` +
+      `still be there when you finish.`
+    : `Write the complete character voice reference to "character-voice.md" with writeFile.`;
+  const povPart = `Write this volume's POV map to "pov-map.md" with writeFile (complete contents).`;
+  if (hasContent) {
+    return (
+      `You produced your answer as a chat message instead of changing the files.\n\n` +
+      `${voicePart}\n\n${povPart}\n\n` +
+      `Read "character-voice.md" before editing it.`
+    );
+  }
+  return (
+    `You produced no output. Read the materials, then:\n\n` +
+    `${voicePart}\n\n${povPart}`
+  );
+}
+
+/**
+ * The step cap for this stage's author / feedback agent on this volume or chapter.
+ *
+ * Scaled rather than flat 30: the agent reads the cumulative reference (which no
+ * longer fits in one `readFile` answer), the text it is compiling from, and (for
+ * feedback) the validation report. A flat 30 is what stopped volume 01's feedback
+ * turn at 46 tool calls with zero writes.
+ *
+ * Fail-soft: an unreadable size counts as 0, which yields the flat floor rather
+ * than failing the volume over a stat call.
+ *
+ * @param {CharacterVoiceVolumeCtx} ctx - The volume context.
+ * @param {SourceSegment|null} [seg] - The chapter being processed (chunked mode).
+ * @returns {Promise<number>} The step cap.
+ */
+async function voiceAuthorMaxSteps(ctx, seg = null) {
+  const sizeOf = async (p) => {
+    try {
+      return (await fs.stat(p)).size;
+    } catch {
+      return 0;
+    }
+  };
+  const artifactBytes = await sizeOf(ctx.voiceOutputFile);
+  const sourceBytes = seg
+    ? await sizeOf(path.join(ctx.volumeDir, seg.file))
+    : await sizeOf(ctx.sourceFile);
+  return authorMaxStepsFor(artifactBytes, sourceBytes);
+}
+
 /**
  * Build the extraction turn prompt for a single volume.
  * @param {CharacterVoiceVolumeCtx} ctx
@@ -170,8 +629,8 @@ function buildAuthorTurnPrompt(ctx, extractionResults, seg = null, si = null) {
     `${sourceLine}\n` +
     previousRefLine +
     `\n\n` +
-    `Write the complete character voice reference to the file "character-voice.md" in your working folder (writeFile, complete contents).\n` +
-    `Write the per-volume POV map to the file "pov-map.md" in your working folder (writeFile, complete contents).\n\n` +
+    voiceIndexBlock(ctx) +
+    voiceWriteInstruction(Boolean(ctx.voiceSeeded), "amend") +
     amendPrompt
   );
 }
@@ -254,7 +713,17 @@ function buildFeedbackTurnPrompt(ctx, seg = null, si = null) {
     `- The current POV map to correct: "pov-map.md" (same folder)\n` +
     previousRefLine +
     `\n` +
-    `Apply the report's findings and write the complete corrected files back to "character-voice.md" and "pov-map.md" using writeFile (complete contents).\n\n` +
+    voiceIndexBlock(ctx) +
+    voiceWriteInstruction(true, "correct") +
+    `Verifying the report's findings against the source is part of the job, but it is not the ` +
+    `job. The report already quotes the source lines it is complaining about, so:\n` +
+    `- Check a batch of findings with ONE grep (its pattern may be several phrases separated by ` +
+    `|) instead of one search per finding, and read the quoted line ranges in as few readFile ` +
+    `calls as the layout allows.\n` +
+    `- Apply each fix with editFile as soon as it is confirmed. Do not verify everything first ` +
+    `and then start editing: if you run out of steps, the fixes you already applied still stand.\n` +
+    `- If a finding cannot be confirmed from the source, say so in your final summary and leave ` +
+    `that entry alone rather than spending more steps on it.\n\n` +
     transformUserPrompt(ctx.feedbackUserPrompt, ctx.values)
   );
 }
@@ -412,6 +881,17 @@ async function characterVoice() {
     const acceptancePrompt = transformUserPrompt(acceptanceTemplate, values);
     const ctx = { values, folderName, volumeDir, sourceFile, bundle, chunked: mode.chunked, voiceOutputFile, povOutputFile, validationOutputFile, isFirst, previousFolderName, previousVoiceRefFile, extractPrompt, validatorPrompt, feedbackPrompt, acceptancePrompt, extractTemplate, authorTemplate, extractSystemPrompt, authorSystemPrompt, validatorSystemPrompt, acceptanceSystemPrompt, feedbackSystemPrompt, authorUserPrompt: authorTemplate, validatorUserPrompt: validatorTemplate, feedbackUserPrompt: feedbackTemplate };
     if (dryRun) {
+      // Preview the instruction a live run would give: the live run seeds
+      // character-voice.md from the previous volume whenever there is one, and the
+      // write instruction follows that. Without this the preview would show the
+      // "create it from scratch" wording for volumes that are actually amended.
+      ctx.voiceSeeded = !isFirst && Boolean(previousVoiceRefFile) && (await fileExists(previousVoiceRefFile));
+      // …and it shows the section map that copy produces, because a preview that
+      // promises "amend it in place" while hiding the map the agent uses to find
+      // the section is a preview of a different prompt.
+      ctx.voiceIndex = ctx.voiceSeeded
+        ? buildVoiceIndex(await fs.readFile(previousVoiceRefFile, "utf8").catch(() => ""))
+        : "";
       const illustrative = JSON.stringify([{ type: "voice", character: "ex", quirkType: "sentenceEnding", description: "ex", examples: ["ex"], formalityLevel: "plain", notes: "ex" }]);
       const sections = [
         { title: "One-shot — extraction system prompt", prompt: extractSystemPrompt },
@@ -589,7 +1069,7 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
     extractionResults = extractionOutput;
   }
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV compilation${seg ? ` for chapter ${seg.id}` : ""}...`);
-  const author = await harness.createAgentHandle({ name: `author-voice-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: 30 });
+  const author = await harness.createAgentHandle({ name: `author-voice-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: await voiceAuthorMaxSteps(ctx, seg) });
   try {
     const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults, seg, si), { label: `character-voice-compile-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
     assertRealToolCalls(compileResult, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
@@ -598,8 +1078,7 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
     // never over files the agent already wrote correctly.
     if (compileFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = compileResult?.text && compileResult.text.trim().length > 0;
-      const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now with the exact same content.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
-      const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `character-voice-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
+      const recoveryResult = await author.sendTurn(voiceRecoveryPrompt(hasContent, Boolean(ctx.voiceSeeded)), { label: `character-voice-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
       assertRealToolCalls(recoveryResult, `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, recoveryResult?.text);
     }
@@ -638,6 +1117,9 @@ async function runQaLoop(ctx) {
     confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
     feedbackLogLine: () => "Calling the AI to apply the validation feedback (author agent)...",
     runFeedback: (iteration) => runFeedback(ctx),
+    // The loop stops when a feedback pass leaves these byte-identical: a turn
+    // that only read is not an iteration (see fingerprintFiles in utils/fs.js).
+    feedbackArtifactFiles: [ctx.voiceOutputFile, ctx.povOutputFile],
     limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`,
   });
   ctx.limitReached = result.limitReached;
@@ -650,7 +1132,7 @@ async function runQaLoop(ctx) {
  */
 async function runFeedback(ctx) {
   const { values, volumeDir, fsGate } = ctx;
-  const author = await harness.createAgentHandle({ name: `author-voice-feedback-${values.INSTALLMENT_NUMBER}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: 30 });
+  const author = await harness.createAgentHandle({ name: `author-voice-feedback-${values.INSTALLMENT_NUMBER}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: await voiceAuthorMaxSteps(ctx) });
   try {
     const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx), { label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}` });
     assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
@@ -659,12 +1141,15 @@ async function runFeedback(ctx) {
     // never over files the agent already wrote correctly.
     if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-      const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
-      const recoveryResult = await author.sendTurn(recoveryPrompt, { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}` });
+      const recoveryResult = await author.sendTurn(voiceRecoveryPrompt(hasContent, true), { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}` });
       assertRealToolCalls(recoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
       await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback recovery)", recoveryResult?.text);
     }
     await assertRealOutput([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)");
+    // The cumulative invariant, re-checked after every rewrite: a feedback pass
+    // that rewrote the reference from memory is how characters disappear from it
+    // (see assertVoiceCarryForward).
+    await assertVoiceCarryForward(ctx, "the feedback pass");
   } finally { await author.close(); }
 }
 
@@ -709,6 +1194,10 @@ async function runChunkedVolume(ctx) {
   // (createGatedFsTools is async and must be awaited — see runVolume).
   const fsGate = await harness.createGatedFsTools({ cwd: ctx.volumeDir, allowedDirs: [ctx.volumeDir] });
   ctx.fsGate = fsGate;
+  // Same rule as whole mode: the previous volume's reference is copied in first,
+  // so each chapter's compile pass amends the current state instead of
+  // reproducing it (see seedVoiceReferenceFromPrevious).
+  await seedVoiceReferenceFromPrevious(ctx);
   const chunkedExtractions = [];
   for (let si = 0; si < bundle.segments.length; si++) {
     const segment = bundle.segments[si];
@@ -727,11 +1216,20 @@ async function runChunkedVolume(ctx) {
       // Unparseable chapter output — runCompile falls back to the raw text;
       // nothing structured to persist for this chapter.
     }
+    // The baseline this chapter must not shrink below: the reference as of the
+    // previous chapter (or the previous volume's, for chapter 0).
+    const chapterBaseline = await fs.readFile(ctx.voiceOutputFile, "utf8").catch(() => null);
     try {
       await runCompile(ctx, extractionOutput, segment, si);
     } catch (err) {
       console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed for chapter ${segment.id}: ${err.message}. Check .logs/ for details.`);
       throw err;
+    }
+    // The carry-forward gate BETWEEN chapters, not just at the volume boundary:
+    // catching a lost character at chapter 3 saves seven chapters of work built
+    // on a reference that is already missing someone.
+    if (chapterBaseline !== null) {
+      await guardVoiceCarryForwardAgainst(ctx, chapterBaseline, `the compile pass (chapter ${segment.id})`, "the reference as of the previous chapter");
     }
   }
   // Persist the volume's extraction results (the new quirks/POV entries) so
@@ -781,7 +1279,7 @@ async function runChunkedQaLoop(ctx) {
       } finally { await validator.close(); }
     }
     // Findings merge: consolidate the partials into the standard report.
-    const merger = await harness.createAgentHandle({ name: `validator-merge-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: 20 });
+    const merger = await harness.createAgentHandle({ name: `validator-merge-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: findingsMergeMaxStepsFor(bundle.segments.length, (await fs.stat(ctx.voiceOutputFile).catch(() => ({ size: 0 }))).size) });
     try {
       const mergeResult = await merger.sendTurn(buildVoiceFindingsMergePrompt(ctx), { label: `character-voice-validate-merge-${values.INSTALLMENT_NUMBER}-${iteration}` });
       assertRealToolCalls(mergeResult, "the findings-merge agent", values.INSTALLMENT_NUMBER);
@@ -822,10 +1320,28 @@ async function runChunkedQaLoop(ctx) {
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 (${recentRollingScores.length} checks) meets the passing score ${ACCEPTANCE_PASSING_SCORE}. Accepted.`);
       break;
     }
+    // A grade that already passes earns the window's remaining samples by
+    // re-grading this artifact, not by paying for a per-chapter feedback round
+    // plus a second full round of per-chapter validators (see confirmPassingScore).
+    const passing = await confirmPassingScore({
+      score,
+      recentRollingScores,
+      confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+      stateFile: stateFilePath,
+      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    });
+    if (passing.accepted) {
+      ctx.acceptedBy = "passing-consensus";
+      break;
+    }
     // Per-chapter feedback (fresh agent per chapter, chapter-tagged findings).
+    // Fingerprinted first: a feedback round that changed nothing is not progress,
+    // and another iteration would re-audit an unchanged document.
+    const beforeFeedback = await fingerprintFiles([ctx.voiceOutputFile, ctx.povOutputFile]);
     for (let si = 0; si < bundle.segments.length; si++) {
       const segment = bundle.segments[si];
-      const feedbackAuthor = await harness.createAgentHandle({ name: `feedback-author-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`, systemPrompt: buildAuthorSystemPrompt(ctx.authorSystemPrompt), tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: 30 });
+      const feedbackAuthor = await harness.createAgentHandle({ name: `feedback-author-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`, systemPrompt: buildAuthorSystemPrompt(ctx.authorSystemPrompt), tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: await voiceAuthorMaxSteps(ctx, segment) });
       try {
         const feedbackResult = await feedbackAuthor.sendTurn(buildFeedbackTurnPrompt(ctx, segment, si), { label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` });
         assertRealToolCalls(feedbackResult, `the author agent (feedback pass, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
@@ -834,14 +1350,35 @@ async function runChunkedQaLoop(ctx) {
         // fallback — never over files the agent already wrote correctly.
         if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
           const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-          const recoveryPrompt = hasContent ? `You were asked to write "character-voice.md" and "pov-map.md" using writeFile, but you replied in chat. Please rewrite both files using writeFile now.` : `You produced no output. Please read the materials and write "character-voice.md" and "pov-map.md" using writeFile now.`;
-          const recoveryResult = await feedbackAuthor.sendTurn(recoveryPrompt, { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` });
+          const recoveryResult = await feedbackAuthor.sendTurn(voiceRecoveryPrompt(hasContent, true), { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` });
           assertRealToolCalls(recoveryResult, `the author agent (feedback recovery, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
           await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (feedback recovery, chapter ${segment.id})`, recoveryResult?.text);
         }
         await assertRealOutput([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (feedback pass, chapter ${segment.id})`);
       } finally { await feedbackAuthor.close(); }
     }
+    if ((await fingerprintFiles([ctx.voiceOutputFile, ctx.povOutputFile])) === beforeFeedback) {
+      console.error(
+        `Volume ${values.INSTALLMENT_NUMBER}: the per-chapter feedback round changed NOTHING — ` +
+          `both artifacts are byte-identical to what they were before it. Stopping the QA loop here ` +
+          `rather than paying for another round of per-chapter validators over an unchanged document. ` +
+          `Check the feedback agents' turn logs in .logs/ for turns that only read (the usual shape: ` +
+          `step cap reached before anything was written).`
+      );
+      ctx.limitReached = true;
+      await saveRollingState(stateFilePath, recentRollingScores, {
+        sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+        stalled: true,
+      });
+      if (ON_QA_LIMIT === "fail") {
+        throw new Error(
+          `Volume ${values.INSTALLMENT_NUMBER}: the feedback round applied nothing (ON_QA_LIMIT=fail).`
+        );
+      }
+      break;
+    }
+    // The cumulative invariant, re-checked after every feedback round.
+    await assertVoiceCarryForward(ctx, "the feedback pass");
     if (iteration === maxValidationIterations) {
       ctx.limitReached = true;
       console.log(`Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`);
@@ -885,9 +1422,14 @@ async function runVolume(ctx) {
   // tool-call syntax as plain text and the run failed mid-way).
   const fsGate = await harness.createGatedFsTools({ cwd: ctx.volumeDir, allowedDirs: [ctx.volumeDir] });
   ctx.fsGate = fsGate;
+  // The previous volume's reference is copied in BEFORE any agent touches the
+  // folder, so the compile pass amends a real file instead of reproducing a
+  // document too large for one reply (see seedVoiceReferenceFromPrevious).
+  await seedVoiceReferenceFromPrevious(ctx);
   try { await runCompile(ctx, extractionOutput); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed: ${err.message}. Check .logs/ for details.`); throw err; }
+  await assertVoiceCarryForward(ctx, "the compile pass");
   await runQaLoop(ctx);
 }
 
 // Export
-module.exports = { characterVoice, parseVoiceQuirks, truncateVoiceRef, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildVoiceFindingsMergePrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runVolume, runExtract, runCompile, runQaLoop, runChunkedVolume, runChunkedQaLoop, acceptanceCheck };
+module.exports = { characterVoice, parseVoiceQuirks, truncateVoiceRef, emittedToolCallAsText, buildExtractTurnPrompt, buildAuthorTurnPrompt, buildValidatorTurnPrompt, buildFeedbackTurnPrompt, buildVoiceFindingsMergePrompt, buildExtractSystemPrompt, buildAuthorSystemPrompt, buildValidatorSystemPrompt, runVolume, runExtract, runCompile, runQaLoop, runChunkedVolume, runChunkedQaLoop, acceptanceCheck, seedVoiceReferenceFromPrevious, parseVoiceSections, voicePrimaryName, compareVoiceCarryForward, assertVoiceCarryForward, guardVoiceCarryForwardAgainst, buildVoiceIndex, voiceIndexBlock, voiceWriteInstruction, voiceRecoveryPrompt, voiceAuthorMaxSteps };
