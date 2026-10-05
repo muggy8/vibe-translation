@@ -72,9 +72,60 @@ function parseAcceptanceScore(output) {
   return null;
 }
 
+/**
+ * Step cap for a validator agent, scaled to the source it must audit.
+ *
+ * A fixed cap ran out on a 521 KB source before the validator could write its
+ * report (gotcha 4), so the cap follows the number of 32 KB pages the agent
+ * has to read.
+ *
+ * @param {number} sourceSizeBytes - Size of the source file being validated.
+ * @returns {number} The step cap.
+ */
 function validatorMaxStepsFor(sourceSizeBytes) {
   const chunks = Math.max(1, Math.ceil((sourceSizeBytes || 0) / 32768));
   return Math.max(40, chunks * 2 + 24);
+}
+
+/**
+ * Step cap for a glossary author / feedback agent: it must read the cumulative
+ * glossary it is amending, the text it is amending FROM, and (for feedback) the
+ * validation report, then patch the file.
+ *
+ * A flat 40 ran out on the live 17-volume run — 17 of the 25 step-cap warnings
+ * were glossary amend turns and 7 were glossary feedback turns, each spending
+ * 8–17 paged `readFile` calls because the cumulative glossary no longer fits in
+ * one read (`AGENT_MAX_READ_BYTES` is 64 KB). Both halves of the reading grow
+ * with the series, so the cap follows them.
+ *
+ * @param {number} glossarySizeBytes - Size of the glossary it amends.
+ * @param {number} sourceSizeBytes - Size of the volume (or chapter) source it reads.
+ * @returns {number} The step cap.
+ */
+function authorMaxStepsFor(glossarySizeBytes, sourceSizeBytes) {
+  const glossaryPages = Math.ceil((glossarySizeBytes || 0) / 32768);
+  const sourcePages = Math.ceil((sourceSizeBytes || 0) / 32768);
+  return Math.max(40, (glossaryPages + sourcePages) * 2 + 24);
+}
+
+/**
+ * Step cap for the findings-merge agent (chunked mode): it reads one validation
+ * partial per chapter PLUS the glossary those partials describe, then writes one
+ * consolidated report.
+ *
+ * The cap used to be a flat 20, and a 10-chapter volume spent 34 read/grep
+ * calls before it reached the write — so the whole validation round's work was
+ * thrown away. Both halves of its reading grow: the number of partials with the
+ * volume's chapter count, the glossary with the series.
+ *
+ * @param {number} segmentCount - How many chapter partials to consolidate.
+ * @param {number} glossarySizeBytes - Size of the glossary it audits.
+ * @returns {number} The step cap.
+ */
+function findingsMergeMaxStepsFor(segmentCount, glossarySizeBytes) {
+  const partials = Math.max(1, segmentCount || 1);
+  const glossaryPages = Math.max(1, Math.ceil((glossarySizeBytes || 0) / 32768));
+  return Math.max(20, partials * 3 + glossaryPages * 2 + 12);
 }
 
 /**
@@ -246,6 +297,8 @@ module.exports = {
   parseAcceptanceScore,
   parseAcceptanceReply,
   validatorMaxStepsFor,
+  authorMaxStepsFor,
+  findingsMergeMaxStepsFor,
   writePromptDump,
   selectSectionsByRelevance,
 };

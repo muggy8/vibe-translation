@@ -25,6 +25,13 @@ const {
   buildGlossaryAuthorTurnPrompt,
   buildGlossaryValidatorTurnPrompt,
   buildGlossaryFeedbackTurnPrompt,
+  buildGlossarySegmentFeedbackPrompt,
+  glossaryRecoveryPrompt,
+  buildGlossaryIndex,
+  compareGlossaryCarryForward,
+  reportCarryForwardLoss,
+  seedGlossaryFromPrevious,
+  assertGlossaryCarryForward,
   truncateGlossary,
   buildPerTermResearchPrompt,
 } = require("../glossary");
@@ -41,7 +48,7 @@ const {
   buildWikiValidatorTurnPrompt,
   buildWikiFeedbackTurnPrompt,
 } = require("../jump-in-wiki");
-const { parseAcceptanceReply } = require("../utils/prompt");
+const { parseAcceptanceReply, findingsMergeMaxStepsFor, authorMaxStepsFor } = require("../utils/prompt");
 const {
   extractJsonObject,
   validateManifest,
@@ -552,6 +559,123 @@ const glossaryCtx2 = { ...glossaryCtx, isFirst: false, previousFolderName: "stor
 assert.ok(buildGlossaryAuthorTurnPrompt(glossaryCtx2, terms, false).includes("../story_name(1)/glossary.md"), "volume-2: previous glossary path");
 assert.ok(buildGlossaryValidatorTurnPrompt(glossaryCtx2).includes("../story_name(1)/glossary.md"), "volume-2 validator: previous glossary path");
 assert.ok(buildGlossaryFeedbackTurnPrompt(glossaryCtx2).includes("../story_name(1)/glossary.md"), "volume-2 feedback: previous glossary path");
+
+// ─── the glossary is AMENDED, not rewritten ─────────────────────────────────
+// The cumulative glossary outgrows one reply around volume 03, and every glossary
+// pass used to be told "writeFile, complete contents, overwrite". Observed on the
+// live 17-volume run: one agent tried to obey and its writeFile argument was cut
+// off mid-string (the tool call failed and the volume died); others paged the
+// file 8–17 times, patched it 16–39 times, ran out of their step budget, and
+// shipped a glossary missing 457 of the 769 terms it had to carry.
+// The workflow now copies the baseline in, so the agent edits a file it can see.
+
+// A seeded volume (the copy already happened) is told to edit in place, and is
+// explicitly forbidden from the whole-file write.
+const seededCtx = {
+  ...glossaryCtx2,
+  glossarySeeded: true,
+  glossaryIndex: "### Characters (2)\nソラ → Sora, 月影 → Moonshadow",
+};
+const seededTurn = buildGlossaryAuthorTurnPrompt(seededCtx, terms, false);
+assert.ok(seededTurn.includes("ALREADY holds"), "seeded author turn says the file already holds the glossary");
+assert.ok(seededTurn.includes("editFile"), "seeded author turn instructs editFile");
+assert.ok(seededTurn.includes("Do NOT rewrite the whole file with writeFile"), "seeded author turn forbids the whole-file rewrite");
+assert.ok(seededTurn.includes('The glossary to amend: "glossary.md"'), "seeded author turn names the same-folder file to amend");
+assert.ok(seededTurn.includes("ソラ → Sora"), "seeded author turn carries the compact term index");
+assert.ok(seededTurn.includes("Never delete a row"), "seeded author turn protects the carried-forward rows");
+
+// An unseeded volume (first volume, or a failed seed) is the one case where a
+// whole-file write is correct — and it says so instead of editing a missing file.
+const unseededTurn = buildGlossaryAuthorTurnPrompt(glossaryCtx2, terms, false);
+assert.ok(unseededTurn.includes("does not exist yet"), "unseeded author turn says the file must be created");
+assert.ok(unseededTurn.includes("writeFile"), "unseeded author turn instructs writeFile");
+assert.ok(!unseededTurn.includes("ALREADY holds"), "unseeded author turn does not claim a baseline that is not there");
+
+// Both feedback passes get the same instruction and the same index.
+const seededFeedback = buildGlossaryFeedbackTurnPrompt(seededCtx);
+assert.ok(seededFeedback.includes("editFile"), "feedback turn instructs editFile");
+assert.ok(seededFeedback.includes("Do NOT rewrite the whole file with writeFile"), "feedback turn forbids the whole-file rewrite");
+assert.ok(seededFeedback.includes("ソラ → Sora"), "feedback turn carries the term index");
+const segFeedback = buildGlossarySegmentFeedbackPrompt(
+  { ...seededCtx, bundle: { segments: [{ id: "ch1", file: "story_name(1)-ch1.md" }] } },
+  { id: "ch1", file: "story_name(1)-ch1.md" },
+  0
+);
+assert.ok(segFeedback.includes("editFile"), "per-chapter feedback turn instructs editFile");
+assert.ok(segFeedback.includes("ソラ → Sora"), "per-chapter feedback turn carries the term index");
+
+// The recovery turn used to demand the exact instruction that broke the file.
+const recoveryWithContent = glossaryRecoveryPrompt(true);
+assert.ok(recoveryWithContent.includes("editFile"), "recovery turn applies the additions with editFile");
+assert.ok(recoveryWithContent.includes("Do NOT rewrite"), "recovery turn does not ask for a whole-file rewrite");
+assert.ok(!recoveryWithContent.includes("rewrite the complete glossary using writeFile"), "recovery turn: no whole-file rewrite demand");
+assert.ok(glossaryRecoveryPrompt(false).includes("editFile"), "empty-output recovery turn also edits");
+
+// The compact index: sections, term → rendering, and an honest note when capped.
+const indexMarkdown =
+  "# Glossary\n\n## Characters\n| Src | Tgt | Notes |\n|---|---|---|\n| ソラ | Sora | protagonist |\n" +
+  "## Places\n| Src | Tgt | Notes |\n|---|---|---|\n| 月影学園 | Moonshadow Academy | school |\n";
+const index = buildGlossaryIndex(indexMarkdown);
+assert.ok(index.includes("### Characters (1)"), "glossary index names the section and its count");
+assert.ok(index.includes("ソラ → Sora"), "glossary index pairs each term with the rendering it already has");
+assert.ok(!index.includes("protagonist"), "glossary index drops the Notes column (it is what makes the file big)");
+assert.strictEqual(buildGlossaryIndex("no tables here"), "", "glossary index: no rows, no index");
+process.env.GLOSSARY_INDEX_MAX_CHARS = "40";
+const cappedIndex = buildGlossaryIndex(indexMarkdown);
+assert.ok(cappedIndex.includes("are not listed here"), "capped glossary index SAYS it truncated (gotcha 43)");
+assert.ok(cappedIndex.includes("grep"), "capped glossary index names the way to check anyway");
+delete process.env.GLOSSARY_INDEX_MAX_CHARS;
+
+// ─── the carry-forward guard (deterministic, no model call) ─────────────────
+// Nothing else in the stage can see a lost term: the validator reads this
+// volume's source and the current glossary, and a term that belonged to volume
+// 2 is invisible to it. Volume 06 shipped 411 of volume 05's 769 terms and
+// every later volume would have been translated against that.
+const prevGlossary =
+  "## Characters\n| Src | Tgt | Notes |\n|---|---|---|\n| A | Alpha | a |\n| B | Beta | b |\n" +
+  "## Terms\n| Src | Tgt | Notes |\n|---|---|---|\n| C | Gamma | c |";
+const grown = prevGlossary + "\n| D | Delta | d |";
+const shrunk = "## Characters\n| Src | Tgt | Notes |\n|---|---|---|\n| A | Alpha | a |\n| D | Delta | d |";
+
+const grownDiff = compareGlossaryCarryForward(prevGlossary, grown);
+assert.strictEqual(grownDiff.previousCount, 3);
+assert.strictEqual(grownDiff.currentCount, 4);
+assert.deepStrictEqual(grownDiff.missing, [], "a grown glossary loses nothing");
+assert.deepStrictEqual(grownDiff.added, ["D"], "the guard reports what the volume added");
+
+const shrunkDiff = compareGlossaryCarryForward(prevGlossary, shrunk);
+assert.deepStrictEqual(
+  shrunkDiff.missing.map((e) => `${e.term}[${e.section}]`),
+  ["B[Characters]", "C[Terms]"],
+  "the guard names every lost term AND the section it came from"
+);
+assert.strictEqual(shrunkDiff.currentCount, 2);
+// Reordering and re-sectioning are not a loss.
+assert.deepStrictEqual(
+  compareGlossaryCarryForward(prevGlossary, "## Terms\n| Src | Tgt |\n|---|---|\n| C | Gamma |\n| B | Beta |\n| A | Alpha |").missing,
+  [],
+  "a reordered glossary is not a lost glossary"
+);
+assert.deepStrictEqual(compareGlossaryCarryForward("", prevGlossary).missing, [], "no baseline, nothing to carry");
+
+assert.doesNotThrow(() => reportCarryForwardLoss("02", grownDiff, "the amend pass", "the previous volume's glossary"), "no loss, no failure");
+assert.throws(
+  () => reportCarryForwardLoss("06", shrunkDiff, "the amend pass", "the previous volume's glossary"),
+  /dropped 2 of the 3 term\(s\)/,
+  "a lost term fails the volume, loudly and with the numbers"
+);
+assert.throws(
+  () => reportCarryForwardLoss("06", shrunkDiff, "the amend pass", "the previous volume's glossary"),
+  /cumulative/,
+  "the failure message says why it matters"
+);
+
+// The step caps that ran out on the live run now follow what they must read.
+assert.ok(findingsMergeMaxStepsFor(10, 473000) > 20, "findings-merge cap: a flat 20 lost a whole validation round on 10 chapters");
+assert.ok(findingsMergeMaxStepsFor(1, 0) >= 20, "findings-merge cap keeps the old floor for a small volume");
+assert.ok(authorMaxStepsFor(473000, 200000) > 40, "author cap: a flat 40 was where 17 of the 25 step-cap warnings came from");
+assert.strictEqual(authorMaxStepsFor(0, 0), 40, "author cap floor is the old flat value");
+assert.strictEqual(validatorMaxStepsFor(0), 40, "validator cap floor unchanged");
 
 // ─── truncateGlossary ────────────────────────────────────────────────────────
 // Under the threshold: returns content unchanged.
@@ -1312,8 +1436,229 @@ assert.ok(!wikiAuthorTurn.includes("The canonical glossary"), "wiki author turn 
   } finally {
     fsSync.rmSync(tmpDir, { recursive: true, force: true });
   }
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+
+// ─── async tail 2: the seed + carry-forward guard on real files ──────────────
+// The two halves of the fix, end to end: the workflow copies the previous
+// volume's glossary in verbatim (so the agent amends a file it can read instead
+// of reproducing one too big for a reply), and the guard fails the volume when
+// terms disappear anyway.
+(async () => {
+  const fsAsync = require("fs").promises;
+  const os = require("os");
+  const tmpDir = await fsAsync.mkdtemp(path.join(os.tmpdir(), "carry-forward-"));
+  try {
+    const prevDir = path.join(tmpDir, "Series(05)");
+    const volDir = path.join(tmpDir, "Series(06)");
+    await fsAsync.mkdir(prevDir);
+    await fsAsync.mkdir(volDir);
+    const prevFile = path.join(prevDir, "glossary.md");
+    const outFile = path.join(volDir, "glossary.md");
+    await fsAsync.writeFile(prevFile, prevGlossary, "utf8");
+
+    const ctx = {
+      values: { INSTALLMENT_NUMBER: "06" },
+      volumeDir: volDir,
+      glossaryOutputFile: outFile,
+      previousGlossaryFile: prevFile,
+      previousFolderName: "Series(05)",
+      isFirst: false,
+    };
+
+    // 1. The seed is a verbatim copy — every term survives before any model
+    //    touches the file, and the index is built from it.
+    assert.strictEqual(await seedGlossaryFromPrevious(ctx), true, "seed reports it seeded");
+    assert.strictEqual(await fsAsync.readFile(outFile, "utf8"), prevGlossary, "the seed is a byte-for-byte copy");
+    assert.strictEqual(ctx.glossarySeeded, true);
+    assert.ok(ctx.glossaryIndex.includes("A → Alpha"), "the seed builds the term index the amend pass needs");
+
+    // 2. A half-written glossary from a previous failed run is RESET to the
+    //    previous volume's clean baseline — that is what "carry forward" means,
+    //    and it is how a damaged volume 04 stops poisoning volume 05.
+    await fsAsync.writeFile(outFile, "# Glossary\n\n## Characters\n| Src | Tgt |\n|---|---|\n| A | Alpha |\n", "utf8");
+    await seedGlossaryFromPrevious(ctx);
+    assert.strictEqual(await fsAsync.readFile(outFile, "utf8"), prevGlossary, "a partial glossary is reset to the baseline");
+
+    // 3. The guard passes when the amended file still holds everything.
+    await fsAsync.writeFile(outFile, grown, "utf8");
+    await assertGlossaryCarryForward(ctx, "the amend pass");
+
+    // 4. The guard FAILS the volume when terms disappeared — the volume 05 → 06
+    //    case (769 terms in, 411 out) that no other check in the stage can see.
+    await fsAsync.writeFile(outFile, shrunk, "utf8");
+    await assert.rejects(
+      () => assertGlossaryCarryForward(ctx, "the amend pass"),
+      /dropped 2 of the 3 term\(s\)/,
+      "a glossary that lost terms fails the volume instead of shipping"
+    );
+
+    // 5. And the damaged document is moved ASIDE, which is what makes the next
+    //    volume skip instead of translating against a glossary missing 45% of
+    //    its terms. A failed cumulative volume normally stops the next one
+    //    because its artifact is MISSING — a present-but-short one is the case
+    //    the ON_MISSING_PREVIOUS cascade cannot see.
+    assert.strictEqual(await fsAsync.stat(outFile).then(() => true, () => false), false, "the damaged glossary is no longer where the next volume would read it");
+    const quarantined = await fsAsync.readFile(`${outFile}.rejected`, "utf8");
+    assert.strictEqual(quarantined, shrunk, "the damaged document survives as the evidence");
+
+    // 6. The guard is a knob (GLOSSARY_CARRY_FORWARD_GUARD=false), and the first
+    //    volume has nothing to carry.
+    await fsAsync.copyFile(`${outFile}.rejected`, outFile);
+    process.env.GLOSSARY_CARRY_FORWARD_GUARD = "false";
+    await assertGlossaryCarryForward(ctx, "the amend pass");
+    assert.strictEqual(await fsAsync.readFile(outFile, "utf8"), shrunk, "guard off: the file is left where it is");
+    delete process.env.GLOSSARY_CARRY_FORWARD_GUARD;
+    await assertGlossaryCarryForward({ ...ctx, isFirst: true, previousGlossaryFile: null }, "the amend pass");
+    assert.strictEqual(await seedGlossaryFromPrevious({ ...ctx, isFirst: true, previousGlossaryFile: null }), false, "first volume: nothing to seed");
+  } finally {
+    await fsAsync.rm(tmpDir, { recursive: true, force: true });
+  }
+  await chunkedGlossaryFlowTest();
   console.log("All tests passed.");
 })().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+// ─── the chunked (chapter-by-chapter) glossary flow ──────────────────────────
+// The seed, the per-chapter carry-forward guard and the findings-merge step cap
+// all live in the chapter-by-chapter path, and a whole-installment fixture never
+// reaches it. The harness is stubbed (the mode wiring is what is under test, not
+// the provider); the files, the QA loop and the guards are the real ones.
+async function chunkedGlossaryFlowTest() {
+  const fsAsync = require("fs").promises;
+  const os = require("os");
+  const harness = require("../harness");
+  const { runChunkedVolumeAgent } = require("../glossary");
+
+  const tmpDir = await fsAsync.mkdtemp(path.join(os.tmpdir(), "chunked-glossary-"));
+  const prevDir = path.join(tmpDir, "Series(05)");
+  const volDir = path.join(tmpDir, "Series(06)");
+  const outFile = path.join(volDir, "glossary.md");
+
+  // Save and restore the harness methods the flow reaches for, so the suites
+  // that run after this one get the real ones back.
+  const real = {
+    createGatedFsTools: harness.createGatedFsTools,
+    createWikiTools: harness.createWikiTools,
+    createAgentHandle: harness.createAgentHandle,
+    runOneShot: harness.runOneShot,
+  };
+  const restore = () => Object.assign(harness, real);
+
+  const VALIDATION_REPORT =
+    "# Glossary validation — Series, volume 06\n\n" +
+    "The glossary covers the chapter sources. No HIGH findings.\n\n" +
+    "FINDING [LOW] chapters=ch1 — one Notes cell is longer than a gloss.\n";
+
+  try {
+    await fsAsync.mkdir(prevDir);
+    await fsAsync.mkdir(volDir);
+    await fsAsync.writeFile(path.join(prevDir, "glossary.md"), prevGlossary, "utf8");
+    const segments = [
+      { id: "ch1", file: "book-ch1.md", title: "第一章", bodyChars: 100 },
+      { id: "ch2", file: "book-ch2.md", title: "第二章", bodyChars: 100 },
+    ];
+    for (const s of segments) {
+      await fsAsync.writeFile(path.join(volDir, s.file), `${s.title}\n\n本文。\n`, "utf8");
+    }
+
+    const ctx = {
+      values: { INSTALLMENT_NUMBER: "06", SOURCE_NAME: "Series", SOURCE_LANGUAGE: "Japanese", TARGET_LANGUAGE: "English" },
+      folderName: "Series(06)",
+      volumeDir: volDir,
+      sourceFile: path.join(volDir, segments[0].file),
+      glossaryOutputFile: outFile,
+      researchNotesFile: path.join(volDir, "glossary-research.md"),
+      validationOutputFile: path.join(volDir, "glossary-validation.md"),
+      isFirst: false,
+      previousGlossaryFile: path.join(prevDir, "glossary.md"),
+      previousFolderName: "Series(05)",
+      chunked: true,
+      bundle: { format: "epub", segments, wholeChars: 200, wholePath: path.join(volDir, segments[0].file) },
+      termsPrompt: "Extract the new terms.",
+      termsSystemPrompt: "You extract terms.",
+      glossarySystemPrompt: "You maintain the glossary.",
+      validatorSystemPrompt: "You audit the glossary.",
+      glossaryTemplate: "Amend the glossary for {{SOURCE_NAME}}.\n{{TERMS_LIST}}\n{{RESEARCH_NOTES}}\n{{DISPUTES}}",
+      feedbackPrompt: "Apply the findings.",
+      disputesText: "",
+    };
+
+    // The scripted agents: validators write their chapter's partial, the merger
+    // consolidates it, the author agents leave the seeded glossary alone (which
+    // is exactly what the new instruction asks them to do).
+    let amendCalls = 0;
+    let shrinkOnAmendCall = 0;
+    harness.createGatedFsTools = async () => ({ tools: {}, approve: async () => true });
+    harness.createWikiTools = () => ({});
+    harness.runOneShot = async ({ label }) =>
+      label.startsWith("glossary-terms")
+        ? "[]" // no new terms: keeps the research agents out of a wiring test
+        : '{"score": 80, "band": "Pass with minor edits", "note": "Carries the previous terms."}';
+    harness.createAgentHandle = async ({ name }) => ({
+      name,
+      sendTurn: async () => {
+        if (name.startsWith("validator-merge-")) {
+          await fsAsync.writeFile(path.join(volDir, "glossary-validation.md"), VALIDATION_REPORT, "utf8");
+        } else if (name.startsWith("validator-")) {
+          const id = name.split("-").pop();
+          await fsAsync.writeFile(path.join(volDir, `glossary-validation-${id}.md`), VALIDATION_REPORT, "utf8");
+        } else if (name.startsWith("author-")) {
+          amendCalls++;
+          // The failure the guard exists for: a chapter pass that rewrites the
+          // glossary from memory instead of editing it.
+          if (amendCalls === shrinkOnAmendCall) {
+            await fsAsync.writeFile(outFile, shrunk, "utf8");
+          }
+        }
+        return { text: "", toolCalls: [{ toolCallId: "1", toolName: "readFile", input: {} }] };
+      },
+      close: async () => {},
+    });
+
+    // 1. The happy path: the volume's glossary starts from the previous volume's
+    //    copy, every chapter amends it, and the QA loop accepts it.
+    await runChunkedVolumeAgent(ctx);
+    assert.ok(
+      (await fsAsync.readFile(outFile, "utf8")).includes("| A | Alpha |"),
+      "chunked: the volume's glossary carries the previous volume's terms verbatim"
+    );
+    assert.ok(amendCalls >= 2, "chunked: every chapter got its own amend pass");
+    assert.ok(
+      await fsAsync.stat(path.join(volDir, "glossary-validation-ch1.md")).then(() => true, () => false),
+      "chunked: the per-chapter validation partials were written"
+    );
+    // This file pins ACCEPTANCE_MIN_SAMPLES=3 while the window holds 2, so the
+    // loop runs its whole iteration budget — which means every per-chapter
+    // FEEDBACK pass also ran, each one guarded. The glossary still holds all
+    // three carried-forward terms after all of them.
+    assert.deepStrictEqual(
+      compareGlossaryCarryForward(prevGlossary, await fsAsync.readFile(outFile, "utf8")).missing,
+      [],
+      "chunked: the per-chapter feedback passes did not shrink the glossary"
+    );
+
+    // 2. A chapter pass that shrinks the glossary is caught AT THAT CHAPTER —
+    //    not eight chapters and one acceptance loop later.
+    amendCalls = 0;
+    shrinkOnAmendCall = 2; // the second chapter's amend pass
+    await fsAsync.writeFile(outFile, prevGlossary, "utf8");
+    await assert.rejects(
+      () => runChunkedVolumeAgent(ctx),
+      /the amend pass for chapter ch2 dropped 2 of the 3 term\(s\)/,
+      "chunked: the guard names the chapter that broke the glossary"
+    );
+    assert.strictEqual(await fsAsync.stat(outFile).then(() => true, () => false), false, "chunked: the damaged glossary is moved out of the next volume's way");
+    assert.ok(
+      await fsAsync.stat(`${outFile}.rejected`).then(() => true, () => false),
+      "chunked: the damaged document survives as the evidence"
+    );
+  } finally {
+    restore();
+    await fsAsync.rm(tmpDir, { recursive: true, force: true });
+  }
+}

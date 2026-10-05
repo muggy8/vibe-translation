@@ -53,10 +53,10 @@ const fs = require("fs").promises;
 const path = require("path");
 require("./types"); // JSDoc type definitions
 const harness = require("./harness");
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
+const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, authorMaxStepsFor, findingsMergeMaxStepsFor, writePromptDump } = require("./utils/prompt");
 const { getTranslationTarget } = require("./get-translation-target");
 const { filterVolumesByInstallment } = require("./utils/manifest");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError } = require("./configs/shared");
+const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("./configs/shared");
 const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact } = require("./utils/fs");
 const { loadGlossaryDisputes } = require("./utils/disputes");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
@@ -582,6 +582,9 @@ function buildGlossaryResearcherTurnPrompt(ctx, terms) {
  */
 function buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg = null, si = null) {
   const { values, isFirst, previousFolderName } = ctx;
+  // True when the workflow already copied the previous glossary into this
+  // volume's folder (seedGlossaryFromPrevious) — the agent amends, not recreates.
+  const seeded = Boolean(ctx.glossarySeeded);
   const termsListText =
     terms.length > 0
       ? terms.map((t) => `- ${t.term} (${t.type})`).join("\n")
@@ -606,7 +609,10 @@ function buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg =
       si === 0
         ? isFirst
           ? "- The previous glossary: (absent — this is the first volume)"
-          : `- The previous glossary: "../${previousFolderName}/glossary.md"`
+          : seeded
+            ? `- The glossary to amend: "glossary.md" (same folder — already a verbatim ` +
+              `copy of "../${previousFolderName}/glossary.md")`
+            : `- The previous glossary: "../${previousFolderName}/glossary.md"`
         : `- The current glossary (state after the earlier chapters of this volume): "glossary.md" (same folder)`;
     chapterBlock = chapterContextBlock(values, ctx.bundle, seg, si);
   } else {
@@ -616,7 +622,10 @@ function buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg =
         : `- The volume source: "${ctx.folderName}.md" (same folder)`;
     previousGlossaryLine = isFirst
       ? "- The previous glossary: (absent — this is the first volume)"
-      : `- The previous glossary: "../${previousFolderName}/glossary.md"`;
+      : seeded
+        ? `- The glossary to amend: "glossary.md" (same folder — already a verbatim ` +
+          `copy of "../${previousFolderName}/glossary.md")`
+        : `- The previous glossary: "../${previousFolderName}/glossary.md"`;
   }
   return (
     `Working folder: the volume folder (you are in it).\n\n` +
@@ -624,9 +633,9 @@ function buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg =
     `Materials (read with readFile before writing anything):\n` +
     `${sourceLine}\n` +
     previousGlossaryLine +
-    `\n\n` +
-    `Write the complete amended glossary to the file "glossary.md" in your working ` +
-    `folder (writeFile, complete contents).\n\n` +
+    `\n` +
+    glossaryIndexBlock(ctx) +
+    glossaryWriteInstruction(Boolean(ctx.glossarySeeded), "amend") +
     amendPrompt
   );
 }
@@ -682,9 +691,8 @@ function buildGlossaryFeedbackTurnPrompt(ctx) {
     `- The current glossary to correct: "glossary.md" (same folder)\n` +
     previousGlossaryLine +
     `\n` +
-    `Apply the report's findings and write the complete corrected glossary back to ` +
-    `"glossary.md" using writeFile (complete contents, overwrite). Use editFile only for ` +
-    `targeted fixes. Make the smallest changes that resolve each valid finding.\n\n` +
+    glossaryIndexBlock(ctx) +
+    glossaryWriteInstruction(true, "correct") +
     ctx.feedbackPrompt
   );
 }
@@ -908,6 +916,11 @@ async function glossary() {
     };
 
     if (dryRun) {
+      // The preview must show the prompt the LIVE run would use. A live run
+      // copies the previous volume's glossary into this volume's folder before
+      // the author turn (seedGlossaryFromPrevious), so from volume 02 on the
+      // author is told to edit that file in place — not to recreate it.
+      ctx.glossarySeeded = !isFirst;
       // The term-dependent prompts carry an illustrative term list (the real
       // list only exists after the extraction call, which dry-run skips).
       const illustrativeTerms = [
@@ -1219,15 +1232,13 @@ function buildGlossarySegmentFeedbackPrompt(ctx, segment, si) {
     `- The chapter source: "${segment.file}" (same folder)\n` +
     `- The current glossary to correct: "glossary.md" (same folder)\n` +
     `\n` +
-    `Apply the chapter's findings and write the complete corrected glossary back to ` +
-    `"glossary.md" using writeFile (complete contents, overwrite). Use editFile only ` +
-    `for targeted fixes. Make the smallest changes that resolve each valid finding; ` +
-    `do not touch entries this chapter's findings do not concern.\n\n` +
+    glossaryIndexBlock(ctx) +
+    glossaryWriteInstruction(true, "correct") +
+    `Do not touch entries this chapter's findings do not concern.\n\n` +
     ctx.feedbackPrompt
   );
 }
 
-/**
 /**
  * The unique placeholder line for one term in the research skeleton.
  *
@@ -1314,6 +1325,11 @@ async function runChunkedVolumeAgent(ctx) {
     console.log(`Removed the stale file "${strayGlossary}" (leftover from a previous run).`);
   }
 
+  // Seed the volume's glossary from the previous volume's before the first
+  // chapter touches it, so every chapter amends a real file rather than
+  // reproducing a document too large for one reply to write.
+  await seedGlossaryFromPrevious(ctx);
+
   const allChunkedTerms = [];
   for (let si = 0; si < bundle.segments.length; si++) {
     const segment = bundle.segments[si];
@@ -1379,7 +1395,29 @@ async function runChunkedVolumeAgent(ctx) {
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: amending the glossary with chapter ${segment.id} (author agent)...`
     );
+    // The state this chapter must not shrink. Read before the pass, compared
+    // after it: a chapter pass that rewrites the glossary from memory is where
+    // the cumulative entries actually disappear.
+    let chapterBaseline = null;
+    try {
+      chapterBaseline = await fs.readFile(glossaryOutputFile, "utf8");
+    } catch {
+      chapterBaseline = null; // No glossary yet — this chapter creates it.
+    }
+    // The index must describe the state THIS chapter is about to amend, and the
+    // earlier chapters have already added rows to it.
+    if (chapterBaseline !== null) ctx.glossaryIndex = buildGlossaryIndex(chapterBaseline);
+
     await generateGlossary(ctx, terms, researchEnabled && terms.length > 0, segment, si);
+
+    if (chapterBaseline !== null) {
+      await guardCarryForwardAgainst(
+        ctx,
+        chapterBaseline,
+        `the amend pass for chapter ${segment.id}`,
+        "the glossary as of the previous chapter"
+      );
+    }
   }
 
   // Persist the volume's new-term extraction (all chapters) so the
@@ -1474,7 +1512,15 @@ async function runChunkedQaLoop(ctx) {
       tools: fsGate.tools,
       approve: fsGate.approve,
       cwd: volumeDir,
-      maxSteps: 20,
+      // The merger reads every chapter partial AND the glossary it is auditing,
+      // then writes one consolidated report. A fixed 20 ran out on a 10-chapter
+      // volume (observed: 34 read/grep calls before it could write anything),
+      // which threw away the whole validation round's work. Scale it with the
+      // number of partials plus the pages of glossary it must read.
+      maxSteps: findingsMergeMaxStepsFor(
+        bundle.segments.length,
+        (await fs.stat(glossaryOutputFile)).size
+      ),
     });
     try {
       const mergeResult = await merger.sendTurn(
@@ -1539,8 +1585,19 @@ async function runChunkedQaLoop(ctx) {
         tools: fsGate.tools,
         approve: fsGate.approve,
         cwd: volumeDir,
-        maxSteps: 40,
+        maxSteps: await glossaryAuthorMaxSteps(ctx, segment),
       });
+      // The state this chapter's correction must not shrink (see the amend
+      // pass above — the same failure mode, reached from the other side).
+      let feedbackBaseline = null;
+      try {
+        feedbackBaseline = await fs.readFile(glossaryOutputFile, "utf8");
+      } catch {
+        feedbackBaseline = null;
+      }
+      // The index must describe the glossary as it is NOW, chapter by chapter.
+      if (feedbackBaseline !== null) ctx.glossaryIndex = buildGlossaryIndex(feedbackBaseline);
+
       try {
         const feedbackResult = await feedbackAuthor.sendTurn(
           buildGlossarySegmentFeedbackPrompt(ctx, segment, si),
@@ -1556,9 +1613,11 @@ async function runChunkedQaLoop(ctx) {
         // fallback — never over a file the agent already wrote correctly.
         if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
           const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-          const recoveryPrompt = hasContent
-            ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead. Please rewrite the complete glossary using writeFile now.`
-            : `You produced no output. Please read the materials and write the complete glossary to "glossary.md" using writeFile now.`;
+          const recoveryPrompt = glossaryRecoveryPrompt(
+            hasContent,
+            '"glossary.md"',
+            `the chapter source, the validation report, and the current glossary`
+          );
           const recoveryResult = await feedbackAuthor.sendTurn(recoveryPrompt, {
             label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
           });
@@ -1572,6 +1631,15 @@ async function runChunkedQaLoop(ctx) {
         await assertRealOutput(glossaryOutputFile, `the author agent (feedback pass, chapter ${segment.id})`);
       } finally {
         await feedbackAuthor.close();
+      }
+
+      if (feedbackBaseline !== null) {
+        await guardCarryForwardAgainst(
+          ctx,
+          feedbackBaseline,
+          `the feedback pass for chapter ${segment.id}`,
+          "the glossary as of the previous chapter"
+        );
       }
     }
 
@@ -1746,14 +1814,390 @@ async function runVolumeAgent(ctx) {
 
   // Pass 3: amend the glossary with the author agent (standalone — creates and
   // closes its own session; no persistent context across QA iterations).
+  //
+  // The previous volume's glossary is copied in first (deterministic, no model
+  // call), so the agent amends a real file instead of reproducing a document
+  // too large for one reply to write. See seedGlossaryFromPrevious.
+  await seedGlossaryFromPrevious(ctx);
+
   console.log(
     `Volume ${values.INSTALLMENT_NUMBER}: amending the glossary (author agent)...`
   );
 
   await generateGlossary(ctx, terms, researchNotesAvailable);
+  await assertGlossaryCarryForward(ctx, "the amend pass");
 
   // QA loop: fresh validator per iteration + fresh author for feedback.
   await runQaLoop(ctx);
+}
+
+/**
+ * Seed this volume's glossary with the previous volume's, verbatim, before any
+ * agent touches it.
+ *
+ * The amend pass has always been "the previous glossary, plus this volume's
+ * new terms". Asking a model to reproduce that by hand is what broke: the
+ * cumulative glossary passes the size of a single reply around volume 03 (the
+ * output cap is a quarter of the context window — `harness.js` `envMaxTokens`
+ * — and volume 05's glossary needs ~154k tokens against a 65,536-token cap),
+ * so the agent could not obey "writeFile, complete contents". It fell back to
+ * paging the file in 8–17 reads and patching it with 16–39 edits, ran out of
+ * its step budget, and rebuilt the document from memory — which is how 457
+ * terms disappeared between volumes 05 and 06.
+ *
+ * Copying the baseline is deterministic, free, and exactly what the prompt was
+ * asking for. The agent's job becomes the part a model is actually good at:
+ * insert a few rows.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @returns {Promise<boolean>} True when the volume's glossary now starts from
+ *   the previous volume's copy (so the amend prompt can say "edit it in place").
+ */
+async function seedGlossaryFromPrevious(ctx) {
+  const { values, isFirst, previousGlossaryFile, glossaryOutputFile } = ctx;
+  if (isFirst || !previousGlossaryFile) return false;
+
+  let previousText;
+  try {
+    previousText = await fs.readFile(previousGlossaryFile, "utf8");
+  } catch (err) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: could not read the previous glossary ` +
+        `(${previousGlossaryFile}: ${err.message}) — the author agent will write ` +
+        `this volume's glossary from scratch.`
+    );
+    return false;
+  }
+  if (!previousText || previousText.trim().length === 0) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: the previous glossary is empty — ` +
+        `the author agent will write this volume's glossary from scratch.`
+    );
+    return false;
+  }
+
+  let replaced = false;
+  try {
+    const existing = await fs.readFile(glossaryOutputFile, "utf8");
+    replaced = existing.trim() !== previousText.trim();
+  } catch {
+    replaced = true; // No file yet — the copy creates it.
+  }
+
+  await fs.writeFile(glossaryOutputFile, previousText, "utf8");
+  ctx.glossarySeeded = true;
+  // The map the amend pass needs in order to place a row without paging the
+  // whole document (see buildGlossaryIndex).
+  ctx.glossaryIndex = buildGlossaryIndex(previousText);
+  if (replaced) {
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: seeded glossary.md from ` +
+        `../${path.basename(path.dirname(previousGlossaryFile))}/glossary.md ` +
+        `(${parseGlossaryTableTerms(previousText).length} term(s) carried forward ` +
+        `verbatim; the author agent amends it in place).`
+    );
+  }
+  return true;
+}
+
+/**
+ * The carry-forward gate: after a glossary pass, check that this volume's
+ * glossary still holds every term the previous volume's held.
+ *
+ * A loss here is not a quality question — it is the cumulative invariant
+ * breaking, and it is invisible to every other check in the stage (see
+ * compareGlossaryCarryForward). It fails the VOLUME, not the run: with
+ * ON_VOLUME_ERROR=skip the series continues and the volume is named in the
+ * task's end-of-run failure summary.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @param {string} [stageLabel] - Which pass produced the glossary (for the message).
+ * @returns {Promise<void>}
+ * @throws {Error} When terms disappeared (unless the guard is disabled with
+ *   GLOSSARY_CARRY_FORWARD_GUARD=false).
+ */
+async function assertGlossaryCarryForward(ctx, stageLabel = "the amend pass") {
+  const { values, isFirst, previousGlossaryFile } = ctx;
+  if (isFirst || !previousGlossaryFile) return;
+
+  let previousText;
+  try {
+    previousText = await fs.readFile(previousGlossaryFile, "utf8");
+  } catch (err) {
+    // A missing previous glossary is already handled by the volume loop's
+    // ON_MISSING_PREVIOUS policy; the guard must not mask it with a different
+    // message.
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: carry-forward check skipped (${err.message}).`
+    );
+    return;
+  }
+  await guardCarryForwardAgainst(ctx, previousText, stageLabel, "the previous volume's glossary");
+}
+
+/**
+ * The same gate against an arbitrary baseline — the previous volume's glossary,
+ * or this volume's own glossary as of the previous chapter.
+ *
+ * The chunked flow needs the per-chapter form: the observed damage happened
+ * DURING volume 06's per-chapter amend passes, not at the volume boundary, and
+ * catching it at chapter 3 saves eight chapters of work built on a broken base.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @param {string} baselineText - The document the newer one must not shrink.
+ * @param {string} stageLabel - Which pass produced the newer snapshot.
+ * @param {string} baselineLabel - What the older snapshot was.
+ * @returns {Promise<void>}
+ * @throws {Error} When terms disappeared.
+ */
+async function guardCarryForwardAgainst(ctx, baselineText, stageLabel, baselineLabel) {
+  if (!readBoolEnv("GLOSSARY_CARRY_FORWARD_GUARD", true)) return;
+  const { values, glossaryOutputFile } = ctx;
+
+  let currentText;
+  try {
+    currentText = await fs.readFile(glossaryOutputFile, "utf8");
+  } catch (err) {
+    // A missing/empty glossary is already the hard stop in assertRealOutput;
+    // the guard adds nothing there and must not report it as a term loss.
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: carry-forward check skipped (${err.message}).`
+    );
+    return;
+  }
+
+  const diff = compareGlossaryCarryForward(baselineText, currentText);
+  if (diff.missing.length === 0) {
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: carry-forward check passed ` +
+        `(${diff.previousCount} terms carried, ${diff.added.length} added).`
+    );
+    return;
+  }
+
+  await quarantineDamagedGlossary(ctx, diff);
+  reportCarryForwardLoss(values.INSTALLMENT_NUMBER, diff, stageLabel, baselineLabel);
+}
+
+/**
+ * Move a glossary that lost carried-forward terms out of the way, so the volume
+ * AFTER it cannot build on it.
+ *
+ * This is what makes the documented cascade actually fire. A failed volume
+ * normally stops the next one because its artifact is MISSING, and
+ * ON_MISSING_PREVIOUS=skip then skips that one in turn, to the end of the task
+ * (AGENTS.md §3). A carry-forward loss is the worse case: the file is present,
+ * plausible, and short by hundreds of terms — so the next volume would read it
+ * as terminology law. Observed live: volume 06 held 411 of volume 05's 769
+ * terms, and nothing in the stage could see it.
+ *
+ * Renamed, not deleted: the damaged document is the evidence, and
+ * `translation-<id>.rejected.md` is the same pattern the translation stage uses.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @param {{missing: Array<{term: string}>, previousCount: number, currentCount: number}} diff
+ *   The result of compareGlossaryCarryForward.
+ * @returns {Promise<void>}
+ */
+async function quarantineDamagedGlossary(ctx, diff) {
+  const { values, glossaryOutputFile } = ctx;
+  const quarantineFile = `${glossaryOutputFile}.rejected`;
+  try {
+    await fs.rename(glossaryOutputFile, quarantineFile);
+    const from = ctx.previousFolderName ? `../${ctx.previousFolderName}/glossary.md` : "the previous volume's glossary";
+    console.error(
+      `Volume ${values.INSTALLMENT_NUMBER}: moved the damaged glossary (${diff.currentCount} of ` +
+        `${diff.previousCount} terms) to "${path.basename(quarantineFile)}" so the next volume ` +
+        `cannot build on it. Re-running this volume starts from ${from}.`
+    );
+  } catch (err) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: could not move the damaged glossary aside ` +
+        `(${err.message}) — it is still a failure, but the next volume may read it.`
+    );
+  }
+}
+
+/**
+ * Log (and fail on) a carry-forward loss, given the two snapshots already compared.
+ *
+ * The pure half of the gate: no files, so it is the part the tests can drive
+ * with hand-built documents.
+ *
+ * @param {string} installmentNumber - The volume being processed.
+ * @param {{previousCount: number, currentCount: number, missing: Array<{term: string, section: string}>, added: string[]}} diff
+ *   The result of compareGlossaryCarryForward.
+ * @param {string} stageLabel - Which pass produced the newer snapshot.
+ * @param {string} baselineLabel - What the older snapshot was.
+ * @returns {void}
+ * @throws {Error} When terms disappeared.
+ */
+function reportCarryForwardLoss(installmentNumber, diff, stageLabel, baselineLabel) {
+  if (diff.missing.length === 0) {
+    console.log(
+      `Volume ${installmentNumber}: carry-forward check passed ` +
+        `(${diff.previousCount} terms carried, ${diff.added.length} added).`
+    );
+    return;
+  }
+
+  const preview = diff.missing
+    .slice(0, 12)
+    .map((e) => `${e.term} [${e.section || "no section"}]`)
+    .join(", ");
+  const message =
+    `Volume ${installmentNumber}: ${stageLabel} dropped ` +
+    `${diff.missing.length} of the ${diff.previousCount} term(s) in ${baselineLabel} ` +
+    `(${diff.currentCount} remain). Lost: ${preview}` +
+    `${diff.missing.length > 12 ? `, … ${diff.missing.length - 12} more` : ""}. ` +
+    `The glossary is cumulative — every later volume is translated against it. ` +
+    `A pass that rewrites the whole file cannot finish it: the cumulative ` +
+    `glossary is larger than one reply can write (AI_MAX_TOKENS).`;
+  console.error(`  [glossary] WARNING: ${message}`);
+  throw new Error(message);
+}
+
+/**
+ * The "what the glossary already holds" block for a glossary agent turn.
+ *
+ * One implementation shared by the amend and both feedback passes: every one of
+ * them has to find the row it is looking for inside a document too big to read
+ * whole, and a `grep` hunt is what eats a capped step budget (see
+ * buildGlossaryIndex).
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context; `glossaryIndex` is set by
+ *   seedGlossaryFromPrevious.
+ * @returns {string} The block, or "" when there is no index. Ends with a blank line.
+ */
+function glossaryIndexBlock(ctx) {
+  if (!ctx.glossaryIndex) return "";
+  return (
+    `What "glossary.md" already holds, by section (term → rendering):\n` +
+    `${ctx.glossaryIndex}\n\n` +
+    `Use this to choose the section a term belongs in, and to catch a term that is ` +
+    `already here under a different spelling. It is an index, not the document: read ` +
+    `the rows you are about to change before changing them.\n\n`
+  );
+}
+
+/**
+ * The write instruction for a glossary pass — ONE implementation shared by the
+ * amend, feedback, and per-chapter variants, because the two cases differ only
+ * in what the file already contains.
+ *
+ * Why this exists: every glossary pass used to be told "writeFile, complete
+ * contents, overwrite". That is right for volume 01 and wrong from volume 03
+ * onward, because the cumulative glossary outgrows a single reply (the output
+ * cap is a quarter of the context window — `envMaxTokens` in harness.js — and
+ * volume 05's glossary needs ~154k tokens against a 65,536-token cap). Observed
+ * on the live 17-volume run: the agent tried to obey, its `writeFile` JSON
+ * argument was cut off mid-string, the tool call failed and the volume died;
+ * other passes gave up on `writeFile`, rebuilt the document from paged reads
+ * and memory, ran out of their step budget, and shipped a glossary missing 457
+ * of the 769 terms it was supposed to carry.
+ *
+ * With the baseline copied in by `seedGlossaryFromPrevious`, the agent's job is
+ * the part a model is actually good at: insert a few rows into a file it can
+ * see.
+ *
+ * @param {boolean} hasExistingFile - Whether `glossary.md` already holds the
+ *   document to change (see seedGlossaryFromPrevious). False means the agent
+ *   must create it, which is the only case a whole-file write is correct.
+ * @param {"amend"|"correct"} [mode] - "amend" adds terms; "correct" applies a
+ *   validation report. Only the wording differs.
+ * @returns {string} The instruction block, ending with a blank line.
+ */
+function glossaryWriteInstruction(hasExistingFile, mode = "amend") {
+  if (!hasExistingFile) {
+    return (
+      `How to write it: the file "glossary.md" in your working folder does not ` +
+      `exist yet, so write the complete document to it with writeFile (complete ` +
+      `contents), in the exact section/table format from the system prompt.\n\n`
+    );
+  }
+  const verb = mode === "correct" ? "correct" : "amend";
+  return (
+    `How to write it — "glossary.md" in your working folder ALREADY holds the ` +
+    `glossary as of the step before this one (the workflow put the current version ` +
+    `of it there). ${verb[0].toUpperCase()}${verb.slice(1)} it ` +
+    `IN PLACE with editFile:\n\n` +
+    `- Insert each new term as ONE new table row at the end of the right section's table.\n` +
+    `- Replace an existing row only when the source text or a listed dispute shows that ` +
+    `rendering is wrong, and keep its Notes column.\n` +
+    `- Update the "_… Current through volume …_" header line.\n\n` +
+    `Do NOT rewrite the whole file with writeFile. This glossary is larger than one ` +
+    `reply can produce, and a write cut off part-way destroys every entry it did not ` +
+    `reach. Never delete a row, and never retype an entry you have not just read — ` +
+    `entries that fall out of this file are lost from every later volume.\n\n`
+  );
+}
+
+/**
+ * The recovery turn for a glossary pass that answered in chat instead of using
+ * the file tools.
+ *
+ * It deliberately does NOT ask for a whole-file rewrite. That is the instruction
+ * that broke the cumulative glossary (see glossaryWriteInstruction), and
+ * `assertWroteWithFallback` has already put the reply on disk, so there is a
+ * file to edit. Asking again for "writeFile, complete contents" over a document
+ * larger than one reply is how a recovery turn destroys the thing it was sent
+ * to repair.
+ *
+ * @param {boolean} hasContent - Whether the agent produced the content in its
+ *   chat reply (true) or produced nothing at all (false).
+ * @param {string} [fileLabel] - The file to fix, as the agent knows it.
+ * @param {string} [materialsLine] - What to read before fixing it.
+ * @returns {string} The recovery prompt.
+ */
+function glossaryRecoveryPrompt(hasContent, fileLabel = '"glossary.md"', materialsLine = "the materials") {
+  if (hasContent) {
+    return (
+      `You produced your answer as a chat message instead of changing the file. ` +
+      `Your additions are correct — now apply them to ${fileLabel} in your working ` +
+      `folder with editFile: insert each new row into the right section's table and ` +
+      `update the "Current through volume" header.\n\n` +
+      `Do NOT rewrite ${fileLabel} from scratch with writeFile. Read it first, then ` +
+      `edit it in place. Every existing row must still be there when you finish.\n\n` +
+      `Read ${materialsLine} before editing.`
+    );
+  }
+  return (
+    `You produced no output. Read ${materialsLine}, then apply your changes to ` +
+    `${fileLabel} in your working folder with editFile — insert each new row into ` +
+    `the right section's table and update the "Current through volume" header.\n\n` +
+    `Do NOT rewrite ${fileLabel} from scratch with writeFile. Every existing row ` +
+    `must still be there when you finish.`
+  );
+}
+
+/**
+ * The step cap for a glossary author or feedback agent on this volume/chapter.
+ *
+ * Scaled rather than fixed because both things it must read grow with the
+ * series: the cumulative glossary (which no longer fits in one `readFile`
+ * answer from volume 03 on) and the text it is amending from. A flat 40 is
+ * where 17 of the 25 step-cap warnings on the live 17-volume run came from.
+ *
+ * Fail-soft: an unreadable size counts as 0, which yields the old flat floor
+ * rather than failing the volume over a stat call.
+ *
+ * @param {GlossaryVolumeCtx} ctx - The volume context.
+ * @param {SourceSegment|null} [seg] - The chapter being processed (chunked mode).
+ * @returns {Promise<number>} The step cap.
+ */
+async function glossaryAuthorMaxSteps(ctx, seg = null) {
+  const sizeOf = async (p) => {
+    try {
+      return (await fs.stat(p)).size;
+    } catch {
+      return 0;
+    }
+  };
+  const glossaryBytes = await sizeOf(ctx.glossaryOutputFile);
+  const sourceBytes = seg
+    ? await sizeOf(path.join(ctx.volumeDir, seg.file))
+    : await sizeOf(ctx.sourceFile);
+  return authorMaxStepsFor(glossaryBytes, sourceBytes);
 }
 
 /**
@@ -1779,7 +2223,7 @@ async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, 
     tools: ctx.fsGate.tools,
     approve: ctx.fsGate.approve,
     cwd: volumeDir,
-    maxSteps: 40,
+    maxSteps: await glossaryAuthorMaxSteps(ctx, seg),
   });
   try {
     const amendResult = await author.sendTurn(
@@ -1802,18 +2246,19 @@ async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, 
           `(model replied in chat instead of writeFile)...`
       );
       const hasContent = amendResult?.text && amendResult.text.trim().length > 0;
-      const recoveryPrompt = hasContent
-        ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
-          `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
-          `Please rewrite the complete glossary to "glossary.md" using writeFile now. Use the exact same content you generated in your previous message.`
-        : `You were asked to write the complete glossary to "glossary.md" using writeFile, but you produced no output.\n\n` +
-          `Please read the source materials and write the complete glossary to "glossary.md" using writeFile now.`;
+      const recoveryPrompt = glossaryRecoveryPrompt(
+        hasContent,
+        '"glossary.md"',
+        "the volume source and the new-terms list"
+      );
       const recoveryResult = await author.sendTurn(
         recoveryPrompt,
         { label: `glossary-recovery-${values.INSTALLMENT_NUMBER}` }
       );
       assertRealToolCalls(recoveryResult, "the author agent (recovery)", values.INSTALLMENT_NUMBER);
-      // Overwrite with the recovery output (may be the same content, now via writeFile).
+      // The recovery turn EDITS the file (see glossaryRecoveryPrompt), so the
+      // fallback here only ever fills a gap the edit left — it can no longer
+      // replace a complete glossary with the text of one chat reply.
       await assertWroteWithFallback(
         glossaryOutputFile,
         "the author agent (recovery)",
@@ -1895,13 +2340,19 @@ async function runQaLoop(ctx) {
 async function runGlossaryFeedback(ctx, iteration) {
   const { values, volumeDir, glossaryOutputFile } = ctx;
 
+  // The index must describe the glossary as it is NOW — the amend pass and the
+  // earlier QA iterations have added rows since it was seeded.
+  ctx.glossaryIndex = buildGlossaryIndex(
+    await fs.readFile(glossaryOutputFile, "utf8").catch(() => "")
+  );
+
   const feedbackAuthor = await harness.createAgentHandle({
     name: `feedback-author-${values.INSTALLMENT_NUMBER}-${iteration}`,
     systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
     tools: ctx.fsGate.tools,
     approve: ctx.fsGate.approve,
     cwd: volumeDir,
-    maxSteps: 40,
+    maxSteps: await glossaryAuthorMaxSteps(ctx),
   });
   try {
     const feedbackResult = await feedbackAuthor.sendTurn(
@@ -1919,12 +2370,11 @@ async function runGlossaryFeedback(ctx, iteration) {
     // re-send the full feedback task.
     if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
       const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-      const recoveryPrompt = hasContent
-        ? `You were asked to write the complete glossary to "glossary.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
-          `The file has been temporarily written from your chat reply, but it must be written properly using writeFile. ` +
-          `Please rewrite the complete glossary to "glossary.md" using writeFile now. Use the exact same content you generated in your previous message.`
-        : `You were asked to write the complete glossary to "glossary.md" using writeFile, but you produced no output.\n\n` +
-          `Please read the source materials and the validation report and write the corrected glossary to "glossary.md" using writeFile now.`;
+      const recoveryPrompt = glossaryRecoveryPrompt(
+        hasContent,
+        '"glossary.md"',
+        "the volume source, the validation report and the current glossary"
+      );
       const feedbackRecoveryResult = await feedbackAuthor.sendTurn(
         recoveryPrompt,
         { label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
@@ -1940,6 +2390,7 @@ async function runGlossaryFeedback(ctx, iteration) {
   } finally {
     await feedbackAuthor.close();
   }
+  await assertGlossaryCarryForward(ctx, "the feedback pass");
 }
 
 // ─── Deterministic term-coverage audit ──────────────────────────────────────
@@ -1959,8 +2410,9 @@ async function runGlossaryFeedback(ctx, iteration) {
  * `|---|---|---|`) are skipped. Emphasis-wrapped cells are normalized.
  *
  * @param {string} markdown - The glossary file content.
- * @returns {Array<{term: string, section: string}>} One entry per term row,
- *   in file order.
+ * @returns {Array<{term: string, rendering: string, section: string}>} One entry
+ *   per term row, in file order. `rendering` is the target-language column
+ *   (empty when the row has none).
  */
 function parseGlossaryTableTerms(markdown) {
   if (!markdown || typeof markdown !== "string") return [];
@@ -1982,7 +2434,15 @@ function parseGlossaryTableTerms(markdown) {
       if (!term) continue;
       if (/^:?-{3,}:?$/.test(term)) continue; // stray separator
       if (/^\[.*\]$/.test(term)) continue; // unrendered template placeholder
-      entries.push({ term, section });
+      // The rendering (column 1) rides along: the compact term index built from
+      // these entries lets the amend pass see what an existing term is ALREADY
+      // called, which is what a conflict check needs.
+      const rendering = (cells[1] || "")
+        .replace(/^`+|`+$/g, "")
+        .replace(/^\*+|\*+$/g, "")
+        .replace(/^_+|_+$/g, "")
+        .trim();
+      entries.push({ term, rendering, section });
     }
     tableRows = [];
   };
@@ -2002,6 +2462,111 @@ function parseGlossaryTableTerms(markdown) {
   }
   flushTable();
   return entries;
+}
+
+/**
+ * Compare two glossary snapshots and report what the newer one LOST.
+ *
+ * The glossary is cumulative: volume N's file must hold every term volume
+ * N-1's held, plus this volume's additions. Nothing else in the pipeline can
+ * see a loss — the validator reads the current glossary and this volume's
+ * source, so a term that belonged to volume 2 is invisible to it (the
+ * validator's own prompt says so: "you do not have the earlier volumes'
+ * sources"). Observed live on the 17-volume series: volume 06's glossary
+ * carried 411 of the 769 terms volume 05 had, and every later volume would
+ * have been translated against a terminology law missing 59% of its entries.
+ *
+ * Pure and deterministic — no model call, so it can run after every amend pass
+ * for the price of two file reads.
+ *
+ * @param {string} previousMarkdown - The previous volume's glossary content.
+ * @param {string} currentMarkdown - The glossary just produced for this volume.
+ * @returns {{previousCount: number, currentCount: number, missing: Array<{term: string, section: string}>, added: string[]}}
+ *   `missing` is every term the previous glossary held that the new one does
+ *   not (in previous-file order, with the section it came from); `added` is
+ *   this volume's new terms.
+ */
+function compareGlossaryCarryForward(previousMarkdown, currentMarkdown) {
+  const previous = parseGlossaryTableTerms(previousMarkdown);
+  const current = parseGlossaryTableTerms(currentMarkdown);
+  const currentTerms = new Set(current.map((e) => e.term));
+  const previousTerms = new Set(previous.map((e) => e.term));
+
+  const seen = new Set();
+  const missing = [];
+  for (const entry of previous) {
+    if (currentTerms.has(entry.term) || seen.has(entry.term)) continue;
+    seen.add(entry.term);
+    missing.push(entry);
+  }
+  const added = current.filter((e) => !previousTerms.has(e.term)).map((e) => e.term);
+
+  return {
+    previousCount: previousTerms.size,
+    currentCount: currentTerms.size,
+    missing,
+    added,
+  };
+}
+
+/**
+ * A compact map of the glossary an agent is about to amend: each section, and
+ * under it every source-language term with the rendering it already has.
+ *
+ * Why the agent needs it: the cumulative glossary is far too big to read whole
+ * (volume 05's is 473 KB, and a `readFile` answer is capped at
+ * `AGENT_MAX_READ_BYTES` = 64 KB), yet the amend pass must know which section a
+ * term belongs in and whether the term is ALREADY there under a different
+ * spelling. Without a map the agent finds that out by paging — 8–17 `readFile`
+ * calls on the live run, each re-billing the whole transcript so far, and the
+ * step budget gone before the first row was inserted.
+ *
+ * The index is the whole document at the resolution a decision needs: term and
+ * rendering, no Notes. Deterministic, and small enough to inline.
+ *
+ * It is capped (`GLOSSARY_INDEX_MAX_CHARS`, default 30000) and says so when it
+ * truncates — a prompt that silently truncates is a prompt that silently
+ * ignores part of the rules (gotcha 43).
+ *
+ * @param {string} markdown - The glossary the agent will amend.
+ * @returns {string} The index, or "" when the glossary has no term rows.
+ */
+function buildGlossaryIndex(markdown) {
+  const entries = parseGlossaryTableTerms(markdown);
+  if (entries.length === 0) return "";
+
+  const bySection = new Map();
+  for (const entry of entries) {
+    const key = entry.section || "(no section heading)";
+    if (!bySection.has(key)) bySection.set(key, []);
+    bySection.get(key).push(entry);
+  }
+
+  const cap = Number.parseInt(process.env.GLOSSARY_INDEX_MAX_CHARS || "30000", 10);
+  const lines = [];
+  let shown = 0;
+  let used = 0;
+  for (const [section, items] of bySection) {
+    const head = `\n### ${section} (${items.length})\n`;
+    const body = items
+      .map((e) => (e.rendering ? `${e.term} → ${e.rendering}` : e.term))
+      .join(", ");
+    if (Number.isFinite(cap) && cap > 0 && used + head.length + body.length > cap) {
+      const remaining = entries.length - shown;
+      lines.push(
+        head +
+          `(${remaining} term(s) of this and later sections are not listed here — ` +
+          `the index is capped at ${cap} chars. Search "glossary.md" with grep ` +
+          `before assuming a term is absent.)`
+      );
+      used += head.length;
+      break;
+    }
+    lines.push(head + body);
+    used += head.length + body.length;
+    shown += items.length;
+  }
+  return lines.join("\n").trim();
 }
 
 /**
@@ -2161,6 +2726,16 @@ module.exports = {
   runChunkedQaLoop,
   runGlossaryFeedback,
   parseGlossaryTableTerms,
+  compareGlossaryCarryForward,
+  buildGlossaryIndex,
+  glossaryIndexBlock,
+  glossaryWriteInstruction,
+  glossaryRecoveryPrompt,
+  seedGlossaryFromPrevious,
+  assertGlossaryCarryForward,
+  guardCarryForwardAgainst,
+  quarantineDamagedGlossary,
+  reportCarryForwardLoss,
   countTermOccurrences,
   buildGlossaryCoverageReportMarkdown,
   writeGlossaryCoverageReport,

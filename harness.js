@@ -1760,7 +1760,12 @@ async function consumeEvents(
     const isAgent = logContext && logContext.type === "agent";
     const lastTool = result.toolCalls[result.toolCalls.length - 1];
     const wroteAtEnd = isAgent && lastTool && /^(write|edit)File$/i.test(lastTool.name);
-    console.warn(
+    // logLine, not console.warn: the summary log is the file a run is read
+    // from afterwards, and a truncated turn that never reached it made the
+    // cause of a dead volume invisible in the log (observed live: volume 04
+    // died with a writeFile whose JSON argument was cut off mid-string, and
+    // summary.log had no WARNING line for it — only the per-turn chat dump).
+    logLine(
       `  [call-ai] WARNING: ${label} ended with finish_reason=length (hit the output-token ` +
         `cap) — the response was truncated. Log: ${logFilePath}`
     );
@@ -2217,8 +2222,11 @@ async function createAgentHandle({
       if (result.result === "max_steps") {
         logLine(
           `  [call-ai] WARNING: ${label} hit its step cap without a final ` +
-            `answer; the turn may be incomplete (raise maxSteps or narrow the ` +
-            `task).`
+            `answer; the turn may be incomplete. Count the tool calls in its ` +
+            `chat log before raising maxSteps: many small reads means the agent ` +
+            `could not read the file it was asked to produce (see ` +
+            `AGENT_MAX_READ_BYTES / AGENT_MAX_LINE_LENGTH, and the cumulative-` +
+            `artifact rules in AGENTS.md), which a bigger cap does not fix.`
         );
       }
       // Write full chat log for this turn.

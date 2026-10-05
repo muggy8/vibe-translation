@@ -10,7 +10,7 @@
 Read the following materials **in full** before writing anything:
 
 1. **The source text of volume {{INSTALLMENT_NUMBER}}** — the single source of truth for what appears in this volume.
-2. **The previous glossary** (`glossary-previous.md`) — the terms already collected from earlier volumes. *(Absent for the first volume.)*
+2. **The glossary so far** — every term already collected from earlier volumes. *(Absent for the first volume.)*
 3. **The new terms** (below) — the terms found in volume {{INSTALLMENT_NUMBER}}'s source that are not yet in the previous glossary.
 4. **The research notes** (below) — web research gathered for the new terms.
 
@@ -30,7 +30,7 @@ Read the following materials **in full** before writing anything:
 
 Following the system prompt, produce the **amended glossary** for {{SOURCE_NAME}}:
 
-1. **Carry forward every existing term** from the previous glossary, unchanged.
+1. **Every existing term is already in `glossary.md`.** Leave each one there, unchanged.
 2. **Add each new term** in the correct section, rendered per the rules and informed by the research notes. Where the research confirms an established {{TARGET_LANGUAGE}} name, use it.
 3. **Reconcile any conflicts** between new and existing terms to a single canonical rendering.
 4. **Settle every open dispute** listed above: correct the entry to the rendering the source supports, or keep the canonical rendering and record in its Notes column why it stands. A dispute left unaddressed reappears in every later volume.
@@ -38,4 +38,4 @@ Following the system prompt, produce the **amended glossary** for {{SOURCE_NAME}
 
 ## Output
 
-Write the complete amended glossary to `glossary.md` using `writeFile` (complete contents, overwrite), in the exact section/table format from the system prompt (using the actual language names as the table headers). Write only the glossary Markdown to the file — no preamble, no commentary, no code fences around the whole thing.
+`glossary.md` must end up holding the **complete amended glossary** — every section and every term, in the exact section/table format from the system prompt (using the actual language names as the table headers). Only glossary Markdown belongs in the file: no preamble, no commentary, no code fences around the whole thing.
