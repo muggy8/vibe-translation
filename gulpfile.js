@@ -65,6 +65,8 @@
  */
 
 require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
 const { discoverSeries } = require("./get-translation-target");
 const { jumpInWiki } = require("./jump-in-wiki");
 const { glossary } = require("./glossary");
@@ -80,6 +82,54 @@ const { writeTranslationReport } = require("./utils/translation-report");
 const { getTranslationTarget } = require("./get-translation-target");
 const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
 const { isStructuralError } = require("./configs/shared");
+const { postMortemDir } = require("./utils/postmortem");
+
+/**
+ * Record a structural failure where a separate process can read it.
+ *
+ * `isStructuralError` is an in-process flag (`err.structural === true`). When a
+ * step runs in its own process — which is how index.js runs the pipeline — the
+ * error object cannot cross the boundary, and the "a structural failure is never
+ * continued past" rule (gotcha 21) would have to be guessed from an exit code or
+ * from error text. Guessing from text is the pattern gotcha 55 exists to prevent.
+ *
+ * So the wrapper writes the marker before rethrowing, and index.js reads it. The
+ * marker is machine state under `.postmortem/` (gitignored, like `.logs/`), and
+ * index.js deletes it before each step so a step can only report its own outcome.
+ *
+ * @param {string} name - The step name.
+ * @param {Function} taskFn - The original (async) gulp task function.
+ * @returns {Function} A drop-in async gulp task that records structural failures.
+ */
+function withStructuralMarker(name, taskFn) {
+  return async function marked(...args) {
+    try {
+      return await taskFn(...args);
+    } catch (err) {
+      if (isStructuralError(err)) {
+        try {
+          const dir = postMortemDir();
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(
+            path.join(dir, "last-structural-failure.json"),
+            JSON.stringify(
+              { step: name, message: err.message, at: new Date().toISOString() },
+              null,
+              2
+            ),
+            "utf8"
+          );
+        } catch (writeErr) {
+          console.error(
+            `[gulp] could not record the structural failure from ${name}: ${writeErr.message}`
+          );
+        }
+      }
+      throw err;
+    }
+  };
+}
+
 
 // Wrap each step so its optional per-machine hooks fire around it. The task
 // functions themselves are unchanged — the hook runner (utils/hooks.js) does
@@ -99,17 +149,29 @@ async function discover() {
   });
 }
 
-const discoverTask = withHooks("discover", discover);
-const glossaryTask = withHooks("glossary", glossary);
-const characterVoiceTask = withHooks("character-voice", characterVoice);
-const styleGuideTask = withHooks("style-guide", styleGuide);
-const jumpInWikiTask = withHooks("jump-in-wiki", jumpInWiki);
-const consistencyAuditTask = withHooks("consistency-audit", consistencyAudit);
-const translateTask = withHooks("translate", translate);
-const verifyTranslateTask = withHooks("verify-translate", verifyTranslate);
-const retranslateTask = withHooks("retranslate", retranslate);
-const translateQaTask = withHooks("translate-qa", translateQa);
-const polishTask = withHooks("polish", polish);
+// Each step is wrapped twice: the hook runner around the outside (so a post-hook
+// still fires when the step failed), and the structural marker on the inside
+// (closest to the error, so it records the failure the task module actually threw).
+const discoverTask = withHooks("discover", withStructuralMarker("discover", discover));
+const glossaryTask = withHooks("glossary", withStructuralMarker("glossary", glossary));
+const characterVoiceTask = withHooks(
+  "character-voice",
+  withStructuralMarker("character-voice", characterVoice)
+);
+const styleGuideTask = withHooks("style-guide", withStructuralMarker("style-guide", styleGuide));
+const jumpInWikiTask = withHooks("jump-in-wiki", withStructuralMarker("jump-in-wiki", jumpInWiki));
+const consistencyAuditTask = withHooks(
+  "consistency-audit",
+  withStructuralMarker("consistency-audit", consistencyAudit)
+);
+const translateTask = withHooks("translate", withStructuralMarker("translate", translate));
+const verifyTranslateTask = withHooks(
+  "verify-translate",
+  withStructuralMarker("verify-translate", verifyTranslate)
+);
+const retranslateTask = withHooks("retranslate", withStructuralMarker("retranslate", retranslate));
+const translateQaTask = withHooks("translate-qa", withStructuralMarker("translate-qa", translateQa));
+const polishTask = withHooks("polish", withStructuralMarker("polish", polish));
 
 /**
  * The "translation-report" step: rebuild the series-level translation report
@@ -125,7 +187,10 @@ async function translationReportStep() {
   await writeTranslationReport({ seriesDir, manifest, volumes: null, dryRun });
 }
 
-const translationReportTask = withHooks("translation-report", translationReportStep);
+const translationReportTask = withHooks(
+  "translation-report",
+  withStructuralMarker("translation-report", translationReportStep)
+);
 
 /**
  * The pipeline steps in run order (step name + hooked task function).
@@ -219,3 +284,14 @@ exports.polish = polishTask;
 exports["translation-report"] = translationReportTask;
 // The whole default run also fires pre-pipeline / post-pipeline around all eight.
 exports.default = withHooks(PIPELINE_TASK, runPipeline);
+
+/**
+ * The steps in run order, exported for a runner that wants to drive them one at a
+ * time instead of as one gulp series (index.js). `name` is the gulp task name, so
+ * a runner can invoke the step as its own process and every per-machine hook still
+ * fires. `exports.default` is the single-process runner — reading it does NOT give
+ * a step list, which is the mistake this export exists to prevent.
+ *
+ * @type {Array<{name: string, run: Function}>}
+ */
+exports.PIPELINE_STEPS = PIPELINE_STEPS;

@@ -42,6 +42,11 @@ yarn-error.log*
 # Dry-run prompt dumps
 .dry-run/
 
+# Post-mortem reports (index.js / utils/postmortem.js) + the structural-failure
+# marker the gulpfile writes for a step that ran in its own process. Machine state,
+# like .logs/ — never committed.
+.postmortem/
+
 # Token calibration cache (per-model measurements of the endpoint's tokenizer —
 # machine state, like hooks/.model-switch-state, not pipeline output)
 .token-calibration.json
