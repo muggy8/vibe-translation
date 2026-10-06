@@ -269,6 +269,10 @@ function appendLedgerEntry(input, filePath = ledgerPath()) {
   };
   if (input.findings) entry.findings = input.findings;
   if (input.findingKinds) entry.findingKinds = input.findingKinds;
+  // The numbers behind an outcome (`utils/delivery-verify.js`'s before/after account). A verdict
+  // with no account next to it is a verdict nobody can check afterwards — least of all the
+  // diagnostics team, who is the reader this whole layer exists to serve.
+  if (input.signals !== undefined) entry.signals = input.signals;
   if (input.tokens !== undefined) entry.tokens = input.tokens;
   if (input.note) entry.note = input.note;
 

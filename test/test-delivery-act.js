@@ -26,16 +26,24 @@
  *      model calls on a foundation that was not fixed;
  *   5. an action that passes every gate really runs: the declared files are wiped, a real
  *      `index.js` child runs the step, the outcome is judged by comparing the deliverable before
- *      and after, and the ledger records it;
+ *      and after, and the ledger records it — including the half the old per-volume count could
+ *      not see, which is that a rehearsal which deletes a glossary and rebuilds nothing made the
+ *      deliverable **worse**, not merely unchanged;
  *   6. when the step does rebuild the volume, the outcome is `improved` and the next triage says
- *      there is nothing left to do.
+ *      there is nothing left to do;
+ *   7. the planted "fix" that removes the finding while shrinking the glossary: the step finishes,
+ *      the next triage reports nothing to do, and the ledger records damage — the case
+ *      `utils/tickets.js` deliberately does not ban, which is why the acceptance test is what has
+ *      to catch it (gotcha 70);
+ *   8. a ticket closes on the same comparison act mode writes to the ledger, and closing one as
+ *      `finding-gone` is still refused.
  *
  * Stubbing, and which half is real: scenarios 1–4 never reach execution, so they use no stub at
  * all. Scenario 5 spawns the real step runner with `--dry-run` (no model call, no artifacts) —
- * which is exactly the point of that scenario: the plumbing is real and the deliverable
- * genuinely does not move, so the honest outcome is `unchanged`. Scenario 6 stands in for the
- * *pipeline* (the injected runner writes the files the glossary stage would have written) because
- * the thing under test is whether act mode notices a rebuild happened, not whether the glossary
+ * which is exactly the point of that scenario: the plumbing is real, nothing is rebuilt, and the
+ * honest verdict is the damage the wipe did. Scenarios 6–8 stand in for the *pipeline* (the
+ * injected runner writes the files the glossary stage would have written) because the thing under
+ * test is whether act mode notices what a rebuild did to the deliverable, not whether the glossary
  * stage can rebuild one — that is `test/test-pipeline-loop.js`'s job.
  */
 
@@ -49,7 +57,8 @@ const { PIPELINE_STEPS } = require("../gulpfile");
 const resume = require("../utils/resume");
 const delivery = require("../delivery");
 const { appendLedgerEntry, readLedger } = require("../utils/ledger");
-const { readTickets } = require("../utils/tickets");
+const { createTicket, closeTicket, readTickets } = require("../utils/tickets");
+const { measureDeliverable } = require("../utils/delivery-verify");
 const { runLockPath } = require("../utils/runlock");
 
 const FIXTURES = path.resolve("/tmp/opencode/delivery-act-tests");
@@ -511,16 +520,26 @@ async function testExecutesThroughTheStepRunner() {
   assert.ok(!after.includes("glossary.md"), "the wiped output stayed wiped — a dry run does not rebuild it");
   assert.ok(after.includes("book.txt"), "and the staged book is not in the wipe list, because it is not a declared output");
 
-  assert.strictEqual(done.outcome, "unchanged", "the deliverable did not move, and the report says so instead of calling a run a repair");
-  assert.strictEqual(done.before, 1);
-  assert.strictEqual(done.after, 1);
+  // The honest verdict, and the reason Phase 4 exists. The old per-volume count said `unchanged`:
+  // volume 02 was missing files before the wipe and missing files after it, so nothing had
+  // "crossed the line". But the wipe removed a glossary that WAS there and the rehearsal rebuilt
+  // nothing, so the deliverable is smaller than it was. A manager that cannot see that is a
+  // manager that damages the series and reports a clean run.
+  assert.strictEqual(done.outcome, "worse", "the deliverable got smaller, and the report says so");
+  assert.ok(done.damage.includes("glossary terms carried"), `the damage is named: ${done.damage.join(", ")}`);
+  assert.strictEqual(done.progress.before, 1, "one volume had the step's output before");
+  assert.strictEqual(done.progress.after, 1, "and one has it after — which is exactly what the old count could not see through");
+  assert.ok(done.account.includes("2 → 1"), `the account names the loss: ${done.account}`);
 
   const entry = readLedger().entries.find((e) => e.kind === "intervention" && e.step === "glossary");
   assert.ok(entry, "every action that runs is recorded");
-  assert.strictEqual(entry.outcome, "unchanged");
+  assert.strictEqual(entry.outcome, "worse");
   assert.strictEqual(entry.decidedBy, "manager");
   assert.strictEqual(entry.action, "wipe-and-cascade");
   assert.strictEqual(entry.finding, line.finding, "the finding the action was a response to is named, so a repeat of it is recognisable");
+  assert.ok(entry.signals, "the numbers behind the verdict are stored, not just printed");
+  assert.strictEqual(entry.signals.before.glossaryTerms, 2);
+  assert.strictEqual(entry.signals.after.glossaryTerms, 1);
 
   console.log("  executes: wiped, ran the real step runner, judged the outcome from the deliverable, recorded it");
 }
@@ -547,8 +566,9 @@ async function testRebuildIsJudgedImproved() {
   const done = res.execution[0];
   assert.strictEqual(done.refused, false);
   assert.strictEqual(done.outcome, "improved");
-  assert.strictEqual(done.before, 1, "one volume had it before");
-  assert.strictEqual(done.after, 2, "both volumes have it after");
+  assert.strictEqual(done.progress.before, 1, "one volume had it before");
+  assert.strictEqual(done.progress.after, 2, "both volumes have it after");
+  assert.strictEqual(done.damage.length, 0, `nothing was damaged: ${done.damage.join(", ")}`);
   assert.strictEqual(res.exitCode, 0);
 
   const after = await fs.promises.readdir(volDir);
@@ -565,6 +585,129 @@ async function testRebuildIsJudgedImproved() {
   console.log("  rebuild: judged improved from the deliverable, and the next triage has nothing to do");
 }
 
+// ─── 7: the planted "fix" that removes the finding and shrinks the glossary ───
+
+/**
+ * A glossary that finishes the step and loses the terminology.
+ *
+ * The table is there, the shape is right, the validator's files are all present — and there is not
+ * one usable row in it. This is the shape `utils/tickets.js` deliberately does NOT ban
+ * (`Add the old spelling back as a second row` and its cousins): a judgment about the deliverable
+ * rather than a guard being switched off, and therefore something the option filter cannot refuse.
+ * The thing that rejects it is this comparison.
+ */
+const SHRUNK_TABLE = `# Glossary
+
+| Term | Rendering | Notes |
+|---|---|---|
+`;
+
+async function testShrinkingFixIsRecordedAsDamage() {
+  const fx = await completeSeries("shrink");
+  await breakGlossaryAt02(fx);
+  const { state, plan } = await planFor(fx);
+  const line = glossaryLine(plan);
+  assert.strictEqual(line.actionName, "wipe-and-cascade", "the plan is the ordinary one: nothing about this action is suspicious");
+
+  // The planted fix. It really does finish the step — every declared file is written, so the next
+  // triage has nothing left to complain about — and it writes a glossary with the rows missing.
+  const writesTheFindingAway = async ({ step, seriesDir }) => {
+    for (const v of fx.volumes) {
+      await writeVolumeOutputs(seriesDir, v, step);
+      if (v.installmentNumber === "02") {
+        await fs.promises.writeFile(path.join(seriesDir, v.folder, "glossary.md"), SHRUNK_TABLE, "utf8");
+      }
+    }
+    await writeSeriesOutputs(seriesDir, step);
+    return { ok: true, code: 0, output: "" };
+  };
+
+  const res = await delivery.runActPlan({ plan, state, runStep: writesTheFindingAway });
+  const done = res.execution[0];
+  assert.strictEqual(
+    done.refused,
+    false,
+    "the action was on the menu and inside the budget — only the measurement stands between this and a success"
+  );
+  assert.strictEqual(done.outcome, "worse", "the finding is gone and the deliverable is smaller; the measurement reads the deliverable");
+  assert.ok(done.damage.includes("glossary terms carried"), `the damage is named, not implied: ${done.damage.join(", ")}`);
+  assert.ok(
+    done.account.includes("2 → 1"),
+    `and it is counted: ${done.account}`
+  );
+
+  // The finding genuinely is gone. That is the trap, and it is why "did the error go away?" is not
+  // a question this layer is allowed to ask (gotcha 70).
+  const retriaged = await planFor(fx);
+  assert.strictEqual(retriaged.plan.verdict, "nothing-to-do", retriaged.plan.headline);
+
+  const entry = readLedger().entries.find((e) => e.kind === "intervention" && e.step === "glossary");
+  assert.strictEqual(entry.outcome, "worse", "the ledger records what happened to the book, not what happened to the report");
+  assert.strictEqual(entry.signals.before.glossaryTerms, 2);
+  assert.strictEqual(entry.signals.after.glossaryTerms, 1);
+
+  console.log("  planted \"fix\": the finding disappeared, the glossary shrank, and the ledger recorded damage");
+}
+
+// ─── 8: a ticket closes on the same measurement act mode records ──────────────
+
+async function testTicketClosesOnTheSameMeasurement() {
+  const fx = await completeSeries("closure");
+  const volDir = await breakGlossaryAt02(fx);
+  const { state, plan } = await planFor(fx);
+  const line = glossaryLine(plan);
+
+  const before = await measureDeliverable({ seriesDir: fx.dir, volumes: state.volumes });
+
+  const opened = createTicket({
+    run: RUN,
+    step: "glossary",
+    volume: "02",
+    finding: line.finding,
+    evidence: [{ file: "glossary.md", note: "volume 02 holds the glossary and none of the reports that always come with it" }],
+    question: "What is leaving volume 02's glossary without its validation report?",
+  });
+  assert.ok(opened.ticket, (opened.problems || []).join("; "));
+
+  // Somebody else's fix, judged here: the step is finished, the glossary is smaller.
+  await fs.promises.writeFile(path.join(volDir, "glossary.md"), SHRUNK_TABLE, "utf8");
+  for (const e of STEP_ARTIFACT_SPECS.glossary.volume) {
+    if (e.name === "glossary.md") continue;
+    await fs.promises.writeFile(path.join(volDir, e.name.replace("{installment}", "02")), contentFor(e.name, e.shape), "utf8");
+  }
+
+  const closed = await delivery.closeTicketOnDeliverable({
+    ticketId: opened.ticket.id,
+    before,
+    seriesDir: fx.dir,
+    note: "the glossary was rebuilt from the previous volume's copy",
+  });
+  assert.strictEqual(closed.error, null);
+  assert.strictEqual(closed.ticket.status, "closed");
+  assert.strictEqual(
+    closed.ticket.closure.outcome,
+    "worse",
+    "the ticket closes on the same comparison act mode writes to the ledger — one answer to \"did it help?\""
+  );
+  assert.ok(closed.ticket.closure.note.includes("glossary terms carried"), closed.ticket.closure.note);
+
+  // The shape rule still holds next to the measurement: a ticket may not close as "it is fixed now".
+  const second = createTicket({
+    run: RUN,
+    step: "glossary",
+    volume: "02",
+    finding: line.finding,
+    evidence: [{ file: "glossary.md", note: "fixture" }],
+    question: "Why is volume 02's glossary missing its validation report?",
+  });
+  assert.ok(second.ticket);
+  const refused = closeTicket(second.ticket.id, { outcome: "finding-gone", note: "it is fixed now" });
+  assert.ok(refused.error, "closing on the finding is the exact thing this layer exists to refuse");
+  assert.ok(refused.error.includes("deliverable"), refused.error);
+
+  console.log("  ticket closure: judged by the measurement act mode also records, and `finding-gone` is still refused");
+}
+
 // ─── Runner ───────────────────────────────────────────────────────────────────
 
 (async function main() {
@@ -576,6 +719,8 @@ async function testRebuildIsJudgedImproved() {
   await testTicketedResumeStepRunsNothing();
   await testExecutesThroughTheStepRunner();
   await testRebuildIsJudgedImproved();
+  await testShrinkingFixIsRecordedAsDamage();
+  await testTicketClosesOnTheSameMeasurement();
   delete process.env.POSTMORTEM_DIR;
   delete process.env.INDEX_RUN_ID;
   console.log("delivery act mode: ok");

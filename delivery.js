@@ -18,7 +18,10 @@
  *   - `report` — write the plan and stop. Nothing is executed.
  *   - `act`    — execute the plan, one step at a time, through the step runner. Every action
  *     passes three gates first (below), and every action that runs is written to the ledger
- *     with its outcome judged by comparing the deliverable before and after.
+ *     with its outcome judged by comparing the deliverable before and after
+ *     (`utils/delivery-verify.js` — never "did the error go away?", gotcha 73). The same
+ *     comparison closes a ticket (`closeTicketOnDeliverable`), so "did it help?" has one answer
+ *     here rather than two.
  *
  * The three gates, in the order they are asked:
  *   1. **Is it on the menu?** `DELIVERY_ACTIONS` in `utils/resume.js`. Tier C is not a limit
@@ -57,12 +60,19 @@ const {
   actionIsAvailable,
   maxInterventionsPerStep,
   interventionsUsed,
-  progressForStep,
 } = require("./utils/resume");
+const {
+  measureDeliverable,
+  compareDeliverable,
+  describeComparison,
+  accountOf,
+  summarizeSnapshot,
+  closureFromComparison,
+} = require("./utils/delivery-verify");
 const { postMortemDir } = require("./utils/postmortem");
 const { wipeAttemptOutputs } = require("./utils/fs");
 const { readLedger, appendLedgerEntry, interventionAllowed } = require("./utils/ledger");
-const { createTicket } = require("./utils/tickets");
+const { createTicket, closeTicket } = require("./utils/tickets");
 const { acquireRunLock, releaseRunLock, runLockPath } = require("./utils/runlock");
 
 const ROOT = __dirname;
@@ -152,8 +162,12 @@ function renderExecution(execution) {
     }
     lines.push(
       `[delivery]   ran ${e.step} (${e.actionName}): wiped ${e.wiped} file(s), step exited ${e.code}, ` +
-        `${e.before} → ${e.after} volumes built → ${e.outcome}`
+        `${e.progress.before} → ${e.progress.after} volumes built → ${e.outcome}`
     );
+    lines.push(`[delivery]     deliverable: ${e.account}`);
+    if (e.damage && e.damage.length) {
+      lines.push(`[delivery]     damage: ${e.damage.join(", ")} — this action is not a fix, whatever it removed`);
+    }
     if (e.note) lines.push(`[delivery]     ${e.note}`);
   }
   return lines.join("\n");
@@ -369,24 +383,18 @@ async function performWipe(step) {
 }
 
 /**
- * Judge what an intervention did, by comparing the deliverable before and after.
+ * The step's progress out of a deliverable measurement.
  *
- * Not "is the error gone": that is the question a fixer answers by disabling the guard, which
- * is the whole reason this layer has the shape it has (gotcha 70). The comparison is of what
- * the step is supposed to leave behind — how many of its volumes have their required files.
+ * Kept because it is a fact a human reads ("2 of 2 volumes have the glossary files") and because
+ * it is NOT the verdict: the verdict is the comparison. The count is the coarse half of the story,
+ * the comparison is the half that can see a glossary shrink while every folder still has a file.
  *
- * Today that is a per-volume count, which is the honest resolution for the four cumulative
- * steps and a coarse one for the translation stage, where a chapter can improve without any
- * volume crossing the line. Phase 4 of the plan replaces this with the publish report.
- *
- * @param {{missing: number, built: number}} before
- * @param {{missing: number, built: number}} after
- * @returns {("improved"|"unchanged"|"worse")}
+ * @param {import("./utils/delivery-verify").DeliverableSnapshot} snapshot
+ * @param {string} step
+ * @returns {{built: number, missing: number}}
  */
-function judgeOutcome(before, after) {
-  if (after.missing < before.missing) return "improved";
-  if (after.missing > before.missing) return "worse";
-  return "unchanged";
+function progressOf(snapshot, step) {
+  return (snapshot.steps && snapshot.steps[step]) || { built: 0, missing: 0 };
 }
 
 /**
@@ -476,7 +484,13 @@ async function runActPlan({ plan, state, runStep = runPipelineStep }) {
         break;
       }
 
-      const before = progressForStep(current.volumes, step.step);
+      // Measured before anything is deleted: the deliverable as it was when the manager decided to
+      // act. The wipe is part of what gets judged. An action that removed a volume's accepted
+      // output and rebuilt nothing made the deliverable worse, and the old per-volume count could
+      // not see the difference between "nothing moved" and "something was lost".
+      const before = await measureDeliverable({ seriesDir: plan.seriesDir, volumes: current.volumes });
+      const beforeProgress = progressOf(before, step.step);
+
       const wiped = await performWipe(step);
       if (wiped) log(`  removed ${wiped} file(s) so the skip-checks cannot read the old work as up to date`);
 
@@ -484,8 +498,11 @@ async function runActPlan({ plan, state, runStep = runPipelineStep }) {
       log(`  step runner exited ${result.code}${result.ok ? "" : " — the step did not finish"}`);
 
       const afterState = await readWorkingState({ seriesDir: plan.seriesDir });
-      const after = progressForStep(afterState.volumes, step.step);
-      const outcome = judgeOutcome(before, after);
+      const after = await measureDeliverable({ seriesDir: plan.seriesDir, volumes: afterState.volumes });
+      const afterProgress = progressOf(after, step.step);
+      const comparison = compareDeliverable(before, after);
+      const outcome = comparison.outcome;
+      const account = accountOf(comparison);
 
       const entry = appendLedgerEntry({
         kind: "intervention",
@@ -496,9 +513,14 @@ async function runActPlan({ plan, state, runStep = runPipelineStep }) {
         action: step.actionName,
         outcome,
         decidedBy: "manager",
+        // The account is stored, not just printed. A ledger entry that records a verdict without
+        // the numbers behind it is a verdict nobody can check afterwards — including the
+        // diagnostics team, who is the reader this layer exists to serve.
+        signals: { before: summarizeSnapshot(before), after: summarizeSnapshot(after) },
         note:
-          `${before.built} → ${after.built} of ${after.built + after.missing} volumes built; ` +
-          `step exited ${result.code}${wiped ? `; wiped ${wiped} file(s) first` : ""}`,
+          `${account}; ${step.step}: ${beforeProgress.built} → ${afterProgress.built} of ` +
+          `${afterProgress.built + afterProgress.missing} volumes built; step exited ${result.code}` +
+          `${wiped ? `; wiped ${wiped} file(s) first` : ""}`,
       });
       if (entry.error) log(`  ledger: ${entry.error}`);
 
@@ -508,17 +530,25 @@ async function runActPlan({ plan, state, runStep = runPipelineStep }) {
         refused: false,
         wiped,
         code: result.code,
-        before: before.built,
-        after: after.built,
+        progress: { before: beforeProgress.built, after: afterProgress.built },
         outcome,
+        account,
+        damage: comparison.regressions.map((r) => r.label),
         ledgerId: entry.entry ? entry.entry.id : null,
         note:
           outcome === "unchanged"
             ? `the deliverable did not move. The ledger now counts this as an attempt that did not help: ` +
               `the next identical action against ${step.finding || "this finding"} is the one the gate refuses.`
-            : null,
+            : outcome === "worse"
+              ? `the deliverable is worse than before this action (${comparison.regressions
+                  .map((r) => r.label)
+                  .join(", ")}). The ledger counts it as an attempt that did harm, and the next identical ` +
+                `action against ${step.finding || "this finding"} is the one the gate refuses.`
+              : null,
       });
-      log(`  outcome: ${outcome} (${before.built} → ${after.built} volumes of ${step.step} built) — recorded as ${entry.entry ? entry.entry.id : "not recorded"}`);
+
+      log(`  outcome: ${outcome} — ${account}`);
+      for (const line of describeComparison(comparison)) log(line);
 
       current = afterState;
 
@@ -556,6 +586,29 @@ function recordRefusal({ step, run, reason, ticket }) {
     note: reason,
   });
   if (entry.error) console.log(`[delivery] ledger: ${entry.error}`);
+}
+
+// ─── Closing a ticket on the deliverable ──────────────────────────────────────
+
+/**
+ * Close a ticket by measuring the deliverable now and comparing it with the measurement taken
+ * before the fix was attempted.
+ *
+ * This is the other half of the seam: act mode's ledger entry and a ticket's closure are produced
+ * by the same comparison (`utils/delivery-verify.js`), so the manager cannot record `worse` in the
+ * ledger and close the ticket `improved`. A ticket may not close as `finding-gone` — `closeTicket`
+ * already refuses that — and it may not be closed on a judgement the deliverable does not support.
+ *
+ * @param {{ticketId: string, before: import("./utils/delivery-verify").DeliverableSnapshot,
+ *   seriesDir?: string, note?: string}} opts
+ * @returns {Promise<{ticket: Object|null, written: boolean, error: string|null,
+ *   comparison: ReturnType<typeof compareDeliverable>}>}
+ */
+async function closeTicketOnDeliverable({ ticketId, before, seriesDir, note }) {
+  const after = await measureDeliverable({ seriesDir });
+  const comparison = compareDeliverable(before, after);
+  const result = closeTicket(ticketId, closureFromComparison(comparison, note));
+  return { ...result, comparison };
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -616,7 +669,9 @@ async function main() {
               e.refused
                 ? `- **${e.step}** — refused: ${e.reason}${e.ticket ? ` (ticket ${e.ticket})` : ""}`
                 : `- **${e.step}** — ${e.actionName}: wiped ${e.wiped} file(s), step exited ${e.code}, ` +
-                  `${e.before} → ${e.after} volumes built → **${e.outcome}**`
+                  `${e.progress.before} → ${e.progress.after} volumes built → **${e.outcome}**\n` +
+                  `  - deliverable: ${e.account}` +
+                  (e.damage && e.damage.length ? `\n  - damage: ${e.damage.join(", ")}` : "")
             )
             .join("\n")
         : mode === "act"
@@ -654,7 +709,8 @@ module.exports = {
   openTicketFor,
   runPipelineStep,
   performWipe,
-  judgeOutcome,
+  progressOf,
+  closeTicketOnDeliverable,
   runActPlan,
   main,
 };

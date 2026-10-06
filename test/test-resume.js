@@ -313,11 +313,19 @@ async function testComplete() {
   assert.ok(plan.steps.every((s) => s.action === "none"), "a finished run is not a queue of work");
   assert.ok(plan.steps.every((s) => s.wipeFirst.length === 0), "nothing is proposed for deletion");
   assert.ok(plan.steps.every((s) => !s.countsAsIntervention), "picking up work is not an intervention");
+  const counts = state.deliverable.counts;
   assert.deepStrictEqual(
-    state.deliverable.counts,
+    {
+      total: counts.total,
+      published: counts.published,
+      unverified: counts.unverified,
+      missing: counts.missing,
+      emptyInSource: counts.emptyInSource,
+    },
     { total: 2, published: 2, unverified: 0, missing: 0, emptyInSource: 0 },
     "the deliverable is read off the publish report, not inferred from exit codes"
   );
+  assert.strictEqual(counts.scoreCount, 0, "the fixture's report carries no scores, and the roll-up does not invent any");
   // The disk matches the declaration, so the assessment finds nothing. If this ever reports a
   // HIGH finding, either the fixture or utils/artifacts.js drifted.
   assert.ok(

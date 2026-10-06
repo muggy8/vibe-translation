@@ -33,6 +33,7 @@ const {
   findingsForChapter,
   readFileOrEmpty,
   verdictCoversCurrentDraft,
+  medianScore,
 } = require("./translate");
 
 /** Markdown report name at the series root. */
@@ -338,17 +339,88 @@ async function writeTranslationReport({ seriesDir, manifest, volumes, dryRun }) 
   );
   await writeProvenanceSidecar(mdFile, jsonFile);
 
-  const unverified = rows.filter((r) => r.outcome.startsWith("UNVERIFIED")).length;
-  const missing = rows.filter((r) => r.outcome.startsWith("MISSING")).length;
-  const emptyInSource = rows.filter((r) => r.outcome.startsWith("EMPTY IN SOURCE")).length;
+  const summary = summarizeReportRows(rows);
   console.log(
-    `[translation-report] ${rows.length} chapter(s): ` +
-      `${rows.length - unverified - missing - emptyInSource} verified, ${unverified} unverified, ` +
-      `${missing} missing` +
-      (emptyInSource > 0 ? `, ${emptyInSource} empty in the source` : "") +
+    `[translation-report] ${summary.total} chapter(s): ` +
+      `${summary.published} verified, ${summary.unverified} unverified, ` +
+      `${summary.missing} missing` +
+      (summary.emptyInSource > 0 ? `, ${summary.emptyInSource} empty in the source` : "") +
       `. Report: ${mdFile}`
   );
-  return { file: mdFile, rows };
+  return { file: mdFile, rows, summary };
+}
+
+/**
+ * Read the machine-readable report back off the disk.
+ *
+ * The report is written at the end of every publishing translation task, so it is always
+ * current with what is on disk — which makes it the cheapest possible answer to "what is
+ * actually good enough to read?" for anything that has to ask that question without running
+ * the stage again. `utils/resume.js` (the delivery manager's triage) and
+ * `utils/delivery-verify.js` (the before/after comparison) both read through here, so the
+ * publish report cannot be described two different ways by two different consumers.
+ *
+ * @param {string} seriesDir
+ * @returns {Promise<{file: string, generatedAt: string|null, chapters: Array<Object>}|null>}
+ *   null when the report does not exist, does not parse, or has no chapter list — the report
+ *   is a roll-up, and a roll-up that cannot be read is absent, not empty.
+ */
+async function readTranslationReport(seriesDir) {
+  const file = seriesArtifactFile(TRANSLATION_REPORT_JSON, "TRANSLATION_REPORT_OUTPUT_FILE", seriesDir);
+  const parsed = await readJsonOrNull(file);
+  if (!parsed || !Array.isArray(parsed.chapters)) return null;
+  return { file, generatedAt: parsed.generatedAt || null, chapters: parsed.chapters };
+}
+
+/**
+ * The one roll-up of the report's rows.
+ *
+ * Every consumer of the deliverable needs the same buckets, and the pipeline already had two
+ * of them: this task's own console line, and `utils/resume.js`'s reading of the same file.
+ * Two readings of one file is how two answers to "did it help?" appear. This is the one.
+ *
+ * The buckets are the report's own outcomes, and they are deliberately derived from the
+ * outcome text rather than from the verdict files: the outcome is what the pipeline decided
+ * to publish, and it already accounts for a stale polish, a missing verdict, and a chapter
+ * that is empty in the BOOK rather than missing from the run.
+ *
+ * @param {Array<Object>} rows - The report's chapter rows.
+ * @returns {{
+ *   total: number, published: number, unverified: number, missing: number, emptyInSource: number,
+ *   scoreCount: number, scoreMedian: number|null, scoreMin: number|null,
+ *   crossChapterHigh: number, variantConflicts: number, publishedChars: number,
+ * }}
+ */
+function summarizeReportRows(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const bucket = (row) => {
+    const outcome = typeof row.outcome === "string" ? row.outcome : "";
+    if (outcome.startsWith("PUBLISHED")) return "published";
+    if (outcome.startsWith("UNVERIFIED")) return "unverified";
+    if (outcome.startsWith("MISSING")) return "missing";
+    return "emptyInSource";
+  };
+  const counts = { total: list.length, published: 0, unverified: 0, missing: 0, emptyInSource: 0 };
+  const scores = [];
+  let crossChapterHigh = 0;
+  let variantConflicts = 0;
+  let publishedChars = 0;
+  for (const row of list) {
+    counts[bucket(row)] += 1;
+    if (typeof row.verifyScore === "number") scores.push(row.verifyScore);
+    crossChapterHigh += Number(row.crossChapterHigh) || 0;
+    variantConflicts += Number(row.renderingVariantConflicts) || 0;
+    publishedChars += Number(row.draftChars) || 0;
+  }
+  return {
+    ...counts,
+    scoreCount: scores.length,
+    scoreMedian: scores.length ? medianScore(scores) : null,
+    scoreMin: scores.length ? Math.min(...scores) : null,
+    crossChapterHigh,
+    variantConflicts,
+    publishedChars,
+  };
 }
 
 /**
@@ -449,6 +521,8 @@ async function checkTranslationPreconditions({ seriesDir, volumes, allowFail, al
 
 module.exports = {
   writeTranslationReport,
+  readTranslationReport,
+  summarizeReportRows,
   checkTranslationPreconditions,
   renderTranslationReport,
   collectVolumeRows,

@@ -50,8 +50,7 @@ const { STEP_ARTIFACT_SPECS, specForStep } = require("./artifacts");
 const { runPostMortem } = require("./postmortem");
 const { readLedger, recurringFindings } = require("./ledger");
 const { validateManifest } = require("../get-translation-target");
-const { seriesArtifactFile } = require("../configs/shared");
-const { TRANSLATION_REPORT_JSON } = require("./translation-report");
+const { readTranslationReport, summarizeReportRows } = require("./translation-report");
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -505,39 +504,35 @@ function inventoryVolume(seriesDir, volume) {
  * A run that finished green and published 40 UNVERIFIED chapters is a failed delivery, and
  * the only way to see that is to read the roll-up.
  *
+ * The reading and the bucketing both come from `utils/translation-report.js` — the module
+ * that writes the file — so the triage and `utils/delivery-verify.js` (which decides whether
+ * an intervention helped) cannot end up counting one report two different ways.
+ *
  * @param {string} seriesDir
  * @returns {Promise<Object|null>} - null when the report does not exist yet.
  */
 async function readDeliverable(seriesDir) {
-  const file = seriesArtifactFile(TRANSLATION_REPORT_JSON, "TRANSLATION_REPORT_OUTPUT_FILE", seriesDir);
-  let parsed;
-  try {
-    parsed = JSON.parse(await fs.promises.readFile(file, "utf8"));
-  } catch {
-    return null;
-  }
-  const chapters = Array.isArray(parsed.chapters) ? parsed.chapters : [];
-  const bucket = (row) =>
-    row.outcome.startsWith("PUBLISHED")
-      ? "published"
-      : row.outcome.startsWith("UNVERIFIED")
-        ? "unverified"
-        : row.outcome.startsWith("MISSING")
-          ? "missing"
-          : "emptyInSource";
+  const report = await readTranslationReport(seriesDir);
+  if (!report) return null;
+  const counts = summarizeReportRows(report.chapters);
 
-  const counts = { total: chapters.length, published: 0, unverified: 0, missing: 0, emptyInSource: 0 };
   /** @type {Object<string, {total: number, published: number, unverified: number, missing: number}>} */
   const byVolume = {};
-  for (const row of chapters) {
-    const key = bucket(row);
-    counts[key] += 1;
+  for (const row of report.chapters) {
     const v = String(row.volume);
     byVolume[v] = byVolume[v] || { total: 0, published: 0, unverified: 0, missing: 0 };
     byVolume[v].total += 1;
-    if (key in byVolume[v]) byVolume[v][key] += 1;
+    const outcome = typeof row.outcome === "string" ? row.outcome : "";
+    const key = outcome.startsWith("PUBLISHED")
+      ? "published"
+      : outcome.startsWith("UNVERIFIED")
+        ? "unverified"
+        : outcome.startsWith("MISSING")
+          ? "missing"
+          : null;
+    if (key) byVolume[v][key] += 1;
   }
-  return { file, generatedAt: parsed.generatedAt || null, counts, byVolume };
+  return { file: report.file, generatedAt: report.generatedAt, counts, byVolume };
 }
 
 /**
