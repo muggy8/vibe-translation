@@ -83,6 +83,7 @@ const { getTranslationTarget } = require("./get-translation-target");
 const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
 const { isStructuralError } = require("./configs/shared");
 const { postMortemDir } = require("./utils/postmortem");
+const { acquireRunLock, releaseRunLock, runLockPath } = require("./utils/runlock");
 
 /**
  * Record a structural failure where a separate process can read it.
@@ -131,6 +132,56 @@ function withStructuralMarker(name, taskFn) {
 }
 
 
+// ─── The run lock ─────────────────────────────────────────────────────────────
+
+/**
+ * Refuse to start a step while another run is already writing the same series.
+ *
+ * Every task is wrapped, because "a run is in progress" is not a property of the runner —
+ * `npx gulp glossary` typed at a terminal while an overnight run is working is exactly the
+ * collision, and it is invisible afterwards: the artifact ends half-built by one process and
+ * half by the other, and every check that asks "is the file there?" says yes.
+ *
+ * The lock sits OUTSIDE the hooks on purpose: a refusal should happen before a pre-hook has
+ * switched a model container in (gotcha 22 — a container switch is the most expensive thing
+ * in this pipeline, and a step that never runs should not have paid for one).
+ *
+ * Two directions:
+ *   - A lock held by a live process elsewhere is a refusal. That is the point of the file.
+ *   - A lock file that cannot be written is a warning, not a failure. A bookkeeping file must
+ *     not be the reason a 12-hour run dies; the manager (delivery.js) is the one that treats
+ *     "I cannot tell" as "no", because deciding whether it is safe to act is its whole job.
+ *
+ * Nesting is counted, so the default run holds one lock across its nine in-process steps, and
+ * a gulp child spawned by index.js inherits its parent's run id through `INDEX_RUN_ID` and
+ * joins that lock instead of competing with it.
+ *
+ * @param {string} name - The step name, for the message.
+ * @param {Function} taskFn - The wrapped task.
+ * @returns {Function} A drop-in async gulp task.
+ */
+function withRunLock(name, taskFn) {
+  return async function locked(...args) {
+    const lock = acquireRunLock({ by: `gulp ${name}` });
+    if (!lock.acquired && lock.lock) {
+      throw new Error(
+        `refusing to run ${name}: ${lock.note || "a pipeline run is already in progress"}. ` +
+          `Two processes writing the same volume folder is how an artifact ends half-built by ` +
+          `one and half by the other. If that run is not actually running, remove ` +
+          `${runLockPath()}. To run two series at once, give each its own POSTMORTEM_DIR.`
+      );
+    }
+    if (!lock.acquired) console.error(`[gulp] warning: ${lock.note}`);
+    else if (lock.note) console.log(`[gulp] ${lock.note}`);
+    try {
+      return await taskFn(...args);
+    } finally {
+      releaseRunLock();
+    }
+  };
+}
+
+
 // Wrap each step so its optional per-machine hooks fire around it. The task
 // functions themselves are unchanged — the hook runner (utils/hooks.js) does
 // all the discovery/execution.
@@ -149,29 +200,30 @@ async function discover() {
   });
 }
 
-// Each step is wrapped twice: the hook runner around the outside (so a post-hook
-// still fires when the step failed), and the structural marker on the inside
-// (closest to the error, so it records the failure the task module actually threw).
-const discoverTask = withHooks("discover", withStructuralMarker("discover", discover));
-const glossaryTask = withHooks("glossary", withStructuralMarker("glossary", glossary));
-const characterVoiceTask = withHooks(
+// Each step is wrapped three times: the run lock on the outside (so a collision is refused
+// before a hook switches a model container in), the hook runner next, and the structural
+// marker on the inside (closest to the error, so it records the failure the task module
+// actually threw).
+const discoverTask = withRunLock("discover", withHooks("discover", withStructuralMarker("discover", discover)));
+const glossaryTask = withRunLock("glossary", withHooks("glossary", withStructuralMarker("glossary", glossary)));
+const characterVoiceTask = withRunLock(
   "character-voice",
-  withStructuralMarker("character-voice", characterVoice)
+  withHooks("character-voice", withStructuralMarker("character-voice", characterVoice))
 );
-const styleGuideTask = withHooks("style-guide", withStructuralMarker("style-guide", styleGuide));
-const jumpInWikiTask = withHooks("jump-in-wiki", withStructuralMarker("jump-in-wiki", jumpInWiki));
-const consistencyAuditTask = withHooks(
+const styleGuideTask = withRunLock("style-guide", withHooks("style-guide", withStructuralMarker("style-guide", styleGuide)));
+const jumpInWikiTask = withRunLock("jump-in-wiki", withHooks("jump-in-wiki", withStructuralMarker("jump-in-wiki", jumpInWiki)));
+const consistencyAuditTask = withRunLock(
   "consistency-audit",
-  withStructuralMarker("consistency-audit", consistencyAudit)
+  withHooks("consistency-audit", withStructuralMarker("consistency-audit", consistencyAudit))
 );
-const translateTask = withHooks("translate", withStructuralMarker("translate", translate));
-const verifyTranslateTask = withHooks(
+const translateTask = withRunLock("translate", withHooks("translate", withStructuralMarker("translate", translate)));
+const verifyTranslateTask = withRunLock(
   "verify-translate",
-  withStructuralMarker("verify-translate", verifyTranslate)
+  withHooks("verify-translate", withStructuralMarker("verify-translate", verifyTranslate))
 );
-const retranslateTask = withHooks("retranslate", withStructuralMarker("retranslate", retranslate));
-const translateQaTask = withHooks("translate-qa", withStructuralMarker("translate-qa", translateQa));
-const polishTask = withHooks("polish", withStructuralMarker("polish", polish));
+const retranslateTask = withRunLock("retranslate", withHooks("retranslate", withStructuralMarker("retranslate", retranslate)));
+const translateQaTask = withRunLock("translate-qa", withHooks("translate-qa", withStructuralMarker("translate-qa", translateQa)));
+const polishTask = withRunLock("polish", withHooks("polish", withStructuralMarker("polish", polish)));
 
 /**
  * The "translation-report" step: rebuild the series-level translation report
@@ -187,9 +239,9 @@ async function translationReportStep() {
   await writeTranslationReport({ seriesDir, manifest, volumes: null, dryRun });
 }
 
-const translationReportTask = withHooks(
+const translationReportTask = withRunLock(
   "translation-report",
-  withStructuralMarker("translation-report", translationReportStep)
+  withHooks("translation-report", withStructuralMarker("translation-report", translationReportStep))
 );
 
 /**
@@ -283,7 +335,9 @@ exports["translate-qa"] = translateQaTask;
 exports.polish = polishTask;
 exports["translation-report"] = translationReportTask;
 // The whole default run also fires pre-pipeline / post-pipeline around all eight.
-exports.default = withHooks(PIPELINE_TASK, runPipeline);
+// The lock is the outermost layer: the default run holds it across all nine in-process
+// steps, and the inner per-step wrappers join it rather than competing with it.
+exports.default = withRunLock(PIPELINE_TASK, withHooks(PIPELINE_TASK, runPipeline));
 
 /**
  * The steps in run order, exported for a runner that wants to drive them one at a

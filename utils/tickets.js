@@ -556,7 +556,7 @@ function createTicket(input, paths = ticketPaths()) {
     run,
     at: new Date().toISOString(),
     step: input.step,
-    volume: input.volume === undefined ? null : String(input.volume),
+    volume: input.volume === undefined || input.volume === null ? null : String(input.volume),
     finding: input.finding,
     evidence: input.evidence,
     tried: input.tried === undefined

@@ -194,6 +194,34 @@ async function scenarioDifferentActionIsNew() {
   assert.strictEqual(otherVolume.allowed, true, "one volume's exhausted action is not another volume's");
 }
 
+// ─── 4b. A step-level attempt (no volume) must match itself ────────────────────
+
+async function scenarioStepLevelSpin() {
+  const { dir, file } = await freshLedger("step-level");
+  // `consistency-audit` is a whole-step action: it names no volume, so the key's volume is null.
+  // This scenario exists because `appendLedgerEntry` used to write `String(null)` for a null
+  // volume, which stored the four-character string "null" — and `matchesKey` then compared a
+  // step-level key (null) against an entry ("null") and never matched, so the gate silently
+  // stopped counting the one case it exists for: the same whole-step action tried again.
+  const key = { step: "consistency-audit", volume: null, finding: "audit-verdict-fail", action: "re-audit" };
+
+  for (let i = 0; i < 2; i++) {
+    const before = interventionAllowed(key, { dir, run: "run-1" });
+    assert.strictEqual(before.allowed, true, `attempt ${i + 1} of a step-level action must be allowed`);
+    intervention("run-1", key.step, null, key.finding, key.action, "unchanged", { file });
+  }
+
+  const third = interventionAllowed(key, { dir, run: "run-1" });
+  assert.strictEqual(third.allowed, false, "the third identical step-level attempt must be refused too");
+  assert.strictEqual(third.unhelpful, 2, `a null volume must match a null volume: ${JSON.stringify(third)}`);
+
+  const entries = readLedger(file).entries.filter((e) => e.kind === "intervention");
+  assert.ok(
+    entries.every((e) => e.volume === null),
+    `a null volume stays null in the file, not the string "null": ${entries.map((e) => JSON.stringify(e.volume)).join(", ")}`
+  );
+}
+
 // ─── 5. An attempt that helped is not evidence against trying again ───────────
 
 async function scenarioImprovedIsNotSpinning() {
@@ -512,6 +540,9 @@ async function scenarioIndexWiring() {
 
   await scenarioDifferentActionIsNew();
   console.log("ledger: only repetition is blocked — a different action is a new attempt");
+
+  await scenarioStepLevelSpin();
+  console.log("ledger: a step-level action (no volume) is counted and refused like any other");
 
   await scenarioImprovedIsNotSpinning();
   console.log("ledger: work that improves is never vetoed; work that damages is");

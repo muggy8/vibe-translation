@@ -256,7 +256,11 @@ function appendLedgerEntry(input, filePath = ledgerPath()) {
     at: new Date().toISOString(),
     kind: input.kind,
     step: input.step,
-    volume: input.volume === undefined ? null : String(input.volume),
+    // `null` stays `null`. Coercing it with String() would write the four-character string
+    // "null", and `matchesKey` compares a step-level entry (volume null) against a step-level
+    // key — a step-level attempt would then never match itself, and the anti-spin gate would
+    // silently stop counting the very case it exists for.
+    volume: input.volume === undefined || input.volume === null ? null : String(input.volume),
     finding: input.finding === undefined ? null : input.finding,
     action: input.action === undefined ? (input.kind === "assessment" ? "assess" : null) : input.action,
     outcome: input.outcome === undefined ? null : input.outcome,

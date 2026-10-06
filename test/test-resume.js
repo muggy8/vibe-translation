@@ -23,8 +23,9 @@
  *      and another step's exhausted budget does not spend this one's;
  *   9. the closed action menu → Tier C refused, picking up work is free, destroying output is
  *      an intervention;
- *  10. the CLI → report mode writes a report and executes nothing, act mode fails loudly,
- *      an unknown flag is refused.
+ *  10. the CLI → report mode writes a report and executes nothing, `--mode=act --no-write` is
+ *      refused as the contradiction it is, and an unknown flag is refused. (Executing the plan
+ *      is `test/test-delivery-act.js`.)
  */
 
 const assert = require("assert");
@@ -469,7 +470,11 @@ async function testInterventionBudgetIsPerStep() {
     }
   };
 
-  // Five interventions already spent on glossary in this run, two on character-voice.
+  // Five interventions already spent on glossary in this run, two on character-voice — plus
+  // three on character-voice that the menu says are FREE. Picking up unfinished work does not
+  // spend a step's allowance; `countsAsIntervention` on the menu entry is what decides, not the
+  // ledger's `kind`, because act mode records everything it does and the budget is a separate
+  // question from the audit trail.
   for (let i = 0; i < 5; i += 1) {
     await appendLedgerEntry({
       run: "run-budget",
@@ -477,9 +482,9 @@ async function testInterventionBudgetIsPerStep() {
       step: "glossary",
       volume: "02",
       finding: "missing-required",
-      action: i === 0 ? "wipe-and-cascade" : "re-run-step",
-      outcome: "unchanged",
-      decidedBy: "delivery-manager",
+      action: "wipe-and-cascade",
+      outcome: "improved",
+      decidedBy: "manager",
     });
   }
   for (let i = 0; i < 2; i += 1) {
@@ -489,9 +494,21 @@ async function testInterventionBudgetIsPerStep() {
       step: "character-voice",
       volume: "02",
       finding: "missing-required",
-      action: "re-run-step",
+      action: "re-run-force",
       outcome: "improved",
-      decidedBy: "delivery-manager",
+      decidedBy: "manager",
+    });
+  }
+  for (let i = 0; i < 3; i += 1) {
+    await appendLedgerEntry({
+      run: "run-budget",
+      kind: "intervention",
+      step: "character-voice",
+      volume: "02",
+      finding: "missing-required",
+      action: "re-run-step",
+      outcome: "unchanged",
+      decidedBy: "manager",
     });
   }
 
@@ -499,7 +516,11 @@ async function testInterventionBudgetIsPerStep() {
   breakStep("glossary");
   let state = await resume.readWorkingState({ seriesDir: fx.dir });
   assert.strictEqual(state.run, "run-budget", "the triage counts the newest recorded run");
-  assert.deepStrictEqual(state.interventionsByStep, { glossary: 5, "character-voice": 2 });
+  assert.deepStrictEqual(
+    state.interventionsByStep,
+    { glossary: 5, "character-voice": 2 },
+    "8 intervention entries were recorded on character-voice's step and glossary's, but only the ones the menu calls interventions spent the budget"
+  );
   assert.strictEqual(state.interventionBudget, 5);
 
   let plan = resume.planResume(state);
@@ -643,11 +664,14 @@ function testCli() {
   assert.strictEqual(planJson.verdict, "resume");
   assert.ok(planJson.markdown.includes("Where each step reached"), planJson.markdown);
 
-  // Act mode is not built, and asking for it must fail loudly rather than quietly do less.
-  const act = run(["--mode=act"]);
-  assert.strictEqual(act.status, 1, "act mode must not exit 0 while executing nothing");
-  assert.ok(act.stderr.includes("act mode is not built yet"), act.stderr);
-  assert.ok(act.stderr.includes("nothing was executed"), act.stderr);
+  // Act mode exists now, so the CLI test pins the two things that must be refused BEFORE any
+  // acting happens. The acting itself is test/test-delivery-act.js, which drives it directly.
+  const actWriteConflict = run(["--mode=act", "--no-write"]);
+  assert.strictEqual(actWriteConflict.status, 2, actWriteConflict.stderr);
+  assert.ok(
+    actWriteConflict.stderr.includes("contradiction"),
+    "acting writes files; --no-write cannot mean 'act but do not touch anything'"
+  );
 
   const badMode = run(["--mode=maybe"]);
   assert.strictEqual(badMode.status, 2, badMode.stderr);
@@ -657,7 +681,7 @@ function testCli() {
   assert.strictEqual(badFlag.status, 2, badFlag.stdout + badFlag.stderr);
   assert.ok(`${badFlag.stdout}${badFlag.stderr}`.includes("unknown flag"), "a mistyped flag on a tool that reads a live series should fail");
 
-  console.log("  delivery.js: report mode writes and executes nothing; act mode refuses loudly");
+  console.log("  delivery.js: report mode writes and executes nothing; a flag that would act without writing is refused");
 }
 
 // ─── Runner ───────────────────────────────────────────────────────────────────

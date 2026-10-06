@@ -85,6 +85,11 @@ const { TRANSLATION_REPORT_JSON } = require("./translation-report");
  *   the evidence behind.
  * @property {string[]} volumes - Installment numbers the DAMAGE findings name, sorted.
  * @property {string[]} evidenceVolumes - Installments holding gate evidence.
+ * @property {Array<{kind: string, file: string, volume: string|null, message: string}>} damageFindings -
+ *   The HIGH damage findings themselves, citable. A ticket must say what the manager looked at,
+ *   and this assessment is the only thing it is allowed to have looked at.
+ * @property {Array<{kind: string, file: string, volume: string|null, message: string}>} evidenceFindings -
+ *   The same for the quarantine evidence.
  * @property {string[]} notes - MEDIUM/LOW gaps worth knowing, not actions.
  * @property {string|null} error - The assessment's own failure, when there is one.
  */
@@ -122,6 +127,10 @@ const { TRANSLATION_REPORT_JSON } = require("./translation-report");
  * @property {string[]} flags - Flags to pass to the step. Deliberately never `--volume` on a
  *   cumulative cascade: `--force --volume NN` does not cascade (gotcha 66).
  * @property {boolean} countsAsIntervention
+ * @property {string|null} finding - The post-mortem finding `kind` this action is a response
+ *   to. `utils/ledger.js` keys the anti-spin check on (step, finding, action, volume), so the
+ *   triage has to name it: an action nobody can say what it was *about* cannot be recognised
+ *   as a repeat of itself.
  */
 
 /**
@@ -555,6 +564,12 @@ function maxInterventionsPerStep() {
  * found, not the manager doing something about it. Only the current run counts, for the same
  * reason the anti-spin count is per run: a real fix must not be frozen out of the next run.
  *
+ * And only the actions the menu says are interventions count against the **budget**. Act mode
+ * records everything it does, including the free ones, because "what did the manager do" is a
+ * question a human has to be able to audit; the menu's `countsAsIntervention` is what decides
+ * which of those spend the step's allowance. An action that is not on the menu counts: an
+ * unknown action cannot be waved through by not recognising it.
+ *
  * @param {Array<Object>} entries - Ledger entries.
  * @param {string|null} run - The run to count.
  * @returns {Object<string, number>} - Step name -> interventions used.
@@ -565,6 +580,8 @@ function interventionsUsed(entries, run) {
   if (!run) return out;
   for (const e of entries || []) {
     if (!e || e.kind !== "intervention" || e.run !== run || !e.step) continue;
+    const action = actionByName(e.action);
+    if (action && !action.countsAsIntervention) continue;
     out[e.step] = (out[e.step] || 0) + 1;
   }
   return out;
@@ -614,6 +631,22 @@ async function readWorkingState({ seriesDir, manifest } = {}) {
                 : "complete",
         damageKinds: [...new Set(damage.map((f) => f.kind))],
         evidenceKinds: [...new Set(evidence.map((f) => f.kind))],
+        // The findings themselves, not just their classes. When act mode has to open a ticket it
+        // must cite what it looked at, and the only thing it looked at is this assessment — so
+        // the citation has to come from here rather than be re-derived from a file that a triage
+        // does not write.
+        damageFindings: damage.map((f) => ({
+          kind: f.kind,
+          file: f.file,
+          volume: f.volume,
+          message: f.message,
+        })),
+        evidenceFindings: evidence.map((f) => ({
+          kind: f.kind,
+          file: f.file,
+          volume: f.volume,
+          message: f.message,
+        })),
         volumes: namedVolumes(damage),
         evidenceVolumes: namedVolumes(evidence),
         notes: findings
@@ -705,6 +738,7 @@ function planResume(state) {
           wipeFirst: [],
           flags: [],
           countsAsIntervention: false,
+          finding: null,
         },
       ],
       notes: [
@@ -787,6 +821,7 @@ function planResume(state) {
       wipeFirst: [],
       flags: [],
       countsAsIntervention: false,
+      finding: quarantined.includes(name) ? stateByStep.get(name).evidenceKinds[0] || null : null,
     }));
 
     if (quarantined.length) {
@@ -837,6 +872,9 @@ function planResume(state) {
     wipeFirst: [],
     flags: [],
     countsAsIntervention: false,
+    // The finding this action is a response to. It is what the ledger keys the anti-spin
+    // check on, so it has to be named by the triage rather than guessed at by whoever acts.
+    finding: resumeState.damageKinds[0] || null,
   };
 
   if (resumeStep === "discover") {
@@ -920,6 +958,7 @@ function planResume(state) {
       wipeFirst: [],
       flags: [],
       countsAsIntervention: false,
+      finding: null,
     });
   }
 
@@ -969,6 +1008,11 @@ function planResume(state) {
       wipeFirst: [],
       flags: [],
       countsAsIntervention: false,
+      // A step with its own damage names its own finding. A step that is complete and is only in
+      // the plan because the resume step's fix invalidates it inherits the finding the whole plan
+      // is a response to — otherwise the ledger has nothing to key on, and "have I already run
+      // this step in this sequence, and did it help?" becomes a question the memory cannot answer.
+      finding: st.damageKinds[0] || plan.finding || null,
     });
   }
 
@@ -1093,6 +1137,33 @@ function formatRanges(installments) {
 }
 
 /**
+ * How far one step has actually got, as a number rather than a sentence.
+ *
+ * `progressByStep` below renders this for a human at 7am; this is the same measurement for a
+ * machine that has to decide whether an intervention changed anything. Comparing the before
+ * and after counts is the smallest honest version of "compare the deliverable": it asks what
+ * the step was supposed to leave behind, not whether the error message went away (which is
+ * the question a fixer answers by removing the guard — gotcha 70).
+ *
+ * @param {VolumeInventory[]} volumes - A working state's volume inventory.
+ * @param {string} step
+ * @returns {{built: number, missing: number, builtInstallments: string[], missingInstallments: string[]}}
+ */
+function progressForStep(volumes, step) {
+  const vols = volumes || [];
+  const hasGap = (v) => (v.missingForStep || []).some((m) => m.step === step);
+  // A folder the plan names but that is not on disk is missing for every step, not none.
+  const missingInstallments = vols.filter((v) => !v.exists || hasGap(v)).map((v) => v.installment);
+  const builtInstallments = vols.filter((v) => v.exists && !hasGap(v)).map((v) => v.installment);
+  return {
+    built: builtInstallments.length,
+    missing: missingInstallments.length,
+    builtInstallments,
+    missingInstallments,
+  };
+}
+
+/**
  * Per step, which volumes hold its required outputs and which do not.
  *
  * This is the sentence a delivery manager actually needs — "glossary is whole through 14,
@@ -1113,11 +1184,8 @@ function progressByStep(volumes) {
   const ordered = PIPELINE_STEPS.map((s) => s.name).filter((n) => gaps.has(n));
   const out = [];
   for (const step of ordered) {
-    const hasGap = (v) => v.missingForStep.some((m) => m.step === step);
-    // A folder the plan names but that is not on disk is missing for every step, not none.
-    const missing = vols.filter((v) => !v.exists || hasGap(v)).map((v) => v.installment);
-    const built = vols.filter((v) => v.exists && !hasGap(v)).map((v) => v.installment);
-    out.push({ step, built: formatRanges(built), missing: formatRanges(missing) });
+    const p = progressForStep(vols, step);
+    out.push({ step, built: formatRanges(p.builtInstallments), missing: formatRanges(p.missingInstallments) });
   }
   return out;
 }
@@ -1220,6 +1288,7 @@ module.exports = {
   maxInterventionsPerStep,
   interventionsUsed,
   formatRanges,
+  progressForStep,
   progressByStep,
   renderResumePlanMarkdown,
 };
