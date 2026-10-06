@@ -75,6 +75,45 @@ const { readBoolEnv } = require("../configs/shared");
  * @property {string} [verify] - How to tell afterwards whether it worked — measured on the
  *   DELIVERABLE, not by whether the finding disappeared (see the plan's §6).
  * @property {boolean} [requiresCodeChange] - True when this is a dev-team job, not a manager action.
+ * @property {boolean} [outcomeOnlyVerification] - Set by `utils/diagnostics.js` when `verify` names
+ *   only the finding vanishing. Not a refusal: the before/after comparison of the deliverable is
+ *   what rejects such an option (gotcha 70/73).
+ */
+
+/**
+ * The diagnostics team's answer to a ticket — the half that is not the option list.
+ *
+ * Written by `recordDiagnosis`, which is the ONLY route from a model's reply to a ticket's options:
+ * it calls `attachOptions` internally, so the banned-option filter cannot be stepped around.
+ *
+ * @typedef {Object} TicketDiagnosis
+ * @property {string} cause - The mechanism, in language a customer can follow.
+ * @property {string} [recommend] - Which option, and why.
+ * @property {string[]} [questions] - Clarifying questions back to the manager.
+ * @property {string} [ownerNote] - Prose for the account owner alone: the thing the manager may not
+ *   be offered as an option.
+ * @property {string[]} [read] - The files the team says it read.
+ * @property {Array<{tool: string, path: string}>} [observedReads] - The files its turn ACTUALLY
+ *   opened, taken from the agent's recorded tool calls. The claim and the record are both kept.
+ * @property {string[]} [citedWithoutReading] - Claimed but never opened by that turn.
+ * @property {Array<{tool: string, path: string, reason: string}>} [attemptedWrites] - Every write
+ *   the read-only gate refused during that turn. A silently dropped attempt would be a support team
+ *   that quietly edited the corpus it was asked about.
+ * @property {number} [attempts] - How many times this ticket has been asked (1 on the first answer).
+ * @property {string} at - ISO timestamp.
+ */
+
+/**
+ * The manager's reply to one of the diagnostics team's questions.
+ *
+ * Validated on the ANSWER, not on the question: the manager may be asked anything, but it may only
+ * answer from what a customer can see (see `customerMayRead`).
+ *
+ * @typedef {Object} TicketAnswer
+ * @property {string} question - The question being answered, verbatim.
+ * @property {string} answer
+ * @property {string[]} cites - The files the answer points at. Every one must be customer-visible.
+ * @property {string} at
  */
 
 /**
@@ -92,6 +131,8 @@ const { readBoolEnv } = require("../configs/shared");
  * @property {string[]} ruledOut - Causes the manager eliminated, and how.
  * @property {string} question - What it is asking. Required, and the half that must not be a demand.
  * @property {("open"|"answered"|"chosen"|"closed")} status
+ * @property {TicketDiagnosis} [diagnosis] - The diagnostics team's answer (see `recordDiagnosis`).
+ * @property {TicketAnswer[]} [answers] - The manager's replies to the team's questions.
  * @property {TicketOption[]} [options] - The allowed half of the reply.
  * @property {Array<{option: TicketOption, because: string, escalateTo: string}>} [refusedOptions]
  *   — the half this module refused, kept visible rather than dropped.
@@ -189,7 +230,11 @@ const BANNED_OPTIONS = [
   },
   {
     id: "delete-evidence",
-    pattern: /\b(delete|remove|drop|clean|wipe|discard|purge)\b[^\n]{0,40}\b(\.rejected|rejected file|quarantine|evidence|postmortem|post-mortem|report|\.logs)\b/i,
+    // Both word orders, and the adjectival forms: "delete the quarantined file", "delete the
+    // .rejected copy", "the quarantined glossary should be removed". A rule that only matches the
+    // exact noun "quarantine" is a rule "quarantined" walks past.
+    pattern:
+      /\b(delete|remove|drop|clean|wipe|discard|purge|clear)\b[^\n]{0,40}\b(\.rejected|rejected[- .]?\w*|quarantin\w*|evidence|postmortem|post-mortem|report|\.logs)\b|\b(\.rejected|quarantin\w*|rejected (?:file|copy|glossary|artifact)|evidence)\b[^\n]{0,40}\b(delete|deleted|remove|removed|drop|dropped|wipe|wiped|discard|purge|gone)\b/i,
     because:
       "quarantine files and reports are how a run explains itself. Deleting them makes the " +
       "finding disappear and the fault unsolvable, and it destroys the before/after comparison " +
@@ -234,6 +279,34 @@ const BANNED_OPTIONS = [
     escalateTo: "the account owner",
   },
 ];
+
+/**
+ * Phrases that name THE FINDING VANISHING as the whole check.
+ *
+ * Deliberately NOT a refusal, and deliberately kept here rather than only in the module that reads
+ * the code: `Add the old spelling back as a second row` survives the banned-option filter on purpose
+ * (gotcha 70) — it manufactures a duplicate, which is a judgment about the deliverable, not a guard
+ * being switched off. The thing that rejects it is the before/after comparison of the deliverable
+ * (utils/delivery-verify.js, gotcha 73). So this table FLAGS the shape on the option itself, where
+ * every later reader — the manager, the human-readable report, the comparison — can see it.
+ */
+const OUTCOME_ONLY_CHECK = [
+  /\b(finding|error|warning|verdict|quarantine|complaint|failure)\b[^\n]{0,40}\b(disappear(?:s|ed)?|gone|goes away|clears?|stops|resolve[ds]?|fixed|fix(?:es)?)\b/i,
+  /\b(the|this|that)\b[^\n]{0,20}\b(finding|error|warning|quarantine)\b[^\n]{0,20}\b(is|be)\b[^\n]{0,12}\b(gone|clear|resolved)\b/i,
+  /\bno longer (reports|appears|shows|fails)\b/i,
+  /\bcheck that (it|the finding|the error)\b[^\n]{0,30}\b(passes|is gone|is clean|disappears)\b/i,
+];
+
+/**
+ * Is this option's stated check "the finding disappears"?
+ *
+ * @param {string} verify
+ * @returns {boolean}
+ */
+function verificationIsOutcomeOnly(verify) {
+  const text = String(verify || "");
+  return OUTCOME_ONLY_CHECK.some((re) => re.test(text));
+}
 
 /**
  * Is this option banned?
@@ -292,10 +365,92 @@ function filterOptions(ticketId, options) {
         ids: verdict.reasons.map((r) => r.id),
       });
     } else {
-      allowed.push(option);
+      // The flag that the banned-option filter deliberately does NOT apply (gotcha 70): an option
+      // whose only stated check is that the complaint stops. It is not refused here — the
+      // before/after comparison of the deliverable is what rejects it (gotcha 73) — but it is
+      // stamped here, on the way in, so every later reader (the manager, tickets.md, the closure)
+      // can see that the option never promised a check on the book.
+      allowed.push(
+        verificationIsOutcomeOnly(option.verify)
+          ? { ...option, outcomeOnlyVerification: true }
+          : option
+      );
     }
   }
   return { allowed, refused };
+}
+
+// ─── What the manager is allowed to have looked at ────────────────────────────
+
+/**
+ * The things a customer of this pipeline cannot see.
+ *
+ * This is the boundary the whole role split rests on: the delivery manager uses the product, it does
+ * not maintain it. It may read the plan of record, what each volume folder holds, the step reports,
+ * the ledger, the tickets and the publish report. It may not read the code, the prompts, or the run
+ * transcripts — those are what the diagnostics team is FOR.
+ *
+ * The table is enforced on the manager's ANSWERS to the diagnostics team's questions
+ * (`recordAnswer`), which is where the boundary would actually leak: a question like "does the
+ * volume folder hold a `.rejected` file?" is fine, and the answer must cite a folder listing, not a
+ * transcript. A question that cannot be answered from here is refused at the generator, in
+ * `utils/diagnostics.js` — so the conversation cannot stall on something neither side can say.
+ */
+const MANAGER_EYES = [
+  {
+    id: "run-transcripts",
+    pattern: /(^|[\\/])\.logs([\\/]|$)/,
+    because:
+      "the run transcripts are the diagnostics team's own material. A manager quoting a chat " +
+      "history is quoting something it was not allowed to read.",
+  },
+  {
+    id: "source-code",
+    pattern: /\.(js|ts|mjs|cjs)\b/i,
+    because: "the manager does not read the code. That is the diagnostics team's job.",
+  },
+  {
+    id: "prompt-files",
+    pattern: /(^|[\\/])(system|user)-prompts([\\/]|$)/,
+    because: "the prompts are part of the product's internals, not part of what a customer sees.",
+  },
+  {
+    id: "pipeline-hooks",
+    pattern: /(^|[\\/])hooks([\\/]|$)/,
+    because: "the per-machine hooks are this machine's configuration, and only the account owner changes them.",
+  },
+  {
+    id: "this-module",
+    pattern: /(^|[\\/])utils([\\/]|$)/,
+    because: "the pipeline's own source lives under utils/ — the manager reads reports, not code.",
+  },
+];
+
+/**
+ * Can the manager cite this path?
+ *
+ * @param {string} filePath
+ * @returns {{allowed: boolean, because: string|null, id: string|null}}
+ */
+function customerMayRead(filePath) {
+  const text = String(filePath || "").replace(/\\/g, "/");
+  if (!text.trim()) return { allowed: false, because: "an answer must name the file it is talking about", id: "no-path" };
+  for (const rule of MANAGER_EYES) {
+    if (rule.pattern.test(text)) return { allowed: false, because: rule.because, id: rule.id };
+  }
+  return { allowed: true, because: null, id: null };
+}
+
+/**
+ * Compare two question strings. The manager quotes the question it is answering; small differences
+ * in quoting (trailing punctuation, whitespace) are not a reason to refuse an honest answer.
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+function sameQuestion(a, b) {
+  const norm = (s) => String(s || "").trim().replace(/\s+/g, " ").replace(/[?.!]+$/, "").toLowerCase();
+  return norm(a) === norm(b);
 }
 
 // ─── Ticket shape: a question, not an order ───────────────────────────────────
@@ -601,6 +756,172 @@ function attachOptions(ticketId, options, paths = ticketPaths()) {
 }
 
 /**
+ * Record the diagnostics team's answer to a ticket — cause, questions, what it read, and its
+ * options.
+ *
+ * **This is the only door from a model's reply to a ticket's options.** It calls `attachOptions`
+ * internally, and `attachOptions` is where `optionIsBanned` runs (gotcha 70). A caller that wanted
+ * to skip the filter would have to call `attachOptions` directly and say so out loud in the code.
+ *
+ * Two things are recorded that the model did not choose to report, because they are the halves that
+ * can be checked: the tool calls its turn actually made (`observedReads`), and every write the
+ * read-only gate refused (`attemptedWrites`). A support team that tried to repair the data while it
+ * was being asked to explain it is a fact the account owner should be able to read.
+ *
+ * @param {string} ticketId
+ * @param {Object} reply
+ * @param {string} reply.cause
+ * @param {TicketOption[]} reply.options
+ * @param {string} [reply.recommend]
+ * @param {string[]} [reply.questions]
+ * @param {string} [reply.ownerNote]
+ * @param {string[]} [reply.read]
+ * @param {Array<{tool: string, path: string}>} [reply.observedReads]
+ * @param {string[]} [reply.citedWithoutReading]
+ * @param {Array<{tool: string, path: string, reason: string}>} [reply.attemptedWrites]
+ * @param {{json?: string, markdown?: string}} [paths]
+ * @returns {{ticket: Ticket|null, allowed: TicketOption[], refused: Object[], error: string|null}}
+ */
+function recordDiagnosis(ticketId, reply, paths = ticketPaths()) {
+  const current = readTickets(paths.json);
+  const existing = current.tickets.find((t) => t.id === ticketId);
+  if (!existing) return { ticket: null, allowed: [], refused: [], error: `no ticket ${ticketId} to answer` };
+  if (existing.status === "closed") {
+    return { ticket: null, allowed: [], refused: [], error: `ticket ${ticketId} is closed — a closed ticket is not re-answered` };
+  }
+
+  // The options go through the filter. Everything else is attached to the ticket afterwards, so a
+  // refusal in the option list cannot take the cause or the questions with it.
+  const answered = attachOptions(ticketId, (reply && reply.options) || [], paths);
+  if (!answered.ticket) return answered;
+
+  // Re-read: `attachOptions` wrote its own copy of the list, so the list this function read before
+  // it is now stale, and writing it back would erase the options that were just filtered in.
+  const after = readTickets(paths.json);
+  const ticket = after.tickets.find((t) => t.id === ticketId);
+  if (!ticket) {
+    return { ...answered, ticket: null, error: `ticket ${ticketId} vanished while it was being answered` };
+  }
+
+  const prior = ticket.diagnosis;
+  ticket.diagnosis = {
+    cause: String((reply && reply.cause) || "").trim(),
+    recommend: String((reply && reply.recommend) || "").trim(),
+    questions: (reply && reply.questions) || [],
+    ownerNote: String((reply && reply.ownerNote) || "").trim(),
+    read: (reply && reply.read) || [],
+    observedReads: (reply && reply.observedReads) || [],
+    citedWithoutReading: (reply && reply.citedWithoutReading) || [],
+    attemptedWrites: (reply && reply.attemptedWrites) || [],
+    maxSteps: Number(reply && reply.maxSteps) || null,
+    usage: (reply && reply.usage) || null,
+    stateMovedDuringDiagnosis: Boolean(reply && reply.stateMovedDuringDiagnosis),
+    attempts: (prior && prior.attempts ? prior.attempts : 0) + 1,
+    askedAgain: Boolean(prior),
+    at: new Date().toISOString(),
+  };
+  // Nothing usable survived the filter. "Answered" would be a lie the manager acts on, so the
+  // ticket says plainly that the remaining decision belongs to the account owner.
+  ticket.noUsableOptions = answered.allowed.length === 0;
+
+  const result = writeTickets(after.tickets, paths);
+  return { ...answered, ticket, error: result.error };
+}
+
+/**
+ * Record the manager's answer to one of the diagnostics team's clarifying questions.
+ *
+ * The check is on the ANSWER, not on the question. The team may ask anything; the manager may only
+ * reply with what a customer can see, and every path it cites is checked against `customerMayRead`.
+ * A refusal names what the manager IS allowed to look at, because the useful failure is the one that
+ * produces a usable second answer.
+ *
+ * @param {string} ticketId
+ * @param {{question: string, answer: string, cites?: string[]}} reply
+ * @param {{json?: string, markdown?: string}} [paths]
+ * @returns {{ticket: Ticket|null, written: boolean, error: string|null}}
+ */
+function recordAnswer(ticketId, reply, paths = ticketPaths()) {
+  const current = readTickets(paths.json);
+  const ticket = current.tickets.find((t) => t.id === ticketId);
+  if (!ticket) return { ticket: null, written: false, error: `no ticket ${ticketId}` };
+
+  const asked = (ticket.diagnosis && ticket.diagnosis.questions) || [];
+  if (!asked.length) {
+    return {
+      ticket: null,
+      written: false,
+      error: `ticket ${ticketId} has no open question to answer. The diagnostics team asks questions ` +
+        `in its diagnosis; answer one of those, or ask for a diagnosis first.`,
+    };
+  }
+  // Only an OPEN question may be answered, and each one exactly once. An answer is evidence the
+  // provider acted on; letting the same question be answered twice is how a first answer that the
+  // manager did not like gets quietly replaced instead of challenged.
+  const open = unansweredQuestions(ticket);
+  const question = open.find((q) => sameQuestion(q, reply && reply.question));
+  if (!question) {
+    const already = asked.find((q) => sameQuestion(q, reply && reply.question));
+    if (already) {
+      const prior = (ticket.answers || []).find((a) => sameQuestion(a.question, already)) || {};
+      return {
+        ticket: null,
+        written: false,
+        error:
+          `"${already}" has no open question behind it — it is already answered: ` +
+          `"${prior.answer}" (at ${prior.at}). Every question is answered once. If that answer was ` +
+          `wrong or incomplete, say so in the next request for a diagnosis; do not overwrite an ` +
+          `answer the provider already acted on.`,
+      };
+    }
+    return {
+      ticket: null,
+      written: false,
+      error:
+        `"${(reply && reply.question) || "(none given)"}" is not a question this ticket asked. ` +
+        `It asked: ${asked.map((q) => `"${q}"`).join(" / ")}`,
+    };
+  }
+  const answer = String((reply && reply.answer) || "").trim();
+  if (!answer) return { ticket: null, written: false, error: "an answer cannot be empty" };
+
+  const cites = Array.isArray(reply.cites) ? reply.cites : [];
+  const refusedCites = [];
+  for (const c of cites) {
+    const verdict = customerMayRead(c);
+    if (!verdict.allowed) refusedCites.push(`${c} — ${verdict.because}`);
+  }
+  if (refusedCites.length) {
+    return {
+      ticket: null,
+      written: false,
+      error:
+        `the answer cites something a delivery manager may not read:\n  - ${refusedCites.join("\n  - ")}\n` +
+        `What the manager CAN cite: the plan of record (translation-target.json), what each volume ` +
+        `folder holds, the step reports in .postmortem/, the ledger, the tickets, and ` +
+        `translation-report.md. Answer from those, or say that the manager cannot tell and the ` +
+        `diagnostics team should read it itself.`,
+    };
+  }
+
+  ticket.answers = ticket.answers || [];
+  ticket.answers.push({ question, answer, cites, at: new Date().toISOString() });
+  const result = writeTickets(current.tickets, paths);
+  return { ticket, written: result.written, error: result.error };
+}
+
+/**
+ * The questions on an answered ticket that the manager has not answered yet.
+ * @param {Ticket} ticket
+ * @returns {string[]}
+ */
+function unansweredQuestions(ticket) {
+  const asked = (ticket.diagnosis && ticket.diagnosis.questions) || [];
+  const answers = ticket.answers || [];
+  return asked.filter((q) => !answers.some((a) => sameQuestion(a.question, q)));
+}
+
+/**
  * Record the manager's choice, in writing, with its reason.
  *
  * The reason is required. A choice without a reason is the thing a human cannot audit six runs
@@ -717,6 +1038,59 @@ function renderTicketMarkdown(ticket) {
     lines.push(``, `**Ruled out:**`);
     for (const r of ticket.ruledOut) lines.push(`- ${r}`);
   }
+  const d = ticket.diagnosis;
+  if (d) {
+    lines.push(``, `**Diagnosis** (from the diagnostics team, attempt ${d.attempts || 1}):`, d.cause);
+    if (d.recommend) lines.push(``, `**Recommended:** ${d.recommend}`);
+    if ((d.questions || []).length) {
+      lines.push(``, `**Asked back of the manager:**`);
+      for (const q of d.questions) lines.push(`- ${q}`);
+    }
+    if ((ticket.answers || []).length) {
+      lines.push(``, `**The manager answered:**`);
+      for (const a of ticket.answers) {
+        lines.push(
+          `- Q: ${a.question}\n  A: ${a.answer}` + (a.cites && a.cites.length ? `\n  citing: ${a.cites.map((c) => `\`${c}\``).join(", ")}` : "")
+        );
+      }
+    }
+    if (d.ownerNote) {
+      lines.push(
+        ``,
+        `**For the account owner only** (not an option the manager may be offered):`,
+        d.ownerNote
+      );
+    }
+    if ((d.read || []).length) {
+      lines.push(``, `**It says it read:** ${d.read.map((r) => `\`${r}\``).join(", ")}`);
+    }
+    if ((d.observedReads || []).length) {
+      lines.push(``, `**What its turn actually opened:**`);
+      for (const r of d.observedReads) lines.push(`- ${r.tool} → \`${r.path}\``);
+    }
+    if ((d.citedWithoutReading || []).length) {
+      lines.push(
+        ``,
+        `**Cited but never opened by that turn** (a conclusion with no file behind it): ` +
+          d.citedWithoutReading.map((r) => `\`${r}\``).join(", ")
+      );
+    }
+    if ((d.attemptedWrites || []).length) {
+      lines.push(``, `**Write attempts the read-only role refused:**`);
+      for (const w of d.attemptedWrites) {
+        const layer = w.layer ? ` (stopped by ${w.layer})` : "";
+        lines.push(`- \`${w.tool}\` on \`${w.path}\`${layer} — ${w.reason}`);
+      }
+    }
+  }
+  if (ticket.noUsableOptions) {
+    lines.push(
+      ``,
+      `**No usable option.** Every option the diagnostics team offered was refused by the banned-option ` +
+        `filter. What it believes the right answer is appears under "For the account owner only" above; ` +
+        `that is the role this decision belongs to.`
+    );
+  }
   if ((ticket.options || []).length) {
     lines.push(``, `**Options offered:**`);
     for (const o of ticket.options) {
@@ -724,7 +1098,12 @@ function renderTicketMarkdown(ticket) {
         `- **${o.label}** (${o.cost || "cost not stated"}${o.requiresCodeChange ? ", needs a code change" : ""})` +
           (o.touches && o.touches.length ? `\n  - touches: ${o.touches.join(", ")}` : "") +
           (o.risk ? `\n  - could break: ${o.risk}` : "") +
-          (o.verify ? `\n  - how to verify: ${o.verify}` : "")
+          (o.verify ? `\n  - how to verify: ${o.verify}` : "") +
+          (o.outcomeOnlyVerification
+            ? `\n  - ⚠ its only stated check is that the finding disappears. That is available for free ` +
+              `by switching a check off, so it is not evidence: the before/after comparison of the ` +
+              `deliverable (utils/delivery-verify.js) is what will judge it.`
+            : "")
       );
     }
   }
@@ -770,16 +1149,22 @@ function renderTicketsMarkdown(tickets = readTickets().tickets) {
 
 module.exports = {
   BANNED_OPTIONS,
+  MANAGER_EYES,
   ticketsEnabled,
   ticketPaths,
   optionIsBanned,
   filterOptions,
+  verificationIsOutcomeOnly,
+  customerMayRead,
   validateTicketShape,
   triedFromLedger,
   readTickets,
   writeTickets,
   createTicket,
   attachOptions,
+  recordDiagnosis,
+  recordAnswer,
+  unansweredQuestions,
   recordChoice,
   closeTicket,
   openTickets,

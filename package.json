@@ -7,7 +7,8 @@
     "start": "node harness.js",
     "pipeline": "node index.js",
     "delivery": "node delivery.js",
-    "test": "node test/test-glossary-load.js && node test/test-hooks.js && node test/test-config.js && node test/test-translate.js && node test/test-tokens.js && node test/test-fake-backend.js && node test/test-intake.js && node test/test-qa-orchestration.js && node test/test-task-failure.js && node test/test-translation-loop.js && node test/test-translate-stage.js && node test/test-disputes.js && node test/test-wiki-orchestration.js && node test/test-artifact-integrity.js && node test/test-postmortem.js && node test/test-ledger.js && node test/test-tickets.js && node test/test-resume.js && node test/test-delivery-verify.js && node test/test-delivery-act.js && node test/test-pipeline-loop.js --audit-selftest && node test/test-pipeline-loop.js",
+    "diagnose": "node diagnose.js",
+    "test": "node test/test-glossary-load.js && node test/test-hooks.js && node test/test-config.js && node test/test-translate.js && node test/test-tokens.js && node test/test-fake-backend.js && node test/test-intake.js && node test/test-qa-orchestration.js && node test/test-task-failure.js && node test/test-translation-loop.js && node test/test-translate-stage.js && node test/test-disputes.js && node test/test-wiki-orchestration.js && node test/test-artifact-integrity.js && node test/test-postmortem.js && node test/test-ledger.js && node test/test-tickets.js && node test/test-resume.js && node test/test-delivery-verify.js && node test/test-delivery-act.js && node test/test-diagnostics.js && node test/test-pipeline-loop.js --audit-selftest && node test/test-pipeline-loop.js",
     "pipeline-loop": "node test/test-pipeline-loop.js",
     "smoke": "node test/harness-smoke.js",
     "calibrate": "node test/calibrate.js"

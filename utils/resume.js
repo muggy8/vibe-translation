@@ -279,6 +279,13 @@ const DELIVERY_ACTIONS = [
     primitive: "createTicket (utils/tickets.js)",
     countsAsIntervention: false,
   },
+  {
+    name: "answer-question",
+    tier: "A",
+    what: "Reply to a question the diagnostics team asked back. This is the manager answering, not acting: it cites a folder listing, a report, or the plan of record, and it changes nothing on disk.",
+    primitive: "recordAnswer (utils/tickets.js)",
+    countsAsIntervention: false,
+  },
 
   // Tier C — never available, at any count, in any mode. Named here so a refusal can name it.
   {
