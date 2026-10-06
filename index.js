@@ -41,7 +41,14 @@
  *   node index.js --dry-run            # no model calls, no post-mortem (nothing is written)
  *   node index.js --post-mortem=off    # orchestration only
  *   node index.js --fail-on=never      # report findings, do not fail the run on them
+ *   node index.js --ledger=off         # record nothing about what this run assessed
  *   node index.js --list               # print the step list and exit
+ *
+ * It also REMEMBERS. Every assessed step appends one entry to
+ * `.postmortem/ledger.json` (see `utils/ledger.js`): what the step left behind, and
+ * later what was decided about it. Nothing else in the pipeline records a DECISION —
+ * the state files record artifacts — and without that record the delivery stage cannot
+ * tell a repair from a repeat of a repair that already failed.
  *
  * @module index
  */
@@ -56,6 +63,15 @@ const { PIPELINE_STEPS } = GULPFILE;
 const { TASKS } = require("./utils/hooks");
 const { isStructuralError } = require("./configs/shared");
 const { runPostMortem, writePostMortemReport, postMortemDir } = require("./utils/postmortem");
+const {
+  ledgerEnabled,
+  ledgerPath,
+  runId,
+  readLedger,
+  appendLedgerEntry,
+  recurringFindings,
+  renderLedgerMarkdown,
+} = require("./utils/ledger");
 
 const ROOT = __dirname;
 
@@ -135,12 +151,13 @@ function structuralMarkerPath() {
  * Parse this runner's own argv, and separate it from the flags handed to gulp.
  *
  * @param {string[]} argv - process.argv.slice(2).
- * @returns {{steps: Array<{name: string, run: Function}>, gulpArgs: string[], postMortem: boolean, failOn: string, list: boolean}}
+ * @returns {{steps: Array<{name: string, run: Function}>, gulpArgs: string[], postMortem: boolean, ledger: boolean, failOn: string, list: boolean}}
  */
 function parseArgs(argv) {
   const gulpArgs = [];
   let only = null;
   let postMortem = process.env.POSTMORTEM_ENABLED !== "false";
+  let ledger = ledgerEnabled();
   let failOn = failOnLevel();
   let list = false;
 
@@ -161,6 +178,14 @@ function parseArgs(argv) {
     }
     if (arg.startsWith("--post-mortem=")) {
       postMortem = arg.endsWith("off") ? false : true;
+      continue;
+    }
+    if (arg === "--ledger=off" || arg === "--no-ledger") {
+      ledger = false;
+      continue;
+    }
+    if (arg === "--ledger=on") {
+      ledger = true;
       continue;
     }
     if (arg.startsWith("--fail-on=")) {
@@ -219,7 +244,7 @@ function parseArgs(argv) {
     steps = chosen;
   }
 
-  return { steps, gulpArgs, postMortem, failOn, list };
+  return { steps, gulpArgs, postMortem, ledger, failOn, list };
 }
 
 // ─── Running one step ─────────────────────────────────────────────────────────
@@ -305,6 +330,51 @@ function digestOf(output) {
   return picked.map((l) => (l.length > 220 ? `${l.slice(0, 220)}…` : l));
 }
 
+// ─── Recording what this run did ──────────────────────────────────────────────
+
+/**
+ * Append this step's assessment to the run ledger.
+ *
+ * Deliberately non-fatal: the ledger is memory, not a gate. A run must not die because
+ * its memory could not be written — but the failure is printed, because a run that
+ * silently loses its memory is a run that cannot tell a repeat from a repair.
+ *
+ * @param {string} step
+ * @param {Object} report - The `PostMortemReport` for this step, or null when the
+ *   assessment itself could not run.
+ * @param {{volume: string|null, structural: Object|null, stepOk: boolean}} ctx
+ * @returns {{written: boolean, error: string|null}}
+ */
+function recordAssessment(step, report, ctx) {
+  const counts = report && report.counts
+    ? { HIGH: report.counts.HIGH, MEDIUM: report.counts.MEDIUM, LOW: report.counts.LOW }
+    : { HIGH: 0, MEDIUM: 0, LOW: 0 };
+  const findingKinds = report && Array.isArray(report.findings)
+    ? [...new Set(report.findings.map((f) => f.kind))]
+    : [];
+
+  const note = ctx.structural
+    ? `structural failure: ${ctx.structural.message}`
+    : report && report.error
+      ? `assessment could not run: ${report.error}`
+      : ctx.stepOk === false
+        ? "step exited non-zero"
+        : undefined;
+
+  const result = appendLedgerEntry({
+    kind: "assessment",
+    step,
+    volume: ctx.volume || null,
+    findings: counts,
+    findingKinds,
+    decidedBy: "runner",
+    note,
+  });
+
+  if (result.error) console.error(`[index] ledger: ${result.error}`);
+  return { written: result.written, error: result.error };
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -327,15 +397,33 @@ async function main() {
   })();
   const seriesDir = process.env.SERIES_LOCATION || "";
   const runAssessment = parsed.postMortem && !dryRun;
+  const runLedger = parsed.ledger && !dryRun;
   const outDir = postMortemDir();
+  const thisRun = runId();
 
   console.log(
     `[index] ${parsed.steps.length} step(s): ${parsed.steps.map((s) => s.name).join(" -> ")}`
   );
   console.log(
     `[index] post-mortem: ${runAssessment ? "on" : dryRun ? "off (dry-run)" : "off"} | ` +
+      `ledger: ${runLedger ? `on (${path.relative(ROOT, ledgerPath())})` : dryRun ? "off (dry-run)" : "off"} | ` +
       `fail-on: ${parsed.failOn} | flags: ${parsed.gulpArgs.join(" ") || "(none)"}`
   );
+
+  // What an EARLIER run already saw. Free to know, and it changes what is worth doing:
+  // a finding class that a re-run never clears is structural, and spending another
+  // intervention on it is the spinning this ledger exists to prevent.
+  if (runLedger) {
+    const prior = readLedger();
+    if (prior.error) console.log(`[index] ledger: ${prior.error}`);
+    const recurring = recurringFindings(prior.entries, thisRun);
+    for (const r of recurring) {
+      console.log(
+        `[index] ledger: ${r.finding} has appeared in ${r.runs} recorded run(s) ` +
+          `(${r.steps.join(", ")}) — a re-run is not clearing it`
+      );
+    }
+  }
 
   /** @type {Array<{name: string, ok: boolean, code: number|null, findings?: Object, structural?: Object|null}>} */
   const results = [];
@@ -365,6 +453,7 @@ async function main() {
         `[index] ${step.name} failed STRUCTURALLY (${run.structural.message}) — ` +
           `stopping. The remaining steps depend on what this step did not build.`
       );
+      if (runLedger) recordAssessment(step.name, null, { volume: volumeArg, structural: run.structural, stepOk });
       results.push(entry);
       stopped = true;
       break;
@@ -416,6 +505,27 @@ async function main() {
             `(${parsed.failOn}) — treating the step as failed.`
         );
       }
+
+      // Record what this step left behind, then ask the free question: did a PREVIOUS
+      // run leave the same thing? A finding class that survives a re-run is structural,
+      // and the answer changes what the delivery stage should spend on it.
+      if (runLedger) {
+        const recorded = recordAssessment(step.name, report, {
+          volume: volumeArg,
+          structural: null,
+          stepOk,
+        });
+        if (recorded.written) {
+          const ledger = readLedger();
+          for (const r of recurringFindings(ledger.entries, thisRun)) {
+            if (!r.steps.includes(step.name)) continue;
+            console.log(
+              `[index]   ledger: ${r.finding} also appeared in ${r.runs - 1} earlier recorded ` +
+                `run(s) on ${step.name} — re-running this step is not clearing it`
+            );
+          }
+        }
+      }
     }
 
     results.push(entry);
@@ -452,12 +562,26 @@ async function main() {
   if (stopped) console.log(`[index]   (stopped early — later steps did not run)`);
   if (totalFindings > 0) console.log(`[index]   reports: ${path.relative(ROOT, outDir)}/`);
 
+  if (runLedger) {
+    const ledger = readLedger();
+    if (ledger.error) console.log(`[index]   ledger: ${ledger.error}`);
+    console.log(`[index]   ${renderLedgerMarkdown(ledger.entries, thisRun).trimEnd()}`);
+  }
+
   if (failed.length > 0) {
+    // The advice used to be unconditional: "re-run, it is cheap". When the ledger shows
+    // this run's findings also survived an earlier run, that advice is the spinning this
+    // file exists to stop, so it is said differently.
+    const recurring = runLedger ? recurringFindings(readLedger().entries, thisRun) : [];
     console.error(
       `[index] ${failed.length} of ${results.length} step(s) failed: ` +
         `${failed.map((f) => f.name).join(", ")}. ` +
-        `Re-run (the idempotent skip-checks make a re-run cheap) — the steps that ` +
-        `finished are not repeated.`
+        (recurring.length
+          ? `Re-running has NOT cleared: ${recurring.map((r) => r.finding).join(", ")} ` +
+            `(seen in ${recurring[0].runs} recorded runs). A repeat of an action that already ` +
+            `failed is not a repair — read the reports before running again.`
+          : `Re-run (the idempotent skip-checks make a re-run cheap) — the steps that ` +
+            `finished are not repeated.`)
     );
     return 1;
   }

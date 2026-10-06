@@ -42,8 +42,9 @@ yarn-error.log*
 # Dry-run prompt dumps
 .dry-run/
 
-# Post-mortem reports (index.js / utils/postmortem.js) + the structural-failure
-# marker the gulpfile writes for a step that ran in its own process. Machine state,
+# Post-mortem reports (index.js / utils/postmortem.js), the structural-failure
+# marker the gulpfile writes for a step that ran in its own process, and the run
+# ledger (utils/ledger.js — what a run assessed and decided). Machine state,
 # like .logs/ — never committed.
 .postmortem/
 
