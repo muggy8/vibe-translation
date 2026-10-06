@@ -26,6 +26,18 @@ process.env.AI_API_KEY = "fake-key";
 process.env.AI_MODEL = "stub";
 process.env.AI_RETRY = "0";
 process.env.AI_CONTEXT_WINDOW = "16000"; // → the derived output cap is 4000
+// The cap must be pinned WITH the window. `AI_MAX_TOKENS` overrides the derived
+// value, and this machine's `.env` now sets it to 131072 — a cap eight times the
+// window this suite pins, which leaves the agent session no room for its own
+// prompt and makes the harness compact before the first turn. That inserts an
+// extra request at `requests[0]`, and this suite asserts both that `requests[0]`
+// is the agent's first turn and that `maxTokens === 4000`. An EMPTY value is the
+// pin that keeps the derivation honest: `dotenv` (harness.js:43) will not overwrite
+// a variable that already exists, and `parseInt("")` is NaN, so `envMaxTokens()`
+// falls back to the quarter of the window this suite means to test. Deleting it
+// instead would let `.env` win. (gotcha 69's rule, other half; gotcha 36's
+// arithmetic.)
+process.env.AI_MAX_TOKENS = "";
 process.env.AI_THINKING = "false";
 process.env.AI_CALL_DEADLINE_MS = "0"; // off, except in the hang scenario
 process.env.ON_VOLUME_ERROR = "abort";

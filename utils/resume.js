@@ -92,7 +92,7 @@ const { TRANSLATION_REPORT_JSON } = require("./translation-report");
 /**
  * One entry of the closed action menu (plan §4). The manager may only ever name an action
  * that is in this table, and the table says which of them count against
- * `DELIVERY_MAX_INTERVENTIONS`.
+ * `DELIVERY_MAX_INTERVENTIONS` — a budget applied PER STEP, not per run.
  *
  * @typedef {Object} DeliveryAction
  * @property {string} name
@@ -128,13 +128,18 @@ const { TRANSLATION_REPORT_JSON } = require("./translation-report");
  * @typedef {Object} ResumePlan
  * @property {string} generatedAt
  * @property {string} seriesDir
- * @property {("resume"|"nothing-to-do"|"blocked")} verdict
+ * @property {("resume"|"nothing-to-do"|"evidence"|"blocked")} verdict - `evidence` means every
+ *   step finished what it claims to have and unread gate evidence is lying in a volume folder.
  * @property {string} headline - One line a human reads first.
  * @property {ResumeStepPlan[]} steps
  * @property {VolumeInventory[]} volumes - Every volume folder as it actually is.
  * @property {string[]} notes - Things that are not actions.
  * @property {Array<{finding: string, steps: string[], runs: number}>} recurring - Finding
  *   classes that survived an earlier recorded run: structural, not transient.
+ * @property {string|null} run - The newest run recorded in the ledger.
+ * @property {Object<string, number>} interventionsByStep - Interventions this run has already
+ *   made on each step.
+ * @property {number} interventionBudget - `DELIVERY_MAX_INTERVENTIONS`, applied PER STEP.
  * @property {Object|null} deliverable - The roll-up of `translation-report.json`.
  * @property {string} markdown
  */
@@ -527,6 +532,45 @@ async function readDeliverable(seriesDir) {
 }
 
 /**
+ * `DELIVERY_MAX_INTERVENTIONS` — how many interventions the manager may make **on one step**
+ * before it must stop acting on that step and write a report / open a ticket instead.
+ *
+ * Per step, not per run (account owner, 2026-10-06). A run with nine steps is not one problem:
+ * a global cap spends glossary's attempts on the wiki, and the step that is genuinely stuck is
+ * the one that ends up with none. The anti-spin gate in `utils/ledger.js` is a separate limit
+ * and still applies inside a step — this one bounds how much the manager may keep doing to one
+ * step even when every attempt is a different action against a different finding.
+ *
+ * @returns {number} - Default 5, minimum 1.
+ */
+function maxInterventionsPerStep() {
+  const n = parseInt(process.env.DELIVERY_MAX_INTERVENTIONS, 10);
+  return Number.isFinite(n) && n >= 1 ? n : 5;
+}
+
+/**
+ * How many interventions this run has already made on each step, read out of the ledger.
+ *
+ * Only `kind: "intervention"` entries count — an `assessment` is the pipeline reporting what it
+ * found, not the manager doing something about it. Only the current run counts, for the same
+ * reason the anti-spin count is per run: a real fix must not be frozen out of the next run.
+ *
+ * @param {Array<Object>} entries - Ledger entries.
+ * @param {string|null} run - The run to count.
+ * @returns {Object<string, number>} - Step name -> interventions used.
+ */
+function interventionsUsed(entries, run) {
+  /** @type {Object<string, number>} */
+  const out = {};
+  if (!run) return out;
+  for (const e of entries || []) {
+    if (!e || e.kind !== "intervention" || e.run !== run || !e.step) continue;
+    out[e.step] = (out[e.step] || 0) + 1;
+  }
+  return out;
+}
+
+/**
  * Read everything a resume decision needs. No model call, no network, no writes.
  *
  * @param {Object} [opts]
@@ -534,6 +578,7 @@ async function readDeliverable(seriesDir) {
  * @param {Object} [opts.manifest] - Pass a plan of record to use instead of reading one.
  * @returns {Promise<{seriesDir: string, manifest: Object|null, manifestProblem: string|null,
  *   volumes: VolumeInventory[], stepStates: ResumeStepState[], recurring: Array,
+ *   run: string|null, interventionsByStep: Object<string, number>, interventionBudget: number,
  *   ledgerError: string|null, deliverable: Object|null}>}
  */
 async function readWorkingState({ seriesDir, manifest } = {}) {
@@ -593,6 +638,9 @@ async function readWorkingState({ seriesDir, manifest } = {}) {
     volumes,
     stepStates,
     recurring: latestRun ? recurringFindings(entries, latestRun) : [],
+    run: latestRun,
+    interventionsByStep: interventionsUsed(entries, latestRun),
+    interventionBudget: maxInterventionsPerStep(),
     ledgerError: ledger.error || null,
     deliverable: await readDeliverable(dir),
   };
@@ -943,6 +991,35 @@ function planResume(state) {
     );
   }
 
+  // ── The per-step intervention budget ────────────────────────────────────────
+  // DELIVERY_MAX_INTERVENTIONS is PER STEP (account owner, 2026-10-06): a run with nine steps is
+  // nine problems, and a global cap spends glossary's attempts on the wiki. This is a different
+  // limit from the anti-spin gate — the ledger refuses the same action against the same finding
+  // twice; this refuses to keep doing *anything* to one step. Both escalate to a ticket, because
+  // the honest reading of "I have run out of moves on this step" is "this needs somebody who can
+  // see the code".
+  const budget = state.interventionBudget || maxInterventionsPerStep();
+  const used = (state.interventionsByStep || {})[resumeStep] || 0;
+  if (used) {
+    notes.push(
+      `${resumeStep}: ${used} of ${budget} interventions used on this step in run ${state.run || "the recorded one"}.`
+    );
+  }
+  if (plan.countsAsIntervention && used >= budget) {
+    plan.action = "ticket";
+    plan.actionName = "open-ticket";
+    plan.cascade = false;
+    plan.wipeFirst = [];
+    plan.countsAsIntervention = false;
+    plan.reasons.push(
+      `this step has already had ${used} of the ${budget} interventions it is allowed in this run. ` +
+        "The budget is per step on purpose, so spending it is the signal that this step needs the diagnostics team, not another attempt."
+    );
+    notes.push(
+      `${resumeStep} is out of intervention budget (${used}/${budget}). The next move is a ticket, and the account owner is the only role that can raise the limit.`
+    );
+  }
+
   if (state.ledgerError) {
     notes.push(`the run ledger could not be read (${state.ledgerError}) — so nothing here is counted as safe to repeat.`);
   }
@@ -974,6 +1051,9 @@ function finishPlan({ state, verdict, headline, steps, notes }) {
     volumes: state.volumes || [],
     notes,
     recurring: state.recurring || [],
+    run: state.run || null,
+    interventionsByStep: state.interventionsByStep || {},
+    interventionBudget: state.interventionBudget || maxInterventionsPerStep(),
     deliverable: state.deliverable,
     markdown: "",
   };
@@ -1098,7 +1178,7 @@ function renderResumePlanMarkdown(plan) {
     if (s.actionName) {
       const action = actionByName(s.actionName);
       lines.push(
-        `- action: **${s.actionName}**${action ? ` (tier ${action.tier}${action.countsAsIntervention ? ", counts against the intervention limit" : ", does not count against the intervention limit"})` : ""}`
+        `- action: **${s.actionName}**${action ? ` (tier ${action.tier}${action.countsAsIntervention ? ", counts against this step's intervention limit" : ", does not count against the intervention limit"})` : ""}`
       );
     }
     for (const r of s.reasons) lines.push(`- ${r}`);
@@ -1137,6 +1217,8 @@ module.exports = {
   readWorkingState,
   planResume,
   declaredOutputsFor,
+  maxInterventionsPerStep,
+  interventionsUsed,
   formatRanges,
   progressByStep,
   renderResumePlanMarkdown,

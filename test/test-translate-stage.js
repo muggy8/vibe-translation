@@ -36,6 +36,11 @@ const childScenario = (process.argv.find((a) => a.startsWith("--child=")) || "")
 process.env.AI_API_KEY = "fake-key";
 process.env.AI_RETRY = "0";
 process.env.AI_CONTEXT_WINDOW = "32000";
+// Pinned with the window: `AI_MAX_TOKENS` overrides the derived cap, and a cap
+// larger than the window this suite pins leaves the agent no room for its prompt
+// (the harness compacts before the first turn). An empty value blocks `.env`
+// without disabling the derivation. See test-fake-backend.js.
+process.env.AI_MAX_TOKENS = "";
 process.env.AI_THINKING = "false";
 process.env.AI_CALL_DEADLINE_MS = "0";
 process.env.TRANSLATION_SOURCE_LANGUAGE = "Japanese";

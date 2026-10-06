@@ -19,9 +19,11 @@
  *      re-running a deterministic gate produces the identical quarantine);
  *   6. no plan of record → blocked, and the intake questions are named as not the manager's;
  *   7. a finding that survived an earlier recorded run → the "just re-run" advice is refused;
- *   8. the closed action menu → Tier C refused, picking up work is free, destroying output is
+ *   8. the intervention budget is PER STEP — a step that has spent its attempts gets a ticket,
+ *      and another step's exhausted budget does not spend this one's;
+ *   9. the closed action menu → Tier C refused, picking up work is free, destroying output is
  *      an intervention;
- *   9. the CLI → report mode writes a report and executes nothing, act mode fails loudly,
+ *  10. the CLI → report mode writes a report and executes nothing, act mode fails loudly,
  *      an unknown flag is refused.
  */
 
@@ -456,7 +458,80 @@ async function testRecurringFindings() {
   console.log("  recurring finding: the cheap advice is refused, and the ledger is why");
 }
 
-// ─── 8: the closed action menu ────────────────────────────────────────────────
+// ─── 8: the intervention budget is per step ───────────────────────────────────
+
+async function testInterventionBudgetIsPerStep() {
+  const fx = await completeSeries("budget");
+  const vol2 = path.join(fx.dir, "Test Story(02)");
+  const breakStep = (step) => {
+    for (const e of STEP_ARTIFACT_SPECS[step].volume) {
+      fs.rmSync(path.join(vol2, e.name.replace("{installment}", "02")), { force: true });
+    }
+  };
+
+  // Five interventions already spent on glossary in this run, two on character-voice.
+  for (let i = 0; i < 5; i += 1) {
+    await appendLedgerEntry({
+      run: "run-budget",
+      kind: "intervention",
+      step: "glossary",
+      volume: "02",
+      finding: "missing-required",
+      action: i === 0 ? "wipe-and-cascade" : "re-run-step",
+      outcome: "unchanged",
+      decidedBy: "delivery-manager",
+    });
+  }
+  for (let i = 0; i < 2; i += 1) {
+    await appendLedgerEntry({
+      run: "run-budget",
+      kind: "intervention",
+      step: "character-voice",
+      volume: "02",
+      finding: "missing-required",
+      action: "re-run-step",
+      outcome: "improved",
+      decidedBy: "delivery-manager",
+    });
+  }
+
+  // Part A: glossary is the broken step, and it is out of budget.
+  breakStep("glossary");
+  let state = await resume.readWorkingState({ seriesDir: fx.dir });
+  assert.strictEqual(state.run, "run-budget", "the triage counts the newest recorded run");
+  assert.deepStrictEqual(state.interventionsByStep, { glossary: 5, "character-voice": 2 });
+  assert.strictEqual(state.interventionBudget, 5);
+
+  let plan = resume.planResume(state);
+  let glossary = plan.steps.find((s) => s.step === "glossary");
+  assert.strictEqual(glossary.actionName, "open-ticket", "a step out of budget gets a question, not another attempt");
+  assert.ok(glossary.reasons.some((r) => r.includes("5 of the 5")), JSON.stringify(glossary.reasons));
+  assert.ok(
+    plan.notes.some((n) => n.includes("out of intervention budget (5/5)")),
+    JSON.stringify(plan.notes)
+  );
+  assert.deepStrictEqual(glossary.wipeFirst, [], "the budget refusal removes nothing");
+
+  // Part B: glossary is fine, character-voice is the broken one — and glossary's exhausted
+  // budget must NOT spend character-voice's. This is the whole point of making it per step.
+  // (Rebuilt in place: `completeSeries` would delete the fixture, and the ledger with it.)
+  for (const v of fx.volumes) await writeVolumeOutputs(fx.dir, v, "glossary");
+  await writeSeriesOutputs(fx.dir, "glossary");
+  breakStep("character-voice");
+  state = await resume.readWorkingState({ seriesDir: fx.dir });
+  plan = resume.planResume(state);
+  const voice = plan.steps.find((s) => s.step === "character-voice");
+  assert.strictEqual(voice.step, "character-voice");
+  assert.strictEqual(voice.actionName, "wipe-and-cascade", "2 of 5 used is not out of budget");
+  assert.strictEqual(voice.countsAsIntervention, true);
+  assert.ok(voice.wipeFirst.length === 1, "and it names the wipe it needs");
+  const glossaryAgain = plan.steps.find((s) => s.step === "glossary");
+  assert.strictEqual(glossaryAgain.action, "none", "glossary is finished; its exhausted budget changes nothing about that");
+
+  console.log("  intervention budget: per step — glossary's spent attempts do not spend character-voice's");
+}
+
+// ─── 9: the closed action menu ────────────────────────────────────────────────
 
 function testActionMenu() {
   // Tier C does not exist for the manager, at any count, in any mode.
@@ -492,7 +567,7 @@ function testActionMenu() {
   console.log("  action menu: Tier C refused with a reason, and the intervention rule pinned");
 }
 
-// ─── 9: the CLI ───────────────────────────────────────────────────────────────
+// ─── 10: the CLI ──────────────────────────────────────────────────────────────
 
 function testCli() {
   const fxPath = path.join(FIXTURES, "cli");
@@ -596,6 +671,7 @@ function testCli() {
   await testGateRemovedTheOutput();
   await testNoPlan();
   await testRecurringFindings();
+  await testInterventionBudgetIsPerStep();
   testActionMenu();
   delete process.env.POSTMORTEM_DIR;
   testCli();
