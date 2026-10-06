@@ -289,12 +289,28 @@ const BANNED_OPTIONS = [
  * being switched off. The thing that rejects it is the before/after comparison of the deliverable
  * (utils/delivery-verify.js, gotcha 73). So this table FLAGS the shape on the option itself, where
  * every later reader — the manager, the human-readable report, the comparison — can see it.
+ *
+ * ONE table for the whole conversation, because the same shape arrives from three directions: an
+ * option's `verify` (`filterOptions` here), a patch's `verify` (`validateProposalShape` in
+ * utils/patches.js), and the manager's accept/reject reason (`judgmentReasonIsSound` there). Two
+ * copies of a phrase list drift, and the drifted half is the one that stops catching things.
  */
 const OUTCOME_ONLY_CHECK = [
   /\b(finding|error|warning|verdict|quarantine|complaint|failure)\b[^\n]{0,40}\b(disappear(?:s|ed)?|gone|goes away|clears?|stops|resolve[ds]?|fixed|fix(?:es)?)\b/i,
   /\b(the|this|that)\b[^\n]{0,20}\b(finding|error|warning|quarantine)\b[^\n]{0,20}\b(is|be)\b[^\n]{0,12}\b(gone|clear|resolved)\b/i,
   /\bno longer (reports|appears|shows|fails)\b/i,
   /\bcheck that (it|the finding|the error)\b[^\n]{0,30}\b(passes|is gone|is clean|disappears)\b/i,
+  // "make volume 15 pass". The object list carries the volume/step spellings as well as the
+  // `the volume` form, because the demand usually names the volume directly.
+  /\b(make|make sure|ensure)\b[^\n]{0,30}\b(it|the step|the volume|the ticket|this step|this volume|volume \d+|step [a-z-]+)\b[^\n]{0,25}\b(pass|passes|passing)\b/i,
+  /\bno more\b[^\n]{0,30}\b(findings?|errors?|warnings?|quarantines?|complaints?|HIGH)\b/i,
+  // "volume 15 passes now", "the step is fixed", "it works". The same demand `validateTicketShape`
+  // refuses on the manager's QUESTION, arriving from the other end of the conversation as a stated
+  // check or a judgment reason (gotcha 70, and `judgmentReasonIsSound` in utils/patches.js).
+  // The `(?![\w-])` after "the volume" is what keeps a real measurement from being read as a result:
+  // "the volume-15 rename passes, and a deleted entry with no trace still fails" names a thing that
+  // passes a test, which is evidence; "the volume passes now" names only the complaint stopping.
+  /\b(?:it|this|the step|the volume(?![\w-])|the ticket|the run|volume \d+|step [a-z-]+)\b[^\n]{0,25}\b(passes|passed|works|succeeds|is fixed|is clean|is green|is resolved|is settled|is done)\b/i,
 ];
 
 /**
@@ -937,6 +953,17 @@ function recordChoice(ticketId, choice, paths = ticketPaths()) {
   const ticket = current.tickets.find((t) => t.id === ticketId);
   if (!ticket) return { ticket: null, written: false, error: `no ticket ${ticketId}` };
   if (!ticket.options || !ticket.options.length) {
+    if (ticket.noUsableOptions) {
+      return {
+        ticket: null,
+        written: false,
+        error:
+          `ticket ${ticketId} has no option left to choose: every option the diagnostics team offered was ` +
+          `refused by the banned-option filter, and what it actually believes is written in ownerNote for ` +
+          `the account owner. There is nothing here the manager may choose, and choosing it is not the ` +
+          `manager's decision to make (gotcha 70).`,
+      };
+    }
     return { ticket: null, written: false, error: `ticket ${ticketId} has no options to choose from yet` };
   }
   const option = ticket.options.find((o) => o.id === choice.optionId);
@@ -1150,6 +1177,7 @@ function renderTicketsMarkdown(tickets = readTickets().tickets) {
 module.exports = {
   BANNED_OPTIONS,
   MANAGER_EYES,
+  OUTCOME_ONLY_CHECK,
   ticketsEnabled,
   ticketPaths,
   optionIsBanned,

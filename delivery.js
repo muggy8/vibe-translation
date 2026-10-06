@@ -45,6 +45,13 @@
  *   node delivery.js --mode=act            # run the plan
  *   node delivery.js --json                # also print the plan as JSON
  *   node delivery.js --no-write            # print only, write nothing (report mode only)
+ *   node delivery.js --mode=act --accept-patch=<id> --reason="…"   # judge a proposal: accept it
+ *   node delivery.js --mode=act --reject-patch=<id> --reason="…"   # judge a proposal: refuse it
+ *
+ * Accepting or rejecting a proposal is the manager's whole authority over a code change, and it is
+ * the only thing it may do with one: it never applies it, and it never commits it (that is the dev
+ * team's act, through `npm run fix`). Act mode also refuses to run any step while a proposal is
+ * unjudged in the working tree, because the tree is what the step runner executes.
  *
  * See AGENTS.md §3.6 and the plan notebook.
  */
@@ -74,6 +81,7 @@ const { wipeAttemptOutputs } = require("./utils/fs");
 const { readLedger, appendLedgerEntry, interventionAllowed } = require("./utils/ledger");
 const { createTicket, closeTicket } = require("./utils/tickets");
 const { acquireRunLock, releaseRunLock, runLockPath } = require("./utils/runlock");
+const patches = require("./utils/patches");
 
 const ROOT = __dirname;
 const PLAN_MD = "delivery-plan.md";
@@ -87,16 +95,33 @@ const PLAN_JSON = "delivery-plan.json";
  * @returns {{mode: string, seriesDir: string|null, json: boolean, write: boolean, error: string|null}}
  */
 function readArgs(argv) {
-  const out = { mode: null, seriesDir: null, json: false, write: true, error: null };
+  const out = {
+    mode: null,
+    seriesDir: null,
+    json: false,
+    write: true,
+    acceptPatch: null,
+    rejectPatch: null,
+    reason: null,
+    error: null,
+  };
   for (const arg of argv) {
     if (arg === "--json") out.json = true;
     else if (arg === "--no-write") out.write = false;
     else if (arg.startsWith("--mode=")) out.mode = arg.slice("--mode=".length).trim().toLowerCase();
     else if (arg.startsWith("--series=")) out.seriesDir = arg.slice("--series=".length).trim();
+    else if (arg.startsWith("--accept-patch=")) out.acceptPatch = arg.slice("--accept-patch=".length).trim();
+    else if (arg.startsWith("--reject-patch=")) out.rejectPatch = arg.slice("--reject-patch=".length).trim();
+    else if (arg.startsWith("--reason=")) out.reason = arg.slice("--reason=".length);
     else {
-      out.error = `unknown flag "${arg}". Known flags: --mode=report|act, --series=<dir>, --json, --no-write`;
+      out.error =
+        `unknown flag "${arg}". Known flags: --mode=report|act, --series=<dir>, --json, --no-write, ` +
+        `--accept-patch=<id> --reason="<text>", --reject-patch=<id> --reason="<text>"`;
       break;
     }
+  }
+  if (out.acceptPatch && out.rejectPatch) {
+    out.error = `--accept-patch and --reject-patch are one decision. Choose one.`;
   }
   return out;
 }
@@ -408,6 +433,25 @@ async function runActPlan({ plan, state, runStep = runPipelineStep }) {
   const log = (line) => console.log(`[delivery] ${line}`);
   const targets = executableSteps(plan);
 
+  // An unjudged patch is live code. The working tree of `main` is what the step runner executes, so
+  // running a step while a proposal is sitting in it — or while a REJECTED patch has not been put back
+  // — runs code the manager has not accepted (gotcha 66). Refusing here costs nothing; running costs a
+  // real run's worth of model calls on code nobody signed off.
+  const unresolved = patches.unresolvedPatches();
+  if (unresolved.length) {
+    log(
+      `REFUSED: ${unresolved.map((p) => `${p.id} (${p.status})`).join(", ")} ` +
+        `is in the working tree of main and has not been accepted. The pipeline runs whatever is in this ` +
+        `tree, so acting now would run code you have not judged.`
+    );
+    for (const p of unresolved) {
+      if (p.status === "rejected") log(`  ${p.id} was rejected and not reverted: node fix.js --revert=${p.id}`);
+      else log(`  ${p.id} is waiting for your judgment: npm run delivery --mode=act --accept-patch=${p.id} --reason="…" (or --reject-patch)`);
+    }
+    log("Nothing was executed, and nothing was deleted.");
+    return { exitCode: 1, execution: [], run: state.run || null };
+  }
+
   if (!targets.length) {
     const escalated = (plan.steps || []).filter((s) => s.action === "ticket" || s.action === "blocked");
     if (plan.verdict === "blocked") {
@@ -611,6 +655,78 @@ async function closeTicketOnDeliverable({ ticketId, before, seriesDir, note }) {
   return { ...result, comparison };
 }
 
+/**
+ * The manager's whole authority over a code proposal: accept it, or reject it. Never apply it.
+ *
+ * Three things are deliberate here.
+ *
+ * **It needs act mode.** Accepting a proposal is a decision with consequences, and `report` mode is
+ * the mode that has none. A manager that records decisions while claiming to be rehearsing is the
+ * contradiction `--no-write` with `--mode=act` already refuses.
+ *
+ * **It is not a ledger entry.** The patch record is the record of the judgment. What goes into the
+ * ledger is the *consequence* — the wipe-and-cascade that makes the accepted code actually run — and
+ * that is already a menu action with a budget and an anti-spin gate. Recording the judgment as an
+ * intervention too would spend the step's budget on reading a proposal.
+ *
+ * **The reason is checked, not just required.** "I accepted it because volume 15 passes now" is the
+ * same demand `validateTicketShape` refuses on the manager's question, arriving from the other end of
+ * the conversation (gotcha 70). The reason has to say something about the deliverable.
+ *
+ * @param {{patchId: string, outcome: "accepted"|"rejected", reason: string|null, mode: string}} opts
+ * @returns {{exitCode: number, patch: Object|null, error: string|null}}
+ */
+function judgePatch({ patchId, outcome, reason, mode }) {
+  const log = (line) => console.log(`[delivery] ${line}`);
+  if (mode !== "act") {
+    log(
+      `REFUSED: accepting or rejecting a patch is an act, and this run is in report mode. ` +
+        `Report mode proposes and decides nothing. Pass --mode=act.`
+    );
+    return { exitCode: 2, patch: null, error: "report mode does not judge patches" };
+  }
+  if (!patchId) {
+    log("REFUSED: no patch named.");
+    return { exitCode: 2, patch: null, error: "no patch named" };
+  }
+
+  const paths = patches.patchPaths();
+  const stored = patches.findPatch(patchId, patches.readPatches(paths.json).patches);
+  if (!stored) {
+    log(`REFUSED: no patch ${patchId}. \`node fix.js --status\` lists what exists.`);
+    return { exitCode: 2, patch: null, error: `no patch ${patchId}` };
+  }
+
+  const result =
+    outcome === "accepted"
+      ? patches.acceptPatch(patchId, { reason, decidedBy: "manager" }, paths)
+      : patches.rejectPatch(patchId, { reason, decidedBy: "manager" }, paths);
+
+  if (result.error) {
+    log(`REFUSED: ${result.error}`);
+    return { exitCode: 2, patch: result.patch || null, error: result.error };
+  }
+
+  const patch = result.patch;
+  log(`${patch.id} ${outcome}: ${patch.decision.reason}`);
+  log(`  ${patch.step}${patch.volume ? ` volume ${patch.volume}` : ""} — ${patch.summary}`);
+  log(`  files it names: ${patch.files ? patch.files.join(", ") : "(none)"}`);
+  if (outcome === "accepted") {
+    log(
+      `  Next: the commit is the dev team's act, not yours — node fix.js --commit=${patch.id}. ` +
+        `Then the accepted code has to be made to run: the skip checks do not know the code changed, ` +
+        `so the step it fixes has to be wiped and cascaded (gotcha 66). Run npm run delivery --mode=act ` +
+        `and the plan will propose that.`
+    );
+  } else {
+    log(
+      `  Next: this code is still in the working tree, and the tree is what the next run executes. ` +
+        `Put it back — node fix.js --revert=${patch.id}. Act mode refuses to run a step until that is done.`
+    );
+  }
+  return { exitCode: 0, patch, error: null };
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -633,6 +749,20 @@ async function main() {
         "Use report mode to see the plan without executing it."
     );
     process.exitCode = 2;
+    return;
+  }
+
+  // Judging a proposal is its own act, and it does not need a triage: the patch, its proposal and its
+  // checks are the whole question. Doing it here also means a mistyped patch id is refused before a
+  // series is read.
+  if (args.acceptPatch || args.rejectPatch) {
+    const judged = judgePatch({
+      patchId: args.acceptPatch || args.rejectPatch,
+      outcome: args.acceptPatch ? "accepted" : "rejected",
+      reason: args.reason,
+      mode,
+    });
+    process.exitCode = judged.exitCode;
     return;
   }
 
@@ -711,6 +841,7 @@ module.exports = {
   performWipe,
   progressOf,
   closeTicketOnDeliverable,
+  judgePatch,
   runActPlan,
   main,
 };
