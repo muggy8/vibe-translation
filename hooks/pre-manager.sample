@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# pre-manager.sample — BEFORE a support-role model turn: the delivery manager's
+# decision, a diagnostics answer, or a dev-team turn (AGENTS.md §3.6).
+#
+# These three roles are the ones in the delivery layer that make a model call
+# and are NOT pipeline steps, so they have their own pseudo-step name. The hook
+# fires inside the role's own module, right before its turn, so a request the
+# role refuses before reaching the model (an unknown ticket, a ticket already
+# answered, a working tree somebody else already edited) never pays for a
+# container switch.
+#
+# Pick the container you want answering a support turn. It must be a model that
+# can CALL TOOLS: the diagnostics and dev-team turns are tool-calling agents,
+# and a container that cannot call tools answers them with nothing at all — the
+# symptom is an empty answer, not an error.
+#
+# Copy to hooks/pre-manager and `chmod +x` it. A repeat switch is a no-op via
+# hooks/.model-switch-state, so firing this on every decision of an autopilot
+# loop costs nothing when the right container already serves the port.
+#
+#   exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/<your-support-model>
+echo "[pre-manager] no container switch configured for the support roles — using whatever serves the endpoint."

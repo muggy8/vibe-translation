@@ -1024,6 +1024,29 @@ function openTickets(paths = ticketPaths()) {
 }
 
 /**
+ * Does this ticket ask about exactly this (step, volume, finding)?
+ *
+ * The key is the same one the anti-spin gate keys on (`utils/ledger.js`), and it is written here
+ * rather than re-derived at each caller because the resume triage (`utils/resume.js`) has to answer
+ * "has this already been asked?" from a state snapshot it was handed, while `ticketsFor` answers it
+ * from the file. Two implementations of a key is two chances for them to disagree about whether a
+ * question is already open — which is how a duplicate ticket gets opened and a manager gets told to
+ * ask the same thing twice.
+ *
+ * @param {Ticket} ticket
+ * @param {{step: string, volume?: string|null, finding: string}} key
+ * @returns {boolean}
+ */
+function matchesTicketKey(ticket, key) {
+  const want = key.volume === undefined || key.volume === null ? null : String(key.volume);
+  return (
+    ticket.step === key.step &&
+    ticket.finding === key.finding &&
+    (ticket.volume === undefined || ticket.volume === null ? null : String(ticket.volume)) === want
+  );
+}
+
+/**
  * Every ticket about one finding — the question "has anyone already asked this?" before a
  * second ticket is opened for the same thing.
  * @param {{step: string, volume?: string|null, finding: string}} key
@@ -1031,13 +1054,7 @@ function openTickets(paths = ticketPaths()) {
  * @returns {Ticket[]}
  */
 function ticketsFor(key, paths = ticketPaths()) {
-  const want = key.volume === undefined || key.volume === null ? null : String(key.volume);
-  return readTickets(paths.json).tickets.filter(
-    (t) =>
-      t.step === key.step &&
-      t.finding === key.finding &&
-      (t.volume === undefined || t.volume === null ? null : String(t.volume)) === want
-  );
+  return readTickets(paths.json).tickets.filter((t) => matchesTicketKey(t, key));
 }
 
 // ─── The human-facing half ────────────────────────────────────────────────────
@@ -1197,6 +1214,8 @@ module.exports = {
   closeTicket,
   openTickets,
   ticketsFor,
+  matchesTicketKey,
+  sameQuestion,
   renderTicketMarkdown,
   renderTicketsMarkdown,
 };

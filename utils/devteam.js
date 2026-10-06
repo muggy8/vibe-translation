@@ -49,6 +49,10 @@ const { assertRealToolCalls } = require("./agents");
 const { extractJsonObject } = require("./manifest");
 const patches = require("./patches");
 const tickets = require("./tickets");
+// The role fires its own hooks around its own model turn: `fix.js` cannot know whether this module is
+// about to reach the model without repeating every refusal `workTicket` makes, and on a machine where
+// a switch means loading a container the guarantee has to belong to the caller (gotcha 22).
+const { runTurnWithHooks, MANAGER_TASK } = require("./hooks");
 
 const ROOT = path.join(__dirname, "..");
 const SYSTEM_PROMPT_FILE = path.join(ROOT, "system-prompts", "devteam.md");
@@ -474,29 +478,42 @@ async function workTicket({ ticketId, seriesDir, root = ROOT, patchPaths = patch
   const maxSteps = devteamMaxStepsFor(footprint.bytes);
 
   const gate = await patchFsTools({ cwd: root, allowedDirs: [root] });
-  const handle = await harness.createAgentHandle({
-    name: "devteam",
-    systemPrompt: loadSystemPrompt() + DEVTEAM_TOOLS_NOTE,
-    tools: gate.tools,
-    approve: gate.approve,
-    cwd: root,
-    maxSteps,
-  });
 
-  let result;
+  // `pre-manager` / `post-manager` fire HERE, around the turn, not in the CLI that typed the command.
+  // Every refusal this module makes (unknown ticket, a tree somebody else already edited, a ticket
+  // with no chosen option, a second team on one ticket) happens first, so a request that never reaches
+  // the model never pays for a container switch (gotcha 22). And this turn is a tool-calling agent
+  // that EDITS files, which a container that cannot call tools answers with nothing at all (gotcha
+  // 51) — so the guarantee "the support model is the one serving" belongs to the role that makes the
+  // call. Which container that is stays entirely the hook's business (AGENTS.md §3).
+  let result = null;
   let turnError = null;
   try {
-    result = await handle.sendTurn(renderTicketForDev({ ticket, patch, option, seriesDir, root }), {
-      label: `devteam-${ticket.id}`,
+    result = await runTurnWithHooks(MANAGER_TASK, async () => {
+      const agent = await harness.createAgentHandle({
+        name: "devteam",
+        systemPrompt: loadSystemPrompt() + DEVTEAM_TOOLS_NOTE,
+        tools: gate.tools,
+        approve: gate.approve,
+        cwd: root,
+        maxSteps,
+      });
+      try {
+        const reply = await agent.sendTurn(renderTicketForDev({ ticket, patch, option, seriesDir, root }), {
+          label: `devteam-${ticket.id}`,
+        });
+        assertRealToolCalls(reply, "the dev team", ticket.volume || ticket.step);
+        return reply;
+      } finally {
+        await agent.close();
+      }
     });
-    assertRealToolCalls(result, "the dev team", ticket.volume || ticket.step);
   } catch (err) {
     // A turn that died part-way is not a clean refusal: the patch is already open and the tree may
     // already be edited. Report it as an unfinished patch, because that is what the next command has
-    // to deal with, and name the way back.
+    // to deal with, and name the way back. A `pre-manager` hook that failed lands here too — the
+    // patch is open and unjudged either way, and the tree is what it is.
     turnError = err;
-  } finally {
-    await handle.close();
   }
 
   const treeAfter = patches.workingTreeChanges(root);

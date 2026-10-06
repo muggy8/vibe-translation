@@ -11,6 +11,9 @@ const path = require("path");
 const {
   TASKS,
   PIPELINE_TASK,
+  SUPPORT_TASKS,
+  MANAGER_TASK,
+  AUTOPILOT_TASK,
   HOOKS_DIR_ENV,
   hookTimeoutMs,
   getHooksDir,
@@ -19,6 +22,7 @@ const {
   buildEnvOverrides,
   execHookFile,
   withHooks,
+  runTurnWithHooks,
 } = require("../utils/hooks");
 
 // ─── temp-dir helpers ─────────────────────────────────────────────────────────
@@ -60,6 +64,17 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(PIPELINE_TASK, "pipeline");
 assert.strictEqual(HOOKS_DIR_ENV, "AI_CLIENT_HOOKS_DIR");
+
+// The support-role pseudo-steps: roles with a model call but no gulp task.
+// They are pinned as NOT in TASKS, because TASKS is the list `index.js --stages=`
+// accepts and `test/test-postmortem.js` pins against the gulp steps and the
+// artifact specs — a support role in that list would look like a runnable step.
+assert.deepStrictEqual(SUPPORT_TASKS, ["manager", "autopilot"]);
+assert.strictEqual(MANAGER_TASK, "manager");
+assert.strictEqual(AUTOPILOT_TASK, "autopilot");
+for (const role of SUPPORT_TASKS) {
+  assert.ok(!TASKS.includes(role), `SUPPORT_TASKS must stay out of TASKS: ${role}`);
+}
 
 // ─── getHooksDir ──────────────────────────────────────────────────────────────
 
@@ -187,6 +202,42 @@ assert.strictEqual(HOOKS_DIR_ENV, "AI_CLIENT_HOOKS_DIR");
     assert.strictEqual(res, "RESULT");
     assert.strictEqual(taskRan, true);
     assert.strictEqual(fs.readFileSync(m, "utf8"), "before\nafter\n");
+    delete process.env[HOOKS_DIR_ENV];
+  }
+
+  // A support-role turn: the CLI is already running, so it asks for the lifecycle
+  // directly rather than wrapping a task definition. This is the guarantee the
+  // manager / diagnostics / dev-team turns need on a shared-port machine (gotcha
+  // 22): the container switch happens BEFORE the model is asked anything.
+  {
+    const dir = makeTmpDir();
+    const m = marker(dir);
+    process.env[HOOKS_DIR_ENV] = dir;
+    writeHook(dir, "pre-manager", `#!/usr/bin/sh\necho "pre $\{AI_CLIENT_TASK\}" >> "${m}"\n`);
+    writeHook(dir, "post-manager", `#!/usr/bin/sh\necho "post $\{AI_CLIENT_TASK\}" >> "${m}"\n`);
+    const res = await runTurnWithHooks(MANAGER_TASK, async () => "ANSWER");
+    assert.strictEqual(res, "ANSWER", "the turn's own result is handed back");
+    assert.strictEqual(
+      fs.readFileSync(m, "utf8"),
+      "pre manager\npost manager\n",
+      "pre-manager / post-manager fire around a support-role turn, and the hook is told which role it is switching for"
+    );
+    delete process.env[HOOKS_DIR_ENV];
+  }
+
+  // A support-role before-hook that fails stops the turn before any model call.
+  {
+    const dir = makeTmpDir();
+    process.env[HOOKS_DIR_ENV] = dir;
+    writeHook(dir, "pre-manager", "#!/usr/bin/sh\necho 'the manager model is not up' >&2\nexit 4\n");
+    let turnRan = false;
+    await assert.rejects(
+      runTurnWithHooks(MANAGER_TASK, async () => {
+        turnRan = true;
+      }),
+      /exited with code 4/
+    );
+    assert.strictEqual(turnRan, false, "a failed pre-manager hook must stop the turn before the model is called");
     delete process.env[HOOKS_DIR_ENV];
   }
 

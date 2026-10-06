@@ -45,8 +45,24 @@
  *   node delivery.js --mode=act            # run the plan
  *   node delivery.js --json                # also print the plan as JSON
  *   node delivery.js --no-write            # print only, write nothing (report mode only)
+ *   node delivery.js --open-ticket         # write the question the plan itself proposes
+ *   node delivery.js --choose=<id> --ticket=<id> --reason="…"   # pick an option the team offered
  *   node delivery.js --mode=act --accept-patch=<id> --reason="…"   # judge a proposal: accept it
  *   node delivery.js --mode=act --reject-patch=<id> --reason="…"   # judge a proposal: refuse it
+ *
+ * **The three verbs of the escalation ladder** are `--open-ticket`, `--choose` and
+ * `--accept-patch`/`--reject-patch`. They exist because the closed menu had entries with no command
+ * behind them: `open-ticket` was a proposal nothing could carry out (`executableSteps` returns
+ * nothing for a `ticket` line, so act mode executed nothing and only a GATE refusal ever reached
+ * `openTicketFor`), and a ticket the diagnostics team had answered could be read but not acted on,
+ * which meant the dev team — summoned only by an option marked `requiresCodeChange` — could never be
+ * summoned at all. A menu with entries nobody can use is a report, not a menu.
+ *
+ * `--open-ticket` is allowed in BOTH modes, and the reason is the ordering of this whole layer: a
+ * ticket is the manager's own words, not an action on the corpus, and refusing the escalation in
+ * report mode would mean the manager had to already be trusted to act before it was allowed to ask
+ * for help. It is idempotent — a live ticket for this exact step/volume/finding is named, not
+ * duplicated — so the autopilot may call it on every iteration.
  *
  * Accepting or rejecting a proposal is the manager's whole authority over a code change, and it is
  * the only thing it may do with one: it never applies it, and it never commits it (that is the dev
@@ -79,7 +95,7 @@ const {
 const { postMortemDir } = require("./utils/postmortem");
 const { wipeAttemptOutputs } = require("./utils/fs");
 const { readLedger, appendLedgerEntry, interventionAllowed } = require("./utils/ledger");
-const { createTicket, closeTicket } = require("./utils/tickets");
+const { createTicket, closeTicket, recordChoice, readTickets } = require("./utils/tickets");
 const { acquireRunLock, releaseRunLock, runLockPath } = require("./utils/runlock");
 const patches = require("./utils/patches");
 
@@ -102,26 +118,39 @@ function readArgs(argv) {
     write: true,
     acceptPatch: null,
     rejectPatch: null,
+    openTicket: false,
+    choose: null,
+    ticket: null,
     reason: null,
     error: null,
   };
   for (const arg of argv) {
     if (arg === "--json") out.json = true;
     else if (arg === "--no-write") out.write = false;
+    else if (arg === "--open-ticket") out.openTicket = true;
     else if (arg.startsWith("--mode=")) out.mode = arg.slice("--mode=".length).trim().toLowerCase();
     else if (arg.startsWith("--series=")) out.seriesDir = arg.slice("--series=".length).trim();
     else if (arg.startsWith("--accept-patch=")) out.acceptPatch = arg.slice("--accept-patch=".length).trim();
     else if (arg.startsWith("--reject-patch=")) out.rejectPatch = arg.slice("--reject-patch=".length).trim();
+    else if (arg.startsWith("--choose=")) out.choose = arg.slice("--choose=".length).trim();
+    else if (arg.startsWith("--ticket=")) out.ticket = arg.slice("--ticket=".length).trim();
     else if (arg.startsWith("--reason=")) out.reason = arg.slice("--reason=".length);
     else {
       out.error =
         `unknown flag "${arg}". Known flags: --mode=report|act, --series=<dir>, --json, --no-write, ` +
+        `--open-ticket, --choose=<optionId> --ticket=<id> --reason="<text>", ` +
         `--accept-patch=<id> --reason="<text>", --reject-patch=<id> --reason="<text>"`;
       break;
     }
   }
   if (out.acceptPatch && out.rejectPatch) {
     out.error = `--accept-patch and --reject-patch are one decision. Choose one.`;
+  }
+  const verbs = [out.openTicket, !!out.choose, !!(out.acceptPatch || out.rejectPatch)].filter(Boolean).length;
+  if (verbs > 1) {
+    out.error =
+      "one act at a time: --open-ticket, --choose, --accept-patch and --reject-patch are each a decision " +
+      "with its own record. Run them as separate commands.";
   }
   return out;
 }
@@ -297,7 +326,56 @@ function gateBudget(step, run) {
 }
 
 /**
- * The question the manager asks when a gate stops it. Findings-shaped, never outcome-shaped
+ * What the manager is allowed to cite as evidence for one step of the plan: the assessment's own
+ * findings for that step and volume, and nothing else. It has not read the code, the prompts or the
+ * run transcripts, so a ticket that cited them would be the manager reaching into the container it
+ * is not allowed to open (gotcha 74 checks the same boundary on the ANSWER side).
+ *
+ * When the assessment named nothing citable — it could not run, or the plan was not built from a
+ * triage — the fallback names the report the diagnostics team should read rather than inventing
+ * evidence the manager did not look at.
+ *
+ * @param {import("./utils/resume").ResumeStepPlan} step
+ * @param {Object} state - The working state the plan was built from.
+ * @param {string} reason - The sentence that explains why a question is being asked at all.
+ * @returns {Array<{file: string, note: string}>}
+ */
+function evidenceForStep(step, state, reason) {
+  const stepState = (state.stepStates || []).find((s) => s.step === step.step) || {};
+  const evidence = [];
+  const cite = (f, label) => {
+    if (!f) return;
+    if (step.fromVolume && f.volume && String(f.volume) !== String(step.fromVolume)) return;
+    evidence.push({ file: f.file, note: `${label} ${f.kind}: ${f.message}` });
+  };
+  for (const f of stepState.damageFindings || []) cite(f, `[HIGH]`);
+  for (const f of stepState.evidenceFindings || []) cite(f, `[HIGH]`);
+  if (!evidence.length) {
+    evidence.push({
+      file: `${step.step}.md (post-mortem report)`,
+      note: `the assessment for ${step.step}: ${step.finding || "no finding named"} — ${reason}`,
+    });
+  }
+  return evidence;
+}
+
+/**
+ * What has already been tried on this step, read out of the ledger rather than out of the
+ * manager's memory, so "this is the third time" is a query with citable ids and a spin cannot be
+ * laundered into a fresh request (gotcha 70).
+ *
+ * @param {string} stepName
+ * @param {string} run
+ * @returns {Array<{action: string, outcome: string, ledgerId: string}>}
+ */
+function triedForStep(stepName, run) {
+  return (readLedger().entries || [])
+    .filter((e) => e.kind === "intervention" && e.step === stepName && e.run === run)
+    .map((e) => ({ action: e.action, outcome: e.outcome, ledgerId: e.id }));
+}
+
+/**
+ * The question the manager asks when a GATE stops it. Findings-shaped, never outcome-shaped
  * (`utils/tickets.js` refuses the other shape), and it names what was already tried out of the
  * ledger rather than out of the manager's memory.
  *
@@ -309,35 +387,13 @@ function gateBudget(step, run) {
  * @returns {{ticket: Object|null, problems: Object[]}}
  */
 function openTicketFor({ step, plan, state, reason, run }) {
-  const stepState = (state.stepStates || []).find((s) => s.step === step.step) || {};
-  const evidence = [];
-  const cite = (f, label) => {
-    if (!f) return;
-    if (step.fromVolume && f.volume && String(f.volume) !== String(step.fromVolume)) return;
-    evidence.push({ file: f.file, note: `${label} ${f.kind}: ${f.message}` });
-  };
-  for (const f of stepState.damageFindings || []) cite(f, `[HIGH]`);
-  for (const f of stepState.evidenceFindings || []) cite(f, `[HIGH]`);
-  if (!evidence.length) {
-    // The assessment named nothing citable (it could not run, or the plan was not built from a
-    // triage). Say which report the diagnostics team should read, rather than inventing evidence.
-    evidence.push({
-      file: `${step.step}.md (post-mortem report)`,
-      note: `the assessment for ${step.step}: ${step.finding || "no finding named"} — ${reason}`,
-    });
-  }
-
-  const tried = (readLedger().entries || [])
-    .filter((e) => e.kind === "intervention" && e.step === step.step && e.run === run)
-    .map((e) => ({ action: e.action, outcome: e.outcome, ledgerId: e.id }));
-
   const result = createTicket({
     run,
     step: step.step,
     volume: step.fromVolume,
     finding: step.finding || "unspecified",
-    evidence,
-    tried,
+    evidence: evidenceForStep(step, state, reason),
+    tried: triedForStep(step.step, run),
     ruledOut: [
       `re-running ${step.step} as it stands — the plan already proposes it and the ledger says what it produced`,
       "deleting the gate evidence — Tier C, and not mine to do",
@@ -351,7 +407,207 @@ function openTicketFor({ step, plan, state, reason, run }) {
   return { ticket: result.ticket, problems: result.problems || [] };
 }
 
+/**
+ * The questions the triage asks when it is the PLAN that says "this is a question, not a re-run".
+ *
+ * `openTicketFor` above is written for a gate refusal: something was tried and the deliverable did
+ * not move. The triage's own escalation has not tried anything yet — it refused to try, because
+ * re-running a deterministic gate reproduces the identical quarantine (gotcha 68). Asking the gate
+ * shape here would state something that did not happen, and a ticket whose "already tried" list is
+ * a fiction is the kind of ticket that gets answered by switching the guard off. So each escalation
+ * kind asks the question that is actually true of it.
+ *
+ * Every one of them is interrogative and names a mechanism, never a wanted result: `utils/tickets.js`
+ * refuses "make volume 15 pass" precisely because the cheapest way to satisfy a demand is to remove
+ * the thing that reported the complaint (gotcha 70).
+ *
+ * @param {import("./utils/resume").ResumeStepPlan} step
+ * @returns {string|null} - null when the plan names no escalation this table knows.
+ */
+function questionForEscalation(step) {
+  const vol = step.fromVolume ? ` volume ${step.fromVolume}` : "";
+  const finding = step.finding || "this finding";
+  switch (step.escalation) {
+    case "gate-removed":
+      return (
+        `Why is ${step.step}'s output missing for${vol} while that same step's own gate evidence sits in the ` +
+        `same folder? Re-running the step writes the file and the same deterministic check then refuses it ` +
+        `again, so the shape on disk is reproduced rather than repaired. What does the evidence say about ` +
+        `what the check was refusing?`
+      );
+    case "audit-verdict":
+      return (
+        `Why does the consistency audit report a FAIL against the four artifacts it read, when nothing in the ` +
+        `series has changed since the report was written? Re-auditing the same artifacts reproduces the same ` +
+        `verdict, so which artifact disagrees with which one is the thing I cannot read.`
+      );
+    case "recurring-finding":
+      return (
+        `Why does ${finding} appear again on ${step.step}${vol} when the ledger records that the same finding ` +
+        `survived an earlier recorded run? What is different this time, if anything?`
+      );
+    case "intervention-budget":
+      return (
+        `${step.step}${vol} has used the interventions it is allowed on one step in one run, and the deliverable ` +
+        `did not move. What is producing ${finding} that those attempts did not?`
+      );
+    default:
+      return null;
+  }
+}
+
+/**
+ * Open the ticket the plan itself proposes — the verb the `open-ticket` menu entry was missing.
+ *
+ * Without it the closed menu had an entry with no command behind it: `executableSteps` returns
+ * nothing for a `ticket` line, so act mode executed nothing and only a GATE refusal ever reached
+ * `openTicketFor`. A plan whose honest answer is a question could therefore only report that it
+ * had a question, which is the shape of a manager that escalates by giving up.
+ *
+ * It is IDEMPOTENT on purpose: the autopilot may call it on every iteration, and the plan's triage
+ * already names the live ticket for this exact (step, volume, finding) rather than proposing a
+ * duplicate (gotcha 71's correspondence half). Re-opening the same complaint would put two tickets
+ * in front of the diagnostics team and make the ledger's "already tried" list describe neither.
+ *
+ * @param {{plan: import("./utils/resume").ResumePlan, state: Object, run: string}} opts
+ * @returns {{exitCode: number, ticket: Object|null, problems: Object[], note: string}}
+ */
+function openTicketFromPlan({ plan, state, run }) {
+  const step = (plan.steps || []).find((s) => s.action === "ticket");
+  if (!step) {
+    return {
+      exitCode: 2,
+      ticket: null,
+      problems: [],
+      note:
+        `the plan does not name a ticket to open — its resume point is "${plan.verdict}". ` +
+        "Run `npm run delivery` and read the report: a ticket is opened when the plan says the answer " +
+        "is a question, and this plan does not.",
+    };
+  }
+
+  if (step.existingTicket) {
+    // The full record, not just the id the triage carried: the manager needs the question and the
+    // next command printed, or "already open" is a dead end.
+    const full = (readTickets().tickets || []).find((t) => t && t.id === step.existingTicket.id) || step.existingTicket;
+    return {
+      exitCode: 0,
+      ticket: full,
+      problems: [],
+      alreadyOpen: true,
+      note:
+        `ticket ${step.existingTicket.id} is already ${step.existingTicket.status} for this exact ` +
+        `${step.step} / ${step.fromVolume || "whole step"} / ${step.finding || "finding"}. Nothing new was opened.`,
+    };
+  }
+
+  const question = questionForEscalation(step);
+  if (!question) {
+    return {
+      exitCode: 2,
+      ticket: null,
+      problems: [],
+      note:
+        `the plan escalates ${step.step} to a question for a reason this command does not know how to ask ` +
+        `(${String(step.escalation)}). Read the plan's own reasons and write the ticket by hand, or report ` +
+        `this to the account owner — a question written from the wrong premise gets answered by removing ` +
+        `the complaint.`,
+    };
+  }
+
+  const reason = (step.reasons || []).join(" ") || `the plan's answer for ${step.step} is a question`;
+  const result = createTicket({
+    run,
+    step: step.step,
+    volume: step.fromVolume,
+    finding: step.finding || "unspecified",
+    evidence: evidenceForStep(step, state, reason),
+    tried: triedForStep(step.step, run),
+    ruledOut: [
+      `re-running ${step.step} as the plan would run it — the plan refuses that itself, and its reasons say why`,
+      "deleting the gate evidence — Tier C, and not mine to do",
+      "turning off the guard that produced the evidence — Tier C, and the account owner's decision alone",
+    ],
+    question,
+  });
+
+  if (!result.ticket) {
+    return {
+      exitCode: 1,
+      ticket: null,
+      problems: result.problems || [],
+      note: "the ticket was refused by the shape rules in utils/tickets.js. Nothing was written.",
+    };
+  }
+  return {
+    exitCode: 0,
+    ticket: result.ticket,
+    problems: result.problems || [],
+    note: `opened ticket ${result.ticket.id} for ${step.step}${step.fromVolume ? ` volume ${step.fromVolume}` : ""}.`,
+  };
+}
+
+/**
+ * Record the manager's choice among the options the diagnostics team offered.
+ *
+ * The choice is the manager's own act, and until now it was reachable only from code: the closed
+ * menu had no entry for it, so a ticket that had been answered could be read but not acted on, and
+ * the next role in the ladder (the dev team, which only ever moves on an option marked
+ * `requiresCodeChange`) could never be summoned by a command the manager runs.
+ *
+ * `recordChoice` requires a reason, and `utils/tickets.js` refuses a banned option by name here —
+ * the filter is on the option generator, but the door is here too, so a refusal is a refusal
+ * whatever route it was reached by (gotcha 70).
+ *
+ * @param {{ticketId: string, optionId: string, reason: string|null}} opts
+ * @returns {{exitCode: number, ticket: Object|null, error: string|null}}
+ */
+function chooseOption({ ticketId, optionId, reason }) {
+  if (!optionId) {
+    return {
+      exitCode: 2,
+      ticket: null,
+      error:
+        "--choose needs the option id: --choose=<optionId> --ticket=<id> --reason=\"<why>\". " +
+        "Run `npm run diagnose -- --open` to read the tickets and the options each one offers.",
+    };
+  }
+  if (!ticketId) {
+    return { exitCode: 2, ticket: null, error: `--choose needs --ticket=<id> as well.` };
+  }
+  if (!reason || !reason.trim()) {
+    return {
+      exitCode: 2,
+      ticket: null,
+      error:
+        "a choice must carry a reason: --reason=\"<what made this option the one>\". " +
+        "The reason is what the account owner reads afterwards, and what the acceptance test is judged against.",
+    };
+  }
+
+  const result = recordChoice(ticketId, { optionId, reason: reason.trim(), decidedBy: "delivery-manager" });
+  if (result.error) return { exitCode: 2, ticket: null, error: result.error };
+  const option = (result.ticket.options || []).find((o) => o.id === optionId) || {};
+  return { exitCode: 0, ticket: result.ticket, error: null, option };
+}
+
 // ─── Act mode: the doing ──────────────────────────────────────────────────────
+
+/**
+ * The run this manager's records belong to.
+ *
+ * Continuing the newest recorded run — rather than starting a fresh one per invocation — is what
+ * lets the anti-spin gate see the whole story: a manager that starts a new memory every time it acts
+ * can never be caught repeating itself (gotcha 72). A genuinely new `npm run pipeline` makes its own
+ * id, and that is where the count resets. One function, so a ticket and the ledger entry that
+ * mentions it cannot land under two different runs.
+ *
+ * @param {Object} state - The working state, whose `run` is the newest recorded one.
+ * @returns {string}
+ */
+function runIdFor(state) {
+  return state && state.run ? state.run : process.env.INDEX_RUN_ID || `delivery-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+}
 
 /**
  * Run one step through the step runner, in its own process.
@@ -463,17 +719,19 @@ async function runActPlan({ plan, state, runStep = runPipelineStep }) {
         `act mode: the plan's answer for ${escalated.map((s) => s.step).join(", ")} is a question, not a step. ` +
           `The steps listed after it are conditional on that question being answered, so nothing was executed.`
       );
+      log(
+        "  the question IS the move the menu offers, and it is free. Write it down: " +
+          "npm run delivery -- --open-ticket, then npm run diagnose -- --ticket=<id> to have the diagnostics team answer it."
+      );
       return { exitCode: 1, execution: [], run: state.run || null };
     }
     log("act mode: the plan contains no step to run. Nothing was executed.");
     return { exitCode: 0, execution: [], run: state.run || null };
   }
 
-  // The run the interventions belong to. Continuing the newest recorded run — rather than
-  // starting a fresh one per invocation — is what lets the anti-spin gate see the whole story:
-  // a manager that starts a new memory every time it acts can never be stopped for repeating
-  // itself. A genuinely new pipeline run makes its own id, and that is where the count resets.
-  const run = state.run || process.env.INDEX_RUN_ID || `delivery-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  // The run the interventions belong to. See `runIdFor`: the same rule the ticket channel uses, so a
+  // ticket and the ledger entry that names it are counted together.
+  const run = runIdFor(state);
   process.env.INDEX_RUN_ID = run;
 
   const lock = acquireRunLock({ by: "delivery.js act", run });
@@ -766,6 +1024,37 @@ async function main() {
     return;
   }
 
+  // Choosing among the diagnostics team's options is the manager's own act, and it needs no triage
+  // either: the ticket and its options are the whole question. Refused before the series is read, so
+  // a mistyped ticket id costs no disk walk.
+  if (args.choose) {
+    if (!args.write) {
+      console.error(
+        "[delivery] --no-write with --choose is a contradiction: a choice is a record written on a ticket, " +
+          "and the dev team is summoned by it. Use --no-write to read the plan, not to answer a ticket."
+      );
+      process.exitCode = 2;
+      return;
+    }
+    const chosen = chooseOption({ ticketId: args.ticket, optionId: args.choose, reason: args.reason });
+    if (chosen.error) console.error(`[delivery] REFUSED: ${chosen.error}`);
+    else {
+      const t = chosen.ticket;
+      console.log(`[delivery] ticket ${t.id}: chose ${chosen.option.id} — ${t.choice.reason}`);
+      console.log(`  option: ${chosen.option.label}`);
+      console.log(`  touches: ${chosen.option.touches} · cost: ${chosen.option.cost} · risk: ${chosen.option.risk}`);
+      console.log(`  how to check it: ${chosen.option.verify}`);
+      console.log(
+        chosen.option.requiresCodeChange
+          ? `  this option needs a code change, which is the dev team's work, not yours: npm run fix -- --ticket=${t.id}`
+          : `  this option needs no code change. Run it through the plan: npm run delivery --mode=act`
+      );
+    }
+    if (args.json) console.log(JSON.stringify(chosen, null, 2));
+    process.exitCode = chosen.exitCode;
+    return;
+  }
+
   const state = await readWorkingState({ seriesDir: args.seriesDir || undefined });
   const plan = planResume(state);
 
@@ -782,6 +1071,34 @@ async function main() {
   }
 
   console.log(renderConsole(plan, mode));
+
+  // Opening the ticket the plan proposes is the verb behind the `open-ticket` menu entry, and it is
+  // allowed in BOTH modes: a ticket is the manager's own words, not an action on the corpus. Report
+  // mode's "executes nothing" means the pipeline — refusing a question in report mode would make the
+  // escalation ladder unusable until the manager was already trusted to act, which is backwards.
+  if (args.openTicket) {
+    if (!args.write) {
+      console.error(
+        "[delivery] --no-write with --open-ticket is a contradiction: a ticket is a written question for " +
+          "the diagnostics team. Use --no-write to read the plan without recording it."
+      );
+      process.exitCode = 2;
+      return;
+    }
+    const opened = openTicketFromPlan({ plan, state, run: runIdFor(state) });
+    const line = `[delivery] ${opened.note}`;
+    if (opened.exitCode === 2) console.error(line);
+    else console.log(line);
+    for (const p of opened.problems) console.log(`  ${p.kind || "problem"}: ${p.message || p.note || JSON.stringify(p)}`);
+    if (opened.ticket && opened.ticket.question) {
+      console.log(`  question: ${opened.ticket.question}`);
+      console.log(`  read it: ${path.join(postMortemDir(), "tickets.md")}`);
+      console.log(`  next: npm run diagnose -- --ticket=${opened.ticket.id}`);
+    }
+    if (args.json) console.log(JSON.stringify(opened, null, 2));
+    process.exitCode = opened.exitCode;
+    return;
+  }
 
   const execution =
     mode === "act"
@@ -837,6 +1154,10 @@ module.exports = {
   gateSpin,
   gateBudget,
   openTicketFor,
+  openTicketFromPlan,
+  questionForEscalation,
+  chooseOption,
+  runIdFor,
   runPipelineStep,
   performWipe,
   progressOf,

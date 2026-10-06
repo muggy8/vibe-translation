@@ -25,6 +25,9 @@
  *     that built it always leaves,
  *   - the post-mortem reports for every step (`utils/postmortem.js`, run fresh — it is free),
  *   - the run ledger's recurring findings (`utils/ledger.js` — what survived an earlier run),
+ *   - the ticket and patch channels (`utils/tickets.js`, `utils/patches.js`) — the manager's own
+ *     correspondence, which is what lets it tell "this shape is new" from "I already asked about
+ *     this, and somebody has already written an answer for it",
  *   - `translation-report.json` — the deliverable itself, which is the manager's goal
  *     function (a run that finishes with 40 UNVERIFIED chapters is a failed delivery even
  *     though it exited 0).
@@ -49,6 +52,8 @@ const { PIPELINE_STEPS } = require("../gulpfile");
 const { STEP_ARTIFACT_SPECS, specForStep } = require("./artifacts");
 const { runPostMortem } = require("./postmortem");
 const { readLedger, recurringFindings } = require("./ledger");
+const { readTickets, matchesTicketKey } = require("./tickets");
+const { readPatches } = require("./patches");
 const { validateManifest } = require("../get-translation-target");
 const { readTranslationReport, summarizeReportRows } = require("./translation-report");
 
@@ -130,6 +135,12 @@ const { readTranslationReport, summarizeReportRows } = require("./translation-re
  *   to. `utils/ledger.js` keys the anti-spin check on (step, finding, action, volume), so the
  *   triage has to name it: an action nobody can say what it was *about* cannot be recognised
  *   as a repeat of itself.
+ * @property {?{id: string, status: string}} existingTicket - Set on a `ticket` line when the
+ *   ticket channel already has a live ticket asking this exact question. The move is then to
+ *   work THAT ticket, not to write a second one for the same finding.
+ * @property {string|null} escalation - Which check turned this line into a question
+ *   (`"gate-removed"` / `"audit-verdict"` / `"recurring-finding"` / `"intervention-budget"`),
+ *   so the report can name the reason instead of just the refusal.
  */
 
 /**
@@ -197,6 +208,24 @@ const DAMAGE_KINDS = new Set([
  * they are not by themselves a reason to rebuild, and they are never wiped (Tier C).
  */
 const EVIDENCE_KINDS = new Set(["quarantine-present"]);
+
+/**
+ * The four shapes where re-running reproduces the same result, and the one line each one puts in
+ * the report's headline. Written as data beside the action menu because a refusal that does not
+ * name the spin just looks like caution — and caution is the thing that gets switched off
+ * (gotcha 65's lesson, and gotcha 71's volume-15 case).
+ *
+ * The keys are the `kind` values `planResume`'s `escalate()` records on the plan line, so the
+ * sentence a human reads and the record a machine reads come from one table.
+ *
+ * @type {Record<string, string>}
+ */
+const ESCALATION_HEADLINES = {
+  "gate-removed": "that step's own gate removed this output, and a re-run reproduces the identical quarantine",
+  "audit-verdict": "the audit's own verdict is the problem, and re-auditing unchanged artifacts reproduces it",
+  "recurring-finding": "the ledger says a re-run of this step has already not cleared it",
+  "intervention-budget": "this step has spent the intervention budget this run allows it",
+};
 
 /**
  * The manager's whole vocabulary of actions. Nothing outside this table exists for it.
@@ -276,7 +305,7 @@ const DELIVERY_ACTIONS = [
     name: "open-ticket",
     tier: "B",
     what: "Ask the diagnostics team. Required when the same action against the same finding has already failed twice (utils/ledger.js).",
-    primitive: "createTicket (utils/tickets.js)",
+    primitive: "delivery.js --open-ticket, then diagnose.js --ticket=<id> (utils/tickets.js)",
     countsAsIntervention: false,
   },
   {
@@ -284,6 +313,27 @@ const DELIVERY_ACTIONS = [
     tier: "A",
     what: "Reply to a question the diagnostics team asked back. This is the manager answering, not acting: it cites a folder listing, a report, or the plan of record, and it changes nothing on disk.",
     primitive: "recordAnswer (utils/tickets.js)",
+    countsAsIntervention: false,
+  },
+  {
+    name: "choose-option",
+    tier: "A",
+    what: "Pick one of the options the diagnostics team offered. The manager chooses among the options the banned-option filter allowed; it may not invent one, and it may not choose a refused one.",
+    primitive: "delivery.js --choose=<optionId> --ticket=<id> --reason=<text> (recordChoice, utils/tickets.js)",
+    countsAsIntervention: false,
+  },
+  {
+    name: "dev-team-patch",
+    tier: "A",
+    what: "Send the ticket to the dev team, which is the only role that may change the code. The manager's move here is choosing an option marked requiresCodeChange and letting that team write it; the manager never writes it.",
+    primitive: "fix.js --ticket=<id> (utils/devteam.js)",
+    countsAsIntervention: false,
+  },
+  {
+    name: "judge-patch",
+    tier: "A",
+    what: "Accept or reject a patch the dev team proposed. These are the manager's only two verbs on a code change, and neither one applies it: the commit is the dev team's act, and the wipe-and-cascade that makes the accepted code run is a separate, counted intervention.",
+    primitive: "delivery.js --accept-patch=<id> / --reject-patch=<id> (utils/patches.js)",
     countsAsIntervention: false,
   },
 
@@ -598,7 +648,8 @@ function interventionsUsed(entries, run) {
  * @returns {Promise<{seriesDir: string, manifest: Object|null, manifestProblem: string|null,
  *   volumes: VolumeInventory[], stepStates: ResumeStepState[], recurring: Array,
  *   run: string|null, interventionsByStep: Object<string, number>, interventionBudget: number,
- *   ledgerError: string|null, deliverable: Object|null}>}
+ *   ledgerError: string|null, tickets: Array, ticketsError: string|null,
+ *   patches: Array, patchesError: string|null, deliverable: Object|null}>}
  */
 async function readWorkingState({ seriesDir, manifest } = {}) {
   const dir = path.resolve(seriesDir || process.env.SERIES_LOCATION || process.cwd());
@@ -666,6 +717,18 @@ async function readWorkingState({ seriesDir, manifest } = {}) {
   // which is the failure mode gotcha 67 exists to prevent.
   const entries = ledger.entries || [];
   const latestRun = entries.length ? entries[entries.length - 1].run : null;
+
+  // The manager's own two channels, read into the same snapshot. They belong here rather than in
+  // `planResume` for the same reason the ledger is read here: `planResume` is a **pure function of
+  // a state snapshot**, and a triage decision that reached for `tickets.json` by itself would make
+  // a hand-built test state silently read the real series' ticket history (gotcha 71's trap, in a
+  // new costume). It also belongs here because these are the manager's own records — the ticket it
+  // wrote and the patch it was handed are the two things in this layer that a customer is allowed
+  // to read, and without them the triage can only describe the disk, which means it re-escalates
+  // the same shape forever after a fix has already answered it.
+  const tickets = readTickets();
+  const patches = readPatches();
+
   return {
     seriesDir: dir,
     manifest: plan.manifest,
@@ -677,6 +740,10 @@ async function readWorkingState({ seriesDir, manifest } = {}) {
     interventionsByStep: interventionsUsed(entries, latestRun),
     interventionBudget: maxInterventionsPerStep(),
     ledgerError: ledger.error || null,
+    tickets: tickets.tickets,
+    ticketsError: tickets.error || null,
+    patches: patches.patches,
+    patchesError: patches.error || null,
     deliverable: await readDeliverable(dir),
   };
 }
@@ -877,7 +944,111 @@ function planResume(state) {
     // The finding this action is a response to. It is what the ledger keys the anti-spin
     // check on, so it has to be named by the triage rather than guessed at by whoever acts.
     finding: resumeState.damageKinds[0] || null,
+    existingTicket: null,
+    escalation: null,
   };
+
+  // The manager's own two channels, read out of the same state snapshot the rest of this triage
+  // reads. They are here rather than reached for inside `planResume` for the reason gotcha 71 ends
+  // with: `planResume` is a **pure function of a state**, and a decision that opened `tickets.json`
+  // by itself would make a hand-built test state silently read the real series' correspondence.
+  //
+  // What they fix is the triage's one real blind spot. It could say "this shape needs a question"
+  // but not "I already asked that question, and somebody has already written an answer for it" —
+  // so on a series where a fix had already landed, the plan kept re-escalating the same disk shape
+  // forever and act mode executed nothing forever. The ticket it wrote and the patch it was handed
+  // are the two records in this layer a customer is allowed to read, so reading them is not the
+  // manager reaching into the code: it is the manager remembering its own conversation.
+  const tickets = state.tickets || [];
+  const patches = state.patches || [];
+
+  /**
+   * What the channels already say about this exact (step, volume, finding).
+   *
+   * "Newest" is the LAST matching ticket, because tickets are appended: it is the one that carries
+   * the ledger's account of what has been tried since, and it is the one `escalationStatus`-style
+   * reasoning has to read. A patch counts as answering it only when the manager has said yes —
+   * `accepted` (in the tree, awaiting the dev team's commit) or `committed` (in `main`). A
+   * `proposed` patch does not supersede anything: it is unjudged code, and act mode refuses the
+   * whole plan while one is open (gotcha 75).
+   *
+   * @param {string|null} finding
+   * @returns {{matching: Array, newest: Object|null, live: Object|null, answered: Object|null}}
+   */
+  function channelFor(finding) {
+    if (!finding) return { matching: [], newest: null, live: null, answered: null };
+    const matching = tickets.filter((t) => matchesTicketKey(t, { step: resumeStep, volume: fromVolume, finding }));
+    const newest = matching.length ? matching[matching.length - 1] : null;
+    const live = newest && newest.status !== "closed" ? newest : null;
+    const answered = newest
+      ? patches.find((p) => p && p.ticketId === newest.id && ["accepted", "committed"].includes(p.status)) || null
+      : null;
+    return { matching, newest, live, answered };
+  }
+
+  /**
+   * Turn the repair into a question — unless the channels show that question has already been
+   * asked, and answered with a change the manager accepted.
+   *
+   * Three outcomes, and the difference between them is the whole point:
+   *   - **superseded** — an accepted/committed patch answers the ticket for this exact finding, so
+   *     the guard that produced this disk shape is not the guard that will run. The repair stands.
+   *   - **already open** — the plan names the ticket it already wrote instead of proposing a
+   *     duplicate, so `delivery.js --open-ticket` and the autopilot work the existing one.
+   *   - **a new question** — nothing live matches, so the escalation stands and the reason says
+   *     what the previous ticket's closure measured.
+   *
+   * The supersede half applies to the three "re-running reproduces the same result" tells and NOT
+   * to `intervention-budget`, and the asymmetry is the point: a patch record does not refund the
+   * attempts this run already made, and applying the patch is itself the counted wipe-and-cascade.
+   * A code change cannot un-spend an allowance, so a step that used up its attempts is still out of
+   * moves whatever else has landed.
+   *
+   * @param {("gate-removed"|"audit-verdict"|"recurring-finding"|"intervention-budget")} kind
+   *   Which check fired. Recorded on the plan so the report can name the reason, not just the no.
+   * @param {string} subject - The short clause the headline and the reason both read.
+   * @param {string[]} reasons - Why a re-run is the spin here.
+   * @returns {boolean} - True when the plan became a ticket.
+   */
+  function escalate(kind, subject, reasons) {
+    const { newest, live, answered } = channelFor(plan.finding);
+    if (answered && kind !== "intervention-budget") {
+      plan.reasons.push(
+        `${subject} — but ${answered.id} (${answered.status}) answers ticket ${newest.id} for this exact finding, ` +
+          "so the code that produced this disk shape is not the code that will run. " +
+          (plan.actionName === "wipe-and-cascade"
+            ? "The cascade is what makes that change take effect: the skip checks do not know the code changed (gotcha 66)."
+            : "A plain re-run is legitimate again.")
+      );
+      if (answered.status === "accepted") {
+        notes.push(
+          `${answered.id} is accepted but not yet committed. The commit is the dev team's act: npm run fix -- --commit=${answered.id}.`
+        );
+      }
+      return false;
+    }
+    plan.action = "ticket";
+    plan.actionName = "open-ticket";
+    plan.cascade = false;
+    plan.wipeFirst = [];
+    plan.countsAsIntervention = false;
+    plan.escalation = kind;
+    plan.reasons.push(...reasons);
+    if (live) {
+      plan.existingTicket = { id: live.id, status: live.status };
+      plan.reasons.push(
+        `this question is already open as ${live.id} (${live.status}) — the move is to work that ticket, ` +
+          "not to write a second one for the same finding."
+      );
+    } else if (newest) {
+      const outcome = newest.closure && newest.closure.outcome ? newest.closure.outcome : "closed";
+      plan.reasons.push(
+        `the last ticket for this finding (${newest.id}) closed ${outcome}. That answer did not move the deliverable, ` +
+          "so the shape is still here and time passing does not make a re-run legitimate; a new ticket is written with the ledger's account of what was tried."
+      );
+    }
+    return true;
+  }
 
   if (resumeStep === "discover") {
     plan.action = "blocked";
@@ -886,56 +1057,83 @@ function planResume(state) {
       "intake is its own step with its own agent and its own guards. I can tell you it is needed; I do not answer its questions."
     );
     notes.push("The intake questions (volume order, which files are volumes, the series name) belong to the intake agent and the account owner.");
-  } else if (gateRemovedIt) {
-    plan.action = "ticket";
-    plan.actionName = "open-ticket";
-    plan.reasons.push(
-      `volume ${fromVolume} is missing ${resumeStep}'s output AND holds ${resumeStep}'s own gate evidence in the same folder: a deterministic gate refused that file, and nothing has replaced it since.`,
-      `re-running ${resumeStep} rebuilds the file and then runs the same gate over it, which produces the identical quarantine (gotcha 68). That is the spin, and the ledger refuses the third attempt.`,
-      `read ${resumeInventory.quarantines.map((n) => `\`${n}\``).join(", ")} first — it is the gate's own account of what it refused, and it is not mine to delete (Tier C).`
-    );
-    notes.push(
-      `A finding whose cause is a gate is not repaired by re-running the step the gate lives in. The evidence names the disagreement; the fix is a code question for the diagnostics team.`
-    );
-  } else if (auditVerdictProblem) {
-    // A FAIL verdict is not repaired by re-auditing: the same four artifacts produce the
-    // same FAIL. Re-running it is the spinning shape, so this is a question, not an action.
-    plan.action = "ticket";
-    plan.actionName = "open-ticket";
-    plan.reasons.push(
-      "the audit's verdict is the deliverable here, and re-auditing unchanged artifacts produces the same verdict. " +
-        "The fix is in the four reference artifacts the findings name — which is a diagnostics question, not a re-run."
-    );
-  } else if (cumulative && fromVolume) {
-    plan.actionName = "wipe-and-cascade";
-    plan.cascade = true;
-    plan.countsAsIntervention = true;
-    const folder = (state.manifest.volumes.find((v) => String(v.installmentNumber) === String(fromVolume)) || {}).folder;
-    if (folder) {
-      plan.wipeFirst = [
-        {
-          volumeDir: path.join(state.seriesDir, folder),
-          files: declaredOutputsFor(resumeStep, fromVolume),
-        },
-      ];
-    }
-    plan.reasons.push(
-      `the cumulative invariant rebuilds every volume after ${fromVolume}, so the primitive is: remove ${fromVolume}'s ${resumeStep} outputs, then run ${resumeStep} over the whole series.`,
-      "not --volume: a filtered run puts one volume in the loop, so the later volumes stay built on the broken one (gotcha 66).",
-      "the declared outputs only — the quarantine evidence beside them is kept."
-    );
-  } else if (CHAPTER_STATE_STEPS.has(resumeStep)) {
-    plan.actionName = "re-translate-volume";
-    plan.reasons.push(
-      "the translation stage is idempotent per chapter, so a plain re-run repairs a hole without throwing away the chapters that are already verified."
-    );
-  } else if (resumeStep === "consistency-audit") {
-    plan.actionName = "re-audit";
-    plan.countsAsIntervention = true;
-    plan.reasons.push("the audit report is missing or stale; re-running it is the whole fix.");
   } else {
-    plan.actionName = "re-run-step";
-    plan.reasons.push("the idempotent skip-checks make a re-run cost almost nothing where the work is already done.");
+    // ── The repair shape first, then the escalations ──────────────────────────
+    // The order matters. Reading the evidence first used to decide the whole plan, which made a
+    // superseded escalation indistinguishable from a live one: once the plan said `open-ticket`
+    // there was no repair left standing to compare a landed patch against. Computing the repair
+    // first means the escalation is a decision ON TOP of a concrete alternative, and `escalate`
+    // can say out loud which one it is overriding and why that override no longer holds.
+    if (cumulative && fromVolume) {
+      plan.actionName = "wipe-and-cascade";
+      plan.cascade = true;
+      plan.countsAsIntervention = true;
+      const folder = (state.manifest.volumes.find((v) => String(v.installmentNumber) === String(fromVolume)) || {}).folder;
+      if (folder) {
+        plan.wipeFirst = [
+          {
+            volumeDir: path.join(state.seriesDir, folder),
+            files: declaredOutputsFor(resumeStep, fromVolume),
+          },
+        ];
+      }
+      plan.reasons.push(
+        `the cumulative invariant rebuilds every volume after ${fromVolume}, so the primitive is: remove ${fromVolume}'s ${resumeStep} outputs, then run ${resumeStep} over the whole series.`,
+        "not --volume: a filtered run puts one volume in the loop, so the later volumes stay built on the broken one (gotcha 66).",
+        "the declared outputs only — the quarantine evidence beside them is kept."
+      );
+    } else if (CHAPTER_STATE_STEPS.has(resumeStep)) {
+      plan.actionName = "re-translate-volume";
+      plan.reasons.push(
+        "the translation stage is idempotent per chapter, so a plain re-run repairs a hole without throwing away the chapters that are already verified."
+      );
+    } else if (resumeStep === "consistency-audit") {
+      plan.actionName = "re-audit";
+      plan.countsAsIntervention = true;
+      plan.reasons.push("the audit report is missing or stale; re-running it is the whole fix.");
+    } else {
+      plan.actionName = "re-run-step";
+      plan.reasons.push("the idempotent skip-checks make a re-run cost almost nothing where the work is already done.");
+    }
+
+    // ── Then the escalations: three shapes where a re-run IS the spin ─────────
+    // Each one says "re-running this reproduces the same result", and each one is now asked
+    // THROUGH `escalate`, so a landed patch can supersede it and an already-written ticket can be
+    // named instead of duplicated.
+    if (gateRemovedIt) {
+      const escalated = escalate(
+        "gate-removed",
+        `volume ${fromVolume} is missing ${resumeStep}'s output AND holds ${resumeStep}'s own gate evidence in the same folder`,
+        [
+          `a deterministic gate refused that file, and nothing has replaced it since.`,
+          `re-running ${resumeStep} rebuilds the file and then runs the same gate over it, which produces the identical quarantine (gotcha 68). That is the spin, and the ledger refuses the third attempt.`,
+          `read ${resumeInventory.quarantines.map((n) => `\`${n}\``).join(", ")} first — it is the gate's own account of what it refused, and it is not mine to delete (Tier C).`,
+        ]
+      );
+      if (escalated) {
+        notes.push(
+          `A finding whose cause is a gate is not repaired by re-running the step the gate lives in. The evidence names the disagreement; the fix is a code question for the diagnostics team.`
+        );
+      }
+    } else if (auditVerdictProblem) {
+      // A FAIL verdict is not repaired by re-auditing: the same four artifacts produce the
+      // same FAIL. Re-running it is the spinning shape, so this is a question, not an action.
+      escalate("audit-verdict", "the consistency audit's own verdict is the problem", [
+        "the audit's verdict is the deliverable here, and re-auditing unchanged artifacts produces the same verdict. " +
+          "The fix is in the four reference artifacts the findings name — which is a diagnostics question, not a re-run.",
+      ]);
+    } else {
+      const recurringHere = recurringFor.get(resumeStep) || [];
+      if (recurringHere.length) {
+        escalate(
+          "recurring-finding",
+          `the ledger says ${recurringHere.map((r) => `${r.finding} (${r.runs} runs)`).join(", ")} for this step already`,
+          [
+            "re-running it has not cleared it before, and the same action against the same finding is refused on the third attempt (utils/ledger.js).",
+          ]
+        );
+      }
+    }
   }
 
   steps.push(plan);
@@ -1025,17 +1223,9 @@ function planResume(state) {
         "A finding that survives a run is structural, not transient — re-running is not the answer, and the ledger refuses the third attempt."
     );
   }
-  const recurringHere = recurringFor.get(resumeStep) || [];
-  if (recurringHere.length && plan.action !== "ticket") {
-    plan.action = "ticket";
-    plan.actionName = "open-ticket";
-    plan.cascade = false;
-    plan.wipeFirst = [];
-    plan.reasons.push(
-      `the ledger says ${recurringHere.map((r) => `${r.finding} (${r.runs} runs)`).join(", ")} for this step already: re-running it has not cleared it before, ` +
-        "and the same action against the same finding is refused on the third attempt (utils/ledger.js)."
-    );
-  }
+  // (The resume step's own recurring finding is escalated above, through `escalate`, so a landed
+  // patch can supersede it. What is left here is the free half: the classes that recurred on OTHER
+  // steps, reported without changing the plan.)
 
   // ── The per-step intervention budget ────────────────────────────────────────
   // DELIVERY_MAX_INTERVENTIONS is PER STEP (account owner, 2026-10-06): a run with nine steps is
@@ -1051,16 +1241,16 @@ function planResume(state) {
       `${resumeStep}: ${used} of ${budget} interventions used on this step in run ${state.run || "the recorded one"}.`
     );
   }
+  // The budget is the ONE escalation a landed patch cannot supersede. A patch record does not
+  // un-spend what this run has already spent, and applying the patch is itself the counted
+  // wipe-and-cascade — so "this step has used up its attempts" stands even when the code has
+  // changed underneath it. The reason says who can raise the limit, because that is the account
+  // owner's decision, not the manager's.
   if (plan.countsAsIntervention && used >= budget) {
-    plan.action = "ticket";
-    plan.actionName = "open-ticket";
-    plan.cascade = false;
-    plan.wipeFirst = [];
-    plan.countsAsIntervention = false;
-    plan.reasons.push(
+    escalate("intervention-budget", "the repair is an intervention and this step has none left", [
       `this step has already had ${used} of the ${budget} interventions it is allowed in this run. ` +
-        "The budget is per step on purpose, so spending it is the signal that this step needs the diagnostics team, not another attempt."
-    );
+        "The budget is per step on purpose, so spending it is the signal that this step needs the diagnostics team, not another attempt.",
+    ]);
     notes.push(
       `${resumeStep} is out of intervention budget (${used}/${budget}). The next move is a ticket, and the account owner is the only role that can raise the limit.`
     );
@@ -1070,10 +1260,15 @@ function planResume(state) {
     notes.push(`the run ledger could not be read (${state.ledgerError}) — so nothing here is counted as safe to repeat.`);
   }
 
-  const headline = gateRemovedIt
-    ? `The run stops at ${resumeStep} volume ${fromVolume}: that step's own gate refused the file, and re-running the step refuses it again.`
-    : plan.action === "ticket"
-      ? `The run stops at ${resumeStep}: the answer is a question, not a re-run.`
+  // The headline keys on what the plan DECIDED, not on which tell was seen on the disk: a
+  // gate-removed shape whose ticket has already been answered by a landed patch is a run, and a
+  // headline that still said "re-running refuses it again" would describe a plan that is running
+  // it. `plan.escalation` is what `escalate` recorded, so the sentence names the real reason.
+  const headline =
+    plan.action === "ticket"
+      ? `The run stops at ${resumeStep}${fromVolume ? ` volume ${fromVolume}` : ""}: ` +
+        `${ESCALATION_HEADLINES[plan.escalation] || "the answer is a question, not a re-run"}` +
+        `${plan.existingTicket ? ` Already ticket ${plan.existingTicket.id} (${plan.existingTicket.status}).` : ""}`
       : plan.action === "blocked"
         ? `The run stops at ${resumeStep}, and the next move is not mine.`
         : `Pick up at ${resumeStep}${fromVolume ? ` volume ${fromVolume}` : ""}${plan.cascade ? ", then let the cascade rebuild the tail" : ""}.`;
@@ -1252,6 +1447,13 @@ function renderResumePlanMarkdown(plan) {
       );
     }
     for (const r of s.reasons) lines.push(`- ${r}`);
+    if (s.escalation) lines.push(`- why this is a question and not a run: **${s.escalation}**`);
+    if (s.existingTicket) {
+      lines.push(
+        `- already asked: ticket **${s.existingTicket.id}** (${s.existingTicket.status}). Work that ticket ` +
+          `(\`npm run diagnose -- --ticket=${s.existingTicket.id}\`) rather than writing a second one for the same finding.`
+      );
+    }
     if (s.flags.length) lines.push(`- flags: ${s.flags.join(" ")}`);
     for (const w of s.wipeFirst) {
       lines.push(`- remove first, in \`${w.volumeDir}\`:`);
@@ -1279,6 +1481,7 @@ module.exports = {
   CHAPTER_STATE_STEPS,
   DAMAGE_KINDS,
   EVIDENCE_KINDS,
+  ESCALATION_HEADLINES,
   actionByName,
   actionIsAvailable,
   readPlanOfRecord,

@@ -223,14 +223,60 @@ function calibrationMaxAgeHours() {
 }
 
 /**
+ * Which container the machine's hooks last started, or "" when the machine has
+ * no switch hook (the common case, and the safe default).
+ *
+ * `hooks/.model-switch-state` is the ONLY authority this project has for "which
+ * model is actually behind the shared port right now": every container on such a
+ * machine advertises the same alias on the same URL, so `GET /v1/models` cannot
+ * tell them apart (gotcha 22). The file is a documented hook convention rather
+ * than something the code owns, so this reads it fail-open and treats a missing
+ * or unreadable marker as "no information" — which leaves the key exactly what it
+ * used to be.
+ *
+ * Read fresh on every call, never cached: a container switch mid-process (the
+ * `translate-qa` loop switches up to twice per round; the autopilot switches
+ * before every support-role turn) is precisely the event that must invalidate a
+ * measurement taken minutes earlier.
+ *
+ * Lazy require: utils/hooks.js pulls in harness.js, and this module is required
+ * by harness-adjacent code, so the edge is only created when a marker is
+ * actually asked for.
+ *
+ * @returns {string} The marker's contents, trimmed; "" when there is none.
+ */
+function modelSwitchMarker() {
+  try {
+    const { getHooksDir } = require("./hooks");
+    const file = path.join(getHooksDir(), ".model-switch-state");
+    if (!fs.existsSync(file)) return "";
+    return (fs.readFileSync(file, "utf8") || "").trim();
+  } catch {
+    return ""; // no hooks, no permission, no file: no information, not an error
+  }
+}
+
+/**
  * The cache key for an endpoint.
  *
- * It is the base URL plus the model id — which on a shared-port local setup is
- * NOT enough to identify the model (every container advertises the alias
- * "local", see AGENTS.md gotcha 22). That is why the age guard exists and why
- * the entry also records the model list the server reported: the key is the best
- * available identity, not a perfect one, and the code says so rather than
- * pretending otherwise.
+ * It is the base URL, the model id, and — when the machine has a model-switch
+ * hook — the container that hook last started.
+ *
+ * The first two are NOT enough on a shared-port local setup: every container
+ * advertises the alias "local" at the same URL (gotcha 22), so two different
+ * models collide on one entry, and the only thing that ever re-measured the
+ * swapped one was the age guard. That is too slow for a loop that alternates
+ * containers every iteration: a manager turn measured against the translator
+ * container would then be reused for the manager's own model for the rest of the
+ * day. The marker makes the identity as good as the machine's own knowledge of
+ * what is serving, and it also fixes the case the age guard could not: a
+ * container that comes BACK reuses the measurement taken for it earlier in the
+ * same run (polish's re-polish on the EDIT endpoint after the audit batch),
+ * instead of paying for a third probe.
+ *
+ * The age guard stays: a container started by hand leaves the marker naming a
+ * dir that is not serving (gotcha 22e), and the age is what eventually catches
+ * that.
  *
  * @param {{baseUrl?: string, model?: string}} endpoint
  * @returns {string}
@@ -238,7 +284,8 @@ function calibrationMaxAgeHours() {
 function calibrationKey(endpoint = {}) {
   const base = String(endpoint.baseUrl || process.env.AI_BASE_URL || "").replace(/\/+$/, "");
   const model = String(endpoint.model || process.env.AI_MODEL || "");
-  return `${base}|${model}`;
+  const serving = modelSwitchMarker();
+  return serving ? `${base}|${model}|${serving}` : `${base}|${model}`;
 }
 
 /**

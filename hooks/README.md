@@ -40,10 +40,34 @@ Default: `<project root>/hooks/`. Override the directory with the
 | before the verify **cross-check** batch (the borderline tiebreak AND the cross-chapter volume audit — one batch, one switch) | `pre-verify-audit` (or `.sh` / `.js`) |
 | before the polish **final audit** batch | `pre-polish-audit` (or `.sh` / `.js`) |
 | around the whole default run | `pre-pipeline` / `post-pipeline` (or `.sh` / `.js`) |
+| before / after **one support-role model turn** — the delivery manager's decision, a diagnostics answer, a dev-team turn | `pre-manager` / `post-manager` (or `.sh` / `.js`) |
+| around the whole **autopilot loop** (`npm run autopilot`) | `pre-autopilot` / `post-autopilot` (or `.sh` / `.js`) |
 
 Hook names are **role labels** — the code asks for "the thing that audits this
 batch", never for a model. Which container answers a role is entirely your
 machine's business (see Example 4).
+
+### The support roles: `pre-manager` / `post-manager`
+
+The delivery layer (§3.6) has three roles that make a model call and are **not**
+pipeline steps: the **manager** (decides what to do next), the **diagnostics
+team** (reads the code, answers a ticket) and the **dev team** (changes the
+code). They are wrapped as the pseudo-step `manager`, and the hook fires
+**inside the role's own module, around the turn** — not in the command that
+typed the request. Two reasons:
+
+- A container switch means loading a model, which is the most expensive thing
+  on a shared-port machine (Example 4). Each of these roles refuses a request
+  before it reaches the model (an unknown ticket, a ticket already answered, a
+  tree somebody else already edited), and those refusals must not cost a switch.
+- The diagnostics and dev turns are **tool-calling agents**. A container that
+  cannot call tools answers them with nothing at all, so the guarantee "the
+  support model is the one serving" has to belong to the role that makes the
+  call rather than to whoever invoked it.
+
+`pre-autopilot` / `post-autopilot` wrap the whole loop once, and `pre-manager`
+fires again on every decision inside it — a repeat switch is a no-op via
+`hooks/.model-switch-state`, exactly as in the `translate-qa` loop.
 
 A hook file must be **executable** (`chmod +x`) and start with a **shebang**
 (`#!/usr/bin/sh`, `#!/usr/bin/env node`, …). Present-but-not-executable files

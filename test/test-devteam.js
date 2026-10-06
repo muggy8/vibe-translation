@@ -50,6 +50,11 @@ const path = require("path");
 // picture — and keeps the patch records out of the fixture's working tree. See gotcha 69 / 71.
 const TMP = path.join(os.tmpdir(), "oresuki-devteam-test");
 process.env.POSTMORTEM_DIR = path.join(TMP, "postmortem");
+// The dev team fires `pre-manager` / `post-manager` around its model turn (AGENTS.md §3). Hooks are
+// per-machine and optional, so a suite that does not pin the hooks directory would let THIS machine's
+// `hooks/pre-manager.sh` load a real model during `npm test` (gotcha 22). An empty folder is the
+// documented no-op: absent hooks, nothing runs.
+process.env.AI_CLIENT_HOOKS_DIR = path.join(TMP, "hooks");
 // A suite that pins the context window must pin the output cap with it (gotcha 69): an empty string
 // blocks `.env` (dotenv will not overwrite a variable that already exists) while parseInt("") → NaN
 // keeps the cap derived from the window this suite means to test.

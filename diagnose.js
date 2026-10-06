@@ -50,6 +50,7 @@ require("./types"); // JSDoc type definitions
 const {
   diagnoseTicket,
   renderDiagnosisMarkdown,
+  diagnosisIsAskable,
   READ_TOOL_NAMES,
 } = require("./utils/diagnostics");
 const {
@@ -196,6 +197,20 @@ async function main() {
     return 0;
   }
 
+  // Is this askable at all? Asked BEFORE a model container is switched in, because on this machine a
+  // switch means loading a model (gotcha 22) and "already answered" is the common case in a loop that
+  // re-reads the state every iteration. `diagnoseTicket` asks the same question internally, so the
+  // CLI's decision and the module's refusal cannot drift.
+  const ticketsFile = ticketPaths();
+  const askable = diagnosisIsAskable(
+    readTickets(ticketsFile.json).tickets.find((t) => t.id === args.ticketId),
+    { ticketId: args.ticketId, reask: args.reask, jsonPath: ticketsFile.json }
+  );
+  if (!askable.askable) {
+    console.error(`\nRefused: ${askable.error}`);
+    return 2;
+  }
+
   // Read-only, so a live run does not block this — but it changes what the answer means.
   const running = runInProgress();
   if (running.inProgress) {
@@ -207,6 +222,10 @@ async function main() {
   }
 
   console.log(`Asking the diagnostics team about ${args.ticketId} (${READ_TOOL_NAMES.join(" / ")} only, no write access)…`);
+  // The `pre-manager` / `post-manager` hooks fire INSIDE `diagnoseTicket`, around the agent turn, not
+  // here: this CLI cannot know whether the module is about to reach the model without repeating every
+  // refusal the module makes, and a container switch costs a model load (gotcha 22). The guarantee
+  // belongs to the role that makes the call.
   const result = await diagnoseTicket({
     ticketId: args.ticketId,
     seriesDir,

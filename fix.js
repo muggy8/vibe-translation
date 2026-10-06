@@ -323,6 +323,10 @@ function revert(patchId, { json }) {
  */
 async function runDevTurn(ticketId, { seriesDir, json }) {
   const patchPaths = patches.patchPaths();
+  // The `pre-manager` / `post-manager` hooks fire INSIDE `workTicket`, around the agent turn, not
+  // here: this CLI cannot know whether the turn is reachable without repeating every refusal the
+  // module makes (unknown ticket, a tree somebody else already edited, a ticket with no chosen
+  // option), and a container switch costs a model load (gotcha 22).
   const result = await devteam.workTicket({ ticketId, seriesDir, patchPaths });
   if (result.patch) console.log(devteam.describePatch(result.patch));
   if (result.maxSteps) console.log(`  step cap: ${result.maxSteps} (scaled to ${result.patch ? "the ticket's evidence" : "the ticket"})`);

@@ -18,6 +18,14 @@ const path = require("path");
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-client-tokens-"));
 process.env.TOKEN_CALIBRATION_FILE = path.join(tmp, "calibration.json");
+// The calibration key now includes "which container the hooks last started" (see
+// calibrationKey below). Without this pin the suite would read THIS machine's
+// real hooks/.model-switch-state and assert a key that depends on which model
+// happens to be up — the gotcha-69 rule that a test must not read live machine
+// state. An empty hooks dir means "no switch hook on this machine".
+const HOOKS_DIR_ENV = "AI_CLIENT_HOOKS_DIR";
+const realHooksDir = process.env[HOOKS_DIR_ENV];
+process.env[HOOKS_DIR_ENV] = path.join(tmp, "hooks-none");
 
 const tokens = require("../utils/tokens");
 const {
@@ -144,6 +152,34 @@ const { runVolumeWithModeFallback } = require("../utils/qa-loop");
   const key = calibrationKey({ baseUrl: "http://localhost:9200/v1/", model: "local" });
   assert.strictEqual(key, "http://localhost:9200/v1|local", "trailing slash normalized, model appended");
   assert.notStrictEqual(calibrationKey({ baseUrl: "http://a/v1", model: "x" }), key, "a different model is a different entry");
+
+  // A machine with a model-switch hook gets the container IN the key.
+  // Every container on such a machine advertises the same alias at the same URL
+  // (gotcha 22), so `baseUrl|model` alone is one entry shared by several models —
+  // and the only thing that ever re-measured the swapped one was the age guard.
+  const switchDir = path.join(tmp, "hooks-switch");
+  fs.mkdirSync(switchDir, { recursive: true });
+  process.env[HOOKS_DIR_ENV] = switchDir;
+  fs.writeFileSync(path.join(switchDir, ".model-switch-state"), "Qwen3.8-flash-next\n", "utf8");
+  const withFlash = calibrationKey({ baseUrl: "http://localhost:9200/v1", model: "local" });
+  assert.strictEqual(withFlash, "http://localhost:9200/v1|local|Qwen3.8-flash-next", "the container the hooks last started is part of the identity");
+  assert.notStrictEqual(withFlash, key, "a machine that switches containers cannot share one entry between them");
+
+  fs.writeFileSync(path.join(switchDir, ".model-switch-state"), "Hy-MT2-30B-A3B", "utf8");
+  const withTranslator = calibrationKey({ baseUrl: "http://localhost:9200/v1", model: "local" });
+  assert.notStrictEqual(withTranslator, withFlash, "a container switch mid-process invalidates the measurement taken for the previous one");
+
+  // …and a container that comes BACK reuses its own measurement, which is what
+  // keeps polish's re-polish (the EDIT endpoint, after the audit batch) from
+  // paying for a third probe. The marker names a container, not an event counter.
+  fs.writeFileSync(path.join(switchDir, ".model-switch-state"), "Qwen3.8-flash-next", "utf8");
+  assert.strictEqual(calibrationKey({ baseUrl: "http://localhost:9200/v1", model: "local" }), withFlash, "the same container coming back reuses its own entry");
+
+  // No marker file is not an error and does not change the key: a machine with no
+  // switch hook keeps exactly the behaviour it had before.
+  fs.rmSync(path.join(switchDir, ".model-switch-state"));
+  assert.strictEqual(calibrationKey({ baseUrl: "http://localhost:9200/v1", model: "local" }), key, "no marker means no extra key segment (fail-open)");
+  process.env[HOOKS_DIR_ENV] = path.join(tmp, "hooks-none");
 
   assert.deepStrictEqual(readCalibrationCache(), {}, "no cache file yet is not an error");
   assert.ok(writeCalibrationEntry(key, { cjkWeight: 0.61, otherWeight: 0.25, templateOverhead: 52, calibratedAt: new Date().toISOString() }));
@@ -556,6 +592,9 @@ const { runVolumeWithModeFallback } = require("../utils/qa-loop");
       "the mode decision's own reason never cites the answer size — chunking cannot repair it"
     );
   }
+
+  if (realHooksDir === undefined) delete process.env[HOOKS_DIR_ENV];
+  else process.env[HOOKS_DIR_ENV] = realHooksDir;
 
   console.log("tokens: all checks passed.");
 })().catch((err) => {

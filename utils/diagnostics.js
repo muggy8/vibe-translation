@@ -47,6 +47,7 @@ const { assertRealToolCalls } = require("./agents");
 const { extractJsonObject } = require("./manifest");
 const { fingerprintFiles } = require("./fs");
 const tickets = require("./tickets");
+const { runTurnWithHooks, MANAGER_TASK } = require("./hooks");
 const { readTickets, ticketPaths, recordDiagnosis } = tickets;
 
 const ROOT = path.join(__dirname, "..");
@@ -688,6 +689,53 @@ async function evidenceFootprint(ticket, extraFiles = [], seriesDir = "") {
 }
 
 /**
+ * Can this ticket be asked, before anything expensive is decided?
+ *
+ * The three refusals `diagnoseTicket` makes before it reaches a model are readable off the ticket
+ * record, and a caller needs to know them BEFORE it switches a model container in. On this machine a
+ * container switch means loading a model (gotcha 22), and "already answered" is the common case in a
+ * loop that re-reads the state every iteration — so the CLI asks this first and only fires the
+ * `pre-manager` hook for a request that can actually reach the endpoint.
+ *
+ * One implementation, two readers: `diagnoseTicket` calls this itself, so the CLI's decision and the
+ * module's refusal cannot drift.
+ *
+ * @param {Object|null} ticket - The ticket record, or null when the id is not in the file.
+ * @param {Object} [opts]
+ * @param {boolean} [opts.reask] - The `--reask` flag.
+ * @param {string} [opts.jsonPath] - Where the tickets live, for the "no ticket" message.
+ * @returns {{askable: boolean, error: string|null}}
+ */
+function diagnosisIsAskable(ticket, { ticketId = "", reask = false, jsonPath = "" } = {}) {
+  const id = ticket ? ticket.id : ticketId;
+  if (!ticket) {
+    return {
+      askable: false,
+      error:
+        `no ticket ${id} in ${jsonPath || "the ticket file"}. Run "node diagnose.js --open" to list the ones ` +
+        `that are waiting, or "npm run delivery" to see why there are none.`,
+    };
+  }
+  if (ticket.status === "closed") {
+    return {
+      askable: false,
+      error: `ticket ${ticket.id} is closed (${ticket.closure ? ticket.closure.outcome : "no outcome recorded"}). A closed ticket is not re-asked; open a new one if the finding came back.`,
+    };
+  }
+  const priorAttempts = (ticket.diagnosis && ticket.diagnosis.attempts) || 0;
+  if (ticket.diagnosis && !reask) {
+    return {
+      askable: false,
+      error:
+        `ticket ${ticket.id} already has a diagnosis (attempt ${priorAttempts}). Re-asking the same question ` +
+        `until a cheaper answer appears is the same spin the ledger refuses (gotcha 69). Pass --reask when a ` +
+        `second opinion is genuinely wanted — for example after the manager answered a question the team asked.`,
+    };
+  }
+  return { askable: true, error: null };
+}
+
+/**
  * Ask the diagnostics team one ticket.
  *
  * @param {Object} cfg
@@ -718,52 +766,51 @@ async function diagnoseTicket({ ticketId, seriesDir, root = ROOT, reask = false,
 
   const store = readTickets(paths.json);
   const ticket = store.tickets.find((t) => t.id === ticketId);
-  if (!ticket) {
-    return fail(
-      `no ticket ${ticketId} in ${paths.json}. Run "node diagnose.js --open" to list the ones that ` +
-        `are waiting, or "npm run delivery" to see why there are none.`
-    );
-  }
-  if (ticket.status === "closed") {
-    return fail(`ticket ${ticketId} is closed (${ticket.closure ? ticket.closure.outcome : "no outcome recorded"}). A closed ticket is not re-asked; open a new one if the finding came back.`);
-  }
-  const priorAttempts = (ticket.diagnosis && ticket.diagnosis.attempts) || 0;
-  if (ticket.diagnosis && !reask) {
-    return fail(
-      `ticket ${ticketId} already has a diagnosis (attempt ${priorAttempts}). Re-asking the same ` +
-      `question until a cheaper answer appears is the same spin the ledger refuses (gotcha 69). ` +
-      `Pass --reask when a second opinion is genuinely wanted — for example after the manager ` +
-      `answered a question the team asked.`
-    );
-  }
+  // The same three refusals the CLI asks about before it switches a model container in (see
+  // `diagnosisIsAskable`). Kept here so no caller can reach the turn by skipping that question.
+  const askable = diagnosisIsAskable(ticket, { ticketId, reask, jsonPath: paths.json });
+  if (!askable.askable) return fail(askable.error);
 
   const where = { seriesDir, root };
   const footprint = await evidenceFootprint(ticket, [], seriesDir);
   const maxSteps = diagnosticsMaxStepsFor(footprint.bytes);
 
   const gate = await readOnlyFsTools({ cwd: root, allowedDirs: [root] });
-  const handle = await harness.createAgentHandle({
-    name: "diagnostics",
-    systemPrompt: loadSystemPrompt() + DIAGNOSIS_TOOLS_NOTE,
-    tools: gate.tools,
-    approve: gate.approve,
-    cwd: root,
-    maxSteps,
-  });
 
   // The role's read-only promise, checked against the disk rather than asserted: hash what the
   // ticket points at before the turn and again after it. `fingerprintFiles` is the same rule the QA
   // loop uses to tell a rewrite from a no-op (gotcha 65) — here it is the difference between
   // "a support team that only looked" and one that quietly edited the corpus it was asked about.
+  // The window includes the per-machine hooks that wrap the turn, because a hook is a side effect
+  // this machine chose and "the state moved while we were asking" is the honest reading of it.
   const before = await fingerprintFiles(footprint.files);
 
-  let result;
-  try {
-    result = await handle.sendTurn(renderTicketForDiagnosis(ticket, where), { label: `diagnose-${ticket.id}` });
-    assertRealToolCalls(result, "the diagnostics agent", ticket.volume || ticket.step);
-  } finally {
-    await handle.close();
-  }
+  // `pre-manager` / `post-manager` fire HERE, around the turn, not in the CLI that typed the command.
+  // Two reasons, both about cost and honesty: every refusal this module makes (no ticket, a closed
+  // ticket, a ticket already answered) happens first, so a request that never reaches the model never
+  // pays for a container switch (gotcha 22); and this turn is a tool-calling agent, which a container
+  // that cannot call tools answers with nothing at all (gotcha 51) — so "the support model is the one
+  // serving" has to be guaranteed by the role that makes the call. Which container that is stays
+  // entirely the hook's business (AGENTS.md §3, "hook names are role labels, never model names").
+  const result = await runTurnWithHooks(MANAGER_TASK, async () => {
+    const agent = await harness.createAgentHandle({
+      name: "diagnostics",
+      systemPrompt: loadSystemPrompt() + DIAGNOSIS_TOOLS_NOTE,
+      tools: gate.tools,
+      approve: gate.approve,
+      cwd: root,
+      maxSteps,
+    });
+    try {
+      const reply = await agent.sendTurn(renderTicketForDiagnosis(ticket, where), {
+        label: `diagnose-${ticket.id}`,
+      });
+      assertRealToolCalls(reply, "the diagnostics agent", ticket.volume || ticket.step);
+      return reply;
+    } finally {
+      await agent.close();
+    }
+  });
 
   const after = await fingerprintFiles(footprint.files);
   const moved = before !== after;
@@ -917,6 +964,7 @@ module.exports = {
   crossCheckReads,
   collectWriteAttempts,
   evidenceFootprint,
+  diagnosisIsAskable,
   diagnoseTicket,
   renderDiagnosisMarkdown,
 };

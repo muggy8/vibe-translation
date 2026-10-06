@@ -21,11 +21,19 @@
  *   7. a finding that survived an earlier recorded run → the "just re-run" advice is refused;
  *   8. the intervention budget is PER STEP — a step that has spent its attempts gets a ticket,
  *      and another step's exhausted budget does not spend this one's;
- *   9. the closed action menu → Tier C refused, picking up work is free, destroying output is
+ *   9. the triage reads its OWN correspondence (`tickets.json` / `patches.json`) — an open ticket
+ *      is named rather than duplicated, an accepted/committed patch supersedes the escalation
+ *      that was only true of the old code, a closed ticket whose closure measured `unchanged`
+ *      does not make a re-run legitimate again, and a spent budget is the one escalation a patch
+ *      cannot un-spend;
+ *  10. the closed action menu → Tier C refused, picking up work is free, destroying output is
  *      an intervention;
- *  10. the CLI → report mode writes a report and executes nothing, `--mode=act --no-write` is
+ *  11. the CLI → report mode writes a report and executes nothing, `--mode=act --no-write` is
  *      refused as the contradiction it is, and an unknown flag is refused. (Executing the plan
  *      is `test/test-delivery-act.js`.)
+ *  12. the verbs behind the escalation ladder → `--open-ticket` writes the question the plan's own
+ *      escalation names (idempotent: a live ticket is named, not duplicated), and `--choose` records
+ *      the manager's pick while an option the filter refused stays refused.
  */
 
 const assert = require("assert");
@@ -37,191 +45,26 @@ const { STEP_ARTIFACT_SPECS } = require("../utils/artifacts");
 const { PIPELINE_STEPS } = require("../gulpfile");
 const resume = require("../utils/resume");
 const { appendLedgerEntry } = require("../utils/ledger");
+const { attachOptions } = require("../utils/tickets");
 
 const ROOT = path.resolve(__dirname, "..");
 const FIXTURES = path.resolve("/tmp/opencode/resume-tests");
 
 // ─── Fixture pieces ───────────────────────────────────────────────────────────
+//
+// The series fixtures live in `test/fixture-series.js`, shared with `test/test-autopilot.js`: they lay
+// a fixture out from `utils/artifacts.js` itself, so the fixture and the declaration cannot drift, and
+// each one points `POSTMORTEM_DIR` at its own folder so no scenario can read the live series' history
+// (gotcha 69, gotcha 71).
 
-/** A Markdown table — the shape the glossary's whole contract IS. */
-const TABLE = `# Glossary
-
-| Term | Rendering | Notes |
-|---|---|---|
-| 主人公 | protagonist | fixture |
-`;
-
-/** A headed Markdown document. */
-const DOC = `# Report
-
-## Findings
-
-- nothing wrong here
-`;
-
-/** The audit's own sign-off, which `utils/postmortem.js` reads out of the report. */
-const PASS_DOC = `${DOC}
-
-**PASS**
-`;
-
-/**
- * Content that satisfies an expectation's declared `shape`, so a fixture built from
- * `utils/artifacts.js` is a fixture the post-mortem agrees is complete. Building it from the
- * declaration is the point: the two cannot drift.
- *
- * @param {string} name
- * @param {string} shape
- * @returns {string}
- */
-function contentFor(name, shape) {
-  if (name === "consistency-report.md") return PASS_DOC;
-  if (name.endsWith("-rolling-state.json")) {
-    // `isAcceptedState` reads `results` through the same criterion the QA loop used.
-    return JSON.stringify({ results: [80, 85], acceptedBy: "rolling-window", lastCheckedAt: new Date().toISOString() }, null, 2);
-  }
-  if (name === "chapters.json") return "[]\n";
-  if (shape === "table") return TABLE;
-  if (shape === "json") return JSON.stringify({ fixture: true }, null, 2) + "\n";
-  if (shape === "document") return DOC;
-  return "fixture\n";
-}
-
-/**
- * Lay out a two-volume series with a committed schema-2 plan of record.
- *
- * `integrity.basis` is ≥ 20 characters on purpose: `validateVolumeIntegrity` rejects a thinner
- * one, and a fixture whose plan is silently rejected makes the intake agent run instead
- * (gotcha 69's fixture half).
- *
- * @param {string} label - Scenario name, so fixtures do not collide.
- * @returns {Promise<{dir: string, volumes: Array<{folder: string, installmentNumber: string}>}>}
- */
-async function fixtureSeries(label) {
-  const dir = path.join(FIXTURES, label);
-  await fs.promises.rm(dir, { recursive: true, force: true });
-  await fs.promises.mkdir(dir, { recursive: true });
-  // The ledger lives in `postMortemDir()`, which defaults to the repo's own `.postmortem`. A
-  // triage test that reads that file is reading the real series' history, and a finding recorded
-  // there would change what the test asserts (gotcha 69, same rule, other half).
-  process.env.POSTMORTEM_DIR = path.join(dir, ".postmortem");
-  await fs.promises.mkdir(process.env.POSTMORTEM_DIR, { recursive: true });
-
-  const volumes = [
-    { folder: "Test Story(01)", installmentNumber: "01" },
-    { folder: "Test Story(02)", installmentNumber: "02" },
-  ];
-  for (const v of volumes) {
-    const volDir = path.join(dir, v.folder);
-    await fs.promises.mkdir(volDir, { recursive: true });
-    await fs.promises.writeFile(path.join(volDir, "book.epub"), "not really an epub", "utf8");
-  }
-
-  await fs.promises.writeFile(
-    path.join(dir, "translation-target.json"),
-    JSON.stringify(
-      {
-        schema: 2,
-        seriesLocation: dir,
-        seriesName: "Test Story",
-        sourceLanguage: "Japanese",
-        targetLanguage: "English",
-        generator: "test-resume.js",
-        generatedAt: new Date().toISOString(),
-        // `discovery.confidence` is a per-dimension object of 0-1 numbers, not one number —
-        // `validateDiscoveryBlock` rejects the flatter shape, and a fixture whose plan does not
-        // validate is a fixture with no plan of record at all (gotcha 33).
-        discovery: {
-          summary: "fixture",
-          confidence: { volumes: 0.9, order: 0.9, sourceLanguage: 0.9 },
-          evidence: ["two books"],
-          excluded: [],
-        },
-        volumes: volumes.map((v) => ({
-          folder: v.folder,
-          sourceFile: `${v.folder}/book.epub`,
-          installmentNumber: v.installmentNumber,
-          title: "Test Story",
-          integrity: {
-            isNarrative: true,
-            confidence: 0.9,
-            basis: "fixture: continuous prose in one headed section, no packaging pages",
-          },
-        })),
-      },
-      null,
-      2
-    ) + "\n",
-    "utf8"
-  );
-  return { dir, volumes };
-}
-
-/**
- * Write every file one step is declared to leave in one volume folder.
- * @param {string} seriesDir
- * @param {{folder: string, installmentNumber: string}} volume
- * @param {string} step
- */
-async function writeVolumeOutputs(seriesDir, volume, step) {
-  const spec = STEP_ARTIFACT_SPECS[step];
-  if (!spec || !spec.perVolume) return;
-  const volDir = path.join(seriesDir, volume.folder);
-  await fs.promises.mkdir(volDir, { recursive: true });
-  for (const e of spec.volume) {
-    const name = e.name.replace("{installment}", volume.installmentNumber);
-    await fs.promises.writeFile(path.join(volDir, name), contentFor(name, e.shape), "utf8");
-  }
-}
-
-/**
- * Write every file one step is declared to publish at the series root.
- * @param {string} seriesDir
- * @param {string} step
- */
-async function writeSeriesOutputs(seriesDir, step) {
-  const spec = STEP_ARTIFACT_SPECS[step];
-  if (!spec) return;
-  for (const e of spec.series || []) {
-    // `discover` declares the plan of record as one of its outputs. Seeding a generic copy of
-    // it would overwrite the fixture's real committed plan, and the triage would correctly
-    // report that there is no usable plan (gotcha 33: a plan that does not validate is never
-    // handed downstream). The plan of record is laid out by `fixtureSeries`, never here.
-    if (e.name === "translation-target.json") continue;
-    await fs.promises.writeFile(path.join(seriesDir, e.name), contentFor(e.name, e.shape), "utf8");
-  }
-}
-
-/**
- * A series where every pipeline step finished what it claims to have.
- * @param {string} label
- */
-async function completeSeries(label) {
-  const fx = await fixtureSeries(label);
-  for (const { name } of PIPELINE_STEPS) {
-    for (const v of fx.volumes) await writeVolumeOutputs(fx.dir, v, name);
-    await writeSeriesOutputs(fx.dir, name);
-  }
-  // The deliverable, so the triage can read the goal function rather than guess it.
-  await fs.promises.writeFile(
-    path.join(fx.dir, "translation-report.json"),
-    JSON.stringify(
-      {
-        schema: 1,
-        generatedAt: new Date().toISOString(),
-        seriesName: "Test Story",
-        chapters: [
-          { volume: "01", folder: "Test Story(01)", id: "whole", outcome: "PUBLISHED (verified)" },
-          { volume: "02", folder: "Test Story(02)", id: "whole", outcome: "PUBLISHED (verified)" },
-        ],
-      },
-      null,
-      2
-    ) + "\n",
-    "utf8"
-  );
-  return fx;
-}
+const {
+  completeSeries,
+  fixtureSeries,
+  writeChannel,
+  writeVolumeOutputs,
+  writeSeriesOutputs,
+  leaveGateEvidenceBesideTheGap,
+} = require("./fixture-series");
 
 // ─── 1: the range helper ──────────────────────────────────────────────────────
 
@@ -560,7 +403,158 @@ async function testInterventionBudgetIsPerStep() {
   console.log("  intervention budget: per step — glossary's spent attempts do not spend character-voice's");
 }
 
-// ─── 9: the closed action menu ────────────────────────────────────────────────
+// ─── 9: the triage reads its own correspondence ───────────────────────────────
+
+async function testTriageReadsItsOwnCorrespondence() {
+  const fx = await completeSeries("ticket-aware");
+  await leaveGateEvidenceBesideTheGap(fx.dir, "Test Story(02)", "02");
+
+  const ticket = (over) => ({
+    id: "T-0001",
+    step: "glossary",
+    volume: "02",
+    finding: "missing-required",
+    status: "open",
+    question: "Why does the carry-forward gate refuse this volume's glossary?",
+    evidence: [{ file: "Test Story(02)/glossary.md.rejected", saw: "the gate's account" }],
+    ...over,
+  });
+  const patch = (over) => ({
+    id: "P-0001",
+    ticketId: "T-0001",
+    status: "committed",
+    files: ["utils/prompt.js"],
+    summary: "match the aliases inside a term cell, not the whole cell",
+    ...over,
+  });
+
+  // A. the question is already open: name it, do not write a second one.
+  await writeChannel(fx.dir, "tickets.json", { tickets: [ticket()] });
+  let state = await resume.readWorkingState({ seriesDir: fx.dir });
+  assert.strictEqual(state.tickets.length, 1, "readWorkingState carries the ticket channel onto the state");
+  assert.strictEqual(state.patches.length, 0);
+  assert.strictEqual(state.ticketsError, null);
+  assert.strictEqual(state.patchesError, null);
+
+  let plan = resume.planResume(state);
+  let glossary = plan.steps.find((s) => s.step === "glossary");
+  assert.strictEqual(glossary.action, "ticket", plan.headline);
+  assert.deepStrictEqual(glossary.existingTicket, { id: "T-0001", status: "open" }, "the plan names the ticket it already wrote");
+  assert.strictEqual(glossary.escalation, "gate-removed", "the report says WHICH check turned this into a question");
+  assert.ok(
+    glossary.reasons.some((r) => r.includes("already open as T-0001") && r.includes("not to write a second one")),
+    JSON.stringify(glossary.reasons)
+  );
+  assert.ok(plan.headline.includes("T-0001"), plan.headline);
+  assert.ok(
+    plan.markdown.includes("already asked: ticket **T-0001**"),
+    "the human-readable plan has to point at the existing ticket, not just the JSON"
+  );
+
+  // B. a committed patch answering that ticket supersedes the escalation: the guard that produced
+  // this disk shape is not the guard that will run, so the repair stands.
+  await writeChannel(fx.dir, "patches.json", { patches: [patch()] });
+  plan = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+  glossary = plan.steps.find((s) => s.step === "glossary");
+  assert.strictEqual(glossary.action, "run", plan.headline);
+  assert.strictEqual(glossary.actionName, "wipe-and-cascade", "applying the fix is what makes it take effect (gotcha 66)");
+  assert.strictEqual(glossary.cascade, true);
+  assert.strictEqual(glossary.escalation, null, "nothing was escalated, so the plan does not claim an escalation");
+  assert.strictEqual(glossary.existingTicket, null);
+  assert.strictEqual(glossary.wipeFirst.length, 1, "and it names the wipe that makes the new code run");
+  assert.ok(
+    glossary.wipeFirst[0].files.includes("glossary.md"),
+    "the cascade is what makes the patch take effect, so the wipe has to name the artifact"
+  );
+  assert.ok(
+    !glossary.wipeFirst[0].files.some((f) => /\.rejected/.test(f)),
+    "the evidence the gate left is still not this plan's to remove"
+  );
+  assert.ok(
+    glossary.reasons.some((r) => r.includes("P-0001 (committed) answers ticket T-0001") && r.includes("skip checks do not know the code changed")),
+    JSON.stringify(glossary.reasons)
+  );
+  assert.ok(!plan.notes.some((n) => n.includes("--commit=")), "a committed patch does not still owe a commit");
+
+  // C. `accepted` is not `committed`: the commit is still owed, and it is the dev team's act.
+  await writeChannel(fx.dir, "patches.json", { patches: [patch({ status: "accepted" })] });
+  plan = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+  glossary = plan.steps.find((s) => s.step === "glossary");
+  assert.strictEqual(glossary.actionName, "wipe-and-cascade");
+  assert.ok(
+    plan.notes.some((n) => n.includes("npm run fix -- --commit=P-0001")),
+    JSON.stringify(plan.notes)
+  );
+
+  // D. a `proposed` patch answers nothing. It is unjudged code already in the tree, and act mode
+  // refuses the whole plan while one is open (gotcha 75), so it must not legitimise a re-run.
+  await writeChannel(fx.dir, "patches.json", { patches: [patch({ status: "proposed" })] });
+  plan = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+  glossary = plan.steps.find((s) => s.step === "glossary");
+  assert.strictEqual(glossary.action, "ticket", "an unjudged patch is not an answer");
+  assert.deepStrictEqual(glossary.existingTicket, { id: "T-0001", status: "open" });
+
+  // E. a CLOSED ticket whose closure measured `unchanged` does not make a re-run legitimate again.
+  await fs.promises.rm(path.join(fx.dir, ".postmortem", "patches.json"), { force: true });
+  await writeChannel(fx.dir, "tickets.json", {
+    tickets: [ticket({ status: "closed", closure: { outcome: "unchanged", note: "the deliverable did not move" } })],
+  });
+  plan = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+  glossary = plan.steps.find((s) => s.step === "glossary");
+  assert.strictEqual(glossary.action, "ticket");
+  assert.strictEqual(glossary.existingTicket, null, "a closed ticket is not one to work — a new question is written");
+  assert.ok(
+    glossary.reasons.some((r) => r.includes("closed unchanged") && r.includes("time passing does not make a re-run legitimate")),
+    JSON.stringify(glossary.reasons)
+  );
+
+  // F. `planResume` is a pure function of the state it was handed. The same disk, the same
+  // fixture, a state whose channels were not read: the escalation stands, and nothing on disk
+  // changed that decision. This is the half that keeps a hand-built test state from silently
+  // reading the real series' correspondence (gotcha 71).
+  state = await resume.readWorkingState({ seriesDir: fx.dir });
+  assert.strictEqual(state.tickets.length, 1, "the channel is still there on disk");
+  const blind = resume.planResume({ ...state, tickets: undefined, patches: undefined });
+  const blindGlossary = blind.steps.find((s) => s.step === "glossary");
+  assert.strictEqual(blindGlossary.action, "ticket");
+  assert.strictEqual(blindGlossary.existingTicket, null, "planResume reached for no file of its own");
+
+  // G. the per-step budget is the ONE escalation a landed patch cannot un-spend. The patch record
+  // does not refund attempts this run already made, and applying it is itself the counted
+  // wipe-and-cascade — so the step is still out of moves, and the report says whose decision that
+  // is (the account owner's), rather than pretending the fix resets the allowance.
+  const budgetFx = await completeSeries("ticket-aware-budget");
+  const bVol2 = path.join(budgetFx.dir, "Test Story(02)");
+  for (const e of STEP_ARTIFACT_SPECS.glossary.volume) {
+    fs.rmSync(path.join(bVol2, e.name.replace("{installment}", "02")), { force: true });
+  }
+  for (let i = 0; i < 5; i += 1) {
+    await appendLedgerEntry({
+      run: "run-spent",
+      kind: "intervention",
+      step: "glossary",
+      volume: "02",
+      finding: "missing-required",
+      action: "wipe-and-cascade",
+      outcome: "unchanged",
+      decidedBy: "manager",
+    });
+  }
+  await writeChannel(budgetFx.dir, "tickets.json", { tickets: [ticket()] });
+  await writeChannel(budgetFx.dir, "patches.json", { patches: [patch({ status: "committed" })] });
+  plan = resume.planResume(await resume.readWorkingState({ seriesDir: budgetFx.dir }));
+  glossary = plan.steps.find((s) => s.step === "glossary");
+  assert.strictEqual(glossary.action, "ticket", "a patch does not un-spend the attempts this run already made");
+  assert.strictEqual(glossary.escalation, "intervention-budget");
+  assert.ok(
+    plan.notes.some((n) => n.includes("out of intervention budget (5/5)") && n.includes("account owner")),
+    JSON.stringify(plan.notes)
+  );
+
+  console.log("  correspondence: an open ticket is named not duplicated, a landed patch supersedes the escalation, a spent budget does not");
+}
+
+// ─── 10: the closed action menu ───────────────────────────────────────────────
 
 function testActionMenu() {
   // Tier C does not exist for the manager, at any count, in any mode.
@@ -596,7 +590,7 @@ function testActionMenu() {
   console.log("  action menu: Tier C refused with a reason, and the intervention rule pinned");
 }
 
-// ─── 10: the CLI ──────────────────────────────────────────────────────────────
+// ─── 11: the CLI ──────────────────────────────────────────────────────────────
 
 function testCli() {
   const fxPath = path.join(FIXTURES, "cli");
@@ -692,6 +686,174 @@ function testCli() {
   console.log("  delivery.js: report mode writes and executes nothing; a flag that would act without writing is refused");
 }
 
+// ─── 12: the verbs behind the escalation ladder ───────────────────────────────
+
+/**
+ * The manager has three acts it can perform on its own correspondence: write the question the plan
+ * says is the answer (`--open-ticket`), pick an option the diagnostics team offered (`--choose`),
+ * and judge a proposal (`--accept-patch` / `--reject-patch`, pinned in `test/test-delivery-act.js`).
+ *
+ * The first two did not exist as commands. `open-ticket` was a menu entry with nothing behind it —
+ * `executableSteps` returns nothing for a `ticket` line, so act mode executed nothing and only a
+ * GATE refusal ever reached `openTicketFor` — and an answered ticket could be read but not acted on,
+ * which meant the dev team (summoned only by an option marked `requiresCodeChange`) could never be
+ * summoned at all. A menu with entries nobody can carry out is a report, not a menu.
+ *
+ * Pinned here, against a fixture series and the fixture's own channel files: the question that gets
+ * written is the one that is TRUE of the escalation (not the "already tried" shape, which assumes an
+ * attempt happened), it passes the ticket shape rules, re-running the command names the live ticket
+ * instead of writing a second one, and a choice is refused when it names an option the filter
+ * already refused.
+ */
+async function testEscalationVerbs() {
+  const fx = await completeSeries("verbs");
+  const ledgerDir = path.join(fx.dir, ".postmortem");
+  const ticketsJson = path.join(ledgerDir, "tickets.json");
+  await leaveGateEvidenceBesideTheGap(fx.dir, "Test Story(02)", "02");
+
+  const run = (args) =>
+    spawnSync(process.execPath, [path.join(ROOT, "delivery.js"), ...args], {
+      encoding: "utf8",
+      cwd: ROOT,
+      env: { ...process.env, SERIES_LOCATION: fx.dir, POSTMORTEM_DIR: ledgerDir, AI_API_KEY: "" },
+    });
+  const readTickets = () => (fs.existsSync(ticketsJson) ? JSON.parse(fs.readFileSync(ticketsJson, "utf8")).tickets : []);
+
+  // 1. The plan's own escalation becomes a written question.
+  const opened = run(["--open-ticket"]);
+  assert.strictEqual(opened.status, 0, `${opened.stdout}\n${opened.stderr}`);
+  const out = `${opened.stdout}\n${opened.stderr}`;
+  let tickets = readTickets();
+  assert.strictEqual(tickets.length, 1, "one ticket, written once");
+  const t = tickets[0];
+  assert.strictEqual(t.step, "glossary");
+  assert.strictEqual(t.volume, "02");
+  assert.strictEqual(t.finding, "missing-required");
+  assert.strictEqual(t.status, "open");
+  assert.ok(
+    t.evidence.some((e) => e.file.includes("glossary.md.rejected")),
+    `the ticket cites the evidence the assessment actually read: ${JSON.stringify(t.evidence)}`
+  );
+  assert.ok(!/\.js\b|\.logs|system-prompts/.test(t.evidence.map((e) => e.file).join(" ")), "a manager may not cite what it cannot read");
+
+  // The question is the one that is TRUE of a gate-removed escalation. `openTicketFor`'s wording
+  // ("has been tried and the deliverable did not move") would state an attempt that never happened,
+  // because the triage REFUSED to try — and a ticket whose "already tried" list is a fiction gets
+  // answered by switching the guard off (gotcha 70).
+  assert.ok(/^Why/.test(t.question), `interrogative, not a demand: ${t.question}`);
+  assert.ok(t.question.includes("reproduced rather than repaired"), `it names the spin out loud: ${t.question}`);
+  assert.ok(!/make .* pass|so that it passes|get rid of/i.test(t.question), `no demanded result: ${t.question}`);
+  assert.ok(out.includes(`npm run diagnose -- --ticket=${t.id}`), "the next command is printed, not left to be guessed");
+  assert.strictEqual(
+    fs.existsSync(path.join(ledgerDir, "delivery-plan.md")),
+    false,
+    "the ticket IS the record of this act; the plan file describes a plan"
+  );
+
+  // 2. Idempotent: the autopilot may call this on every iteration, and a live ticket for this exact
+  // (step, volume, finding) is named, not duplicated. Two tickets for one complaint put the same
+  // question in front of the diagnostics team twice and make the ledger's "already tried" list
+  // describe neither.
+  const again = run(["--open-ticket"]);
+  assert.strictEqual(again.status, 0, `${again.stdout}\n${again.stderr}`);
+  tickets = readTickets();
+  assert.strictEqual(tickets.length, 1, "a second call wrote no second ticket");
+  assert.strictEqual(tickets[0].id, t.id);
+  assert.ok(`${again.stdout}`.includes("already open"), again.stdout);
+
+  // 3. Refused combinations.
+  const noWrite = run(["--open-ticket", "--no-write"]);
+  assert.strictEqual(noWrite.status, 2, noWrite.stderr);
+  assert.ok(noWrite.stderr.includes("contradiction"), noWrite.stderr);
+  assert.strictEqual(readTickets().length, 1, "a refusal writes nothing");
+
+  const twoActs = run(["--open-ticket", "--choose=O1", `--ticket=${t.id}`, '--reason=x']);
+  assert.strictEqual(twoActs.status, 2, twoActs.stderr);
+  assert.ok(twoActs.stderr.includes("one act at a time"), twoActs.stderr);
+
+  const badFlag = run(["--frobnicate"]);
+  assert.strictEqual(badFlag.status, 2, badFlag.stderr);
+  assert.ok(
+    badFlag.stderr.includes("--open-ticket") && badFlag.stderr.includes("--choose"),
+    "the known-flag list names the verbs it now has: " + badFlag.stderr
+  );
+
+  // A plan with nothing wrong has no question to ask, and the command says so instead of inventing
+  // one: a ticket written from a premise the disk does not support is the ticket that gets answered
+  // by removing the complaint.
+  const cleanFx = await completeSeries("verbs-clean");
+  const cleanOut = spawnSync(process.execPath, [path.join(ROOT, "delivery.js"), "--open-ticket"], {
+    encoding: "utf8",
+    cwd: ROOT,
+    env: { ...process.env, SERIES_LOCATION: cleanFx.dir, POSTMORTEM_DIR: path.join(cleanFx.dir, ".postmortem"), AI_API_KEY: "" },
+  });
+  assert.strictEqual(cleanOut.status, 2, `${cleanOut.stdout}\n${cleanOut.stderr}`);
+  assert.ok(cleanOut.stderr.includes("does not name a ticket"), cleanOut.stderr);
+  assert.strictEqual(fs.existsSync(path.join(cleanFx.dir, ".postmortem", "tickets.json")), false, "no ticket, no channel file");
+
+  // `completeSeries` moved `POSTMORTEM_DIR` to the clean fixture. Put it back before the parent
+  // process touches a channel file, or `attachOptions` answers a ticket in the wrong series.
+  process.env.POSTMORTEM_DIR = ledgerDir;
+
+  // 4. `--choose`: the manager's own act, and the door the dev team is summoned through.
+  // The options come through `attachOptions`, so the banned-option filter runs on the way in
+  // (gotcha 70) and the refused one is KEPT on the ticket rather than dropped.
+  const attached = attachOptions(t.id, [
+    {
+      label: "match the aliases inside a term cell, not the whole cell",
+      touches: ["utils/prompt.js"],
+      cost: "low",
+      risk: "low",
+      verify: "the glossary term rows carried forward are counted before and after",
+      requiresCodeChange: true,
+    },
+    {
+      label: "turn off the glossary carry-forward guard for this volume",
+      touches: [".env"],
+      cost: "low",
+      risk: "high",
+      verify: "the finding disappears",
+      requiresCodeChange: false,
+    },
+  ]);
+  assert.strictEqual(attached.error, null);
+  assert.strictEqual(attached.allowed.length, 1, "one option survives the filter");
+  assert.strictEqual(attached.refused.length, 1, "and the refused one is kept where the manager can see it");
+  const good = attached.allowed[0].id;
+  const bannedId = attached.refused[0].option.id;
+
+  const noReason = run([`--choose=${good}`, `--ticket=${t.id}`]);
+  assert.strictEqual(noReason.status, 2, noReason.stderr);
+  assert.ok(noReason.stderr.includes("must carry a reason"), noReason.stderr);
+
+  const chooseBanned = run([`--choose=${bannedId}`, `--ticket=${t.id}`, '--reason=cheapest']);
+  assert.strictEqual(chooseBanned.status, 2, chooseBanned.stderr);
+  assert.ok(chooseBanned.stderr.includes("was refused when it was offered"), chooseBanned.stderr);
+  assert.ok(chooseBanned.stderr.includes("account owner"), "a refusal names who it belongs to: " + chooseBanned.stderr);
+
+  const chooseUnknown = run([`--ticket=${t.id}`, "--choose=NOPE", '--reason=x']);
+  assert.strictEqual(chooseUnknown.status, 2, chooseUnknown.stderr);
+
+  const chooseUnknownTicket = run(["--ticket=TCK-nope-1", `--choose=${good}`, '--reason=x']);
+  assert.strictEqual(chooseUnknownTicket.status, 2, chooseUnknownTicket.stderr);
+
+  // The reason is passed unquoted because `spawnSync` has no shell: the argument arrives verbatim,
+  // which is also how `autopilot.js` will pass it. A human typing this in a shell gets the same
+  // string, because the shell is what strips the quotes there.
+  const chosen = run([`--ticket=${t.id}`, `--choose=${good}`, '--reason=it changes the test, not the guard']);
+  assert.strictEqual(chosen.status, 0, `${chosen.stdout}\n${chosen.stderr}`);
+  const after = readTickets()[0];
+  assert.strictEqual(after.status, "chosen");
+  assert.strictEqual(after.choice.optionId, good);
+  assert.strictEqual(after.choice.reason, "it changes the test, not the guard");
+  assert.ok(
+    `${chosen.stdout}`.includes(`npm run fix -- --ticket=${t.id}`),
+    "an option that needs code prints the command that summons the dev team:\n" + chosen.stdout
+  );
+
+  console.log("  escalation verbs: the plan's question is written once, a refused option stays refused, and choosing one names the dev team");
+}
+
 // ─── Runner ───────────────────────────────────────────────────────────────────
 
 (async function main() {
@@ -704,9 +866,11 @@ function testCli() {
   await testNoPlan();
   await testRecurringFindings();
   await testInterventionBudgetIsPerStep();
+  await testTriageReadsItsOwnCorrespondence();
   testActionMenu();
   delete process.env.POSTMORTEM_DIR;
   testCli();
+  await testEscalationVerbs();
   console.log("resume triage: ok");
 })().catch((err) => {
   console.error("resume triage test failed:", err.message);

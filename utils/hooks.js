@@ -23,6 +23,10 @@
  *   - after   -> hooks/post-<task>  (or post-<task>.sh / post-<task>.js)
  *   - the whole default run wraps a "pipeline" pseudo-step: pre-pipeline /
  *     post-pipeline.
+ *   - the support roles wrap their own turns: pre-manager / post-manager around
+ *     each model call the delivery manager, the diagnostics team or the dev team
+ *     makes, and pre-autopilot / post-autopilot around the whole autopilot loop.
+ *     These are pseudo-steps too (SUPPORT_TASKS): not gulp tasks, not in TASKS.
  * The directory is <project root>/hooks by default; override it with the
  * AI_CLIENT_HOOKS_DIR env var (the git core.hooksPath analogue).
  *
@@ -84,6 +88,39 @@ const TASKS = [
 const PIPELINE_TASK = "pipeline";
 
 /**
+ * The support-role pseudo-steps: roles that are NOT pipeline steps and have no
+ * gulp task, but DO make a model call, and therefore need the same guarantee
+ * every stage gets — that the right container is serving before the call starts.
+ *
+ * `manager` is the delivery manager's own decision call (autopilot.js) and the
+ * support team's turn (diagnose.js, fix.js): every one of these roles runs on
+ * the manager's model, which on a shared-port machine is a different container
+ * from the one the last pipeline step left running. `autopilot` wraps the whole
+ * loop, so a machine can put a hook around the loop itself (a notification that
+ * the loop stopped, a switch back to the resting container when it does).
+ *
+ * They are deliberately NOT in TASKS: TASKS is the list of gulp steps that
+ * `index.js --stages=` accepts and that `test/test-postmortem.js` pins against
+ * `gulpfile.js` PIPELINE_STEPS and the artifact specs. A support role is not a
+ * step, and adding one there would make `--stages=manager` look runnable.
+ *
+ * Each command that makes a support-role call fires `pre-manager` ITSELF,
+ * around the turn, rather than trusting whoever invoked it to do so: the
+ * guarantee belongs to the role, not to the caller (gotcha 22 — with identical
+ * aliases, a support turn served by the translator container answers with
+ * nothing, and the symptom looks like a model problem).
+ *
+ * @type {string[]}
+ */
+const SUPPORT_TASKS = ["manager", "autopilot"];
+
+/** @type {string} The support-role turn: the manager's decision, a diagnosis, a dev turn. */
+const MANAGER_TASK = "manager";
+
+/** @type {string} The whole autopilot loop, from reading the state to ending it. */
+const AUTOPILOT_TASK = "autopilot";
+
+/**
  * Env var that overrides the hooks directory (git core.hooksPath analogue).
  * @type {string}
  */
@@ -132,7 +169,7 @@ function getHooksDir() {
  * Find the hook file for a step + phase, or null when none exists.
  *
  * @param {string} hooksDir - Absolute hooks directory.
- * @param {string} task - The step name (a TASKS entry or PIPELINE_TASK).
+ * @param {string} task - The hook name: a TASKS entry, PIPELINE_TASK, or a SUPPORT_TASKS entry.
  * @param {"before"|"after"} phase - Which side of the step.
  * @returns {string|null} Absolute path to the hook file, or null.
  */
@@ -417,11 +454,31 @@ function withHooks(task, taskFn) {
   };
 }
 
+/**
+ * The same lifecycle, for a turn that is not a gulp task: fire the before-hook,
+ * await the function, fire the after-hook, and hand back its result (or rethrow
+ * its error). This is what the support-role CLIs use around a model call
+ * (`runTurnWithHooks(MANAGER_TASK, () => diagnoseTicket(…))`).
+ *
+ * `withHooks` exists to WRAP a task at definition time, which is the right shape
+ * for gulpfile.js and the wrong one for a CLI that is already running.
+ *
+ * @param {string} task - A SUPPORT_TASKS entry (or any hook name).
+ * @param {Function} turnFn - The async function to run between the hooks.
+ * @returns {Promise<*>} Whatever turnFn resolved to.
+ */
+async function runTurnWithHooks(task, turnFn) {
+  return withHooks(task, turnFn)();
+}
+
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
   TASKS,
   PIPELINE_TASK,
+  SUPPORT_TASKS,
+  MANAGER_TASK,
+  AUTOPILOT_TASK,
   HOOKS_DIR_ENV,
   hookTimeoutMs,
   getHooksDir,
@@ -431,4 +488,5 @@ module.exports = {
   execHookFile,
   runHook,
   withHooks,
+  runTurnWithHooks,
 };
