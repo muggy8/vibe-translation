@@ -2016,8 +2016,12 @@ async function guardCarryForwardAgainst(ctx, baselineText, stageLabel, baselineL
   if (diff.missing.length === 0) {
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: carry-forward check passed ` +
-        `(${diff.previousCount} terms carried${diff.restructured ? `, ${diff.restructured} of them reworded` : ""}, ${diff.added.length} added).`
+        `(${diff.previousCount} terms carried` +
+        `${diff.restructured ? `, ${diff.restructured} of them reworded` : ""}` +
+        `${diff.renamed.length ? `, ${diff.renamed.length} renamed (see the report)` : ""}` +
+        `, ${diff.added.length} added).`
     );
+    if (diff.renamed.length) logRenamedTerms(values.INSTALLMENT_NUMBER, diff.renamed);
     return;
   }
 
@@ -2065,13 +2069,39 @@ async function quarantineDamagedGlossary(ctx, diff) {
 }
 
 /**
+ * Name the carried-forward entries the gate recognised as RENAMED rather than
+ * lost, so a rename is visible in the log instead of being silently absorbed.
+ *
+ * A rename is legitimate (the amend prompt asks for it when a new term is an
+ * existing term under another spelling), but it is the form of edit that a
+ * carry-forward loss most often hides behind, so the run says which entries
+ * changed their source-language spelling and what they changed it to.
+ *
+ * @param {string} installmentNumber - The volume being processed.
+ * @param {Array<{term: string, now: string, section: string}>} renamed - The
+ *   `renamed` half of compareGlossaryCarryForward's diff.
+ * @returns {void}
+ */
+function logRenamedTerms(installmentNumber, renamed) {
+  const preview = renamed
+    .slice(0, 8)
+    .map((e) => `${e.term} → ${e.now} [${e.section || "no section"}]`)
+    .join(", ");
+  console.log(
+    `  [glossary] Volume ${installmentNumber}: ${renamed.length} carried-forward term(s) ` +
+      `kept under a new source-language spelling: ${preview}` +
+      `${renamed.length > 8 ? `, … ${renamed.length - 8} more` : ""}`
+  );
+}
+
+/**
  * Log (and fail on) a carry-forward loss, given the two snapshots already compared.
  *
  * The pure half of the gate: no files, so it is the part the tests can drive
  * with hand-built documents.
  *
  * @param {string} installmentNumber - The volume being processed.
- * @param {{previousCount: number, currentCount: number, missing: Array<{term: string, section: string}>, added: string[]}} diff
+ * @param {{previousCount: number, currentCount: number, missing: Array<{term: string, section: string}>, added: string[], renamed?: Array<{term: string, now: string, section: string}>}} diff
  *   The result of compareGlossaryCarryForward.
  * @param {string} stageLabel - Which pass produced the newer snapshot.
  * @param {string} baselineLabel - What the older snapshot was.
@@ -2087,18 +2117,27 @@ function reportCarryForwardLoss(installmentNumber, diff, stageLabel, baselineLab
     return;
   }
 
+  if (diff.renamed && diff.renamed.length) logRenamedTerms(installmentNumber, diff.renamed);
+
   const preview = diff.missing
     .slice(0, 12)
     .map((e) => `${e.term} [${e.section || "no section"}]`)
     .join(", ");
+  const shrinkNote =
+    diff.currentCount < diff.previousCount
+      ? ` The file shrank, which is what a pass that rewrites the whole document ` +
+        `does when the cumulative glossary is larger than one reply can write ` +
+        `(${diff.currentCount} of ${diff.previousCount} rows survived).`
+      : ` The file did NOT shrink (${diff.currentCount} rows), so these entries were ` +
+        `replaced rather than run out of room — check whether a row was rewritten ` +
+        `under a spelling the source does not use.`;
   const message =
     `Volume ${installmentNumber}: ${stageLabel} dropped ` +
     `${diff.missing.length} of the ${diff.previousCount} term(s) in ${baselineLabel} ` +
     `(${diff.currentCount} remain). Lost: ${preview}` +
     `${diff.missing.length > 12 ? `, … ${diff.missing.length - 12} more` : ""}. ` +
-    `The glossary is cumulative — every later volume is translated against it. ` +
-    `A pass that rewrites the whole file cannot finish it: the cumulative ` +
-    `glossary is larger than one reply can write (AI_MAX_TOKENS).`;
+    `The glossary is cumulative — every later volume is translated against it.` +
+    shrinkNote;
   console.error(`  [glossary] WARNING: ${message}`);
   throw new Error(message);
 }
@@ -2491,7 +2530,12 @@ function parseGlossaryTableTerms(markdown) {
         .replace(/^\*+|\*+$/g, "")
         .replace(/^_+|_+$/g, "")
         .trim();
-      entries.push({ term, rendering, section });
+      // The Notes column rides along (everything past the rendering). The
+      // carry-forward gate needs it to tell a RENAMED entry from a deleted one:
+      // "also written <the old spelling>" recorded in the Notes is the evidence
+      // that the entry survived having its term column rewritten.
+      const notes = cells.slice(2).join(" | ").trim();
+      entries.push({ term, rendering, notes, section });
     }
     tableRows = [];
   };
@@ -2547,6 +2591,40 @@ function glossaryTermSpans(term) {
 }
 
 /**
+ * The whole text of one glossary row — every column — for the "is this entry
+ * still documented here?" test.
+ *
+ * The carry-forward gate used to read only the term column, which is what made
+ * a legitimate rename look like a deletion (see compareGlossaryCarryForward).
+ *
+ * @param {{term: string, rendering: string, notes: string}} entry - One parsed row.
+ * @returns {string} The row's columns joined by " | ".
+ */
+function glossaryRowText(entry) {
+  return [entry.term, entry.rendering, entry.notes].filter(Boolean).join(" | ");
+}
+
+/**
+ * A rendering compared without Markdown emphasis or spacing, so `*The Twin
+ * Flowers' Love Story*` and `The Twin Flowers' Love Story` are the same name.
+ *
+ * @param {string} rendering - One row's target-language column.
+ * @returns {string} The comparison key ("" for an empty rendering).
+ */
+function normalizeGlossaryRendering(rendering) {
+  return String(rendering || "")
+    .replace(/[*_`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+// A one-character term is too ambiguous to prove anything by substring matching
+// ("A" occurs in half the Notes cells of a real glossary), so the rename test
+// only trusts a spelling long enough to be a term.
+const CARRY_FORWARD_MIN_ALIAS_SPAN_CHARS = 2;
+
+/**
  * Compare two glossary snapshots and report what the newer one LOST.
  *
  * The glossary is cumulative: volume N's file must hold every term volume
@@ -2564,17 +2642,33 @@ function glossaryTermSpans(term) {
  * The gate is deliberately about SPELLINGS, not cell text: what must survive is
  * the terminology, not the formatting of the row that held it.
  *
+ * A third legitimate form exists, and the gate used to mistake it for a loss:
+ * the entry is still in the file, but its term column now names a DIFFERENT
+ * source-language spelling of the same thing. That is what the amend prompt
+ * tells the agent to do when a new term is an existing term under another
+ * spelling ("reconcile them to a single canonical form and note the change").
+ * It counts as carried — reported separately as `renamed` — when the row still
+ * documents the old spelling (the Notes column is where "also written …"
+ * belongs) or the row carries the same target-language rendering and that
+ * rendering is unique on both sides. Observed live on volume 15: the extraction
+ * pass re-proposed 双ふた花ばの恋物語 under the fully furiganed spelling the
+ * chapter actually prints, the amend pass reconciled the two spellings into one
+ * row exactly as instructed, and the gate read the rewritten term column as a
+ * deletion — quarantining a glossary that had GROWN from 445 terms to 460 and
+ * aborting a 12-hour run.
+ *
  * Pure and deterministic — no model call, so it can run after every amend pass
  * for the price of two file reads.
  *
  * @param {string} previousMarkdown - The previous volume's glossary content.
  * @param {string} currentMarkdown - The glossary just produced for this volume.
- * @returns {{previousCount: number, currentCount: number, missing: Array<{term: string, section: string}>, added: string[], restructured: number}}
+ * @returns {{previousCount: number, currentCount: number, missing: Array<{term: string, rendering: string, section: string}>, added: string[], restructured: number, renamed: Array<{term: string, now: string, rendering: string, section: string}>}}
  *   `missing` is every term the previous glossary held that the new one does
  *   not (in previous-file order, with the section it came from); `added` is
- *   this volume's new or widened rows; `restructured` counts the carried
- *   entries whose term column was rewritten (an alias added, or one row split
- *   into several) and so is NOT a loss.
+ *   this volume's new rows; `restructured` counts the carried entries whose term
+ *   column was widened or split; `renamed` counts the carried entries whose term
+ *   column was replaced by another spelling of the same thing (`now` is the row
+ *   it lives in now). Neither `restructured` nor `renamed` is a loss.
  */
 function compareGlossaryCarryForward(previousMarkdown, currentMarkdown) {
   const previous = parseGlossaryTableTerms(previousMarkdown);
@@ -2597,30 +2691,14 @@ function compareGlossaryCarryForward(previousMarkdown, currentMarkdown) {
   }
 
   // Carried when every spelling the old row named still appears somewhere in the
-  // new file — as its own row, or inside a longer one.
+  // new file's term columns — as its own row, or inside a longer one.
   const isCarried = (cell) =>
     currentExact.has(cell) ||
     glossaryTermSpans(cell).every((span) => currentSpans.has(span) || currentHaystack.includes(span));
 
-  const seen = new Set();
-  const missing = [];
-  let restructured = 0;
-  for (const entry of previous) {
-    if (seen.has(entry.term)) continue;
-    seen.add(entry.term);
-    if (currentExact.has(entry.term)) continue;
-    if (isCarried(entry.term)) {
-      restructured++;
-      continue;
-    }
-    missing.push(entry);
-  }
-
-  // The other direction: the rows that are NOT a carried-forward entry in any of
-  // the three legitimate forms — unchanged, widened into one longer row, or split
-  // into several. Those are this volume's new work. Counting a widened row as both
-  // carried and added would make the two numbers mean different things depending
-  // on how the agent happened to format the row.
+  // The other direction, which the rename test needs as much as the `added` list
+  // does: a row whose every spelling the previous glossary already named is doing
+  // its job as a carried-forward row, so it is NOT this volume's new work.
   const previousCellSpans = [...previousCells].map((cell) => glossaryTermSpans(cell));
   const isCarriedForm = (cell) => {
     if (previousCells.has(cell)) return true;
@@ -2632,7 +2710,98 @@ function compareGlossaryCarryForward(previousMarkdown, currentMarkdown) {
     // …or every spelling in it was already named somewhere (a split row).
     return spans.every((s) => previousSpans.has(s));
   };
-  const added = current.filter((e) => !isCarriedForm(e.term)).map((e) => e.term);
+
+  // Renderings keyed for the rename test. A rendering shared by several rows
+  // proves nothing, so both sides must be unique before it counts as evidence.
+  const previousRenderingCount = new Map();
+  for (const e of previous) {
+    const key = normalizeGlossaryRendering(e.rendering);
+    if (!key) continue;
+    previousRenderingCount.set(key, (previousRenderingCount.get(key) || 0) + 1);
+  }
+  const currentRowsByRendering = new Map();
+  for (const e of current) {
+    const key = normalizeGlossaryRendering(e.rendering);
+    if (!key) continue;
+    if (!currentRowsByRendering.has(key)) currentRowsByRendering.set(key, []);
+    currentRowsByRendering.get(key).push(e);
+  }
+
+  /**
+   * The entry is gone from the term columns. Is it still IN the file?
+   *
+   * @param {{term: string, rendering: string}} entry - One previous row.
+   * @returns {?{term: string}} The current row it moved into, or null when the
+   *   entry is genuinely gone.
+   */
+  const findRename = (entry) => {
+    const spans = glossaryTermSpans(entry.term).filter(
+      (span) => span.length >= CARRY_FORWARD_MIN_ALIAS_SPAN_CHARS
+    );
+    if (spans.length === 0) return null;
+
+    // (a) A row this volume produced records every old spelling somewhere in the
+    //     row — the Notes column's "also written …". Restricting the search to
+    //     rows that are NOT already carrying a previous term is what keeps an
+    //     incidental mention from hiding a real deletion: a row doing its job as
+    //     a carried-forward entry is not the row this entry moved into.
+    const recorded = current.filter(
+      (e) => !isCarriedForm(e.term) && spans.every((span) => glossaryRowText(e).includes(span))
+    );
+    if (recorded.length === 1) return recorded[0];
+    if (recorded.length > 1) {
+      // Several rows mention it: the one carrying the same rendering is the entry.
+      const key = normalizeGlossaryRendering(entry.rendering);
+      const sameRendering = recorded.filter((e) => normalizeGlossaryRendering(e.rendering) === key);
+      return sameRendering[0] || recorded[0];
+    }
+
+    // (b) A row carries the SAME rendering, and that rendering is unique on both
+    //     sides — the only thing that changed is the source-language spelling.
+    //     An entry deleted outright has no row left for this to match.
+    const key = normalizeGlossaryRendering(entry.rendering);
+    if (!key) return null;
+    if ((previousRenderingCount.get(key) || 0) !== 1) return null;
+    const rows = currentRowsByRendering.get(key) || [];
+    if (rows.length !== 1) return null;
+    if (isCarriedForm(rows[0].term)) return null; // that row is carrying something else
+    return rows[0];
+  };
+
+  const seen = new Set();
+  const missing = [];
+  const renamed = [];
+  const renamedCells = new Set();
+  let restructured = 0;
+  for (const entry of previous) {
+    if (seen.has(entry.term)) continue;
+    seen.add(entry.term);
+    if (currentExact.has(entry.term)) continue;
+    if (isCarried(entry.term)) {
+      restructured++;
+      continue;
+    }
+    const row = findRename(entry);
+    if (row) {
+      renamed.push({
+        term: entry.term,
+        now: row.term,
+        rendering: entry.rendering,
+        section: entry.section,
+      });
+      renamedCells.add(row.term);
+      continue;
+    }
+    missing.push(entry);
+  }
+
+  // The other direction: the rows that are NOT a carried-forward entry in any of
+  // the legitimate forms — unchanged, widened into one longer row, split into
+  // several, or renamed to another spelling of the same thing. Those are this
+  // volume's new work. Counting a carried row as both carried and added would
+  // make the two numbers mean different things depending on how the agent
+  // happened to format the row.
+  const added = current.filter((e) => !isCarriedForm(e.term) && !renamedCells.has(e.term)).map((e) => e.term);
 
   return {
     previousCount: previousCells.size,
@@ -2640,6 +2809,7 @@ function compareGlossaryCarryForward(previousMarkdown, currentMarkdown) {
     missing,
     added,
     restructured,
+    renamed,
   };
 }
 

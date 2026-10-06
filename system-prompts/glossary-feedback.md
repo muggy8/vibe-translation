@@ -13,7 +13,7 @@ You are **not** regenerating the glossary from scratch. You are making **targete
 
 1. **Work through every finding.** Do not skip a finding silently. For each one, either apply it or reject it with a reason.
 2. **Missing terms** — add them in the correct section, rendered per the glossary's conventions (Hepburn romanization for names, consistent with existing entries). Verify the term actually appears in the source before adding it.
-3. **Dropped terms** — restore any carried-forward term that was accidentally removed.
+3. **Dropped terms** — restore any carried-forward term that was accidentally removed. A term the report lists under **Renamed Entries** was NOT removed: it is the same entry under another source-language spelling. Leave it where it is — re-adding the old spelling as a second row creates the duplicate the one-canonical-rendering rule exists to prevent. Act on a rename only when the report says the new spelling is not a form this volume's source prints; then change that row's term column to the spelling the source uses.
 4. **Consistency conflicts** — pick the correct/canonical rendering and make the whole glossary use it. Update every occurrence.
 5. **Correctness / placement / format fixes** — apply them precisely.
 6. **Preserve everything unflagged.** Make the smallest change that resolves each valid finding. Do not reword or "improve" entries the audit did not flag.

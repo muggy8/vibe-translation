@@ -694,6 +694,76 @@ assert.deepStrictEqual(
   ["三つ編み魔王 / 三つ編み悪魔 / 呪われし姫君"],
   "dropping one spelling out of an alias row IS a loss — the gate is about spellings"
 );
+// …and a one-character term is not proven carried by a substring landing inside
+// someone else's Notes cell.
+assert.deepStrictEqual(
+  compareGlossaryCarryForward(
+    prevGlossary,
+    "## Characters\n| Src | Tgt | Notes |\n|---|---|---|\n| A | Alpha | a |\n| D | Delta | d, cf. B and C"
+  ).missing.map((e) => e.term),
+  ["B", "C"],
+  "a short spelling mentioned in a Notes cell is not evidence an entry survived"
+);
+
+// A RENAME is not a loss. This is the live failure that aborted a 12-hour run:
+// volume 15 chapter 6 re-proposed 双ふた花ばの恋物語 under the fully furiganed
+// spelling the chapter actually prints, the amend pass reconciled the two
+// spellings into one row exactly as its system prompt tells it to ("reconcile
+// them to a single canonical form and note the change"), and the gate — which
+// read only the term column — called the rewritten row a deletion and quarantined
+// a glossary that had GROWN from 445 terms to 460.
+const renamePrev =
+  "## Items\n| Src | Tgt | Notes |\n|---|---|---|\n" +
+  "| 双ふた花ばの恋物語 | *The Twin Flowers' Love Story* | a library book |\n" +
+  "| 子犬のワルツ | Minute Waltz | a piece of music |";
+const renameNoted =
+  "## Items\n| Src | Tgt | Notes |\n|---|---|---|\n" +
+  "| 双ふた花ばの恋こい物もの語がたり | *The Twin Flowers' Love Story* | Coined title (also written 双ふた花ばの恋物語): Pansy's favourite book |\n" +
+  "| 子犬のワルツ | Minute Waltz | a piece of music |";
+const renameDiff = compareGlossaryCarryForward(renamePrev, renameNoted);
+assert.deepStrictEqual(
+  renameDiff.missing,
+  [],
+  "a term carried under another source-language spelling is NOT a lost term"
+);
+assert.strictEqual(renameDiff.renamed.length, 1, "…and it is reported as a rename, not silently absorbed");
+assert.strictEqual(renameDiff.renamed[0].now, "双ふた花ばの恋こい物もの語がたり", "the rename names the row the entry moved into");
+assert.deepStrictEqual(renameDiff.added, [], "a renamed row is not this volume's new work");
+assert.doesNotThrow(
+  () => reportCarryForwardLoss("15", renameDiff, "the amend pass for chapter ch6", "the glossary as of the previous chapter"),
+  "the gate that killed volume 15 now passes it"
+);
+// A rename with no "also written" note is still a rename when the row carries the
+// same target-language rendering and that rendering is unique on both sides.
+const bareDiff = compareGlossaryCarryForward(
+  renamePrev,
+  renameNoted.replace("Coined title (also written 双ふた花ばの恋物語): ", "Coined title: ")
+);
+assert.deepStrictEqual(bareDiff.missing, [], "the unchanged rendering is the other half of the rename evidence");
+assert.strictEqual(bareDiff.renamed.length, 1, "…reported as a rename, not a loss");
+assert.deepStrictEqual(bareDiff.added, [], "…and not counted as an addition either");
+// A genuinely deleted entry is still caught: no row, no spelling, no rendering.
+const deletedDiff = compareGlossaryCarryForward(
+  renamePrev,
+  "## Items\n| Src | Tgt | Notes |\n|---|---|---|\n| 子犬のワルツ | Minute Waltz | a piece of music |\n| 新語 | New Thing | new |"
+);
+assert.deepStrictEqual(deletedDiff.missing.map((e) => e.term), ["双ふた花ばの恋物語"], "a deleted entry is still a loss");
+assert.strictEqual(deletedDiff.renamed.length, 0, "…and nothing is excused as a rename");
+assert.throws(
+  () => reportCarryForwardLoss("15", deletedDiff, "the amend pass", "the previous volume's glossary"),
+  /dropped 1 of the 2 term\(s\)/,
+  "the gate still fails the volume on a real deletion"
+);
+// An incidental mention does not excuse a deletion: the rename test only trusts a
+// row that is this volume's new work, never one already carrying a term.
+assert.deepStrictEqual(
+  compareGlossaryCarryForward(
+    renamePrev,
+    "## Items\n| Src | Tgt | Notes |\n|---|---|---|\n| 子犬のワルツ | Minute Waltz | a piece of music; cf. 双ふた花ばの恋物語 |\n| 新語 | New Thing | new |"
+  ).missing.map((e) => e.term),
+  ["双ふた花ばの恋物語"],
+  "a carried-forward row mentioning the lost term in its Notes is not the row it moved into"
+);
 
 assert.doesNotThrow(() => reportCarryForwardLoss("02", grownDiff, "the amend pass", "the previous volume's glossary"), "no loss, no failure");
 assert.throws(
