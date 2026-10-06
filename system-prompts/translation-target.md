@@ -112,8 +112,9 @@ You choose each volume's folder name. Rules you must respect:
   committed.
 
 Stage every volume's source into its folder with `stageVolume` before you write
-the manifest, and use the staged path in the manifest. Staging copies the file
-and never touches the original; restaging the same content is a no-op.
+the manifest, and use the staged path in the manifest. Staging links the book
+into the folder rather than duplicating it, and never touches the original;
+restaging the same content is a no-op.
 
 ## The manifest you must write
 

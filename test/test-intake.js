@@ -665,6 +665,60 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   );
   assert.strictEqual(stillThere.metadata.title, "Loose One", "the staged book is unchanged");
 
+  // Staging LINKS the book rather than writing a second copy of it: the volume
+  // folder gets its own name for the same stored bytes. A 203 MB series used to
+  // cost 406 MB, and the extra half was the pipeline's single largest output.
+  assert.ok(
+    staged.via === "link" || staged.via === "copy",
+    "the answer says which one this filesystem got (a link, or the copy it fell back to)"
+  );
+  const stagedEntry = await fs.promises.lstat(staged.file);
+  if (staged.via === "link") {
+    assert.ok(stagedEntry.isSymbolicLink(), "the volume folder holds a shortcut, not a duplicate");
+    assert.strictEqual(
+      await fs.promises.realpath(staged.file),
+      await fs.promises.realpath(loose),
+      "and it reaches the original book"
+    );
+  } else {
+    assert.ok(stagedEntry.isFile(), "a filesystem that cannot link still gets a real copy");
+  }
+  assert.strictEqual(
+    (await fs.promises.stat(staged.file)).size,
+    (await fs.promises.stat(loose)).size,
+    "the volume folder's book reads as the same book either way"
+  );
+
+  // A BROKEN shortcut at the destination is refused, and nothing is written
+  // through it. readFile/copyFile both follow a shortcut, so the ordinary
+  // "is something already there?" answer for a dangling one is "no" — and the
+  // ordinary "put the file there" call would then create the file at whatever the
+  // shortcut POINTS at, outside the folder the sandbox confined the write to.
+  const brokenDir = path.join(seriesDir, "Broken(01)");
+  await fs.promises.mkdir(brokenDir, { recursive: true });
+  const brokenLink = path.join(brokenDir, "gone.epub");
+  const phantom = path.join(seriesDir, "never-written.epub");
+  await fs.promises.symlink(phantom, brokenLink);
+  const brokenRefused = await gates.tools.stageVolume.execute({
+    sourceFile: "loose01.epub",
+    folder: "Broken(01)",
+    as: "gone.epub",
+  });
+  assert.ok(String(brokenRefused).includes("refused"), "a broken shortcut is not staged over");
+  assert.ok(
+    String(brokenRefused).includes("shortcut"),
+    "and the refusal says what it found, not just 'no'"
+  );
+  assert.strictEqual(
+    await fs.promises.stat(phantom).then(() => "exists", () => "absent"),
+    "absent",
+    "nothing was written through the broken shortcut"
+  );
+  assert.ok(
+    (await fs.promises.lstat(brokenLink)).isSymbolicLink(),
+    "the broken shortcut is still there to be fixed by hand, not silently replaced"
+  );
+
   // Path safety: no escaping the series folder, no nested paths, no odd names.
   assert.ok(
     (await gates.tools.stageVolume.execute({ sourceFile: "other.epub", folder: "../outside" })).includes("refused")
@@ -1189,6 +1243,40 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
     fs.readdirSync(laidOut).filter((n) => n.endsWith(")")).sort(),
     ["My Series(01)", "My Series(02)"],
     "no rival set of volume folders was created"
+  );
+
+  // The same series laid out the way intake lays it out now: the volume folder's
+  // book is a SHORTCUT to the one at the root. `Dirent.isFile()` answers no for a
+  // shortcut, so a layout scan that asks the cheap directory question walks past
+  // every book already staged — and re-stages the whole series into a rival set of
+  // folders beside the committed ones (gotcha 31's failure, in a new costume).
+  const linked = makeTmpDir("ai-client-linked-");
+  for (const [folder, file] of [["Link Series(01)", "book-one.epub"], ["Link Series(02)", "book-two.epub"]]) {
+    await fs.promises.mkdir(path.join(linked, folder), { recursive: true });
+    const original = await writeEpub(linked, file, {
+      title: folder,
+      series: "Link Series",
+      sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
+    });
+    await fs.promises.symlink(
+      path.relative(path.join(linked, folder), original),
+      path.join(linked, folder, file)
+    );
+  }
+  const linkedPreview = await buildDeterministicManifest(linked, {
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+    seriesName: undefined,
+  });
+  assert.deepStrictEqual(
+    linkedPreview.volumes.map((v) => v.sourceFile),
+    ["Link Series(01)/book-one.epub", "Link Series(02)/book-two.epub"],
+    "a shortcut is recognised as the volume's book"
+  );
+  assert.deepStrictEqual(
+    fs.readdirSync(linked).filter((n) => n.endsWith(")")).sort(),
+    ["Link Series(01)", "Link Series(02)"],
+    "and it is previewed as it is — not re-staged into a second set of folders"
   );
 
   // ─── the prompt blocks the agent is given ──────────────────────────────────

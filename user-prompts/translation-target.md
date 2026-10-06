@@ -10,7 +10,7 @@ Series location (the folder to work in): {{SERIES_LOCATION}}
 
 1. **Stage the series.** For every book you decided is a volume, call
    `stageVolume` to create its volume folder inside the series location and
-   copy that volume's source file into it.
+   put that volume's source file in it.
 2. **Write the manifest** to `{{MANIFEST_FILE}}` (inside the series location)
    with `writeFile`: the JSON object described in your instructions, and nothing
    else in that file.

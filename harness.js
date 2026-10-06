@@ -882,9 +882,11 @@ function createWikiTools() {
  *   - epubInfo(filePath)                 the book's catalog card + section list
  *   - readEpubText(filePath, ...)        a bounded slice of one section's text
  *   - stageVolume({sourceFile, folder, as})
- *                                        create the volume folder and copy the
- *                                        source into it (the agent's "put the
- *                                        book where it belongs" action)
+ *                                        create the volume folder and put the
+ *                                        source in it — LINKED, not copied (the
+ *                                        agent's "put the book where it belongs"
+ *                                        action; a copy is the fallback only
+ *                                        where this filesystem cannot link)
  *
  * Text comes back in bounded windows (sampleChars per call) on purpose: an
  * agent sampling 17 books must not blow its own context window, and it only
@@ -901,6 +903,7 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
   const fsp = require("fs").promises;
   const crypto = require("crypto");
   const { openEpub, readEpubSection, scriptCounts, isEpubPath, classifyNavEntry } = require("./utils/source");
+  const { stageSourceFile } = require("./utils/fs");
   const allowed = allowedDirs.map((dir) => path.resolve(dir));
   const inside = (p) => {
     const resolved = path.resolve(cwd, p);
@@ -1048,11 +1051,15 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
 
     stageVolume: tool({
       description:
-        "Create a volume folder inside the series location and copy a source " +
-        "file into it — the action that lays the series out for the rest of " +
-        "the pipeline. The original file is never moved or modified. Re-staging " +
-        "the same content is a no-op; staging a DIFFERENT file over an existing " +
-        "one is refused.",
+        "Create a volume folder inside the series location and put a source " +
+        "file in it — the action that lays the series out for the rest of " +
+        "the pipeline. The book is LINKED, not copied: the folder gets its own " +
+        "name for the same stored file, so a series does not cost twice its " +
+        "bytes (where linking is not possible on this filesystem, a copy is " +
+        "made instead and the answer says so). The original file is never " +
+        "moved or modified. Re-staging the same content is a no-op; staging a " +
+        "DIFFERENT file over an existing one is refused, and so is staging over " +
+        "a shortcut that points at a file that no longer exists.",
       inputSchema: z.object({
         sourceFile: z
           .string()
@@ -1096,27 +1103,25 @@ async function createEpubTools({ cwd = process.cwd(), allowedDirs, sampleChars =
         }
         if (!st.isFile()) return `stageVolume refused: "${sourceFile}" is not a file.`;
         const target = path.join(dir, name);
+        // One read of the book, for the content hash the duplicate-book check and
+        // the no-clobber guard both need. Staging itself then LINKS the book rather
+        // than copying it — see stageSourceFile for why the destination is inspected
+        // with lstat first.
         const srcHash = sha256Of(await fsp.readFile(src));
-        let existing = null;
-        try {
-          existing = await fsp.readFile(target);
-        } catch {
-          /* nothing staged there yet */
-        }
-        if (existing) {
-          if (sha256Of(existing) === srcHash) {
-            return JSON.stringify({ staged: true, unchanged: true, file: target, sha256: srcHash });
-          }
-          return `stageVolume refused: ${target} already holds different content. Pick a different folder or file name.`;
-        }
-        await fsp.mkdir(dir, { recursive: true });
-        await fsp.copyFile(src, target);
+        const staged = await stageSourceFile({ src, target, srcSha256: srcHash, cwd });
+        if (!staged.ok) return `stageVolume refused: ${staged.reason}`;
         return JSON.stringify({
           staged: true,
-          unchanged: false,
+          unchanged: staged.unchanged,
           file: target,
           bytes: st.size,
           sha256: srcHash,
+          // "link" = the folder's name for the same stored bytes; "copy" = the
+          // fallback this filesystem forced. The run log and the agent both get
+          // to see which one happened.
+          via: staged.mode,
+          ...(staged.mode === "link" ? { linksTo: staged.linkTo } : {}),
+          ...(staged.reason ? { note: staged.reason } : {}),
           isEpub: isEpubPath(target),
         });
       },

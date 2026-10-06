@@ -236,6 +236,13 @@ async function assessFile(filePath, expectation, step, volume, displayPath) {
  * List the regular files in a folder (directories excluded — `images/` and the
  * epub extraction cache's image manifest are legitimate).
  *
+ * A SHORTCUT counts as a file when it resolves to one, and does not when it
+ * resolves to a folder or to nothing. `Dirent.isFile()` answers no for a shortcut,
+ * and a staged book is now usually a shortcut: without this, a stray shortcut in a
+ * volume folder would be invisible to the check that exists to report stale
+ * leftovers, and "the folder holds exactly what the pipeline writes" would stop
+ * being a question anyone could answer.
+ *
  * @param {string} dir
  * @returns {Promise<string[]>} Sorted file names, or null when the folder is absent.
  */
@@ -246,10 +253,20 @@ async function listFiles(dir) {
   } catch {
     return null;
   }
-  return entries
-    .filter((e) => e.isFile())
-    .map((e) => e.name)
-    .sort();
+  const names = [];
+  for (const e of entries) {
+    if (e.isFile()) {
+      names.push(e.name);
+      continue;
+    }
+    if (!e.isSymbolicLink()) continue;
+    try {
+      if ((await fs.promises.stat(path.join(dir, e.name))).isFile()) names.push(e.name);
+    } catch {
+      /* a broken shortcut is not a file — reported by the source-existence check, not here */
+    }
+  }
+  return names.sort();
 }
 
 /**

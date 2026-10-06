@@ -14,8 +14,8 @@
  *   - the series name (in its own language) and the source language (from the
  *     writing it actually read, not from a file name),
  *   - where each volume's artifacts will live: it names the volume folder,
- *     creates it, and stages the source file inside (stageVolume — a copy; the
- *     original is never touched),
+ *     creates it, and stages the source file inside (stageVolume — a link to
+ *     the original, not a second copy; the original is never touched),
  *   - and it writes the plan every later stage acts on.
  *
  * The agent decides; the code only gives it senses (the epub tools in
@@ -83,7 +83,7 @@ const {
   sanitizeFolderName,
   filterVolumesByInstallment,
 } = require("./utils/manifest");
-const { fileExists } = require("./utils/fs");
+const { fileExists, stageSourceFile } = require("./utils/fs");
 const { transformUserPrompt } = require("./utils/prompt");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { sha256OfFile, openEpub, isEpubPath, htmlToPlainText } = require("./utils/source");
@@ -294,8 +294,8 @@ async function applyCommittedLayout(seriesDir, manifest, committed) {
     warnings.push(
       `volume ${vol.installmentNumber}: "${owner.folder}" already holds this book's ` +
         `pipeline output — keeping that folder name instead of the planned ` +
-        `"${vol.folder}". The newly staged copy stays behind as a duplicate; ` +
-        `remove it by hand if you want it gone.`
+        `"${vol.folder}". The folder the agent planned stays behind with a staged ` +
+        `book in it; remove it by hand if you want it gone.`
     );
     vol.folder = owner.folder;
     vol.sourceFile = `${owner.folder}/${owner.src.file}`;
@@ -766,10 +766,12 @@ function confidenceGate(manifest) {
 }
 
 /**
- * Find a book listed twice. The agent chooses folder names and stages copies, so
- * the same book can end up as two volumes under two names — which silently
- * doubles every cumulative artifact built on it. Content hashes are the only
- * reliable detector, because the file names differ on purpose.
+ * Find a book listed twice. The agent chooses folder names and stages each book
+ * into one of them, so the same book can end up as two volumes under two names —
+ * which silently doubles every cumulative artifact built on it. Content hashes are
+ * the only reliable detector, because the file names differ on purpose (and a
+ * staged book is usually a shortcut to the same stored bytes, which is exactly
+ * what makes two entries the same book).
  *
  * @param {string} seriesDir - The SERIES_LOCATION path.
  * @param {TranslationTargetManifest} manifest - A validated manifest.
@@ -803,6 +805,26 @@ async function findDuplicateSources(seriesDir, manifest, hashCache = new Map()) 
 }
 
 // ─── Discovery backends ─────────────────────────────────────────────────────
+
+/**
+ * Is this directory entry a book the intake could stage?
+ *
+ * `Dirent.isFile()` answers NO for a shortcut, and a staged book is now usually
+ * a shortcut — so a scan that asks the cheap directory question would walk past
+ * every book the previous intake laid out, and a dry run would re-stage the whole
+ * series into a rival set of folders beside the committed ones (the exact failure
+ * gotcha 31 is about). Ask for a file OR a shortcut with a source-looking name.
+ *
+ * @param {import("fs").Dirent} entry
+ * @returns {boolean}
+ */
+function isSourceEntry(entry) {
+  return (
+    (entry.isFile() || entry.isSymbolicLink()) &&
+    /\.(epub|txt|md)$/i.test(entry.name) &&
+    !isVolumeArtifact(entry.name)
+  );
+}
 
 /**
  * Find the book staged inside a volume folder.
@@ -848,8 +870,9 @@ async function firstSourceInVolumeDir(volumeDir, folderName) {
  *      SERIES_LOCATION. Those are staged into "<base>(NN)/" folders — the same
  *      layout the intake agent produces — so a dry run previews the layout the
  *      real run will use. (This is the one file-writing side effect --dry-run
- *      has: it creates folders and copies sources, and never modifies or
- *      deletes anything.)
+ *      has: it creates folders and links each source into one — a copy only
+ *      where this filesystem cannot link — and never modifies or deletes
+ *      anything.)
  *
  * @param {string} seriesDir - The SERIES_LOCATION path.
  * @param {{sourceLanguage: string, targetLanguage: string, seriesName?: string}} opts
@@ -926,7 +949,7 @@ async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLan
   // 2. A flat pile of source files: stage each into its own volume folder.
   if (volumes.length === 0) {
     const loose = entries
-      .filter((e) => e.isFile() && /\.(epub|txt|md)$/i.test(e.name) && !isVolumeArtifact(e.name))
+      .filter((e) => isSourceEntry(e))
       .map((e) => e.name);
     for (const file of orderBy(loose)) {
       const number = String(volumes.length + 1).padStart(2, "0");
@@ -935,9 +958,11 @@ async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLan
       const target = path.join(seriesDir, folder, file);
       if (!(await fileExists(target))) {
         await fs.mkdir(path.join(seriesDir, folder), { recursive: true });
-        await fs.copyFile(path.join(seriesDir, file), target);
+        const staged = await stageSourceFile({ src: path.join(seriesDir, file), target });
         harness.logLine(
-          `[get-translation-target] staged ${file} into ${folder}/ (deterministic layout).`
+          `[get-translation-target] staged ${file} into ${folder}/ (${
+            staged.ok ? (staged.mode === "link" ? "linked" : "copied") : `staging refused: ${staged.reason}`
+          }) — deterministic layout.`
         );
       }
       volumes.push({
@@ -1026,7 +1051,7 @@ Your working folder is the series location; always use paths relative to it.
 - readFile / grep — plain-text files only. grep searches a FOLDER (dirPath), not one file; narrow it with glob, which is a filename ENDING (".md"), not a wildcard ("*.md" matches nothing). The file tools REFUSE .epub paths: an epub is a zip, and reading one as text returns binary junk, so readFile or grep on a book is blocked rather than wasted.
 - epubInfo(filePath) — open a book: its catalog card (title, author, language tag, the series name and book number stored inside it) and its section list.
 - readEpubText(filePath, section, offset, limit) — sample a bounded slice of one section's text.
-- stageVolume({ sourceFile, folder, as }) — create a volume folder and copy a source into it. It never touches the original.
+- stageVolume({ sourceFile, folder, as }) — create a volume folder and put a source in it (the book is linked, not duplicated). It never touches the original.
 - writeFile — write the manifest and the plan document. Always write the WHOLE file with writeFile; never append.
 - You cannot delete files, and you cannot write over a book file.
 - **CRITICAL: both output files must be written with writeFile. A chat reply is not saved to disk — if you put the JSON in your reply instead of calling writeFile, the manifest will not exist and the run will fail.**
@@ -1280,9 +1305,7 @@ async function runDiscoveryAgent(seriesDir, { overrides, committed, maxSteps, ex
   // source files) — the same lesson as validatorMaxStepsFor.
   const entries = await fs.readdir(seriesDir, { withFileTypes: true });
   const candidates = entries.filter(
-    (e) =>
-      e.isDirectory() ||
-      (e.isFile() && /\.(epub|txt|md)$/i.test(e.name) && !isVolumeArtifact(e.name))
+    (e) => e.isDirectory() || isSourceEntry(e)
   ).length;
   const stepCap =
     maxSteps ?? Math.max(DISCOVERY_BASE_STEPS, DISCOVERY_STEPS_PER_CANDIDATE * candidates + 20);

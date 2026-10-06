@@ -226,6 +226,40 @@ async function scenarioCleanRun() {
   assert.ok(report.markdown.includes("CLEAN"));
 }
 
+// ─── 3b. A staged book that is a shortcut is still the volume's book ──────────
+
+/**
+ * Intake now links each book into its volume folder instead of copying it. The
+ * post-mortem asks "does this folder hold exactly what the pipeline writes?" — so
+ * the shortcut must read as the volume's own source (not a stray), and a DIFFERENT
+ * shortcut must still be caught as a stray. Both halves, because a check that
+ * reports every staged book as a stray is a check people learn to ignore.
+ */
+async function scenarioLinkedSource() {
+  const { dir, volumes } = await freshSeries("linked");
+  for (const v of volumes) {
+    const book = path.join(dir, v.folder, "book.epub");
+    const original = path.join(dir, `${v.folder}.epub`);
+    await fs.writeFile(original, "not really an epub", "utf8");
+    await fs.rm(book);
+    await fs.symlink(path.relative(path.dirname(book), original), book);
+  }
+  const report = await runPostMortem({ step: "glossary", seriesDir: dir });
+  assert.strictEqual(
+    report.findings.length,
+    0,
+    `a series whose books are shortcuts reported:\n${report.markdown}`
+  );
+
+  // The other half: a shortcut that is NOT the volume's source is a stray.
+  await fs.symlink(path.join(dir, "glossary.md"), path.join(dir, "Test Story(01)", "old-notes.md"));
+  const stray = await runPostMortem({ step: "glossary", seriesDir: dir });
+  assert.ok(
+    kinds(stray).has("unexpected-file"),
+    `a stray shortcut in a volume folder was invisible:\n${stray.markdown}`
+  );
+}
+
 // ─── 4. Every finding class fires on its real shape ───────────────────────────
 
 /**
@@ -562,6 +596,9 @@ async function scenarioRendering() {
 
   await scenarioCleanRun();
   console.log("postmortem: a finished step reports nothing (the false-positive half)");
+
+  await scenarioLinkedSource();
+  console.log("postmortem: a linked book is the volume's source, a stray shortcut is still a stray");
 
   await scenarioPlantedDefects();
   console.log(`postmortem: ${DEFECT_CASES.length + 1} planted defects all detected`);

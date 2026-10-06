@@ -42,7 +42,7 @@ const path = require("path");
 const crypto = require("crypto");
 const JSZip = require("jszip");
 const cheerio = require("cheerio");
-const { fileExists } = require("./fs");
+const { fileExists, shortcutTarget } = require("./fs");
 const { structuralError } = require("../configs/shared");
 const tokens = require("./tokens");
 const { scriptMixOf } = tokens;
@@ -2050,13 +2050,22 @@ async function materializeTextParts(originalPath, volumeDir, base, size, fingerp
 async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false }) {
   const originalPath = path.resolve(seriesDir, volume.sourceFile);
   if (!(await fileExists(originalPath))) {
+    // A staged book is a shortcut to the copy at the series root, so this failure
+    // has two shapes now, and the second one is unfindable without being named:
+    // the folder lost its book, or the book is there and the ORIGINAL it was
+    // reaching is gone. Say which.
+    const link = await shortcutTarget(originalPath);
+    const linkNote = link
+      ? ` The name in the volume folder is a shortcut to "${link.pointsTo}", which ` +
+        (link.resolves ? "is not readable." : "does not exist — restore THAT file.")
+      : "";
     // STRUCTURAL: the manifest's plan of record points at a book that is no
     // there (a deleted file, a moved folder, a disk failure). No run policy may
     // skip past it — every artifact built after this point would be built on a
     // missing book.
     throw structuralError(
       `Required source file not found: ${originalPath} (volume ${volume.installmentNumber}, ` +
-        `listed in the plan of record as "${volume.sourceFile}"). ` +
+        `listed in the plan of record as "${volume.sourceFile}").${linkNote} ` +
         `The file is gone or the folder moved — restore it, or re-run "npx gulp discover --force" ` +
         `to re-plan the series.`
     );
