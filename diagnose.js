@@ -42,7 +42,7 @@
  * the contract), 2 the request itself was refused (an unknown flag, a re-ask that was not asked
  * for, an answer citing something the manager may not read).
  *
- * See AGENTS.md §3.6.
+ * See docs/delivery-layer.md.
  */
 
 require("./types"); // JSDoc type definitions

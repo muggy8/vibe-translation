@@ -3,7 +3,7 @@
  * pipeline runs, and the rules that stop it from changing the rules.
  *
  * `npm run delivery --mode=act` gives a manager authority over a run without ever letting it read the
- * code (AGENTS.md §3.6). When re-running stops working it opens a ticket, the diagnostics team answers
+ * code (docs/delivery-layer.md). When re-running stops working it opens a ticket, the diagnostics team answers
  * it, the manager chooses an option, and if that option says `requiresCodeChange` a dev team is called
  * in (plan §9 rows 4–5). That role is the mirror image of the manager's: it reads and edits the code,
  * and it never decides whether its own work is good.
@@ -53,7 +53,7 @@ const path = require("path");
 // picture — and keeps the patch records out of the fixture's working tree. See gotcha 69 / 71.
 const TMP = path.join(os.tmpdir(), "oresuki-devteam-test");
 process.env.POSTMORTEM_DIR = path.join(TMP, "postmortem");
-// The dev team fires `pre-manager` / `post-manager` around its model turn (AGENTS.md §3). Hooks are
+// The dev team fires `pre-manager` / `post-manager` around its model turn (docs/architecture.md). Hooks are
 // per-machine and optional, so a suite that does not pin the hooks directory would let THIS machine's
 // `hooks/pre-manager.sh` load a real model during `npm test` (gotcha 22). An empty folder is the
 // documented no-op: absent hooks, nothing runs.

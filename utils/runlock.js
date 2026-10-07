@@ -2,7 +2,7 @@
  * utils/runlock.js — who is running the pipeline right now.
  *
  * The delivery manager has the authority to wipe a volume's outputs and start a step
- * (AGENTS.md §3.6). That authority has one failure mode that has nothing to do with the
+ * (docs/delivery-layer.md). That authority has one failure mode that has nothing to do with the
  * manager's judgment: **it starts a step while a step is already running.** Two processes
  * writing the same volume folder is how a run ends with an artifact half-built by one and
  * half by the other, and the pipeline has no way to notice afterwards.

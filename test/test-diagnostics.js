@@ -45,7 +45,7 @@ const { spawn } = require("child_process");
 // history) out of the picture. See gotcha 69/71.
 const TMP = path.join(os.tmpdir(), "oresuki-diagnostics-test");
 process.env.POSTMORTEM_DIR = path.join(TMP, "postmortem");
-// The diagnostics role fires `pre-manager` / `post-manager` around its model turn (AGENTS.md §3: the
+// The diagnostics role fires `pre-manager` / `post-manager` around its model turn (docs/architecture.md: the
 // guarantee belongs to the role that makes the call). Hooks are per-machine and optional, so a suite
 // that does not pin the hooks directory would let THIS machine's `hooks/pre-manager.sh` load a real
 // model during `npm test` (gotcha 22). Pinning it to an empty folder makes the hooks the documented

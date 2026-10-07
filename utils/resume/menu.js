@@ -6,7 +6,7 @@
 
 /**
  * The steps whose artifacts are cumulative: regenerating one volume forces every later
- * volume to regenerate (`regeneratedAny`, AGENTS.md §4/§5/§6/§7). This is what makes
+ * volume to regenerate (`regeneratedAny`, docs/pipelines.md). This is what makes
  * "wipe the broken volume and re-run the step" the correct primitive instead of
  * "re-run one volume".
  */

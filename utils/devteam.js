@@ -101,7 +101,7 @@ const DELETION_REFUSAL =
 
 /**
  * The tool note appended to the system prompt in code (the convention: prompt files stay
- * mode-agnostic, mode-specific text is appended here — see AGENTS.md §11).
+ * mode-agnostic, mode-specific text is appended here — see docs/conventions.md).
  *
  * Three things it must say that `AGENT_TOOLS_NOTE` cannot: which files this role may NOT write, the
  * fact that it has no shell, and how its working window works now that this turn has no step limit.
@@ -522,7 +522,7 @@ async function workTicket({ ticketId, seriesDir, root = ROOT, patchPaths = patch
   // the model never pays for a container switch (gotcha 22). And this turn is a tool-calling agent
   // that EDITS files, which a container that cannot call tools answers with nothing at all (gotcha
   // 51) — so the guarantee "the support model is the one serving" belongs to the role that makes the
-  // call. Which container that is stays entirely the hook's business (AGENTS.md §3).
+  // call. Which container that is stays entirely the hook's business (docs/architecture.md).
   let result = null;
   let turnError = null;
   try {

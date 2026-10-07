@@ -23,7 +23,7 @@
  * `managerDecision` sits on: the shaped brief, the fail-closed parse and the menu gate all run for
  * real, so a scripted reply is tested through the same gate a live one would meet.
  * `AI_CLIENT_HOOKS_DIR` is pinned to an empty folder: `pre-autopilot` and `pre-manager` are real
- * executables on this machine and they start real model containers (AGENTS.md §3, gotcha 22).
+ * executables on this machine and they start real model containers (docs/architecture.md, gotcha 22).
  *
  * No scenario spawns a pipeline step. The one act-mode scenario that spawns a command spawns
  * `delivery.js --open-ticket`, which writes a ticket in the fixture's own channel and reaches no

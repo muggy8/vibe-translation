@@ -19,7 +19,7 @@ const { validateManagerAction } = require("./gate");
  *
  * One tool-less `runOneShot`, wrapped in `runTurnWithHooks(MANAGER_TASK, …)` so `pre-manager` fires
  * before it and `post-manager` after: the guarantee that the manager's model is the one serving is
- * the role's, not the caller's (AGENTS.md §3 "Pipeline hooks"). It samples like a grader —
+ * the role's, not the caller's (docs/architecture.md "Pipeline hooks"). It samples like a grader —
  * `JUDGE_TEMPERATURE` + `STAGE_THINKING_LEVEL` — because a decision is a judgment over records that
  * are already on disk, not a document being written (gotcha 59).
  *

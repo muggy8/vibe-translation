@@ -6,7 +6,7 @@
  * that make a model's answer safe to act on:
  *
  *   1. **The call has no file tools.** The manager's whole guarantee is that it never sees the code
- *      (AGENTS.md §3.6). A tool-less `runOneShot` is that guarantee as a capability; a prompt that
+ *      (docs/delivery-layer.md). A tool-less `runOneShot` is that guarantee as a capability; a prompt that
  *      says "do not read the code" is a sentence. So the stub asserts the request it received had no
  *      `tools` and no agent handle, and that the brief it was handed names the folders and reports but
  *      never a `.js`.
@@ -24,7 +24,7 @@
  *
  * No model call, no network. `AI_CLIENT_HOOKS_DIR` is pinned to an empty folder: `managerDecision`
  * fires `pre-manager` around its own turn, and on this machine that hook starts a real container
- * (AGENTS.md §3 "Pipeline hooks"). A test must not be able to do that.
+ * (docs/architecture.md "Pipeline hooks"). A test must not be able to do that.
  */
 
 const assert = require("assert");

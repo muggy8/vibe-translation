@@ -3,7 +3,7 @@
  * rules that stop the role making that change from editing the rules that judge it.
  *
  * `npm run delivery --mode=act` gives a manager authority over a run without ever letting it read the
- * code (AGENTS.md §3.6). When re-running stops working it opens a ticket, the diagnostics team answers
+ * code (docs/delivery-layer.md). When re-running stops working it opens a ticket, the diagnostics team answers
  * it, and the manager chooses an option. If the chosen option says `requiresCodeChange`, a dev team is
  * called in — and that is the first role in this pipeline that can change the code deciding what is
  * allowed. So the channel has to be built before the role is (gotcha 66: a running process cannot pick

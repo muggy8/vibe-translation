@@ -103,7 +103,7 @@ function recallMaxBytes() {
  *
  * This is a repetition detector, not a spending limit (design §4.8). It is
  * consistent with the standing decision that these roles get no token budget
- * (AGENTS.md §9): "a spending limit would hide the spin behind a cost error, and
+ * (docs/environment.md): "a spending limit would hide the spin behind a cost error, and
  * the spin is the thing this layer exists to catch."
  *
  * @returns {number} AGENT_REPEAT_LIMIT, default 3, minimum 2.

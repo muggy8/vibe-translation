@@ -11,7 +11,7 @@ require("../../types"); // JSDoc type definitions
  *
  * There is deliberately no token BUDGET here (no `DELIVERY_TOKEN_BUDGET`) — the ceiling on one
  * decision is the model's own output cap, and what stops a spin is the ledger, not a spending limit
- * (AGENTS.md §9, "The delivery manager"). A spending limit would hide the spin behind a cost error,
+ * (docs/environment.md, "The delivery manager"). A spending limit would hide the spin behind a cost error,
  * and the spin is the thing this layer exists to catch (gotcha 69).
  *
  * @returns {number} - Default 131072, minimum 1024.

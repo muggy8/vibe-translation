@@ -181,7 +181,7 @@ async function guardCarryForwardAgainst(ctx, baselineText, stageLabel, baselineL
  * This is what makes the documented cascade actually fire. A failed volume
  * normally stops the next one because its artifact is MISSING, and
  * ON_MISSING_PREVIOUS=skip then skips that one in turn, to the end of the task
- * (AGENTS.md §3). A carry-forward loss is the worse case: the file is present,
+ * (docs/architecture.md). A carry-forward loss is the worse case: the file is present,
  * plausible, and short by hundreds of terms — so the next volume would read it
  * as terminology law. Observed live: volume 06 held 411 of volume 05's 769
  * terms, and nothing in the stage could see it.

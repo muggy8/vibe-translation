@@ -52,7 +52,7 @@
  * Exit codes: 0 the end was provable; 1 the loop stopped short (a refusal, an escalation, the
  * iteration cap); 2 the request itself was refused (a bad flag, a mode that does not exist).
  *
- * See AGENTS.md §3.6 and the plan notebook.
+ * See docs/delivery-layer.md and the plan notebook.
  */
 
 require("./types"); // JSDoc type definitions
@@ -112,7 +112,7 @@ function readArgs(argv) {
  * `AUTOPILOT_MODE`, with the command line winning. The default is **watch**.
  *
  * The ordering is the same one `DELIVERY_MODE` uses and for the same reason: this layer earns the
- * right to act by writing a report that is demonstrably right about a real run (AGENTS.md §3.6).
+ * right to act by writing a report that is demonstrably right about a real run (docs/delivery-layer.md).
  *
  * @param {string|null} fromFlag
  * @returns {string}

@@ -128,7 +128,7 @@ async function diagnoseTicket({ ticketId, seriesDir, root = ROOT, reask = false,
   // pays for a container switch (gotcha 22); and this turn is a tool-calling agent, which a container
   // that cannot call tools answers with nothing at all (gotcha 51) — so "the support model is the one
   // serving" has to be guaranteed by the role that makes the call. Which container that is stays
-  // entirely the hook's business (AGENTS.md §3, "hook names are role labels, never model names").
+  // entirely the hook's business (docs/architecture.md, "hook names are role labels, never model names").
   const result = await runTurnWithHooks(MANAGER_TASK, async () => {
     const agent = await harness.createAgentHandle({
       name: "diagnostics",

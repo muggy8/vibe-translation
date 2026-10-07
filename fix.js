@@ -53,7 +53,7 @@
  * failed), 2 the request itself was refused (an unknown flag, a run in progress, a patch in a state
  * that does not allow the action).
  *
- * See AGENTS.md §3.6.
+ * See docs/delivery-layer.md.
  */
 
 require("./types"); // JSDoc type definitions
