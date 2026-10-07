@@ -27,7 +27,7 @@ const {
   sanitizeFolderName,
   filterVolumesByInstallment,
 } = require("../utils/manifest");
-const { fileExists, stageSourceFile } = require("../utils/fs");
+const { fileExists } = require("../utils/fs");
 const { structuralError } = require("../configs/shared");
 
 const { confidenceGate, findDuplicateSources, manifestSourcesExist, validateManifest } = require("./validate");

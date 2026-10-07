@@ -18,12 +18,12 @@ require("dotenv").config();
 const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, saveRollingState, ON_QA_LIMIT, validateRequiredEnv, judgeTemperature, judgeThinking, isStructuralError } = require("../configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, writeProvenanceSidecar, fingerprintFiles } = require("../utils/fs");
-const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("../utils/qa-loop");
+const { validateRequiredEnv } = require("../configs/shared");
+const { fileExists, hasRealOutput } = require("../utils/fs");
+const { runVolumeWithModeFallback } = require("../utils/qa-loop");
 const { writeVolumeHandoff } = require("../utils/handoff");
 const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifacts, volumeAlreadyAccepted, publishLatestToSeriesRoot, runVolumeSeries } = require("../utils/series-run");
-const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("../utils/prompt");
+const { transformUserPrompt, writePromptDump } = require("../utils/prompt");
 const {
   resolveSourceBundle,
   decideProcessingMode,

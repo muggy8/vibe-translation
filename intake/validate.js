@@ -23,8 +23,8 @@ const {
   sanitizeFolderName,
   filterVolumesByInstallment,
 } = require("../utils/manifest");
-const { fileExists, stageSourceFile } = require("../utils/fs");
-const { sha256OfFile, openEpub, isEpubPath, htmlToPlainText } = require("../utils/source");
+const { fileExists } = require("../utils/fs");
+const { sha256OfFile } = require("../utils/source");
 
 const { MANIFEST_SCHEMA, discoverMinConfidence } = require("./config");
 const { validateVolumeIntegrity } = require("./integrity");

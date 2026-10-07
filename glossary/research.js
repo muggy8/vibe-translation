@@ -12,7 +12,7 @@
 require("dotenv").config();
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
+const { assertRealToolCalls } = require("../utils/agents");
 const {
   resolveSourceBundle,
   decideProcessingMode,

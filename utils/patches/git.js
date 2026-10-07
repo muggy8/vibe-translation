@@ -5,7 +5,7 @@
  */
 
 const path = require("path");
-const { execFileSync, spawnSync } = require("child_process");
+const { execFileSync } = require("child_process");
 
 const { ROOT } = require("./rules");
 const { normalizeProjectPath, patchTouchesBanned } = require("./path-rules");

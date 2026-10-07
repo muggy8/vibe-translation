@@ -4,7 +4,7 @@
  * Part of the context.js layer (split out of the original single file).
  */
 
-const { scriptMixOf, estimateMix, activeCoefficients, tokenEstimateMargin } = require("../tokens");
+const { scriptMixOf, estimateMix } = require("../tokens");
 
 const { contextHardLimit, contextSoftLimit } = require("./limits");
 

@@ -6,7 +6,7 @@
 
 require("../../types"); // JSDoc type definitions
 const { customerMayRead, sameQuestion, unansweredQuestions } = require("../tickets");
-const { judgmentReasonIsSound, patchTouchesBanned, isProjectSourcePath, UNJUDGED_STATUSES } = require("../patches");
+const { judgmentReasonIsSound, UNJUDGED_STATUSES } = require("../patches");
 
 const { ACTION_BY_NAME } = require("./rules");
 

@@ -10,7 +10,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const tokens = require("../utils/tokens");
-const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("../utils/prompt");
+const { transformUserPrompt } = require("../utils/prompt");
 const {
   sha256,
   checkTranslationQa,

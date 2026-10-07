@@ -8,8 +8,8 @@ require("dotenv").config();
 const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError } = require("../configs/shared");
-const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("../utils/prompt");
+const { ACCEPTANCE_PASSING_SCORE, judgeTemperature, judgeThinking } = require("../configs/shared");
+const { parseAcceptanceReply } = require("../utils/prompt");
 
 /**
  * The wiki acceptance check (called by the shared QA loop in

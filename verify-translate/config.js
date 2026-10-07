@@ -7,7 +7,7 @@
 require("dotenv").config();
 const path = require("path");
 require("../types"); // JSDoc type definitions
-const { ON_VOLUME_ERROR, PASSING_SCORE, ACCEPTANCE_SCORE_TOLERANCE, validateRequiredEnv, isStructuralError, volumeFailureError, readBoolEnv, resolveRunSettings } = require("../configs/shared");
+const { PASSING_SCORE, ACCEPTANCE_SCORE_TOLERANCE, readBoolEnv } = require("../configs/shared");
 const {
   sha256,
   roleEndpoint,

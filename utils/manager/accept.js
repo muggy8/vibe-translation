@@ -5,7 +5,7 @@
  */
 
 require("../../types"); // JSDoc type definitions
-const { judgmentReasonIsSound, patchTouchesBanned, isProjectSourcePath, UNJUDGED_STATUSES } = require("../patches");
+const { patchTouchesBanned, isProjectSourcePath } = require("../patches");
 
 const { NOT_ORDINARY_CODE } = require("./rules");
 

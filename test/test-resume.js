@@ -42,7 +42,6 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 
 const { STEP_ARTIFACT_SPECS } = require("../utils/artifacts");
-const { PIPELINE_STEPS } = require("../gulpfile");
 const resume = require("../utils/resume");
 const { appendLedgerEntry } = require("../utils/ledger");
 const { attachOptions } = require("../utils/tickets");

@@ -12,7 +12,7 @@ const {
   maxInterventionsPerStep,
   interventionsUsed,
 } = require("../utils/resume");
-const { readLedger, appendLedgerEntry, interventionAllowed } = require("../utils/ledger");
+const { readLedger, interventionAllowed } = require("../utils/ledger");
 
 /**
  * The steps act mode will try to execute, in run order.

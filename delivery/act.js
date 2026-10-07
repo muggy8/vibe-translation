@@ -24,7 +24,7 @@ const {
   closureFromComparison,
 } = require("../utils/delivery-verify");
 const { wipeAttemptOutputs } = require("../utils/fs");
-const { readLedger, appendLedgerEntry, interventionAllowed } = require("../utils/ledger");
+const { appendLedgerEntry } = require("../utils/ledger");
 const { acquireRunLock, releaseRunLock, runLockPath } = require("../utils/runlock");
 const patches = require("../utils/patches");
 const projectRoot = path.resolve(__dirname, "..");

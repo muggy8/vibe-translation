@@ -11,7 +11,7 @@
 require("dotenv").config();
 const path = require("path");
 require("../types"); // JSDoc type definitions
-const { tool, generateText } = require("ai");
+const { tool } = require("ai");
 const { z } = require("zod");
 
 /**

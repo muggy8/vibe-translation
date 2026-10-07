@@ -10,7 +10,7 @@ require("dotenv").config();
 const fs = require("fs").promises;
 const path = require("path");
 require("../types");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("../configs/shared");
+const { ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, readBoolEnv } = require("../configs/shared");
 
 const { buildVoiceIndex, parseVoiceSections } = require("./reference-index");
 

@@ -14,7 +14,7 @@ require("dotenv").config();
 const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
-const { sha256OfFile, openEpub, isEpubPath, htmlToPlainText } = require("../utils/source");
+const { sha256OfFile } = require("../utils/source");
 
 const { isVolumeArtifact } = require("./config");
 

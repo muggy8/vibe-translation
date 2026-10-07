@@ -7,7 +7,7 @@
 const fs = require("fs");
 const path = require("path");
 const { postMortemDir } = require("../postmortem");
-const { readTickets, ticketPaths, OUTCOME_ONLY_CHECK, verificationIsOutcomeOnly } = require("../tickets");
+const { readTickets, ticketPaths } = require("../tickets");
 
 const { renderPatchesMarkdown } = require("./render");
 const { UNJUDGED_STATUSES } = require("./rules");

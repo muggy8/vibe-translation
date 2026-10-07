@@ -14,8 +14,8 @@
 
 require("dotenv").config();
 require("../types"); // JSDoc type definitions
-const { Agent: UndiciAgent, fetch: undiciFetch } = require("undici");
-const { readBoolEnv, tooBigForOnePassError, isTooBigForOnePassError } = require("../configs/shared");
+const { fetch: undiciFetch } = require("undici");
+const { tooBigForOnePassError } = require("../configs/shared");
 
 const { logLine } = require("./log");
 const { noTimeoutAgent } = require("./provider");

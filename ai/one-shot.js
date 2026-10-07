@@ -11,7 +11,7 @@
 require("dotenv").config();
 require("../types"); // JSDoc type definitions
 const { tool, generateText } = require("ai");
-const { readBoolEnv, tooBigForOnePassError, isTooBigForOnePassError } = require("../configs/shared");
+const { tooBigForOnePassError, isTooBigForOnePassError } = require("../configs/shared");
 
 const { createChatModel, createTaps, createTapsRef, loadEsm, thinkingExtraBody, toModelMessages } = require("./provider");
 const { logFilePath, logLine, writeOneShotLog } = require("./log");

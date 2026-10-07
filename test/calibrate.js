@@ -29,7 +29,6 @@
  */
 const assert = require("assert");
 const fs = require("fs").promises;
-const fsSync = require("fs");
 const path = require("path");
 
 const { PASSING_SCORE, judgeTemperature } = require("../configs/shared");

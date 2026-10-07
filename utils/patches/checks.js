@@ -6,7 +6,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execFileSync, spawnSync } = require("child_process");
+const { spawnSync } = require("child_process");
 
 const { CHECK_TIMEOUT_MS, REQUIRED_CHECKS, ROOT } = require("./rules");
 const { patchPaths, readPatches, writePatches } = require("./record");

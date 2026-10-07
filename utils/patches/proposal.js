@@ -4,7 +4,7 @@
  * Part of the patches.js layer (split out of the original single file).
  */
 
-const { readTickets, ticketPaths, OUTCOME_ONLY_CHECK, verificationIsOutcomeOnly } = require("../tickets");
+const { OUTCOME_ONLY_CHECK, verificationIsOutcomeOnly } = require("../tickets");
 
 const { normalizeProjectPath, patchTouchesAnswerKey, patchTouchesBanned } = require("./path-rules");
 const { PROPOSAL_CONTRACT, SIGNAL_DIRECTIONS, SIGNAL_NAMES } = require("./rules");

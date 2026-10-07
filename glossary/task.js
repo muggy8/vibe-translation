@@ -16,11 +16,11 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, authorMaxStepsFor, findingsMergeMaxStepsFor, writePromptDump } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, saveRollingState, ON_QA_LIMIT, validateRequiredEnv, judgeTemperature, judgeThinking, isStructuralError, readBoolEnv } = require("../configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, inlineReferenceMessage } = require("../utils/fs");
+const { transformUserPrompt, writePromptDump } = require("../utils/prompt");
+const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, validateRequiredEnv } = require("../configs/shared");
+const { fileExists, inlineReferenceMessage } = require("../utils/fs");
 const { loadGlossaryDisputes } = require("../utils/disputes");
-const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("../utils/qa-loop");
+const { runVolumeWithModeFallback } = require("../utils/qa-loop");
 const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifacts, volumeAlreadyAccepted, publishLatestToSeriesRoot, runVolumeSeries } = require("../utils/series-run");
 const {
   resolveSourceBundle,

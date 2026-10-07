@@ -29,8 +29,14 @@
 require("dotenv").config();
 require("./types"); // JSDoc type definitions
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
-const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("./utils/prompt");
-const { installmentNumberFromDir, filterVolumesByInstallment } = require("./utils/manifest");
+const {
+  transformUserPrompt,
+  isPassingVerdict,
+  parseAcceptanceScore,
+  validatorMaxStepsFor,
+  writePromptDump,
+} = require("./utils/prompt");
+const { installmentNumberFromDir } = require("./utils/manifest");
 
 const __config = require("./jump-in-wiki/config");
 const __prompts = require("./jump-in-wiki/prompts");

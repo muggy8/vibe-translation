@@ -31,7 +31,7 @@ const {
   sanitizeFolderName,
   filterVolumesByInstallment,
 } = require("./utils/manifest");
-const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
+const { emittedToolCallAsText } = require("./utils/agents");
 
 const __config = require("./intake/config");
 const __committed = require("./intake/committed");

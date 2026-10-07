@@ -8,7 +8,7 @@
 const fs = require("fs").promises;
 const path = require("path");
 const harness = require("../harness");
-const { ON_VOLUME_ERROR, validateRequiredEnv, resolveRunSettings, isStructuralError, volumeFailureError } = require("../configs/shared");
+const { ON_VOLUME_ERROR, validateRequiredEnv, isStructuralError, volumeFailureError } = require("../configs/shared");
 const { resolveSourceBundle } = require("../utils/source");
 const { readRunArgs, openSeriesRun } = require("../utils/series-run");
 const {

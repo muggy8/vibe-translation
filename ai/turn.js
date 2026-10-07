@@ -16,7 +16,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 require("../types"); // JSDoc type definitions
-const { readBoolEnv, tooBigForOnePassError, isTooBigForOnePassError } = require("../configs/shared");
+const { tooBigForOnePassError } = require("../configs/shared");
 
 const { logFilePath, logLine, runDir } = require("./log");
 const { agentTextGuardChars } = require("./env");

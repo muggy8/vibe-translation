@@ -9,7 +9,7 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("../utils/prompt");
+const { transformUserPrompt, parseAcceptanceScore } = require("../utils/prompt");
 const {
   parseGlossaryDisputes,
   collectVolumeDisputes,

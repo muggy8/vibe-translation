@@ -24,7 +24,7 @@
 
 require("dotenv").config();
 require("./types");
-const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
+const { emittedToolCallAsText } = require("./utils/agents");
 
 const __config = require("./character-voice/config");
 const __carry_forward = require("./character-voice/carry-forward");

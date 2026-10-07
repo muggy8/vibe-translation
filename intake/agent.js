@@ -22,8 +22,8 @@ const {
   sanitizeFolderName,
   filterVolumesByInstallment,
 } = require("../utils/manifest");
-const { fileExists, stageSourceFile } = require("../utils/fs");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
+const { fileExists } = require("../utils/fs");
+const { assertRealToolCalls } = require("../utils/agents");
 
 const { validateManifest } = require("./validate");
 const { DISCOVERY_BASE_STEPS, DISCOVERY_STEPS_PER_CANDIDATE, DRAFT_MANIFEST_FILE_NAME, MANIFEST_FILE_NAME, PLAN_FILE_NAME, discoverSampleChars } = require("./config");

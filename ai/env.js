@@ -12,7 +12,7 @@
 
 require("dotenv").config();
 require("../types"); // JSDoc type definitions
-const { readBoolEnv, tooBigForOnePassError, isTooBigForOnePassError } = require("../configs/shared");
+const { readBoolEnv } = require("../configs/shared");
 
 /** Default retry count from AI_RETRY (.env), matching the old callAi(). */
 function envRetry() {

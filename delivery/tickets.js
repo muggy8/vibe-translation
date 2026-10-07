@@ -13,7 +13,7 @@ const {
   summarizeSnapshot,
   closureFromComparison,
 } = require("../utils/delivery-verify");
-const { readLedger, appendLedgerEntry, interventionAllowed } = require("../utils/ledger");
+const { readLedger, appendLedgerEntry } = require("../utils/ledger");
 const { createTicket, closeTicket, recordChoice, readTickets } = require("../utils/tickets");
 const patches = require("../utils/patches");
 

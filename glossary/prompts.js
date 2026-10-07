@@ -8,7 +8,7 @@
 
 require("dotenv").config();
 require("../types"); // JSDoc type definitions
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, authorMaxStepsFor, findingsMergeMaxStepsFor, writePromptDump } = require("../utils/prompt");
+const { transformUserPrompt } = require("../utils/prompt");
 const {
   resolveSourceBundle,
   decideProcessingMode,
