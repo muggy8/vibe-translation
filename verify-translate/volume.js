@@ -28,6 +28,7 @@ const {
   chapterTerminology,
   glossaryBlockMaxChars,
   runWithConcurrency,
+  chapterHeartbeat,
   stageConcurrency,
   judgeTemperature,
   stageThinking,
@@ -219,7 +220,243 @@ async function runAuditTiebreak({ volume, volumeDir, bundle, refs, systemPrompt,
 
 
 /**
+ * A draft the translate task already flagged as failing the deterministic QA needs no grader: the
+ * reason is known and already actionable, and spending a model call to rediscover it is pure cost.
+ * Seeding the verdict here is what lets the retranslate batch treat it like any other FAIL instead of
+ * skipping it for having no verification entry at all.
+ *
+ * @param {{volume: Object, seg: Object, idx: number, sidecar: Object, sidecarPath: string, sourceHash: string, draftHash: string, findings: string, rows: Object[], counters: Object}} args
+ * @returns {Promise<void>}
+ */
+async function seedDeterministicFail({ volume, seg, idx, sidecar, sidecarPath, sourceHash, draftHash, findings, rows, counters }) {
+  sidecar.chapters[seg.id] = {
+    sourceHash,
+    draftHash,
+    score: null,
+    pass: false,
+    findings,
+    deterministic: true,
+    samples: [],
+    verifiedAt: new Date().toISOString(),
+  };
+  await saveVerificationSidecar(sidecarPath, sidecar);
+  counters.failed += 1;
+  console.warn(
+    `  Volume ${volume.installmentNumber} ${seg.id}: deterministic QA FAIL — no model call needed, ` +
+      `queued for retranslation.`
+  );
+  rows[idx] = {
+    id: seg.id,
+    title: seg.title,
+    status: "deterministic QA FAIL (no model call)",
+    score: null,
+    pass: false,
+    findings,
+  };
+}
+
+/**
+ * A chapter whose verdict already covers the current draft: keep the verdict, count it, and say it
+ * was skipped. The counts still include it, because the summary describes the volume's state, not
+ * this run's work.
+ *
+ * @param {{volume: Object, seg: Object, idx: number, entry: Object, rows: Object[], counters: Object}} args
+ * @returns {void}
+ */
+function recordCoveredChapter({ volume, seg, idx, entry, rows, counters }) {
+  console.log(`  Volume ${volume.installmentNumber} ${seg.id}: verification up to date — skipping.`);
+  counters.skipped += 1;
+  if (entry.pass) counters.passed += 1;
+  else counters.failed += 1;
+  rows[idx] = {
+    id: seg.id,
+    title: seg.title,
+    status: "skipped (up to date)",
+    score: entry.score,
+    pass: entry.pass,
+    findings: entry.findings,
+  };
+}
+
+/**
+ * --dry-run: dump the verify prompt for one chapter (the system prompt and the filled user prompt).
+ * No AI calls.
+ *
+ * @param {{volume: Object, seg: Object, ctx: Object, prompt: string}} args
+ * @returns {Promise<void>}
+ */
+async function dumpVerifyPrompt({ volume, seg, ctx, prompt }) {
+  const { systemPrompt, endpoint } = ctx;
+  const thinking = verifyThinking.thinking ? verifyThinking.thinkingLevel : "off";
+  const file = await writePromptDump(
+    `verify-translate-${volume.installmentNumber}-${seg.id}`,
+    volume.installmentNumber,
+    "one-shot (verify model)",
+    [
+      { title: "One-shot — verify system prompt", prompt: systemPrompt },
+      {
+        title: `One-shot — verify ${seg.id} (endpoint ${endpoint.model} @ ${endpoint.baseUrl}, thinking=${thinking})`,
+        prompt,
+      },
+    ]
+  );
+  console.log(`  Volume ${volume.installmentNumber} ${seg.id}: --dry-run prompt dump → ${file}`);
+}
+
+/**
+ * Grade one chapter and record the verdict.
+ *
+ * This is sample 1 of VERIFY_SAMPLES. The remaining samples are a separate BATCH
+ * (runVerificationSamples) so the extra grading never interleaves with the first pass — on a
+ * shared-port local setup that keeps it to one model.
+ *
+ * @param {{volume: Object, seg: Object, idx: number, sidecar: Object, sidecarPath: string, sourceHash: string, draftHash: string, ctx: Object, prompt: string, rows: Object[], counters: Object}} args
+ * @returns {Promise<void>}
+ */
+async function gradeAndRecordChapter({ volume, seg, idx, sidecar, sidecarPath, sourceHash, draftHash, ctx, prompt, rows, counters }) {
+  const { sourceText, draft } = ctx;
+  console.log(
+    `  Volume ${volume.installmentNumber} ${seg.id}: verifying draft (${draft.length} chars) with ${ctx.endpoint.model}…`
+  );
+  const graded = await gradeChapter({
+    volume,
+    systemPrompt: ctx.systemPrompt,
+    template: ctx.template,
+    endpoint: ctx.endpoint,
+    sourceText,
+    draft,
+    refs: ctx.refs,
+    label: `verify-v${volume.installmentNumber}-${seg.id}`,
+  });
+  const score = graded.score;
+  // Fail-closed: an unparseable score is a FAIL (the retranslate pass gets another shot at the
+  // chapter).
+  const pass = score !== null && score >= passingScore;
+  const findings = graded.findings;
+  sidecar.chapters[seg.id] = {
+    sourceHash,
+    draftHash,
+    score,
+    pass,
+    findings,
+    ...(graded.disputes.length > 0 ? { disputes: graded.disputes } : {}),
+    samples: [score],
+    verifiedAt: new Date().toISOString(),
+  };
+  if (graded.disputes.length > 0) {
+    console.log(
+      `  Volume ${volume.installmentNumber} ${seg.id}: ${graded.disputes.length} GLOSSARY DISPUTE(s) ` +
+        `(${graded.disputes.map((d) => d.term).join(", ")}) — queued for the glossary task.`
+    );
+  }
+  await saveVerificationSidecar(sidecarPath, sidecar);
+  counters.verified += 1;
+  if (pass) counters.passed += 1;
+  else counters.failed += 1;
+  console.log(
+    `  Volume ${volume.installmentNumber} ${seg.id}: score ${score === null ? "n/a (unparseable — FAIL)" : score + "/100"} → ${pass ? "PASS" : "FAIL"}.`
+  );
+  rows[idx] = { id: seg.id, title: seg.title, status: "verified", score, pass, findings };
+}
+
+/**
+ * Verify one chapter: is there a draft, does a verdict already cover it, does a free deterministic
+ * check already explain the failure, or does it need the grader?
+ *
+ * @param {{volume: Object, volumeDir: string, seg: Object, idx: number, sidecar: Object, sidecarPath: string, state: Object, ctx: Object, rows: Object[], counters: Object}} args
+ * @returns {Promise<void>}
+ */
+async function verifyOneChapter({ volume, volumeDir, seg, idx, sidecar, sidecarPath, state, ctx, rows, counters }) {
+  const { draftFile } = chapterArtifactNames(seg.id);
+  const chapterPath = path.join(volumeDir, seg.file);
+  const draftPath = path.join(volumeDir, draftFile);
+
+  if (!(await fileExists(draftPath))) {
+    console.warn(
+      `  Volume ${volume.installmentNumber} ${seg.id}: no draft (${draftFile}) — run the translate task first.`
+    );
+    counters.noDraft += 1;
+    rows[idx] = { id: seg.id, title: seg.title, status: "no draft (run translate first)", score: null, pass: null };
+    return;
+  }
+
+  const sourceText = await fs.readFile(chapterPath, "utf8");
+  const draft = await fs.readFile(draftPath, "utf8");
+  const sourceHash = sha256(sourceText);
+  const draftHash = sha256(draft);
+
+  const entry = sidecar.chapters[seg.id] || {};
+  const covered =
+    !ctx.force &&
+    typeof entry.sourceHash === "string" &&
+    entry.sourceHash === sourceHash &&
+    typeof entry.draftHash === "string" &&
+    entry.draftHash === draftHash;
+
+  // The translation state carries the deterministic-QA failure marker — the one verdict the verify
+  // task can produce without asking the model anything.
+  const stateEntry = state.chapters[seg.id] || {};
+  if (!covered && stateEntry.qaFailed === true) {
+    await seedDeterministicFail({
+      volume,
+      seg,
+      idx,
+      sidecar,
+      sidecarPath,
+      sourceHash,
+      draftHash,
+      findings:
+        stateEntry.qaFindings ||
+        "(the deterministic QA checks failed — see this volume's translation-qa.md)",
+      rows,
+      counters,
+    });
+    return;
+  }
+
+  if (covered) {
+    recordCoveredChapter({ volume, seg, idx, entry, rows, counters });
+    return;
+  }
+
+  const endpoint = ctx.endpoint;
+  const { prompt } = buildVerifyPrompt({
+    template: ctx.template,
+    sourceText,
+    draft,
+    refs: ctx.refs,
+    roleWindow: endpoint.contextWindow || harness.envContextWindow(),
+    outputReserve: endpoint.maxTokens || harness.envMaxTokens(),
+  });
+
+  if (ctx.dryRun) {
+    // Dump the prompt for every chapter a live run would verify (no-draft and already-covered
+    // chapters were skipped above) — one file per chapter, no AI calls in dry-run.
+    await dumpVerifyPrompt({ volume, seg, ctx, prompt });
+    return;
+  }
+
+  await gradeAndRecordChapter({
+    volume,
+    seg,
+    idx,
+    sidecar,
+    sidecarPath,
+    sourceHash,
+    draftHash,
+    ctx: { ...ctx, sourceText, draft },
+    prompt,
+    rows,
+    counters,
+  });
+}
+
+/**
  * Verify one volume's chapter drafts against their sources.
+ *
+ * The chapters are independent (each is verified against its own source + draft), so they run through
+ * `runWithConcurrency` — and the report rows are stored by index so the report stays in reading order
+ * whatever order the chapters finished in.
  *
  * @param {{
  *   volume: {folder: string, sourceFile: string, installmentNumber: string},
@@ -232,196 +469,39 @@ async function runAuditTiebreak({ volume, volumeDir, bundle, refs, systemPrompt,
  *   dryRun: boolean,
  *   force: boolean,
  * }} ctx
- * @returns {Promise<{verified: number, skipped: number, passed: number, failed: number, noDraft: number}>}
+ * @returns {Promise<{verified: number, skipped: number, passed: number, failed: number, noDraft: number, sidecar: Object, sidecarPath: string}>}
  */
 async function processVerifyVolume(ctx) {
-  const { volume, volumeDir, bundle, refs, systemPrompt, template, endpoint, auditEndpoint, dryRun, force } = ctx;
+  const { volume, volumeDir, bundle } = ctx;
   const sidecarPath = path.join(volumeDir, VERIFICATION_FILE);
   const sidecar = await loadVerificationSidecar(sidecarPath);
-  // The translation state carries the deterministic-QA failure marker — the
-  // one verdict the verify task can produce without asking the model anything.
-  const state = await loadTranslationState(path.join(volumeDir, STATE_FILE));
+  const translationState = await loadTranslationState(path.join(volumeDir, STATE_FILE));
+  /** @type {Object[]} */
   const rows = [];
-  /**
-   * A heartbeat for an un-monitored run: every 10 chapters, a greppable
-   * "N/M" line, so a reader of the log can tell a slow stage from a stuck one
-   * without waiting for the volume to finish.
-   */
-  let doneCount = 0;
-  const heartbeat = (id) => {
-    doneCount += 1;
-    if (doneCount % 10 === 0 || doneCount === bundle.segments.length) {
-      harness.logLine(
-        `[progress] verify Volume ${volume.installmentNumber}: ${doneCount}/${bundle.segments.length} chapter(s) (last: ${id})`
-      );
-    }
-  };
-  let verified = 0;
-  let skipped = 0;
-  let passed = 0;
-  let failed = 0;
-  let noDraft = 0;
+  const counters = { verified: 0, skipped: 0, passed: 0, failed: 0, noDraft: 0 };
+  const heartbeat = chapterHeartbeat("verify", volume.installmentNumber, bundle.segments.length);
 
-  // Chapters are INDEPENDENT (each is verified against its own source +
-  // draft), so they can run in parallel when STAGE_CONCURRENCY > 1. Rows are
-  // stored by index to keep the report in reading order.
+  // Chapters are INDEPENDENT (each is verified against its own source + draft), so they can run in
+  // parallel when STAGE_CONCURRENCY > 1. Rows are stored by index to keep the report in reading order.
   await runWithConcurrency(bundle.segments, verifyConcurrency, async (seg, idx) => {
     heartbeat(seg.id);
-    const { draftFile } = chapterArtifactNames(seg.id);
-    const chapterPath = path.join(volumeDir, seg.file);
-    const draftPath = path.join(volumeDir, draftFile);
-    if (!(await fileExists(draftPath))) {
-      console.warn(
-        `  Volume ${volume.installmentNumber} ${seg.id}: no draft (${draftFile}) — run the translate task first.`
-      );
-      noDraft += 1;
-      rows[idx] = { id: seg.id, title: seg.title, status: "no draft (run translate first)", score: null, pass: null };
-      return;
-    }
-    const sourceText = await fs.readFile(chapterPath, "utf8");
-    const draft = await fs.readFile(draftPath, "utf8");
-    const sourceHash = sha256(sourceText);
-    const draftHash = sha256(draft);
-
-    const entry = sidecar.chapters[seg.id] || {};
-    const covered =
-      !force &&
-      typeof entry.sourceHash === "string" &&
-      entry.sourceHash === sourceHash &&
-      typeof entry.draftHash === "string" &&
-      entry.draftHash === draftHash;
-
-    // A draft the translate task already flagged as failing the deterministic
-    // QA needs no grader: the reason is known and already actionable, and
-    // spending a model call to rediscover it is pure cost. Seeding the verdict
-    // here is what lets the retranslate batch treat it like any other FAIL
-    // instead of skipping it for having no verification entry at all.
-    const stateEntry = state.chapters[seg.id] || {};
-    if (!covered && stateEntry.qaFailed === true) {
-      const findings =
-        stateEntry.qaFindings || "(the deterministic QA checks failed — see this volume's translation-qa.md)";
-      sidecar.chapters[seg.id] = {
-        sourceHash,
-        draftHash,
-        score: null,
-        pass: false,
-        findings,
-        deterministic: true,
-        samples: [],
-        verifiedAt: new Date().toISOString(),
-      };
-      await saveVerificationSidecar(sidecarPath, sidecar);
-      failed += 1;
-      console.warn(
-        `  Volume ${volume.installmentNumber} ${seg.id}: deterministic QA FAIL — no model call needed, ` +
-          `queued for retranslation.`
-      );
-      rows[idx] = {
-        id: seg.id,
-        title: seg.title,
-        status: "deterministic QA FAIL (no model call)",
-        score: null,
-        pass: false,
-        findings,
-      };
-      return;
-    }
-    if (covered) {
-      console.log(`  Volume ${volume.installmentNumber} ${seg.id}: verification up to date — skipping.`);
-      skipped += 1;
-      if (entry.pass) passed += 1;
-      else failed += 1;
-      rows[idx] = {
-        id: seg.id,
-        title: seg.title,
-        status: "skipped (up to date)",
-        score: entry.score,
-        pass: entry.pass,
-        findings: entry.findings,
-      };
-      return;
-    }
-
-    const { prompt } = buildVerifyPrompt({
-      template,
-      sourceText,
-      draft,
-      refs,
-      roleWindow: endpoint.contextWindow || harness.envContextWindow(),
-      outputReserve: endpoint.maxTokens || harness.envMaxTokens(),
-    });
-
-    if (dryRun) {
-      // Dump the prompt for every chapter a live run would verify (no-draft
-      // and already-covered chapters were skipped above) — one file per
-      // chapter, no AI calls in dry-run.
-      const file = await writePromptDump(
-        `verify-translate-${volume.installmentNumber}-${seg.id}`,
-        volume.installmentNumber,
-        "one-shot (verify model)",
-        [
-          { title: "One-shot — verify system prompt", prompt: systemPrompt },
-          {
-            title:
-              `One-shot — verify ${seg.id} ` +
-              `(endpoint ${endpoint.model} @ ${endpoint.baseUrl}, thinking=${verifyThinking.thinking ? verifyThinking.thinkingLevel : "off"})`,
-            prompt,
-          },
-        ]
-      );
-      console.log(`  Volume ${volume.installmentNumber} ${seg.id}: --dry-run prompt dump → ${file}`);
-      return;
-    }
-
-    console.log(
-      `  Volume ${volume.installmentNumber} ${seg.id}: verifying draft (${draft.length} chars) with ${endpoint.model}…`
-    );
-    // Sample 1 of VERIFY_SAMPLES. The remaining samples are a separate BATCH
-    // (runVerificationSamples) so the extra grading never interleaves with the
-    // first pass — on a shared-port local setup that keeps it to one model.
-    const graded = await gradeChapter({
+    await verifyOneChapter({
       volume,
-      systemPrompt,
-      template,
-      endpoint,
-      sourceText,
-      draft,
-      refs,
-      label: `verify-v${volume.installmentNumber}-${seg.id}`,
+      volumeDir,
+      seg,
+      idx,
+      sidecar,
+      sidecarPath,
+      state: translationState,
+      ctx,
+      rows,
+      counters,
     });
-    const score = graded.score;
-    // Fail-closed: an unparseable score is a FAIL (the retranslate pass gets
-    // another shot at the chapter).
-    const pass = score !== null && score >= passingScore;
-    const findings = graded.findings;
-    sidecar.chapters[seg.id] = {
-      sourceHash,
-      draftHash,
-      score,
-      pass,
-      findings,
-      ...(graded.disputes.length > 0 ? { disputes: graded.disputes } : {}),
-      samples: [score],
-      verifiedAt: new Date().toISOString(),
-    };
-    if (graded.disputes.length > 0) {
-      console.log(
-        `  Volume ${volume.installmentNumber} ${seg.id}: ${graded.disputes.length} GLOSSARY DISPUTE(s) ` +
-          `(${graded.disputes.map((d) => d.term).join(", ")}) — queued for the glossary task.`
-      );
-    }
-    await saveVerificationSidecar(sidecarPath, sidecar);
-    verified += 1;
-    if (pass) passed += 1;
-    else failed += 1;
-    console.log(
-      `  Volume ${volume.installmentNumber} ${seg.id}: score ${score === null ? "n/a (unparseable — FAIL)" : score + "/100"} → ${pass ? "PASS" : "FAIL"}.`
-    );
-    rows[idx] = { id: seg.id, title: seg.title, status: "verified", score, pass, findings };
   });
 
-  return { verified, skipped, passed, failed, noDraft, sidecar, sidecarPath };
+  return { ...counters, sidecar, sidecarPath };
 }
+
 
 
 /**

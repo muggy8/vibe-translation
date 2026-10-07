@@ -170,6 +170,31 @@ function progressCounter(total, unit = "chapter") {
   };
 }
 
+/**
+ * The per-volume heartbeat a long stage writes into the run log: every 10 chapters, and once at the
+ * end, a greppable "N/M" line naming the last chapter.
+ *
+ * It exists so a reader of an un-monitored run can tell a slow stage from a stuck one without waiting
+ * for the volume to finish. The stage name and the volume are in the line because a log with three
+ * stages running is not a log that says which one is moving.
+ *
+ * @param {string} stage - What the line is measuring ("translate", "verify", "retranslate").
+ * @param {string} installmentNumber
+ * @param {number} total - How many chapters the stage is about to walk.
+ * @returns {(id: string) => void} Call it once per finished chapter.
+ */
+function chapterHeartbeat(stage, installmentNumber, total) {
+  let done = 0;
+  return function heartbeat(id) {
+    done += 1;
+    if (done % 10 === 0 || done === total) {
+      harnessLogLine(
+        `[progress] ${stage} Volume ${installmentNumber}: ${done}/${total} chapter(s) (last: ${id})`
+      );
+    }
+  };
+}
+
 
 /**
  * How many chapters a stage is about to walk, without doing the stage's work.
@@ -221,5 +246,6 @@ module.exports = {
   logRunEstimate,
   harnessLogLine,
   progressCounter,
+  chapterHeartbeat,
   countStageChapters,
 };

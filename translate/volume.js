@@ -37,6 +37,7 @@ const {
   EMPTY_SOURCE_CHARS,
   buildPolishGuardFindings,
   createChapterPlanner,
+  chapterHeartbeat,
   stripMarkdownFence,
   chapterContextHash,
   STATE_FILE,
@@ -84,15 +85,12 @@ async function processTranslateVolume(ctx) {
   // Chapters are processed SEQUENTIALLY on purpose: each chapter's prompt carries the previous
   // chapter's ending (run.tail) as continuity context, so chapter N+1 depends on chapter N's output.
   // (The independent tasks — verify / retranslate / polish — use runWithConcurrency instead.)
+  const heartbeat = chapterHeartbeat("translate", volume.installmentNumber, bundle.segments.length);
   for (let segIdx = 0; segIdx < bundle.segments.length; segIdx++) {
     const seg = bundle.segments[segIdx];
     // A heartbeat for an un-monitored run: every 10 chapters a greppable "N/M" line, so a slow stage
     // can be told apart from a stuck one.
-    if ((segIdx + 1) % 10 === 0 || segIdx + 1 === bundle.segments.length) {
-      harness.logLine(
-        `[progress] translate Volume ${volume.installmentNumber}: ${segIdx + 1}/${bundle.segments.length} chapter(s) (last: ${seg.id})`
-      );
-    }
+    heartbeat(seg.id);
 
     const chapter = await readChapter(ctx, seg);
     if (chapter.empty) {
