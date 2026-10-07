@@ -8,6 +8,12 @@
 const fs = require("fs");
 const path = require("path");
 
+// __dirname here is utils/postmortem, so the repo root is two levels up (AGENTS.md §3).
+// postMortemDir() used to sit in utils/postmortem.js, where one ".." was enough; when the
+// file moved into the folder the same expression started naming utils/.postmortem, and the
+// whole run's machine state — reports, ledger, tickets, run lock — silently moved folder.
+const projectRoot = path.resolve(__dirname, "..", "..");
+
 /** @typedef {import("../postmortem").PostMortemFinding} PostMortemFinding */
 
 // ─── Rendering ────────────────────────────────────────────────────────────────
@@ -98,7 +104,7 @@ async function writePostMortemReport(report, outDir) {
  */
 function postMortemDir() {
   const dir = (process.env.POSTMORTEM_DIR || "").trim();
-  return dir ? path.resolve(dir) : path.resolve(__dirname, "..", ".postmortem");
+  return dir ? path.resolve(dir) : path.join(projectRoot, ".postmortem");
 }
 
 module.exports = { renderPostMortemMarkdown, writePostMortemReport, postMortemDir };

@@ -29,6 +29,10 @@
  *      deliberately does not publish the series-root copies, so it is not blamed for them).
  *   7. index.js reads the step list from gulpfile and runs each step as its own
  *      process — checked without calling a model.
+ *   8. The folder a run remembers itself in: the post-mortem reports, the ledger, the tickets
+ *      and the run lock all resolve to the repo's own `.postmortem`, and the token-calibration
+ *      cache to the repo's own file — not into the folder a split module lives in. Every other
+ *      suite passes those paths explicitly, so only this one can catch the default moving.
  *
  * No network, no endpoint, no model call. Run with `npm test` (or standalone:
  * `node test/test-postmortem.js`).
@@ -44,6 +48,7 @@ const { declaredSteps, isKnownVolumeFile } = require("../utils/artifacts");
 const {
   runPostMortem,
   renderPostMortemMarkdown,
+  postMortemDir,
   hasTableShape,
   matchesShape,
   readConsistencyVerdict,
@@ -585,6 +590,81 @@ async function scenarioRendering() {
   assert.ok(md.includes("glossary.md"), "a finding must name the file");
 }
 
+// ─── 11. The run's machine state has one home ─────────────────────────────────
+
+/**
+ * The post-mortem folder is where a run remembers itself: the step reports, the anti-spin
+ * ledger, the tickets, the run lock. All four paths come out of postMortemDir(), so a wrong
+ * default moves the whole memory of a run into a different folder — and every suite that
+ * passes POSTMORTEM_DIR explicitly is unable to notice.
+ *
+ * That happened for real. utils/postmortem.js split into utils/postmortem/, the one function
+ * that built the path kept its `path.resolve(__dirname, "..")`, and ".." from inside the
+ * folder is utils/ — so tickets written at the repo root became invisible to
+ * `node diagnose.js --open`, which reported "nothing is waiting" about a ticket that was
+ * sitting there open. The default is pinned here so the next split cannot repeat it.
+ */
+function scenarioMachineStateHome() {
+  const root = path.resolve(__dirname, "..");
+  const saved = process.env.POSTMORTEM_DIR;
+  delete process.env.POSTMORTEM_DIR;
+  try {
+    const dir = postMortemDir();
+    assert.strictEqual(
+      dir,
+      path.join(root, ".postmortem"),
+      `postMortemDir() resolves to ${dir}, not the repo's own .postmortem`
+    );
+    // The exact shape of the bug: a split module's __dirname is the folder, so a
+    // machine-state path that lands inside utils/ means the alias is one level short.
+    assert.ok(
+      !dir.startsWith(path.join(root, "utils") + path.sep),
+      `machine state moved inside utils/ — a split module resolved the repo root from its own folder: ${dir}`
+    );
+
+    const { ticketPaths } = require("../utils/tickets");
+    const { ledgerPath } = require("../utils/ledger");
+    const { runLockPath } = require("../utils/runlock");
+    for (const [name, file] of [
+      ["tickets", ticketPaths().json],
+      ["ledger", ledgerPath()],
+      ["run lock", runLockPath()],
+    ]) {
+      assert.strictEqual(
+        path.dirname(file),
+        dir,
+        `${name} must live in the post-mortem folder, and it resolves to ${file}`
+      );
+    }
+
+    // The token calibration is machine state too, and it moved for the same reason.
+    const { calibrationFile } = require("../utils/tokens");
+    const savedCalibration = process.env.TOKEN_CALIBRATION_FILE;
+    delete process.env.TOKEN_CALIBRATION_FILE;
+    try {
+      assert.strictEqual(
+        calibrationFile(),
+        path.join(root, ".token-calibration.json"),
+        `calibrationFile() resolves to ${calibrationFile()}, not the repo's own cache file`
+      );
+    } finally {
+      if (savedCalibration === undefined) delete process.env.TOKEN_CALIBRATION_FILE;
+      else process.env.TOKEN_CALIBRATION_FILE = savedCalibration;
+    }
+
+    // An explicit POSTMORTEM_DIR still wins: two series at once each need their own history.
+    process.env.POSTMORTEM_DIR = path.join(root, ".postmortem-other");
+    assert.strictEqual(
+      postMortemDir(),
+      path.join(root, ".postmortem-other"),
+      "POSTMORTEM_DIR must override the default"
+    );
+  } finally {
+    if (saved === undefined) delete process.env.POSTMORTEM_DIR;
+    else process.env.POSTMORTEM_DIR = saved;
+  }
+}
+
 // ─── run ──────────────────────────────────────────────────────────────────────
 
 (async function main() {
@@ -620,6 +700,9 @@ async function scenarioRendering() {
 
   await scenarioRendering();
   console.log("postmortem: report rendering names severity, volume and file");
+
+  scenarioMachineStateHome();
+  console.log("postmortem: the run's machine state resolves to the repo's own .postmortem");
 
   console.log("postmortem: all checks passed.");
 })();

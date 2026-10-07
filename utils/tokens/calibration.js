@@ -14,6 +14,11 @@
 const fs = require("fs");
 const path = require("path");
 
+// __dirname here is utils/tokens, so the repo root is two levels up (AGENTS.md §3). Same
+// trap as utils/postmortem/render.js: the default cache path moved folder when this file
+// moved into one, and the calibration memory of every run started over.
+const projectRoot = path.resolve(__dirname, "..", "..");
+
 const {
   DEFAULT_CJK_WEIGHT,
   DEFAULT_OTHER_WEIGHT,
@@ -30,7 +35,7 @@ const {
 function calibrationFile() {
   const custom = (process.env.TOKEN_CALIBRATION_FILE || "").trim();
   if (custom) return path.resolve(custom);
-  return path.join(__dirname, "..", ".token-calibration.json");
+  return path.join(projectRoot, ".token-calibration.json");
 }
 
 /** Whether calibration is enabled (TOKEN_CALIBRATION_ENABLED, default on). */

@@ -58,14 +58,14 @@ index for working on it.
 | adding or renaming a setting | `docs/environment.md` |
 | putting the pipeline on a new machine, or running it in a container | `docs/docker.md` |
 | writing code or tests here | `docs/conventions.md` |
-| about to change a behavior you do not understand | **the gotchas** — `docs/gotchas-1-20.md`, `docs/gotchas-21-45.md`, `docs/gotchas-46-63.md`, `docs/gotchas-64-69.md`, `docs/gotchas-70-79.md` |
+| about to change a behavior you do not understand | **the gotchas** — `docs/gotchas-1-20.md`, `docs/gotchas-21-45.md`, `docs/gotchas-46-63.md`, `docs/gotchas-64-69.md`, `docs/gotchas-70-80.md` |
 
 Each map doc ends with a table of the **implementation folders** its module was cut into
 (§3 below): what each file in the folder holds and how long it is.
 
 Code comments cite `AGENTS.md gotcha N`. The numbers are unchanged from when the gotchas were
 one file: the list now lives in the five `docs/gotchas-*.md` slices (1–20, 21–45, 46–63,
-64–69, 70–79), and each slice says which part of the list it holds.
+64–69, 70–80), and each slice says which part of the list it holds.
 
 ## 3. The implementation folders
 
@@ -86,7 +86,9 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
   and only `utils/runlock.js` is still a single file today, so splitting one must not change what
   the ban covers;
 - `__dirname` in a subfolder is the subfolder: a root-level task module needs a
-  `projectRoot` alias passed down, a `utils/` module needs a `utilsDir` alias.
+  `projectRoot` alias passed down, a `utils/` module needs a `utilsDir` alias — and a
+  **machine-state path built from it** (`.postmortem`, `.token-calibration.json`) moves folder
+  with the file, so re-derive it and pin the *default* in a test. → gotcha 80
 
 | Barrel | Folder |
 |---|---|

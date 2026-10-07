@@ -60,6 +60,12 @@
  * entry, the hooks, the exit code). This file is the public surface and the CLI entry point.
  */
 
+// .env first, and quietly: the loop's commands read the same settings the pipeline's entry
+// points do, and dotenv v17 prints an advertising line per module that loads it itself
+// (configs/env-defaults.js). The default source folder is deliberately NOT applied here —
+// a manager's turn is about one named series (AGENTS.md gotcha 79).
+require("./configs/env-defaults").loadEnv();
+
 const settings = require("./autopilot/settings");
 const moves = require("./autopilot/moves");
 const commands = require("./autopilot/commands");

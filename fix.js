@@ -61,8 +61,10 @@ require("./types"); // JSDoc type definitions
 const path = require("path");
 
 // The delivery layer names the series it is answering about; it does not inherit the
-// pipeline's default source folder (AGENTS.md gotcha 79).
-const { chosenSeriesLocation } = require("./configs/env-defaults");
+// pipeline's default source folder (AGENTS.md gotcha 79). Loading .env here, before any
+// support module is required, also keeps dotenv's per-module banner out of the ticket list.
+const { chosenSeriesLocation, loadEnv } = require("./configs/env-defaults");
+loadEnv();
 
 const devteam = require("./utils/devteam");
 const patches = require("./utils/patches");

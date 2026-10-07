@@ -47,6 +47,12 @@
 
 require("./types"); // JSDoc type definitions
 
+// The team answers a ticket about ONE series; it does not inherit the pipeline's default
+// source folder (AGENTS.md gotcha 79). Loading .env here, before any support module is
+// required, also keeps dotenv's per-module banner out of the ticket list.
+const { chosenSeriesLocation, loadEnv } = require("./configs/env-defaults");
+loadEnv();
+
 const {
   diagnoseTicket,
   renderDiagnosisMarkdown,
@@ -61,9 +67,6 @@ const {
   unansweredQuestions,
 } = require("./utils/tickets");
 const { runInProgress, describeRunLock } = require("./utils/runlock");
-// The team answers a ticket about ONE series; it does not inherit the pipeline's default
-// source folder (AGENTS.md gotcha 79).
-const { chosenSeriesLocation } = require("./configs/env-defaults");
 
 /**
  * Read the CLI flags this command owns. Unknown flags are refused: a mistyped flag on a tool that
