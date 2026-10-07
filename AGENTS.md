@@ -132,10 +132,12 @@ into its folder (`readModuleLayer(rootDir, "utils/translate.js")`).
 9. **Update the docs after changes.** `docs/` is the current map; an agent reading it should be
    able to rely on it. If you add, remove or move something, update the map doc, the barrel
    table above if it is a split, and the gotcha list if you learned one.
-10. **This repository is bigger than this folder.** The git root is the parent `oresuki/`
-    directory, so git paths appear as `ai-client/…`, and the tree outside `ai-client/` holds
-    the account owner's in-progress translation output. Scope every git call; never `git add -A`.
-    → gotcha 75
+10. **There are two repositories here, and you are inside the smaller one.** `ai-client/` is its
+    own git repository (split out on 2026-10-06), so git paths here appear **without** an
+    `ai-client/` prefix. The parent `oresuki/` is a *different* repository that ignores this folder
+    and holds the account owner's in-progress translation output. Run git inside `ai-client/`, never
+    reach upward — `git -C ..` is how somebody else's ~800 changes get committed — and keep scoping
+    every call; never `git add -A`. → gotcha 75
 11. **`npm test` is the gate**, and its last act is the offline pipeline loop plus the prompt
     audit. A green unit suite that breaks what the pipeline asks the model is still broken. →
     gotcha 62, gotcha 63
