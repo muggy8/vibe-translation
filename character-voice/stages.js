@@ -11,7 +11,7 @@ require("../types");
 const harness = require("../harness");
 const { inlineReferenceMessage } = require("../utils/fs");
 const { assertRealToolCalls } = require("../utils/agents");
-const { runWriteTurn } = require("../utils/qa-loop");
+const { runAuthorStage } = require("../utils/qa-loop");
 const {
   resolveSourceBundle,
   decideProcessingMode,
@@ -94,13 +94,19 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
     extractionResults = extractionOutput;
   }
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV compilation${seg ? ` for chapter ${seg.id}` : ""}...`);
-  const author = await harness.createAgentHandle({ name: `author-voice-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: await voiceAuthorMaxSteps(ctx, seg) });
-  try {
-    const who = `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`;
-    await runWriteTurn(author, {
+  await runAuthorStage(
+    {
+      name: `author-voice-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt),
+      tools: ctx.fsGate.tools,
+      approve: ctx.fsGate.approve,
+      cwd: ctx.volumeDir,
+      maxSteps: await voiceAuthorMaxSteps(ctx, seg),
+    },
+    {
       prompt: buildAuthorTurnPrompt(ctx, extractionResults, seg, si),
       label: `character-voice-compile-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
-      who,
+      who: `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`,
       writesTo: [ctx.voiceOutputFile, ctx.povOutputFile],
       recoveryPrompt: (hasContent) => voiceRecoveryPrompt(hasContent, Boolean(ctx.voiceSeeded)),
       recoveryLabel: `character-voice-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
@@ -109,9 +115,9 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
       // artifact is a failure, not an output.
       verifyOutput: true,
       assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
-    });
-    console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved voice reference to ${ctx.voiceOutputFile} and POV map to ${ctx.povOutputFile}${seg ? ` (after chapter ${seg.id})` : ""}`);
-  } finally { await author.close(); }
+    }
+  );
+  console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved voice reference to ${ctx.voiceOutputFile} and POV map to ${ctx.povOutputFile}${seg ? ` (after chapter ${seg.id})` : ""}`);
 }
 
 

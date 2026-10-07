@@ -15,7 +15,7 @@ const harness = require("../harness");
 const { parseAcceptanceReply, validatorMaxStepsFor } = require("../utils/prompt");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking } = require("../configs/shared");
 const { assertRealToolCalls } = require("../utils/agents");
-const { runSharedQaLoop, runWriteTurn } = require("../utils/qa-loop");
+const { runSharedQaLoop, runAuthorStage } = require("../utils/qa-loop");
 
 const { maxValidationIterations } = require("./config");
 const { buildGlossaryFeedbackTurnPrompt, buildGlossaryValidatorTurnPrompt } = require("./prompts");
@@ -143,18 +143,18 @@ async function runGlossaryFeedback(ctx, iteration) {
     await fs.readFile(glossaryOutputFile, "utf8").catch(() => "")
   );
 
-  const feedbackAuthor = await harness.createAgentHandle({
-    name: `feedback-author-${values.INSTALLMENT_NUMBER}-${iteration}`,
-    systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
-    tools: ctx.fsGate.tools,
-    approve: ctx.fsGate.approve,
-    cwd: volumeDir,
-    maxSteps: await glossaryAuthorMaxSteps(ctx),
-  });
-  try {
-    // The shared turn protocol (utils/qa-loop/turn.js) — the same six steps every
-    // file-writing stage in this pipeline owes, in one place.
-    await runWriteTurn(feedbackAuthor, {
+  await runAuthorStage(
+    {
+      name: `feedback-author-${values.INSTALLMENT_NUMBER}-${iteration}`,
+      systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
+      tools: ctx.fsGate.tools,
+      approve: ctx.fsGate.approve,
+      cwd: volumeDir,
+      maxSteps: await glossaryAuthorMaxSteps(ctx),
+    },
+    {
+      // The shared turn protocol (utils/qa-loop/turn.js) — the same six steps every
+      // file-writing stage in this pipeline owes, in one place.
       prompt: buildGlossaryFeedbackTurnPrompt(ctx),
       label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}`,
       who: "the author agent (feedback pass)",
@@ -169,10 +169,8 @@ async function runGlossaryFeedback(ctx, iteration) {
         ),
       verifyOutput: true,
       assertToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
-    });
-  } finally {
-    await feedbackAuthor.close();
-  }
+    }
+  );
   await assertGlossaryCarryForward(ctx, "the feedback pass");
 }
 

@@ -98,6 +98,10 @@ const FLOWS = [
     partialPrefix: "character-voice-validation-",
     prevArtifact: PREV_VOICE,
     shrunk: SHRUNK_VOICE,
+    newEntriesName: "character-voice-new.json",
+    // What the extraction one-shot answers with: one entry, in the shape
+    // parseVoiceQuirks accepts (an entry without a `type` is filtered out).
+    extractPayload: '[{"type": "quirk", "character": "如月雨露", "note": "clipped sentence ends"}]',
     // "the compile pass (chapter ch2) dropped character section(s) that … held"
     guardMessage: /the compile pass \(chapter ch2\) dropped character section\(s\)/,
     isCompileAgent: (name) => /^author-voice-06-ch\d+$/.test(name),
@@ -152,6 +156,9 @@ const FLOWS = [
     partialPrefix: "style-guide-validation-",
     prevArtifact: PREV_STYLE,
     shrunk: SHRUNK_STYLE,
+    newEntriesName: "style-guide-new.json",
+    // The shape parseStyleObservations accepts (an entry without a `category` is filtered out).
+    extractPayload: '[{"category": "Narration", "rule": "Keep the distance."}]',
     // "the compile pass (chapter ch2) dropped style-guide section(s) that … held"
     guardMessage: /the compile pass \(chapter ch2\) dropped style-guide section\(s\)/,
     isCompileAgent: (name) => /^author-style-06-ch\d+$/.test(name),
@@ -232,7 +239,7 @@ async function runFlow(flow) {
 
     harness.createGatedFsTools = async () => ({ tools: {}, approve: async () => true });
     harness.runOneShot = async ({ label }) =>
-      label.includes("extract") ? "[]" : PASSING_SCORE;
+      label.includes("extract") ? flow.extractPayload : PASSING_SCORE;
     harness.createAgentHandle = async ({ name }) => ({
       name,
       sendTurn: async () => {
@@ -289,6 +296,16 @@ async function runFlow(flow) {
     assert.ok(
       await fs.stat(validationFile).then(() => true, () => false),
       `${flow.label}: the findings-merge agent consolidated the partials into the volume's report`
+    );
+
+    // The volume's own extraction results are persisted for the translation handoff, which reads
+    // them without a model call. A chapter's parse that threw and was swallowed by a bare catch
+    // leaves this file empty — which is invisible everywhere else in the run.
+    const persisted = JSON.parse(await fs.readFile(path.join(volDir, flow.newEntriesName), "utf8"));
+    assert.strictEqual(
+      persisted.length,
+      SEGMENTS.length,
+      `${flow.label}: every chapter's extraction results were persisted for the handoff`
     );
 
     // 2. A chapter pass that shrinks the document is caught AT THAT CHAPTER — and the

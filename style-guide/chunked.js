@@ -15,6 +15,7 @@ const { runPerChapterQaLoop, validationReportRecoveryPrompt } = require("../util
 
 const { guardStyleCarryForwardAgainst, seedStyleGuideFromPrevious } = require("./carry-forward");
 const { runCompile, runExtract } = require("./stages");
+const { parseStyleObservations } = require("./amend");
 const { maxValidationIterations } = require("./config");
 const { buildStyleFindingsMergePrompt, buildValidatorTurnPrompt } = require("./prompts");
 const { acceptanceCheck, runFeedback } = require("./qa");

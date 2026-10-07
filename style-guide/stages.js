@@ -11,7 +11,7 @@ require("../types");
 const harness = require("../harness");
 const { inlineReferenceMessage } = require("../utils/fs");
 const { assertRealToolCalls } = require("../utils/agents");
-const { runWriteTurn } = require("../utils/qa-loop");
+const { runAuthorStage } = require("../utils/qa-loop");
 const {
   resolveSourceBundle,
   decideProcessingMode,
@@ -95,9 +95,16 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
     extractionResults = extractionOutput;
   }
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running style-guide compilation${seg ? ` for chapter ${seg.id}` : ""}...`);
-  const author = await harness.createAgentHandle({ name: `author-style-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: await styleAuthorMaxSteps(ctx, seg) });
-  try {
-    await runWriteTurn(author, {
+  await runAuthorStage(
+    {
+      name: `author-style-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt),
+      tools: ctx.fsGate.tools,
+      approve: ctx.fsGate.approve,
+      cwd: ctx.volumeDir,
+      maxSteps: await styleAuthorMaxSteps(ctx, seg),
+    },
+    {
       prompt: buildAuthorTurnPrompt(ctx, extractionResults, seg, si),
       label: `style-guide-compile-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
       who: `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`,
@@ -109,9 +116,9 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
       // is a failure, not an output.
       verifyOutput: true,
       assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
-    });
-    console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved style guide to ${ctx.styleOutputFile}${seg ? ` (after chapter ${seg.id})` : ""}`);
-  } finally { await author.close(); }
+    }
+  );
+  console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved style guide to ${ctx.styleOutputFile}${seg ? ` (after chapter ${seg.id})` : ""}`);
 }
 
 

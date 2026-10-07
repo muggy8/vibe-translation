@@ -18,7 +18,7 @@ const harness = require("../harness");
 const { ON_QA_LIMIT } = require("../configs/shared");
 const { fileExists } = require("../utils/fs");
 const { assertRealToolCalls } = require("../utils/agents");
-const { runPerChapterQaLoop, runWriteTurn } = require("../utils/qa-loop");
+const { runPerChapterQaLoop, runAuthorStage } = require("../utils/qa-loop");
 const { validatorMaxStepsFor, findingsMergeMaxStepsFor } = require("../utils/prompt");
 
 const { buildWikiAuthorSystemPrompt, buildWikiFindingsMergePrompt, buildWikiMergeTurnPrompt, buildWikiSectionTurnPrompt, buildWikiSegmentFeedbackPrompt, buildWikiSegmentValidatorPrompt, buildWikiValidatorSystemPrompt } = require("./prompts");
@@ -72,16 +72,16 @@ async function runChunkedVolumeAgent(ctx) {
       `Volume ${values.INSTALLMENT_NUMBER}: chapter ${segment.id} (${segment.title}), ` +
         `${si + 1}/${bundle.segments.length} — writing the wiki section (author agent)...`
     );
-    const sectionAuthor = await harness.createAgentHandle({
-      name: `wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}`,
-      systemPrompt: buildWikiAuthorSystemPrompt(ctx),
-      tools: fsGate.tools,
-      approve: fsGate.approve,
-      cwd: volumeDir,
-      maxSteps: 40,
-    });
-    try {
-      await runWriteTurn(sectionAuthor, {
+    await runAuthorStage(
+      {
+        name: `wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+        systemPrompt: buildWikiAuthorSystemPrompt(ctx),
+        tools: fsGate.tools,
+        approve: fsGate.approve,
+        cwd: volumeDir,
+        maxSteps: 40,
+      },
+      {
         prompt: buildWikiSectionTurnPrompt(ctx, segment, si),
         label: `jump-in-wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}`,
         who: `the section author agent (chapter ${segment.id})`,
@@ -96,10 +96,8 @@ async function runChunkedVolumeAgent(ctx) {
         // wiki.md / shared-wiki.md as finished work.
         verifyOutput: true,
         assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
-      });
-    } finally {
-      await sectionAuthor.close();
-    }
+      }
+    );
   }
 
   // Merge pass: assemble wiki.md + shared-wiki.md from the sections.
@@ -118,16 +116,16 @@ async function runChunkedVolumeAgent(ctx) {
     );
   }
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: merging the chapter sections into the wiki (merge agent)...`);
-  const merger = await harness.createAgentHandle({
-    name: `wiki-merge-${values.INSTALLMENT_NUMBER}`,
-    systemPrompt: buildWikiAuthorSystemPrompt(ctx),
-    tools: fsGate.tools,
-    approve: fsGate.approve,
-    cwd: volumeDir,
-    maxSteps: 40,
-  });
-  try {
-    await runWriteTurn(merger, {
+  await runAuthorStage(
+    {
+      name: `wiki-merge-${values.INSTALLMENT_NUMBER}`,
+      systemPrompt: buildWikiAuthorSystemPrompt(ctx),
+      tools: fsGate.tools,
+      approve: fsGate.approve,
+      cwd: volumeDir,
+      maxSteps: 40,
+    },
+    {
       prompt: buildWikiMergeTurnPrompt(ctx),
       label: `jump-in-wiki-merge-${values.INSTALLMENT_NUMBER}`,
       who: "the merge agent",
@@ -142,10 +140,8 @@ async function runChunkedVolumeAgent(ctx) {
       // artifact.
       verifyOutput: true,
       assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
-    });
-  } finally {
-    await merger.close();
-  }
+    }
+  );
 
   // QA loop: per-chapter validation partials → findings merge → acceptance.
   await runChunkedQaLoop(ctx);

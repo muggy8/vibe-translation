@@ -16,7 +16,7 @@ const { runPerChapterQaLoop, validationReportRecoveryPrompt } = require("../util
 const { assertVoiceCarryForward, guardVoiceCarryForwardAgainst, seedVoiceReferenceFromPrevious } = require("./carry-forward");
 const { runCompile, runExtract } = require("./stages");
 const { maxValidationIterations } = require("./config");
-const { voiceAuthorMaxSteps, voiceRecoveryPrompt } = require("./amend");
+const { parseVoiceQuirks, voiceAuthorMaxSteps, voiceRecoveryPrompt } = require("./amend");
 const { buildAuthorSystemPrompt, buildFeedbackTurnPrompt, buildValidatorTurnPrompt, buildVoiceFindingsMergePrompt } = require("./prompts");
 const { acceptanceCheck } = require("./qa");
 

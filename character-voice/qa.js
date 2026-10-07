@@ -11,7 +11,7 @@ const harness = require("../harness");
 const { parseAcceptanceReply, validatorMaxStepsFor } = require("../utils/prompt");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking } = require("../configs/shared");
 const { assertRealToolCalls } = require("../utils/agents");
-const { runSharedQaLoop, runWriteTurn } = require("../utils/qa-loop");
+const { runSharedQaLoop, runAuthorStage } = require("../utils/qa-loop");
 
 const { maxValidationIterations } = require("./config");
 const { buildFeedbackTurnPrompt, buildValidatorTurnPrompt } = require("./prompts");
@@ -62,10 +62,17 @@ async function runQaLoop(ctx) {
  */
 async function runFeedback(ctx) {
   const { values, volumeDir, fsGate } = ctx;
-  const author = await harness.createAgentHandle({ name: `author-voice-feedback-${values.INSTALLMENT_NUMBER}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: await voiceAuthorMaxSteps(ctx) });
-  try {
-    // The shared turn protocol (utils/qa-loop/turn.js).
-    await runWriteTurn(author, {
+  // The shared turn protocol (utils/qa-loop/turn.js).
+  await runAuthorStage(
+    {
+      name: `author-voice-feedback-${values.INSTALLMENT_NUMBER}`,
+      systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE,
+      tools: fsGate.tools,
+      approve: fsGate.approve,
+      cwd: volumeDir,
+      maxSteps: await voiceAuthorMaxSteps(ctx),
+    },
+    {
       prompt: buildFeedbackTurnPrompt(ctx),
       label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}`,
       who: "the author agent (feedback pass)",
@@ -75,12 +82,12 @@ async function runFeedback(ctx) {
       recoveryPrompt: (hasContent) => voiceRecoveryPrompt(hasContent, true),
       verifyOutput: true,
       assertToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
-    });
-    // The cumulative invariant, re-checked after every rewrite: a feedback pass
-    // that rewrote the reference from memory is how characters disappear from it
-    // (see assertVoiceCarryForward).
-    await assertVoiceCarryForward(ctx, "the feedback pass");
-  } finally { await author.close(); }
+    }
+  );
+  // The cumulative invariant, re-checked after every rewrite: a feedback pass
+  // that rewrote the reference from memory is how characters disappear from it
+  // (see assertVoiceCarryForward).
+  await assertVoiceCarryForward(ctx, "the feedback pass");
 }
 
 

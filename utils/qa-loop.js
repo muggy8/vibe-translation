@@ -32,6 +32,7 @@ const { confirmExceptionalScore, confirmPassingScore } = require("./qa-loop/cons
 const {
   runWriteTurn,
   runQaAgentStage,
+  runAuthorStage,
   defaultRecoveryPrompt,
   validationReportRecoveryPrompt,
 } = require("./qa-loop/turn");
@@ -45,6 +46,7 @@ module.exports = {
   confirmPassingScore,
   runWriteTurn,
   runQaAgentStage,
+  runAuthorStage,
   defaultRecoveryPrompt,
   validationReportRecoveryPrompt,
   runVolumeWithModeFallback,

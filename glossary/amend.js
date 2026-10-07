@@ -6,10 +6,9 @@
 
 require("dotenv").config();
 require("../types"); // JSDoc type definitions
-const harness = require("../harness");
 const { AGENT_TOOLS_NOTE } = require("../configs/shared");
 const { assertRealToolCalls } = require("../utils/agents");
-const { runWriteTurn } = require("../utils/qa-loop");
+const { runAuthorStage } = require("../utils/qa-loop");
 
 const { buildGlossaryAuthorTurnPrompt } = require("./prompts");
 const { glossaryAuthorMaxSteps, glossaryRecoveryPrompt } = require("./authoring");
@@ -31,16 +30,16 @@ async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, 
   const { values, volumeDir, glossaryOutputFile } = ctx;
   const labelSuffix = seg ? `-${seg.id}` : "";
 
-  const author = await harness.createAgentHandle({
-    name: `author-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
-    systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
-    tools: ctx.fsGate.tools,
-    approve: ctx.fsGate.approve,
-    cwd: volumeDir,
-    maxSteps: await glossaryAuthorMaxSteps(ctx, seg),
-  });
-  try {
-    await runWriteTurn(author, {
+  await runAuthorStage(
+    {
+      name: `author-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
+      tools: ctx.fsGate.tools,
+      approve: ctx.fsGate.approve,
+      cwd: volumeDir,
+      maxSteps: await glossaryAuthorMaxSteps(ctx, seg),
+    },
+    {
       prompt: buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg, si),
       label: `glossary-amend-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
       who: `the author agent (amend${seg ? `, chapter ${seg.id}` : ""})`,
@@ -56,14 +55,10 @@ async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, 
       // failure, not an output.
       verifyOutput: true,
       assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
-    });
+    }
+  );
 
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: saved the glossary to ${glossaryOutputFile}`
-    );
-  } finally {
-    await author.close();
-  }
+  console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved the glossary to ${glossaryOutputFile}`);
 }
 
 

@@ -11,7 +11,7 @@ const harness = require("../harness");
 const { parseAcceptanceReply, validatorMaxStepsFor } = require("../utils/prompt");
 const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking } = require("../configs/shared");
 const { assertRealToolCalls } = require("../utils/agents");
-const { runSharedQaLoop, runWriteTurn } = require("../utils/qa-loop");
+const { runSharedQaLoop, runAuthorStage } = require("../utils/qa-loop");
 
 const { maxValidationIterations } = require("./config");
 const { buildFeedbackTurnPrompt, buildValidatorTurnPrompt } = require("./prompts");
@@ -69,12 +69,19 @@ async function runFeedback(ctx, seg = null, si = null) {
   const { values, volumeDir, fsGate } = ctx;
   const labelSuffix = seg ? `-${seg.id}` : "";
   const who = `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`;
-  const author = await harness.createAgentHandle({ name: `author-style-feedback-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: await styleAuthorMaxSteps(ctx, seg) });
-  try {
-    // The shared turn protocol (utils/qa-loop/turn.js): send the turn, refuse a
-    // tool call emitted as text, rescue a missing file from the chat reply, and
-    // only then re-send the task to this same agent.
-    await runWriteTurn(author, {
+  await runAuthorStage(
+    {
+      name: `author-style-feedback-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE,
+      tools: fsGate.tools,
+      approve: fsGate.approve,
+      cwd: volumeDir,
+      maxSteps: await styleAuthorMaxSteps(ctx, seg),
+    },
+    {
+      // The shared turn protocol (utils/qa-loop/turn.js): send the turn, refuse a
+      // tool call emitted as text, rescue a missing file from the chat reply, and
+      // only then re-send the task to this same agent.
       prompt: buildFeedbackTurnPrompt(ctx, seg, si),
       label: `style-guide-feedback-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
       who,
@@ -84,11 +91,11 @@ async function runFeedback(ctx, seg = null, si = null) {
       recoveryPrompt: (hasContent) => styleRecoveryPrompt(hasContent, true),
       verifyOutput: true,
       assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
-    });
-    // The cumulative invariant, re-checked after every rewrite: a feedback pass
-    // that rewrote the guide from memory is how sections disappear from it.
-    await assertStyleCarryForward(ctx, "the feedback pass");
-  } finally { await author.close(); }
+    }
+  );
+  // The cumulative invariant, re-checked after every rewrite: a feedback pass
+  // that rewrote the guide from memory is how sections disappear from it.
+  await assertStyleCarryForward(ctx, "the feedback pass");
 }
 
 

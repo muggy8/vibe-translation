@@ -150,9 +150,34 @@ async function runQaAgentStage(stage, ref, loop) {
   }
 }
 
+/**
+ * Open an agent, run one writing turn on it, and close it — the lifecycle every authoring pass uses.
+ *
+ * `runQaAgentStage` is the same lifecycle read from the chunked loop's stage descriptors; this is the
+ * version an authoring stage calls directly, because it knows its own agent's name and prompt and has
+ * no descriptor to read them from.
+ *
+ * The `finally` is the reason this is a function rather than three lines at each call site: a stage
+ * that throws part-way must still hand the agent back, or a session that died mid-edit is what the
+ * next stage inherits (gotcha 64/65).
+ *
+ * @param {{name: string, systemPrompt: string, tools: Object, approve: Function, cwd: string, maxSteps: number}} agent - What `harness.js` is asked for.
+ * @param {Object} turn - What to say, and what the turn must end up having written (see `runWriteTurn`).
+ * @returns {Promise<{fallbackUsed: boolean}>} What the turn needed to do to get the file written.
+ */
+async function runAuthorStage(agent, turn) {
+  const handle = await harness.createAgentHandle(agent);
+  try {
+    return await runWriteTurn(handle, turn);
+  } finally {
+    await handle.close();
+  }
+}
+
 module.exports = {
   runWriteTurn,
   runQaAgentStage,
+  runAuthorStage,
   defaultRecoveryPrompt,
   validationReportRecoveryPrompt,
   quotedFileLabels,
