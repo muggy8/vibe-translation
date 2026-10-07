@@ -12,7 +12,7 @@ const { judgeTemperature, judgeThinking } = require("../../configs/shared");
 const { managerMaxTokens } = require("./rules");
 const { renderManagerBrief } = require("./brief");
 const { parseManagerAction } = require("./parse");
-const { validateManagerAction } = require("./gate");
+const { validateManagerAction, repairTicketReference } = require("./gate");
 
 /**
  * Ask the manager for the next move.
@@ -28,11 +28,13 @@ const { validateManagerAction } = require("./gate");
  * @param {ManagerMove[]} args.moves
  * @param {import("./tickets").Ticket[]} [args.tickets]
  * @param {import("./patches").Patch[]} [args.patches]
+ * @param {string} [args.correction] - Set on a second attempt: the refusal the last answer got, put
+ *   in front of the model so the retry is a correction and not the same roll of the dice.
  * @param {(line: string) => void} [args.log]
  * @returns {Promise<{ok: boolean, action: ManagerAction|null, problems: Object[], warnings: Object[], reply: string, refusal: string|null, kind: string|null, maxTokens: number}>}
  */
-async function managerDecision({ plan, moves, tickets = [], patches = [], log = (line) => console.log(line) }) {
-  const brief = renderManagerBrief({ plan, moves, tickets, patches });
+async function managerDecision({ plan, moves, tickets = [], patches = [], correction = null, log = (line) => console.log(line) }) {
+  const brief = renderManagerBrief({ plan, moves, tickets, patches, correction });
   const maxTokens = managerMaxTokens();
   log(
     `asking the delivery manager (${brief.length} characters of state, ${moves.length} offered move(s), ` +
@@ -86,11 +88,23 @@ async function managerDecision({ plan, moves, tickets = [], patches = [], log = 
     };
   }
 
-  const gate = validateManagerAction(parsed.action, { moves, tickets, patches, plan });
+  // A mistyped ticket id, when the answer's own option id names the ticket exactly, is a
+  // transcription slip and not an illegal move. Repair it, say so out loud, and let the gate judge
+  // the decision the manager actually made rather than the characters it typed.
+  const fixed = repairTicketReference(parsed.action, tickets);
+  if (fixed.repaired) {
+    const note =
+      `the answer named ticket ${JSON.stringify(fixed.repaired.from)}, which is not open. Its option id names ` +
+      `${fixed.repaired.to}, so the decision was read against that ticket.`;
+    parsed.warnings.push({ kind: "repaired-ticket-id", message: note });
+    log(`  note: ${note}`);
+  }
+
+  const gate = validateManagerAction(fixed.action, { moves, tickets, patches, plan });
   if (!gate.allowed) {
     return {
       ok: false,
-      action: parsed.action,
+      action: fixed.action,
       problems: [{ kind: gate.kind, message: gate.why }],
       warnings: parsed.warnings,
       reply,
@@ -102,7 +116,7 @@ async function managerDecision({ plan, moves, tickets = [], patches = [], log = 
 
   return {
     ok: true,
-    action: parsed.action,
+    action: fixed.action,
     problems: [],
     warnings: parsed.warnings,
     reply,

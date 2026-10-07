@@ -6,7 +6,15 @@
  * already in progress stops the loop before it can overlap another process writing the same
  * volume folder (gotcha 66), and the iteration cap is the backstop on the manager, not on the
  * run.
- * 
+ *
+ * **One correction per decision, for a mistyped name only.** The manager's answer has to reproduce
+ * ids of the shape `TCK-delivery-2026-10-06T18-27-38-632Z-1/O2` character for character, and a model
+ * that drops a chunk of one is a transcription error, not a decision the state should die on. When the
+ * refusal is "there is no such ticket / option / question / patch", the loop asks once more with the
+ * refusal in front of it — the refusal already prints the ids that exist. When the refusal is a guard
+ * (a banned option, an answer that cites the code, an `end` that is not provable) the loop stops at
+ * once: a guard the role is asked to try again is a guard with a retry button on it.
+ *
  * Watch mode runs the whole loop and writes nothing: the same reading, the same decision, the
  * same account, no command started.
  */
@@ -27,6 +35,23 @@ const {
 const { runCommand, commandFor, describeCommand, followUpsFor } = require("./commands");
 
 const projectRoot = path.join(__dirname, ".."); // the runner's ROOT
+
+/**
+ * The refusals that are a name written wrong rather than a move the state forbids. Every one of them
+ * says "there is no such X" and prints the X's that DO exist, which is what a corrected answer needs.
+ *
+ * What is deliberately NOT here: `banned-option`, `cited-forbidden`, `already-answered`,
+ * `not-answered`, `not-chosen`, `option-not-code`, `patch-exists`, `already-judged`,
+ * `unsound-reason`, `thin-escalation`, `end-not-provable`, `unknown-action`. Those are the guards, and
+ * re-asking the model about a guard is asking it to rephrase the same move until the guard flinches.
+ */
+const NAMING_SLIPS = new Set([
+  "unknown-ticket",
+  "unknown-option",
+  "unknown-question",
+  "unknown-patch",
+  "not-offered",
+]);
 
 // ─── The loop ─────────────────────────────────────────────────────────────────
 
@@ -221,7 +246,37 @@ async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.
 
     const moves = offerMoves({ plan, tickets, patches: pending });
 
-    const decision = await manager.managerDecision({ plan, moves, tickets, patches: pending, log: (line) => log(line) });
+    let decision = await manager.managerDecision({ plan, moves, tickets, patches: pending, log: (line) => log(line) });
+
+    // One correction, and only for the refusals that are a naming slip: the answer named a ticket,
+    // option, question or patch that is not there, or a step that is not on the menu. The refusal
+    // already prints the names that DO exist, so asking again is a correction rather than another roll
+    // of the dice — and the ids are long enough to be mistyped (`TCK-delivery-2026-10-06T18-27-38-632Z-1`
+    // is 43 characters, and on 2026-10-07 one was copied as `…2026-10-27-38-632Z-1`, which cost a whole
+    // run whose diagnosis had already been paid for).
+    //
+    // A safety refusal is never re-asked. A banned option, an answer that cites the code, an `end` that
+    // is not provable, a second diagnosis of an answered ticket: putting those in front of the model
+    // again is inviting it to phrase the same move so it slips through, and a guard the role can wear
+    // down is not a guard (gotcha 70).
+    let refusedFirst = null;
+    if (!decision.ok && NAMING_SLIPS.has(decision.kind)) {
+      refusedFirst = { kind: decision.kind, refusal: decision.refusal };
+      log(
+        `the answer named something that is not there (${decision.kind}). Asking once more with the refusal ` +
+          `in front of it…`
+      );
+      decision = await manager.managerDecision({
+        plan,
+        moves,
+        tickets,
+        patches: pending,
+        correction: decision.refusal,
+        log: (line) => log(line),
+      });
+      if (decision.ok) log(`  the second answer is a move this state supports.`);
+    }
+
     const record = {
       iteration,
       verdict: plan.verdict,
@@ -231,6 +286,8 @@ async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.
       reason: decision.action ? decision.action.reason : null,
       refusal: decision.refusal,
       kind: decision.kind,
+      refusedFirst,
+      warnings: decision.warnings || [],
       command: (() => {
         if (!decision.action) return null;
         const args = commandFor(decision.action, { ticket: ticketNamed(decision.action, tickets) });
@@ -243,6 +300,7 @@ async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.
       // A manager that cannot name a legal move is not a manager that should keep going. Fail closed
       // and say what the menu was, because the useful failure is the one the account owner can read.
       log(`REFUSED: ${decision.refusal}`);
+      if (refusedFirst) log(`  (twice: the first answer was refused too — ${refusedFirst.refusal})`);
       if (decision.kind === "unparseable" || decision.kind === "call-failed") {
         log(
           "  the reply was not a decision at all. On this machine the usual cause is the wrong container " +

@@ -14,7 +14,11 @@
  *      move for a patch that has already been decided.
  *   3. **A decision the state does not support stops the loop.** The manager is asked on every
  *      iteration, and `validateManagerAction` is the thing that makes that safe; the loop reports the
- *      refusal and the menu it was offered rather than trying again.
+ *      refusal and the menu it was offered. One exception, and it is narrow: a refusal that says "there
+ *      is no such ticket / option / question / patch" is a name typed wrong, and the loop asks ONCE
+ *      more with that refusal in front of the model. A guard refusal — a banned option, an `end` the
+ *      records do not prove — is never re-asked, because a guard the role is asked to try again is a
+ *      guard with a retry button on it.
  *   4. **The loop takes no run lock of its own** — its children take their own — but it refuses to act
  *      beside a run that is already going.
  *   5. **An accept is the one move it will not take on the manager's word.**
@@ -272,8 +276,15 @@ async function testWatchModeWritesNothing() {
 // ─── 4: a decision the state does not support stops the loop ──────────────────
 
 async function testIllegalDecisionStops() {
+  // A name written wrong gets ONE correction: the refusal prints the names that exist, so asking again
+  // is a correction and not another roll. The live case (2026-10-07) was a ticket id mangled from
+  // `…2026-10-06T18-27-38-632Z-1` to `…2026-10-27-38-632Z-1`, which stopped a loop that had already
+  // paid 7.1M input tokens for its diagnosis.
   const fx = await brokenGlossarySeries("off-menu");
-  const stub = scriptManager([json({ action: "run", step: "polish", reason: "just finish it" })]);
+  const stub = scriptManager([
+    json({ action: "run", step: "polish", reason: "just finish it" }),
+    json({ action: "run", step: "polish", reason: "it is the only step that produces the book" }),
+  ]);
   let log = "";
   try {
     const result = await autopilot.runLoop({
@@ -287,11 +298,44 @@ async function testIllegalDecisionStops() {
     assert.strictEqual(result.exitCode, 1);
     assert.strictEqual(result.decisions[0].kind, "not-offered");
     assert.ok(result.decisions[0].refusal.includes("no \"run\" move"), result.decisions[0].refusal);
+    assert.ok(result.decisions[0].refusedFirst, "the first refusal is on the record, not overwritten");
+    assert.strictEqual(result.decisions[0].refusedFirst.kind, "not-offered");
+    assert.ok(log.includes("Asking once more"), log);
     assert.ok(log.includes("REFUSED:"), log);
     assert.ok(log.includes("the menu it was offered"), "the refusal prints what WAS available, because a refusal you cannot act on gets worked around");
-    assert.strictEqual(stub.seen.length, 1, "one decision, then the loop stops rather than asking again");
+    assert.ok(log.includes("(twice:"), "the report says the correction was tried: " + log);
+    assert.strictEqual(stub.seen.length, 2, "one correction, and then the loop stops");
+    assert.ok(stub.seen[1].messages[0].text.includes("previous answer was refused"), "the retry carries the refusal, not the same question again");
   } finally {
     stub.restore();
+  }
+
+  // And the correction is allowed to land: the second answer is the one the loop acts on.
+  const fx1 = await brokenGlossarySeries("corrected");
+  const stub1 = scriptManager([
+    json({ action: "run", step: "polish", reason: "just finish it" }),
+    json({ action: "escalate", note: "the carry-forward gate removed volume 02's glossary and only the account owner may decide what happens to that evidence", reason: "the plan's answer here is a question, not a run" }),
+  ]);
+  try {
+    const r = await autopilot.runLoop({ mode: "watch", seriesDir: fx1.dir, iterationCap: 12, log: () => {} });
+    assert.strictEqual(r.decisions[0].action.action, "escalate", "the corrected answer is the decision of record");
+    assert.strictEqual(r.decisions[0].refusedFirst.kind, "not-offered");
+    assert.strictEqual(stub1.seen.length, 2);
+  } finally {
+    stub1.restore();
+  }
+
+  // A GUARD refusal is never re-asked. Putting "you may not end this run" in front of the model again
+  // is asking it to rephrase the same move until the guard flinches (gotcha 70).
+  const fx3 = await brokenGlossarySeries("guard-not-reasked");
+  const stub3 = scriptManager([json({ action: "end", reason: "I think we are done here" })]);
+  try {
+    const r3 = await autopilot.runLoop({ mode: "watch", seriesDir: fx3.dir, iterationCap: 12, log: () => {} });
+    assert.strictEqual(r3.decisions[0].kind, "end-not-provable");
+    assert.strictEqual(r3.decisions[0].refusedFirst, null, "a guard is not given a second bite");
+    assert.strictEqual(stub3.seen.length, 1, "one call, no correction, the loop stops");
+  } finally {
+    stub3.restore();
   }
 
   // An answer that is not a decision at all. On this machine the usual cause is the wrong container
@@ -305,11 +349,12 @@ async function testIllegalDecisionStops() {
     assert.strictEqual(result2.exitCode, 1);
     assert.strictEqual(result2.decisions[0].kind, "unparseable");
     assert.ok(log2.includes("model-switch-state"), log2);
+    assert.strictEqual(stub2.seen.length, 1, "an answer that is not a decision is not re-asked either");
   } finally {
     stub2.restore();
   }
 
-  console.log("  fail-closed: an illegal move and an unparseable reply both stop the loop and say why");
+  console.log("  fail-closed: a mistyped name is corrected once, a guard is not, and both say why");
 }
 
 // ─── 5: `end` is proved before the loop believes it ───────────────────────────

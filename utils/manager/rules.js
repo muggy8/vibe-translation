@@ -215,9 +215,11 @@ Two things about your own limits:
 - Picking up unfinished work is free. Destroying finished work is an intervention, and each step has
   a limited number of them. When a step is out of attempts, the honest move is a ticket, not a
   cleverer re-run.
-- The same action against the same finding that has already failed twice will be refused. Volume 15
-  of this series is the case: re-running a deterministic gate reproduces the identical quarantine,
-  because the finding was never about the data.
+- The same action against the same finding that has already failed twice will be refused. And when a
+  deterministic gate removed an output, re-running that step rebuilds the file and the same check
+  refuses it again: the finding is about the check, not about the data, so the move is the ticket.
+  Whether anything has actually been attempted is written in the state below, where the run ledger
+  records it — count it there, and do not assume an attempt that is not written down.
 
 Answer with ONE fenced \`\`\`json block and nothing after it.`;
 

@@ -132,6 +132,23 @@ async function scenarioOneShot() {
     assert.ok(req.tools === undefined, "a tool-less one-shot advertises no tools");
     ok("runOneShot streamed a real completion through the real provider and undici");
 
+    // A role asked twice in one process has to leave BOTH answers behind. The delivery loop asks the
+    // manager on every iteration, and keying the file on the label alone meant the second decision
+    // erased the first: on 2026-10-07 the record of iteration 1 was gone by the time anyone looked,
+    // and only the iteration that failed was still readable.
+    await harness.runOneShot({
+      systemPrompt: "You translate.",
+      messages: [{ text: "translate that again" }],
+      endpoint: { baseUrl: backend.baseUrl, apiKey: "k", model: "stub" },
+      label: "one-shot-scenario",
+    });
+    const oneShotDir = path.join(harness.currentRunDir(), "one-shot");
+    const firstLog = fs.readFileSync(path.join(oneShotDir, "one-shot-scenario.md"), "utf8");
+    const secondLog = fs.readFileSync(path.join(oneShotDir, "one-shot-scenario-2.md"), "utf8");
+    assert.ok(firstLog.includes("translate this"), "the first call is still there");
+    assert.ok(secondLog.includes("translate that again"), "the second call is beside it, not on top of it");
+    ok("one-shot logs are numbered per call, so a role asked twice keeps both answers");
+
     // The usage block the client asked for (stream_options.include_usage) is
     // read back — the numbers in .logs/ are the server's, not a guess.
     const backend2 = await startFakeBackend({

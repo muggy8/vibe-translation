@@ -389,6 +389,18 @@ the account owner's own command in its own process.
 - **`escalate` is a branch, not a failure state.** A Tier C move is one the manager may name and
   never make, so a loop that could only act would have to work around the rule instead of ending on
   it. The loop prints what the account owner has to decide and exits 1.
+- **A mistyped name gets one correction; a guard gets none.** The manager has to reproduce ids like
+  `TCK-delivery-2026-10-06T18-27-38-632Z-1/O2` character for character, and on 2026-10-07 one came
+  back as `…2026-10-27-38-632Z-1` — the right option, the ticket mangled — which stopped a loop that
+  had already paid 7.1M input tokens for the diagnosis it was about to act on. So a refusal of the
+  shape "there is no such ticket / option / question / patch" is re-asked **once**, with that refusal
+  printed in front of the model (`NAMING_SLIPS`, and `renderManagerBrief`'s `correction` section): the
+  refusal already lists the ids that exist. A refusal that is a **guard** — a banned option, an answer
+  that cites the code, an `end` the records do not prove, a second diagnosis of an answered ticket — is
+  never re-asked, because asking a role to try a guard again is asking it to rephrase the same move
+  until the guard flinches (gotcha 70). `utils/manager.js` also repairs the one case where the state
+  already contains the name: a `choose` whose `option` id holds a real ticket id while its `ticket`
+  field holds a garbled one. The repair is reported in the decision record, never applied silently.
 - **`AUTOPILOT_MAX_ITERATIONS` (default 12) is a wall, not a budget.** The anti-spin gate needs a
   repetition and the per-step allowance needs an intervention; a loop making legal, different,
   non-repeating moves that never reach a provable end trips neither, and it should not run overnight.

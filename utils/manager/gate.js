@@ -1,6 +1,10 @@
 /**
  * The gate that refuses every illegal move by name with what IS available: a step not on the menu, an unknown or already-diagnosed ticket, an answer that cites utils/prompt.js, an answer that does not say which of several open questions it answers, a banned option, calling the dev team without a chosen code-changing option, "volume 15 passes now" as a judgment, a two-word escalation, and end on a state that is not finished.
  *
+ * It normalises exactly one thing, and reports it: a `choose` whose `ticket` field names nothing but
+ * whose `option` id contains a real ticket id (`repairTicketReference`). A mistyped name the state
+ * already holds is a transcription slip, not an illegal move; everything else is refused as before.
+ *
  * Part of the manager.js layer (split out of the original single file).
  */
 
@@ -32,6 +36,45 @@ function pathishWords(text) {
     "gi"
   );
   return (String(text || "").match(re) || []).map((w) => w.replace(/\\/g, "/"));
+}
+
+
+/**
+ * A ticket id the model mistyped, when the rest of its own answer names the ticket exactly.
+ *
+ * Observed live on 2026-10-07: the manager chose `TCK-delivery-2026-10-06T18-27-38-632Z-1/O1` — the
+ * right option, copied correctly — and named its ticket as
+ * `TCK-delivery-2026-10-27-38-632Z-1`, dropping `T18` out of a 43-character id on the way. The gate
+ * refused, the loop stopped, and the whole decision was thrown away over a transcription slip.
+ *
+ * A `choose` carries the ticket id twice: once in `ticket`, once as the prefix of `option`. When the
+ * loose copy does not name an open ticket and the exact one does, the exact one wins, and the repair
+ * is reported rather than hidden. This is not fuzzy matching and it is not a guess:
+ * - only `choose` is considered, because it is the only move with a second field that contains the
+ *   ticket id in full;
+ * - the match is `option.startsWith(ticket.id + "/")` — the shape `utils/tickets.js` writes;
+ * - it applies only when `ticket` names NOTHING, so an answer that names one real ticket and an
+ *   option belonging to another is still refused, as `unknown-option`;
+ * - it applies only when exactly one open ticket matches.
+ *
+ * Every other refusal in this module stays exactly as strict as it was: this repairs a name the
+ * state already contains, never a move the state does not support.
+ *
+ * @param {ManagerAction} action - The parsed action.
+ * @param {import("./tickets").Ticket[]} tickets - The open tickets.
+ * @returns {{action: ManagerAction, repaired: {from: string, to: string}|null}}
+ */
+function repairTicketReference(action, tickets = []) {
+  if (!action || action.action !== "choose" || !action.option) return { action, repaired: null };
+  if ((tickets || []).some((t) => t && t.id === action.ticket)) return { action, repaired: null };
+
+  const matches = (tickets || []).filter((t) => t && String(action.option).startsWith(`${t.id}/`));
+  if (matches.length !== 1) return { action, repaired: null };
+
+  return {
+    action: { ...action, ticket: matches[0].id },
+    repaired: { from: String(action.ticket || ""), to: matches[0].id },
+  };
 }
 
 
@@ -168,7 +211,12 @@ function validateManagerAction(action, { moves = [], tickets = [], patches = [],
 
     case "choose": {
       const ticket = findTicket(action.ticket);
-      if (!ticket) return refuse("unknown-ticket", `there is no open ticket ${action.ticket}.`);
+      if (!ticket)
+        return refuse(
+          "unknown-ticket",
+          `there is no open ticket ${action.ticket}. Open tickets: ${tickets.map((t) => t.id).join(", ") || "none"}. ` +
+            `The option id you named carries the ticket id inside it — copy the whole thing from the menu.`
+        );
       if (!ticket.diagnosis) {
         return refuse("not-answered", `ticket ${ticket.id} has no answer yet, so it has no options. Ask the diagnostics team first.`);
       }
@@ -356,6 +404,7 @@ function endIsProvable({ plan = null, tickets = [], patches = [] }) {
 
 module.exports = {
   pathishWords,
+  repairTicketReference,
   validateManagerAction,
   endIsProvable,
 };

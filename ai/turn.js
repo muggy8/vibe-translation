@@ -18,7 +18,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const { tooBigForOnePassError } = require("../configs/shared");
 
-const { logFilePath, logLine, runDir } = require("./log");
+const { logFilePath, logLine, runDir, numberedLogFile } = require("./log");
 const { agentTextGuardChars } = require("./env");
 
 /**
@@ -135,10 +135,12 @@ async function consumeEvents(
       // first one's evidence (design §4.10). Non-managed turns keep the old name.
       const chunkSuffix =
         logContext.chunk && logContext.chunk > 1 ? `-c${String(logContext.chunk).padStart(2, "0")}` : "";
-      const fileName = isAgent
-        ? `turn-${String(logContext.turnNumber).padStart(3, "0")}${chunkSuffix}.stream.md`
-        : `${logContext.label.replace(/[^a-zA-Z0-9_-]/g, "_")}.stream.md`;
-      logFilePath = path.join(logDir, fileName);
+      const safeLabel = logContext.label.replace(/[^a-zA-Z0-9_-]/g, "_");
+      logFilePath = isAgent
+        ? path.join(logDir, `turn-${String(logContext.turnNumber).padStart(3, "0")}${chunkSuffix}.stream.md`)
+        : // A role called twice in one process (the manager, every iteration) gets its own partial
+          // file too, so the streamed text lines up with the numbered answer written next to it.
+          numberedLogFile(logDir, safeLabel, ".stream.md");
       fs.mkdirSync(path.dirname(logFilePath), { recursive: true });
       logFd = fs.openSync(logFilePath, "a");
     } catch (err) {

@@ -231,6 +231,50 @@ async function testGateRemovedTheOutput() {
   );
   assert.strictEqual(resumeStep.countsAsIntervention, false, "asking is not an intervention");
 
+  // What the ledger records is said as what the ledger records. This reason used to assert "the ledger
+  // refuses the third attempt" on a series with NO ledger file at all, and the diagnostics team spent a
+  // whole turn on 2026-10-06 asking the account owner whether two runs of volume 15 had really happened.
+  // A mechanism that exists is not a record that something has met it — and a plan that claims an
+  // attempt nobody made is answered by somebody switching the guard off.
+  assert.ok(
+    resumeStep.reasons.some((r) => r.includes("nothing is recorded as attempted on glossary")),
+    `with an empty ledger the plan says so: ${resumeStep.reasons.join(" | ")}`
+  );
+  assert.ok(
+    !resumeStep.reasons.some((r) => r.includes("refuses the third attempt")),
+    `no count, no claim of a count: ${resumeStep.reasons.join(" | ")}`
+  );
+
+  // And when the ledger DOES record attempts, it counts them out.
+  const ledgerDir = path.join(fx.dir, ".postmortem");
+  const ledgerFile = path.join(ledgerDir, "ledger.json");
+  fs.mkdirSync(ledgerDir, { recursive: true });
+  process.env.POSTMORTEM_DIR = ledgerDir;
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      appendLedgerEntry(
+        {
+          kind: "intervention",
+          step: "glossary",
+          volume: "02",
+          action: "wipe-and-cascade",
+          finding: "missing-required",
+          outcome: "unchanged",
+          run: "run-2",
+        },
+        ledgerFile
+      );
+    }
+    const again = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+    const counted = again.steps.find((s) => s.step === "glossary");
+    assert.ok(
+      counted.reasons.some((r) => r.includes("the ledger records 3 intervention(s) on glossary")),
+      `the attempts are named with their number: ${counted.reasons.join(" | ")}`
+    );
+  } finally {
+    delete process.env.POSTMORTEM_DIR;
+  }
+
   console.log("  gate removed the output: a ticket, because re-running reproduces the quarantine");
 }
 

@@ -176,9 +176,11 @@ function renderPatchForManager(patch) {
  * @param {ManagerMove[]} args.moves - The offered menu.
  * @param {import("./tickets").Ticket[]} [args.tickets] - The open tickets.
  * @param {import("./patches").Patch[]} [args.patches] - The patches waiting for a judgment.
+ * @param {string} [args.correction] - On a second attempt: the refusal the last answer got. It turns
+ *   the retry into a correction — the model is shown the name it got wrong and the names that exist.
  * @returns {string}
  */
-function renderManagerBrief({ plan, moves, tickets = [], patches = [] }) {
+function renderManagerBrief({ plan, moves, tickets = [], patches = [], correction = null }) {
   const out = [MANAGER_RULES, "", "---", ""];
 
   out.push(`## The question`);
@@ -187,6 +189,16 @@ function renderManagerBrief({ plan, moves, tickets = [], patches = [] }) {
       `going to. Choose the next move from the list at the end of this message.`
   );
   out.push("");
+
+  if (correction) {
+    out.push(`## Your previous answer was refused`);
+    out.push(correction);
+    out.push(
+      `Answer again from the same state and the same menu. Ticket, option and patch ids are printed in ` +
+        `full below — copy them character for character rather than writing one from memory.`
+    );
+    out.push("");
+  }
 
   out.push(`## What the triage says`);
   out.push(`verdict: ${plan.verdict}`);

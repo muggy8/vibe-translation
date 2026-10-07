@@ -13,7 +13,9 @@
  *   2. **The reply is parsed fail-closed, and the menu is closed.** An answer that names a step the
  *      triage did not offer, a ticket that does not exist, an option the filter refused, or a patch
  *      already judged is refused by name — with the refusal saying what IS available, because a
- *      refusal that cannot be acted on is the refusal that gets worked around (gotcha 70).
+ *      refusal that cannot be acted on is the refusal that gets worked around (gotcha 70). The one
+ *      thing it does NOT refuse is a ticket id typed wrong when the answer's own option id contains
+ *      the real one: that is a transcription slip, it is corrected, and the correction is on the record.
  *   3. **The two claims that need proving are proved against the records.** "I'm done" and "this patch
  *      is safe to accept without a human" are checked, not believed.
  *
@@ -416,7 +418,91 @@ function testValidation() {
   console.log("  menu gate: every illegal move is refused by name, and every refusal names what is available");
 }
 
-// ─── 4: "I'm done" is proved, not asserted ───────────────────────────────────
+// ─── 4: a mistyped id, when the rest of the answer names it exactly ───────────
+
+async function testMistypedIds() {
+  const tickets = [answeredTicket()];
+  const moves = [
+    { kind: "choose", ticket: "TCK-1", option: ALLOWED_OPTION.id, label: `choose ${ALLOWED_OPTION.id} on TCK-1` },
+  ];
+  const ctx = { moves, tickets, patches: [], plan: planOf() };
+
+  // The live shape (2026-10-07): the right option, copied exactly, and the ticket id mangled on the way
+  // in — `…2026-10-06T18-27-38-632Z-1` answered as `…2026-10-27-38-632Z-1`. The option id carries the
+  // ticket id, so the decision is readable; refusing it threw away a loop whose diagnosis had already
+  // cost 7.1M input tokens.
+  const mangled = {
+    action: "choose",
+    ticket: "TCK-delivery-2026-10-27-38-632Z-1",
+    option: ALLOWED_OPTION.id,
+    reason: "the free check settles what the gate was refusing before anything is spent",
+  };
+  const fixed = manager.repairTicketReference(mangled, tickets);
+  assert.strictEqual(fixed.action.ticket, "TCK-1", "the ticket the answer's own option id names");
+  assert.deepStrictEqual(fixed.repaired, { from: mangled.ticket, to: "TCK-1" }, "the repair is reported, not hidden");
+  assert.strictEqual(manager.validateManagerAction(fixed.action, ctx).allowed, true, manager.validateManagerAction(fixed.action, ctx).why);
+
+  // It repairs a name the state already contains, and nothing else: when the option names no ticket
+  // either, there is nothing to recover and the refusal stands.
+  const bothWrong = manager.repairTicketReference(
+    { action: "choose", ticket: "TCK-nope", option: "TCK-nope/O1", reason: "x" },
+    tickets
+  );
+  assert.strictEqual(bothWrong.repaired, null, "an id that matches nothing stays unmatched");
+  assert.strictEqual(manager.validateManagerAction(bothWrong.action, ctx).kind, "unknown-ticket");
+
+  // An answer that names a REAL ticket and an option belonging to something else is a contradiction,
+  // not a transcription slip, and it is refused for the problem it actually has.
+  const crossed = manager.repairTicketReference(
+    { action: "choose", ticket: "TCK-1", option: "TCK-someother/O1", reason: "x" },
+    tickets
+  );
+  assert.strictEqual(crossed.repaired, null, "a ticket that exists is never rewritten under it");
+  assert.strictEqual(manager.validateManagerAction(crossed.action, ctx).kind, "unknown-option");
+
+  // Only `choose` carries the ticket id twice. A `diagnose` has no second field to recover it from.
+  assert.strictEqual(
+    manager.repairTicketReference({ action: "diagnose", ticket: "TCK-27", reason: "look again" }, tickets).repaired,
+    null,
+    "no second field, no repair"
+  );
+
+  // End to end, through the real parse and the real gate.
+  const real = harness.runOneShot;
+  harness.runOneShot = async () => "```json\n" + JSON.stringify(mangled) + "\n```";
+  let decision;
+  try {
+    decision = await manager.managerDecision({ plan: planOf(), moves, tickets, patches: [] });
+  } finally {
+    harness.runOneShot = real;
+  }
+  assert.strictEqual(decision.ok, true, decision.refusal);
+  assert.strictEqual(decision.action.ticket, "TCK-1", "the loop acts on the corrected id, not the typed one");
+  assert.strictEqual(decision.action.option, ALLOWED_OPTION.id);
+  assert.ok(
+    decision.warnings.some((w) => w.kind === "repaired-ticket-id"),
+    `the correction is on the record: ${JSON.stringify(decision.warnings)}`
+  );
+
+  // On a re-ask, the refusal is put in front of the role with the ids it has to copy.
+  const withCorrection = manager.renderManagerBrief({
+    plan: planOf(),
+    moves,
+    tickets,
+    patches: [],
+    correction: "there is no open ticket TCK-27. Open tickets: TCK-1.",
+  });
+  assert.ok(withCorrection.includes("previous answer was refused"), withCorrection.slice(0, 300));
+  assert.ok(withCorrection.includes("Open tickets: TCK-1"), "the refusal is quoted verbatim");
+  assert.ok(
+    withCorrection.indexOf("previous answer was refused") < withCorrection.indexOf("## The moves available"),
+    "it is read before the menu, not after it"
+  );
+
+  console.log("  mistyped ids: a name the state already holds is corrected and reported; a move it does not support is still refused");
+}
+
+// ─── 5: "I'm done" is proved, not asserted ───────────────────────────────────
 
 function testEndIsProvable() {
   const clean = manager.endIsProvable({ plan: cleanPlan(), tickets: [], patches: [] });
@@ -466,7 +552,7 @@ function testEndIsProvable() {
   console.log("  end: provable only from the records, and a hole in the book is not a failure of the run");
 }
 
-// ─── 5: an unattended accept is the narrowest thing here ──────────────────────
+// ─── 6: an unattended accept is the narrowest thing here ──────────────────────
 
 function testAutoAcceptSafety() {
   const safe = manager.safeToAcceptAutomatically(patchOf());
@@ -507,7 +593,7 @@ function testAutoAcceptSafety() {
   console.log("  auto-accept: ordinary code with green checks and no warning, and nothing else, unattended");
 }
 
-// ─── 6: the call itself — tool-less, hooked, fail-closed ──────────────────────
+// ─── 7: the call itself — tool-less, hooked, fail-closed ──────────────────────
 
 async function testTheCall() {
   const real = harness.runOneShot;
@@ -582,7 +668,7 @@ async function testTheCall() {
   console.log("  the call: no tools, one shaped report, fail-closed parse, and a dead call names the container");
 }
 
-// ─── 7: the manager's own reply budget ────────────────────────────────────────
+// ─── 8: the manager's own reply budget ────────────────────────────────────────
 
 function testMaxTokens() {
   const before = process.env.DELIVERY_MAX_TOKENS;
@@ -608,6 +694,7 @@ function testMaxTokens() {
   testTheTwoMenus();
   testParsing();
   testValidation();
+  await testMistypedIds();
   testEndIsProvable();
   testAutoAcceptSafety();
   testMaxTokens();

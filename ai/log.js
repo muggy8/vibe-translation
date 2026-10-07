@@ -24,8 +24,10 @@ const { envMaxTokens } = require("./env");
 // under .logs/ (one directory per process) so runs can be inspected after
 // the fact. The directory contains:
 //   - summary.log        (CALL / RESULT / WARNING lines — greppable)
-//   - one-shot/<label>.md  (full system prompt + messages + response for
-//                          each tool-less runOneShot call)
+//   - one-shot/<label>[-N].md  (full system prompt + messages + response for
+//                          each tool-less runOneShot call; a role called twice
+//                          in one process gets -2, -3, …, so the first
+//                          decision is not overwritten by the second)
 //   - agent-<name>/turn-<N>.md  (full chat history for each agent turn:
 //                          system prompt, user input, assistant response,
 //                          reasoning, tool calls + results)
@@ -136,6 +138,40 @@ const CODE_BLOCK = "\x60\x60\x60";
 
 
 /**
+ * The log file for one call, without a second call of the same label erasing the first.
+ *
+ * A role that is asked more than once in one process is the normal shape of the delivery loop: the
+ * manager is asked on every iteration. Keying the file on the label alone meant `one-shot/
+ * delivery-manager.md` held the LAST decision and the earlier ones were gone — the record of what the
+ * manager decided at iteration 1 was overwritten by the one that failed at iteration 2. Same label,
+ * then `-2`, `-3`, in call order, which is what the agent logs already do with `turn-<N>`.
+ *
+ * @param {string} dir - The directory to write in.
+ * @param {string} base - The sanitised label, without the extension.
+ * @param {string} ext - The extension, including the dot (`.md`, `.stream.md`).
+ * @returns {string}
+ */
+function numberedLogFile(dir, base, ext) {
+  let candidate = path.join(dir, `${base}${ext}`);
+  for (let n = 2; fs.existsSync(candidate); n += 1) {
+    candidate = path.join(dir, `${base}-${n}${ext}`);
+  }
+  return candidate;
+}
+
+
+/**
+ * The log file for one one-shot call. See {@link numberedLogFile}.
+ * @param {string} oneShotDir
+ * @param {string} safeLabel
+ * @returns {string}
+ */
+function oneShotLogFile(oneShotDir, safeLabel) {
+  return numberedLogFile(oneShotDir, safeLabel, ".md");
+}
+
+
+/**
  * Write a one-shot call log file: full system prompt, messages, and response.
  * Called after runOneShot completes.
  *
@@ -154,7 +190,7 @@ function writeOneShotLog(label, systemPrompt, messages, response, result, modelN
     fs.mkdirSync(oneShotDir, { recursive: true });
 
     const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const logFile = path.join(oneShotDir, `${safeLabel}.md`);
+    const logFile = oneShotLogFile(oneShotDir, safeLabel);
 
     const durationMs = result.startTime ? Date.now() - result.startTime : null;
     const ttftMs = result.firstTokenTime ? result.firstTokenTime - result.startTime : null;
@@ -307,6 +343,8 @@ module.exports = {
   escapeCodeBlock,
   escapeInline,
   CODE_BLOCK,
+  numberedLogFile,
+  oneShotLogFile,
   writeOneShotLog,
   writeAgentTurnLog,
 };

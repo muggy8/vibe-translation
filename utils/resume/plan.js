@@ -317,12 +317,25 @@ function raiseStructuralTells(plan, notes, { state, resumeState, resumeStep, fro
   const gateRemovedIt = Boolean(fromVolume && inventory && inventory.quarantinedForStep.includes(resumeStep));
 
   if (gateRemovedIt) {
+    // Say what the ledger ACTUALLY records. This reason used to assert "the ledger refuses the third
+    // attempt" on a series with no ledger file at all, and the diagnostics team spent a whole turn
+    // asking the account owner whether two runs had really happened (ticket TCK-delivery-2026-10-06
+    // …-1, 2026-10-06). A mechanism that exists is not a record that something has met it, and a plan
+    // that claims an attempt nobody made gets answered by somebody switching the guard off.
+    const spent = (state.interventionsByStep || {})[resumeStep] || 0;
+    const ledgerLine = spent
+      ? `the ledger records ${spent} intervention(s) on ${resumeStep} in the newest recorded run, and the same ` +
+        `action against the same finding is refused on the third attempt (utils/ledger.js).`
+      : `nothing is recorded as attempted on ${resumeStep} in the run ledger: this is not a refused third ` +
+        `attempt, it is the shape itself — the gate's check runs at the end of the step, so a re-run does ` +
+        `the whole model work and then reproduces the identical quarantine.`;
     const escalated = escalate(
       "gate-removed",
       `volume ${fromVolume} is missing ${resumeStep}'s output AND holds ${resumeStep}'s own gate evidence in the same folder`,
       [
         `a deterministic gate refused that file, and nothing has replaced it since.`,
-        `re-running ${resumeStep} rebuilds the file and then runs the same gate over it, which produces the identical quarantine (gotcha 68). That is the spin, and the ledger refuses the third attempt.`,
+        `re-running ${resumeStep} rebuilds the file and then runs the same gate over it, which produces the identical quarantine (gotcha 68). That is the spin.`,
+        ledgerLine,
         `read ${inventory.quarantines.map((n) => `\`${n}\``).join(", ")} first — it is the gate's own account of what it refused, and it is not mine to delete (Tier C).`,
       ]
     );
