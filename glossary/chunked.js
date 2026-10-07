@@ -79,17 +79,7 @@ async function appendResearchSkeleton(researchNotesFile, values, segment, terms,
  * @param {GlossaryVolumeCtx} ctx - The volume context (must include bundle).
  */
 async function runChunkedVolumeAgent(ctx) {
-  const {
-    values,
-    bundle,
-    volumeDir,
-    glossaryOutputFile,
-    researchNotesFile,
-    isFirst,
-    previousGlossaryFile,
-    termsPrompt,
-    termsSystemPrompt,
-  } = ctx;
+  const { values, bundle, volumeDir } = ctx;
   console.log(
     `Volume ${values.INSTALLMENT_NUMBER}: chapter-by-chapter fallback ` +
       `(${bundle.segments.length} segments, ${bundle.wholeChars} chars whole)...`
@@ -114,91 +104,10 @@ async function runChunkedVolumeAgent(ctx) {
   const allChunkedTerms = [];
   for (let si = 0; si < bundle.segments.length; si++) {
     const segment = bundle.segments[si];
-    // 1. Extract this chapter's new terms (one-shot). The cumulative reference
-    // is the previous volume's glossary for the first chapter and the current
-    // in-volume glossary afterwards.
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: chapter ${segment.id} (${segment.title}), ` +
-        `${si + 1}/${bundle.segments.length} — extracting terms...`
-    );
-    const messages = [{ file: path.join(volumeDir, segment.file), name: segment.file }];
-    const stateFile = si === 0 ? previousGlossaryFile : glossaryOutputFile;
-    if (stateFile) {
-      // The truncation is ranked by what THIS chapter actually contains (see
-      // truncateGlossary), so the cumulative glossary shown to the extractor is
-      // the part of it that matters for this chapter.
-      const chapterSource = await fs.readFile(path.join(volumeDir, segment.file), "utf8");
-      messages.push(
-        await inlineReferenceMessage(stateFile, si === 0 ? "glossary-previous.md" : "glossary-current.md", {
-          truncate: (raw) => truncateGlossary(raw, chapterSource),
-        })
-      );
-    }
-    messages.push({ text: termsPrompt }, { text: chapterSegmentNote(bundle, segment, si) });
-    const termsOutput = await harness.runOneShot({
-      systemPrompt: termsSystemPrompt,
-      messages,
-      label: `glossary-terms-${values.INSTALLMENT_NUMBER}-${segment.id}`,
-    });
-    let terms = [];
-    try {
-      terms = parseTerms(termsOutput);
-    } catch (err) {
-      console.warn(
-        `Volume ${values.INSTALLMENT_NUMBER}: could not parse the term list for ` +
-          `chapter ${segment.id} (${err.message}). Continuing without research.`
-      );
-    }
+    const terms = await extractChapterTerms(ctx, segment, si);
     allChunkedTerms.push(...terms);
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: extracted ${terms.length} new term(s) from chapter ${segment.id}.`
-    );
-
-    // 2. Research this chapter's new terms (skeleton-first, appended per chapter).
-    if (researchEnabled && terms.length > 0) {
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: researching ${terms.length} new term(s) ` +
-          `of chapter ${segment.id} (concurrency=${RESEARCH_CONCURRENCY})...`
-      );
-      await appendResearchSkeleton(researchNotesFile, values, segment, terms, si === 0);
-      const termsWithIndices = terms.map((term, idx) => ({ ...term, _idx: idx }));
-      for (let i = 0; i < termsWithIndices.length; i += RESEARCH_CONCURRENCY) {
-        const batch = termsWithIndices.slice(i, i + RESEARCH_CONCURRENCY);
-        await researchBatch(ctx, batch, segment);
-        if (i + RESEARCH_CONCURRENCY < termsWithIndices.length) {
-          const delayMs = parseInt(process.env.RESEARCH_DELAY_MS, 10) || 300;
-          await new Promise((r) => setTimeout(r, delayMs));
-        }
-      }
-    }
-
-    // 3. Amend the glossary with this chapter's terms (fresh author agent).
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: amending the glossary with chapter ${segment.id} (author agent)...`
-    );
-    // The state this chapter must not shrink. Read before the pass, compared
-    // after it: a chapter pass that rewrites the glossary from memory is where
-    // the cumulative entries actually disappear.
-    let chapterBaseline = null;
-    try {
-      chapterBaseline = await fs.readFile(glossaryOutputFile, "utf8");
-    } catch {
-      chapterBaseline = null; // No glossary yet — this chapter creates it.
-    }
-    // The index must describe the state THIS chapter is about to amend, and the
-    // earlier chapters have already added rows to it.
-    if (chapterBaseline !== null) ctx.glossaryIndex = buildGlossaryIndex(chapterBaseline);
-
-    await generateGlossary(ctx, terms, researchEnabled && terms.length > 0, segment, si);
-
-    if (chapterBaseline !== null) {
-      await guardCarryForwardAgainst(
-        ctx,
-        chapterBaseline,
-        `the amend pass for chapter ${segment.id}`,
-        "the glossary as of the previous chapter"
-      );
-    }
+    await researchChapterTerms(ctx, segment, si, terms);
+    await amendGlossaryForChapter(ctx, segment, si, terms);
   }
 
   // Persist the volume's new-term extraction (all chapters) so the
@@ -218,6 +127,134 @@ async function runChunkedVolumeAgent(ctx) {
 
   // QA loop: per-chapter validation partials → findings merge → acceptance.
   await runChunkedQaLoop(ctx);
+}
+
+
+/**
+ * Step 1 of a chapter's pass: extract this chapter's new terms (one-shot).
+ *
+ * The cumulative reference handed to the extractor is the previous volume's glossary for the first
+ * chapter and the current in-volume glossary afterwards — so each chapter is amended against what the
+ * chapters before it already wrote, not against a snapshot from before this volume started.
+ *
+ * A reply that cannot be parsed is not a failure of the volume: the chapter continues without
+ * research, and the amend pass still runs on the chapter's own text.
+ *
+ * @param {GlossaryVolumeCtx} ctx
+ * @param {import("../types").SourceSegment} segment - The chapter being read.
+ * @param {number} si - Zero-based position in reading order.
+ * @returns {Promise<Array<{term: string, type: string, query: string}>>} The chapter's new terms.
+ */
+async function extractChapterTerms(ctx, segment, si) {
+  const { values, bundle, volumeDir, glossaryOutputFile, previousGlossaryFile, termsPrompt, termsSystemPrompt } = ctx;
+  console.log(
+    `Volume ${values.INSTALLMENT_NUMBER}: chapter ${segment.id} (${segment.title}), ` +
+      `${si + 1}/${bundle.segments.length} — extracting terms...`
+  );
+  const messages = [{ file: path.join(volumeDir, segment.file), name: segment.file }];
+  const stateFile = si === 0 ? previousGlossaryFile : glossaryOutputFile;
+  if (stateFile) {
+    // The truncation is ranked by what THIS chapter actually contains (see
+    // truncateGlossary), so the cumulative glossary shown to the extractor is
+    // the part of it that matters for this chapter.
+    const chapterSource = await fs.readFile(path.join(volumeDir, segment.file), "utf8");
+    messages.push(
+      await inlineReferenceMessage(stateFile, si === 0 ? "glossary-previous.md" : "glossary-current.md", {
+        truncate: (raw) => truncateGlossary(raw, chapterSource),
+      })
+    );
+  }
+  messages.push({ text: termsPrompt }, { text: chapterSegmentNote(bundle, segment, si) });
+  const termsOutput = await harness.runOneShot({
+    systemPrompt: termsSystemPrompt,
+    messages,
+    label: `glossary-terms-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+  });
+  let terms = [];
+  try {
+    terms = parseTerms(termsOutput);
+  } catch (err) {
+    console.warn(
+      `Volume ${values.INSTALLMENT_NUMBER}: could not parse the term list for ` +
+        `chapter ${segment.id} (${err.message}). Continuing without research.`
+    );
+  }
+  console.log(
+    `Volume ${values.INSTALLMENT_NUMBER}: extracted ${terms.length} new term(s) from chapter ${segment.id}.`
+  );
+  return terms;
+}
+
+/**
+ * Step 2 of a chapter's pass: research this chapter's new terms (skeleton-first, appended per chapter).
+ *
+ * The skeleton is written before any research runs, so a volume that dies half-way still has a file
+ * naming every term it meant to look up.
+ *
+ * @param {GlossaryVolumeCtx} ctx
+ * @param {import("../types").SourceSegment} segment
+ * @param {number} si
+ * @param {Array<{term: string, type: string, query: string}>} terms - What step 1 found.
+ * @returns {Promise<void>}
+ */
+async function researchChapterTerms(ctx, segment, si, terms) {
+  if (!researchEnabled || terms.length === 0) return;
+  const { values, researchNotesFile } = ctx;
+  console.log(
+    `Volume ${values.INSTALLMENT_NUMBER}: researching ${terms.length} new term(s) ` +
+      `of chapter ${segment.id} (concurrency=${RESEARCH_CONCURRENCY})...`
+  );
+  await appendResearchSkeleton(researchNotesFile, values, segment, terms, si === 0);
+  const termsWithIndices = terms.map((term, idx) => ({ ...term, _idx: idx }));
+  for (let i = 0; i < termsWithIndices.length; i += RESEARCH_CONCURRENCY) {
+    const batch = termsWithIndices.slice(i, i + RESEARCH_CONCURRENCY);
+    await researchBatch(ctx, batch, segment);
+    if (i + RESEARCH_CONCURRENCY < termsWithIndices.length) {
+      const delayMs = parseInt(process.env.RESEARCH_DELAY_MS, 10) || 300;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
+/**
+ * Step 3 of a chapter's pass: amend the volume's glossary with this chapter's terms, and refuse if
+ * the amendment shrank it.
+ *
+ * The baseline is read BEFORE the pass and compared after it: a chapter pass that rewrites the
+ * glossary from memory is where the cumulative entries actually disappear, and the volume boundary is
+ * eight chapters too late to say which one did it. The index handed to the author is rebuilt from the
+ * baseline too, because the earlier chapters have already added rows to it.
+ *
+ * @param {GlossaryVolumeCtx} ctx
+ * @param {import("../types").SourceSegment} segment
+ * @param {number} si
+ * @param {Array<{term: string, type: string, query: string}>} terms
+ * @returns {Promise<void>}
+ * @throws {Error} When this chapter's pass dropped terms the glossary already held.
+ */
+async function amendGlossaryForChapter(ctx, segment, si, terms) {
+  const { values, glossaryOutputFile } = ctx;
+  console.log(
+    `Volume ${values.INSTALLMENT_NUMBER}: amending the glossary with chapter ${segment.id} (author agent)...`
+  );
+  let chapterBaseline = null;
+  try {
+    chapterBaseline = await fs.readFile(glossaryOutputFile, "utf8");
+  } catch {
+    chapterBaseline = null; // No glossary yet — this chapter creates it.
+  }
+  if (chapterBaseline !== null) ctx.glossaryIndex = buildGlossaryIndex(chapterBaseline);
+
+  await generateGlossary(ctx, terms, researchEnabled && terms.length > 0, segment, si);
+
+  if (chapterBaseline !== null) {
+    await guardCarryForwardAgainst(
+      ctx,
+      chapterBaseline,
+      `the amend pass for chapter ${segment.id}`,
+      "the glossary as of the previous chapter"
+    );
+  }
 }
 
 
