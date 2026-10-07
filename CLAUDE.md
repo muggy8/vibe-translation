@@ -1,1 +1,3 @@
-Read [AGENTS.md](AGENTS.md) first — it is this project's entry point for AI agents (architecture, both workflows, environment reference, and hard-won gotchas).
+Read [AGENTS.md](AGENTS.md) first — it is this project's index for AI agents: what the pipeline is, the commands, which doc to read for which job, and the rules that do not bend.
+
+The depth lives in [`docs/`](docs/): the file map (`docs/map-*.md`), the architecture (`docs/architecture.md`), the delivery layer (`docs/delivery-layer.md`), the pipelines (`docs/pipelines.md`), every `.env` variable (`docs/environment.md`), the conventions (`docs/conventions.md`), and the numbered gotchas in five slices (`docs/gotchas-*.md`). A code comment that says `AGENTS.md gotcha 64` means gotcha 64 in `docs/gotchas-64-69.md`.
