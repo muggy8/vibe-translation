@@ -72,6 +72,17 @@ const { volumeFailureError, structuralError, isStructuralError } = require("../c
   assert.ok(many.message.includes("Book(01) (volume failed)"), many.message);
   assert.ok(many.message.includes("03 (failed)"), many.message);
 
+  // The four translation-stage tasks collect installment NUMBERS here. A summary that answered
+  // "unknown (failed)" for every one of them named no volume, which is the difference between a
+  // run log that says where to pick up and one that says something broke.
+  const numbered = volumeFailureError("translate", [15, 16], 17);
+  assert.ok(numbered.message.includes("2 of 17 volume(s) failed"), numbered.message);
+  assert.ok(
+    numbered.message.includes("15 (volume failed); 16 (volume failed)"),
+    `a bare installment number is named: ${numbered.message}`
+  );
+  assert.ok(!numbered.message.includes("unknown"), numbered.message);
+
   // It is a plain Error, NOT a structural one: a volume failure is what
   // ON_VOLUME_ERROR=skip exists for, and the run-level summary is what reports it.
   assert.strictEqual(isStructuralError(one), false, "a volume-failure summary is not a structural error");
@@ -125,6 +136,15 @@ for (const [file, taskName] of TASK_FILES) {
     new RegExp(`(volumeFailureError|runVolumeSeries)\\("${taskName}"`).test(src),
     `${file} builds its failure summary under its own task name`
   );
+  // A stage that borrows the shared WALK but not the shared CLOSE (verify-translate and polish have
+  // phases to run after the volume loop, so their summary is thrown later) still has to throw it.
+  // `walkVolumes` skips the summary on purpose — that freedom is only safe if it is used.
+  if (usesSharedLoop && !/runVolumeSeries\("/.test(src)) {
+    assert.ok(
+      /if \(volumeError\) \{?\s*throw/.test(src),
+      `${file} throws its own summary where its run actually ends`
+    );
+  }
   if (usesSharedLoop) continue;
   assert.ok(
     /if \(volumeError\) \{?\s*throw/.test(src),

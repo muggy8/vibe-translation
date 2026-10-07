@@ -71,8 +71,8 @@ const { retranslate } = require("./retranslate");
 const { withHooks } = require("./utils/hooks");
 const { qaLoopDecision, qaMaxRounds, applyDraftRatchet } = require("./utils/translate");
 const { validateRequiredEnv } = require("./configs/shared");
+const { readRunArgs, selectVolumesFromManifest } = require("./utils/series-run");
 const { getTranslationTarget } = require("./get-translation-target");
-const { filterVolumesByInstallment } = require("./utils/manifest");
 const { resolveSourceBundle } = require("./utils/source");
 const { writeTranslationReport } = require("./utils/translation-report");
 
@@ -84,17 +84,12 @@ const { writeTranslationReport } = require("./utils/translation-report");
  * known) and before the retranslate batch (so a correction is applied to the
  * best text we have, not to the regression).
  *
- * @param {{seriesDir: string, manifest: Object, dryRun: boolean}} p
+ * @param {{seriesDir: string, manifest: Object, dryRun: boolean, volumeArg?: string|null}} p
  * @returns {Promise<{restored: number, volumes: number}>}
  */
-async function runDraftRatchet({ seriesDir, manifest, dryRun }) {
+async function runDraftRatchet({ seriesDir, manifest, dryRun, volumeArg = null }) {
   if (dryRun) return { restored: 0, volumes: 0 };
-  const volumeArg =
-    (process.argv.find((a) => a.startsWith("--volume=")) || "").replace("--volume=", "") ||
-    (process.argv.includes("--volume")
-      ? process.argv[process.argv.indexOf("--volume") + 1]
-      : null);
-  const folders = volumeArg ? filterVolumesByInstallment(manifest, volumeArg) : manifest.volumes.map((v) => v.folder);
+  const folders = selectVolumesFromManifest({ manifest, volumeArg, log: () => {} });
   let restored = 0;
   for (const folder of folders) {
     const volume = manifest.volumes.find((v) => v.folder === folder);
@@ -113,6 +108,43 @@ async function runDraftRatchet({ seriesDir, manifest, dryRun }) {
   return { restored, volumes: folders.length };
 }
 
+/**
+ * Say why the loop stopped after a verify batch, in the words the account owner acts on.
+ *
+ * The four stop reasons are four different situations, and the loop's own decision function already
+ * knows which one it is; what belongs here is the sentence that tells a human what to do next.
+ *
+ * @param {{reason: string, round: number, maxRounds: number, failed: number, noDraft: number}} p
+ * @returns {void}
+ */
+function reportVerifyStop({ reason, round, maxRounds, failed, noDraft }) {
+  if (reason === "all-pass") {
+    console.log(
+      `[translate-qa] Validator satisfied — every chapter passes verification (round ${round}).`
+    );
+    return;
+  }
+  if (reason === "no-improvement") {
+    console.warn(
+      `[translate-qa] Stopped — all ${failed} failing chapter(s) scored worse than the draft the ` +
+        `loop already had, so they were rolled back. Re-running would spend tokens to make the ` +
+        `translation worse; the better drafts are kept.`
+    );
+    return;
+  }
+  if (reason === "missing-drafts") {
+    console.warn(
+      `[translate-qa] Stopped — ${noDraft} chapter(s) have no draft. Run the translate task first.`
+    );
+    return;
+  }
+  console.warn(
+    `[translate-qa] Round limit reached (${maxRounds}) with ${failed} chapter(s) still FAIL — ` +
+      `they keep their latest draft (polish still runs on them). Re-run with --force for ` +
+      `another attempt.`
+  );
+}
+
 // ─── Task entry ─────────────────────────────────────────────────────────────
 
 /**
@@ -125,7 +157,7 @@ async function runDraftRatchet({ seriesDir, manifest, dryRun }) {
  *   verify batch).
  */
 async function translateQa() {
-  const dryRun = process.argv.includes("--dry-run");
+  const { dryRun, volumeArg } = readRunArgs();
 
   if (process.env.VERIFY_TRANSLATE_ENABLED === "false") {
     console.log(
@@ -205,7 +237,7 @@ async function translateQa() {
     // The draft ratchet: a retranslate that scored WORSE than the draft it
     // replaced is rolled back, so the loop can never end with a chapter less
     // good than it started with.
-    const ratchet = await runDraftRatchet({ seriesDir, manifest, dryRun });
+    const ratchet = await runDraftRatchet({ seriesDir, manifest, dryRun, volumeArg });
     if (ratchet.restored > 0) {
       console.log(
         `[translate-qa] round ${round}: draft ratchet restored ${ratchet.restored} chapter(s) to their ` +
@@ -223,27 +255,13 @@ async function translateQa() {
       noImprovement: ratchet.restored,
     });
     if (afterVerify.stop) {
-      if (afterVerify.reason === "all-pass") {
-        console.log(
-          `[translate-qa] Validator satisfied — every chapter passes verification (round ${round}).`
-        );
-      } else if (afterVerify.reason === "no-improvement") {
-        console.warn(
-          `[translate-qa] Stopped — all ${v.failed} failing chapter(s) scored worse than the draft the ` +
-            `loop already had, so they were rolled back. Re-running would spend tokens to make the ` +
-            `translation worse; the better drafts are kept.`
-        );
-      } else if (afterVerify.reason === "missing-drafts") {
-        console.warn(
-          `[translate-qa] Stopped — ${v.noDraft} chapter(s) have no draft. Run the translate task first.`
-        );
-      } else {
-        console.warn(
-          `[translate-qa] Round limit reached (${maxRounds}) with ${v.failed} chapter(s) still FAIL — ` +
-            `they keep their latest draft (polish still runs on them). Re-run with --force for ` +
-            `another attempt.`
-        );
-      }
+      reportVerifyStop({
+        reason: afterVerify.reason,
+        round,
+        maxRounds,
+        failed: v.failed,
+        noDraft: v.noDraft,
+      });
       await writeTranslationReport({ seriesDir, manifest, volumes: null, dryRun });
       return { rounds, reason: afterVerify.reason };
     }

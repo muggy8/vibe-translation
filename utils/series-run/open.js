@@ -15,6 +15,35 @@ const { resolveRunSettings } = require("../../configs/shared");
 const { filterVolumesByInstallment } = require("../manifest");
 
 /**
+ * Narrow a manifest's volumes to the ones this invocation should process.
+ *
+ * `--volume NN` is resolved through the manifest's installment numbers, not by parsing folder names —
+ * the intake agent chooses the folder names. A no-match fails loudly: a silent exit would masquerade
+ * as a successful no-op in an un-monitored run.
+ *
+ * Exported on its own for the one task that does not walk the volumes itself (translate-qa runs
+ * verify and retranslate, which each resolve the volume list from their own arguments) but still has
+ * to act on the same `--volume` for its own deterministic half.
+ *
+ * @param {{manifest: Object, volumeArg?: string|null, log?: (line: string) => void}} opts
+ * @returns {string[]} The folders to process, in the manifest's reading order.
+ * @throws {Error} When `--volume` matches none of them.
+ */
+function selectVolumesFromManifest({ manifest, volumeArg = null, log = console.log }) {
+  const folders = manifest.volumes.map((v) => v.folder);
+  if (!volumeArg) return folders;
+  const picked = filterVolumesByInstallment(manifest, volumeArg);
+  if (picked.length === 0) {
+    throw new Error(
+      `No volume matching --volume ${volumeArg} (manifest volumes: ` +
+        `${manifest.volumes.map((v) => `${v.installmentNumber} = ${v.folder}`).join(", ")}).`
+    );
+  }
+  log(`--volume: processing only ${picked.join(", ")}`);
+  return picked;
+}
+
+/**
  * Load the plan of record and resolve what this run will process.
  *
  * `--force` here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
@@ -52,22 +81,8 @@ async function openSeriesRun({ seriesDir, dryRun, volumeArg = null, log = consol
     throw new Error(`No volume folders found in ${seriesDir}.`);
   }
 
-  // "--volume NN" is resolved through the manifest's installment numbers, not by parsing folder
-  // names — the intake agent chooses the folder names. A no-match fails loudly: a silent exit would
-  // masquerade as a successful no-op in an un-monitored run.
-  let volumes = folders;
-  if (volumeArg) {
-    volumes = filterVolumesByInstallment(manifest, volumeArg);
-    if (volumes.length === 0) {
-      throw new Error(
-        `No volume matching --volume ${volumeArg} (manifest volumes: ` +
-          `${manifest.volumes.map((v) => `${v.installmentNumber} = ${v.folder}`).join(", ")}).`
-      );
-    }
-    log(`--volume: processing only ${volumes.join(", ")}`);
-  }
-
+  const volumes = selectVolumesFromManifest({ manifest, volumeArg, log });
   return { manifest, runSettings, folders, volumes, volumeByFolder };
 }
 
-module.exports = { openSeriesRun };
+module.exports = { openSeriesRun, selectVolumesFromManifest };

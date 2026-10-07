@@ -15,18 +15,20 @@
  */
 
 const { readRunArgs } = require("./series-run/args");
-const { openSeriesRun } = require("./series-run/open");
+const { openSeriesRun, selectVolumesFromManifest } = require("./series-run/open");
 const { locatePreviousVolume, requirePreviousArtifacts } = require("./series-run/previous");
 const { volumeAlreadyAccepted } = require("./series-run/skip");
 const { publishLatestToSeriesRoot } = require("./series-run/publish");
-const { runVolumeSeries } = require("./series-run/loop");
+const { walkVolumes, runVolumeSeries } = require("./series-run/loop");
 
 module.exports = {
   readRunArgs,
   openSeriesRun,
+  selectVolumesFromManifest,
   locatePreviousVolume,
   requirePreviousArtifacts,
   volumeAlreadyAccepted,
   publishLatestToSeriesRoot,
+  walkVolumes,
   runVolumeSeries,
 };

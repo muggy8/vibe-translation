@@ -113,7 +113,10 @@ function volumeFailureError(taskName, failedVolumes, totalVolumes) {
   if (!Array.isArray(failedVolumes) || failedVolumes.length === 0) return null;
   const names = failedVolumes
     .map((v) => {
-      if (typeof v === "string") return `${v} (volume failed)`;
+      // A bare name or installment number is as much a volume as an entry object: the four
+      // translation-stage tasks have always collected numbers here, and a summary that answered
+      // "unknown (failed)" for all of them named no volume at all.
+      if (typeof v === "string" || typeof v === "number") return `${v} (volume failed)`;
       const label = v && (v.installmentNumber || v.folder) ? (v.installmentNumber || v.folder) : "unknown";
       const reason = v && v.error && v.error.message ? v.error.message : "failed";
       return `${label} (${reason})`;
