@@ -65,11 +65,11 @@ const { scoreAndConfirm } = require("./acceptance");
  *   persisted to cfg.stateFile on every iteration).
  */
 async function runSharedQaLoop(cfg) {
-  const { maxIterations, onQaLimit } = cfg;
   // Rolling window of recent acceptance scores (0–100). A score of `null`
   // (unparseable acceptance response) counts as a failed check (fail-closed)
   // and is not stored in the window.
   const recentRollingScores = [];
+  const { maxIterations, onQaLimit } = cfg;
 
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
     console.log(
@@ -79,25 +79,7 @@ async function runSharedQaLoop(cfg) {
     );
     if (cfg.validatorLogLine) console.log(cfg.validatorLogLine());
 
-    // Validate with an independent validator agent (fresh per iteration).
-    const validator = await cfg.createValidatorAgent(iteration);
-    try {
-      // verifyOutput stays off here: this loop has never refused to grade a
-      // validator report that came back empty, and changing that is a separate
-      // decision from sharing the turn protocol.
-      await runWriteTurn(validator, {
-        prompt: cfg.buildValidatorTurn(iteration),
-        label: cfg.validatorLabel(iteration),
-        who: "the validator agent",
-        writesTo: cfg.validationOutputFile,
-        recoveryPrompt: cfg.validatorRecoveryPrompt,
-        recoveryLabel: cfg.validatorRecoveryLabel(iteration),
-        assertToolCalls: cfg.assertRealToolCalls,
-        verifyOutput: false,
-      });
-    } finally {
-      await validator.close();
-    }
+    await runValidatorTurn(cfg, iteration);
 
     if (cfg.acceptanceLogLine) console.log(cfg.acceptanceLogLine());
     const graded = await scoreAndConfirm({
@@ -118,52 +100,98 @@ async function runSharedQaLoop(cfg) {
       };
     }
 
-    // Apply the feedback (task-specific stage).
-    //
-    // Fingerprint the artifacts first: a feedback pass that changed nothing is
-    // not a step, and running another iteration would re-audit a document that
-    // has not moved (see fingerprintFiles in utils/fs.js — this is the check that
-    // was missing when a 46-tool-call, zero-write feedback pass was recorded as
-    // a normal iteration and the loop went around again).
-    const watchedArtifacts = Array.isArray(cfg.feedbackArtifactFiles) ? cfg.feedbackArtifactFiles.filter(Boolean) : [];
-    const beforeFeedback = watchedArtifacts.length ? await fingerprintFiles(watchedArtifacts) : null;
+    // Apply the feedback (task-specific stage), and stop if it applied nothing.
     console.log(cfg.feedbackLogLine());
-    await cfg.runFeedback(iteration);
+    const stalled = await feedbackAppliedNothing(cfg, iteration, recentRollingScores);
+    if (stalled) return stalled;
 
-    if (beforeFeedback !== null && (await fingerprintFiles(watchedArtifacts)) === beforeFeedback) {
-      console.error(
-        `${cfg.volumeLabel}: the feedback pass changed NOTHING — ${watchedArtifacts.length} ` +
-          `artifact(s) are byte-identical to what they were before it. Stopping the QA loop here ` +
-          `rather than paying for another validator turn and another grade over an unchanged ` +
-          `document. Check the agent's turn log in .logs/ for a turn that only read (the usual ` +
-          `shape: step cap reached before it wrote anything).`
-      );
-      await saveRollingState(cfg.stateFile, recentRollingScores, {
-        sourceFingerprint: cfg.sourceFingerprint,
-        stalled: true,
-      });
-      if (onQaLimit === "fail") {
-        throw new Error(
-          `${cfg.volumeLabel}: the feedback pass applied nothing (ON_QA_LIMIT=fail).`
-        );
-      }
-      return { accepted: false, acceptedBy: null, limitReached: true, stalled: true, scores: recentRollingScores };
-    }
-
-    if (iteration === maxIterations) {
-      console.log(cfg.limitReachedLogLine());
-      if (onQaLimit === "fail") {
-        throw new Error(
-          `${cfg.volumeLabel}: hit the validation iteration limit ` +
-            `without a passing grade (ON_QA_LIMIT=fail).`
-        );
-      }
-      return { accepted: false, acceptedBy: null, limitReached: true, scores: recentRollingScores };
-    }
+    if (iteration === maxIterations) return await hitIterationLimit(cfg, recentRollingScores);
   }
 
   // Unreachable: the loop always returns via acceptance or the limit.
   return { accepted: false, acceptedBy: null, limitReached: false, scores: recentRollingScores };
+}
+
+/**
+ * One validator turn: open the task's fresh validator agent, run the shared turn protocol on it, and
+ * hand it back.
+ *
+ * `verifyOutput` stays off here: this loop has never refused to grade a validator report that came back
+ * empty, and changing that is a separate decision from sharing the turn protocol.
+ *
+ * @param {SharedQaLoopCfg} cfg
+ * @param {number} iteration
+ * @returns {Promise<void>}
+ */
+async function runValidatorTurn(cfg, iteration) {
+  const validator = await cfg.createValidatorAgent(iteration);
+  try {
+    await runWriteTurn(validator, {
+      prompt: cfg.buildValidatorTurn(iteration),
+      label: cfg.validatorLabel(iteration),
+      who: "the validator agent",
+      writesTo: cfg.validationOutputFile,
+      recoveryPrompt: cfg.validatorRecoveryPrompt,
+      recoveryLabel: cfg.validatorRecoveryLabel(iteration),
+      assertToolCalls: cfg.assertRealToolCalls,
+      verifyOutput: false,
+    });
+  } finally {
+    await validator.close();
+  }
+}
+
+/**
+ * Run the task's feedback stage, and decide whether it actually did anything.
+ *
+ * The artifacts are fingerprinted first: a feedback pass that changed nothing is not a step, and running
+ * another iteration would re-audit a document that has not moved (see fingerprintFiles in utils/fs.js —
+ * this is the check that was missing when a 46-tool-call, zero-write feedback pass was recorded as a
+ * normal iteration and the loop went around again).
+ *
+ * @param {SharedQaLoopCfg} cfg
+ * @param {number} iteration
+ * @param {number[]} scores - The rolling window, as it stands when the loop stops.
+ * @returns {Promise<Object|null>} The loop's return value when it stopped here, or null to continue.
+ * @throws {Error} Only under ON_QA_LIMIT=fail.
+ */
+async function feedbackAppliedNothing(cfg, iteration, scores) {
+  const watched = Array.isArray(cfg.feedbackArtifactFiles) ? cfg.feedbackArtifactFiles.filter(Boolean) : [];
+  const before = watched.length ? await fingerprintFiles(watched) : null;
+  await cfg.runFeedback(iteration);
+  if (before === null || (await fingerprintFiles(watched)) !== before) return null;
+
+  console.error(
+    `${cfg.volumeLabel}: the feedback pass changed NOTHING — ${watched.length} ` +
+      `artifact(s) are byte-identical to what they were before it. Stopping the QA loop here ` +
+      `rather than paying for another validator turn and another grade over an unchanged ` +
+      `document. Check the agent's turn log in .logs/ for a turn that only read (the usual ` +
+      `shape: step cap reached before it wrote anything).`
+  );
+  await saveRollingState(cfg.stateFile, scores, {
+    sourceFingerprint: cfg.sourceFingerprint,
+    stalled: true,
+  });
+  if (cfg.onQaLimit === "fail") {
+    throw new Error(`${cfg.volumeLabel}: the feedback pass applied nothing (ON_QA_LIMIT=fail).`);
+  }
+  return { accepted: false, acceptedBy: null, limitReached: true, stalled: true, scores };
+}
+
+/**
+ * The last iteration ended without acceptance: say so, and honour ON_QA_LIMIT.
+ *
+ * @param {SharedQaLoopCfg} cfg
+ * @param {number[]} scores - The rolling window, as it stands when the loop stops.
+ * @returns {Promise<Object>} The loop's return value.
+ * @throws {Error} Under ON_QA_LIMIT=fail.
+ */
+async function hitIterationLimit(cfg, scores) {
+  console.log(cfg.limitReachedLogLine());
+  if (cfg.onQaLimit === "fail") {
+    throw new Error(`${cfg.volumeLabel}: hit the validation iteration limit without a passing grade (ON_QA_LIMIT=fail).`);
+  }
+  return { accepted: false, acceptedBy: null, limitReached: true, scores };
 }
 
 module.exports = { runSharedQaLoop };
