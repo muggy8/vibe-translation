@@ -161,11 +161,35 @@ async function volumeChapterList(volumeDir, state) {
  * @returns {string}
  */
 function renderTranslationReport(rows, meta) {
+  const byVolume = groupRowsByVolume(rows);
+  return [...seriesVerdictSection(rows, byVolume, meta), ...volumeSections(byVolume)].join("\n");
+}
+
+/**
+ * The chapter rows grouped by the volume they belong to, in the order they were read.
+ *
+ * @param {Object[]} rows - One row per chapter.
+ * @returns {Map<string, Object[]>} Volume → its rows.
+ */
+function groupRowsByVolume(rows) {
   const byVolume = new Map();
   for (const r of rows) {
     if (!byVolume.has(r.volume)) byVolume.set(r.volume, []);
     byVolume.get(r.volume).push(r);
   }
+  return byVolume;
+}
+
+/**
+ * The top of the report: what the whole series looks like, and the three things a reader would
+ * otherwise have to count themselves.
+ *
+ * @param {Object[]} rows - One row per chapter.
+ * @param {Map<string, Object[]>} byVolume
+ * @param {{seriesName: string, generatedAt: string, disputes?: Object[]}} meta
+ * @returns {string[]} The Markdown lines.
+ */
+function seriesVerdictSection(rows, byVolume, meta) {
   const count = (pred) => rows.filter(pred).length;
   const publishedVerified = count((r) => r.outcome === "PUBLISHED (verified)");
   const unverified = count((r) => r.outcome.startsWith("UNVERIFIED"));
@@ -196,6 +220,7 @@ function renderTranslationReport(rows, meta) {
   lines.push(`| Rolled back by the draft ratchet | ${count((r) => r.ratchetedBack)} |`);
   lines.push(`| Polished and drift-audited | ${count((r) => r.polishAccepted)} |`);
   lines.push("");
+
   if (emptyInSource > 0) {
     lines.push(
       `**${emptyInSource} chapter(s) have no text in the source.** They are holes in the book, not ` +
@@ -224,63 +249,86 @@ function renderTranslationReport(rows, meta) {
     );
     lines.push("");
   }
+  return lines;
+}
 
-  for (const [volume, volumeRows] of byVolume) {
-    const folder = volumeRows[0].folder;
-    lines.push(`## Volume ${volume} — ${folder}`);
-    lines.push("");
-    lines.push("| Chapter | Title | Outcome | Text | Verify | Retranslates | Ratchet | Polish |");
-    lines.push("|---|---|---|---|---|---|---|---|");
-    for (const r of volumeRows) {
-      const verify =
-        r.verifyScore === null
-          ? "—"
-          : `${r.verifyScore}/100 ${r.verifyPass ? "PASS" : "FAIL"}` + (r.tiebreak ? " (tiebreak)" : "");
-      lines.push(
-        `| ${r.id} | ${r.title} | ${r.outcome} | ${r.published} | ${verify} | ` +
-          `${r.retranslateAttempts} | ${r.ratchetedBack ? `back to ${r.bestScore}` : r.bestScore === null ? "—" : `${r.bestScore}`} | ` +
-          `${r.polishScore === null ? "—" : `${r.polishScore}/100${r.polishAccepted ? " ✓" : ""}`} |`
-      );
-    }
-    lines.push("");
-    // The deterministic cross-chapter scan is a VOLUME-level fact (a name spelled
-    // two ways is only visible across the volume), so it is reported once here
-    // rather than repeated on every chapter row.
-    const variantCount = volumeRows.reduce((n, r) => Math.max(n, r.renderingVariants || 0), 0);
-    const variantConflicts = volumeRows.reduce((n, r) => Math.max(n, r.renderingVariantConflicts || 0), 0);
-    if (variantCount > 0) {
-      lines.push(
-        `**Rendering variants (deterministic scan, no model call): ${variantCount}**` +
-          (variantConflicts > 0
-            ? ` — including ${variantConflicts} HIGH conflict(s) where the glossary gives one term two renderings and this volume uses both.`
-            : "") +
-          ` Details in \`${volumeRows[0].folder}/translation-verification.md\`.`
-      );
-      lines.push("");
-    }
-    const crossFindings = volumeRows.reduce((n, r) => Math.max(n, r.crossChapterFindings || 0), 0);
-    const crossHigh = volumeRows.reduce((n, r) => Math.max(n, r.crossChapterHigh || 0), 0);
-    if (crossFindings > 0) {
-      lines.push(
-        `**Cross-chapter audit: ${crossFindings} finding(s) naming chapters in this volume**` +
-          (crossHigh > 0
-            ? ` — ${crossHigh} HIGH, which the \`retranslate\` pass repairs even in a chapter that passed its own verification.`
-            : "") +
-          ` Details in \`${volumeRows[0].folder}/volume-consistency.md\`.`
-      );
-      lines.push("");
-    }
-    const flagged = volumeRows.filter((r) => !r.outcome.startsWith("PUBLISHED"));
-    if (flagged.length > 0) {
-      lines.push(`### Needs attention — Volume ${volume}`);
-      lines.push("");
-      for (const r of flagged) {
-        lines.push(`- **${r.id} — ${r.title}**: ${r.outcome}` + (r.verifyScore !== null ? ` (score ${r.verifyScore}/100)` : ""));
-      }
-      lines.push("");
-    }
+/**
+ * One volume's section: the chapter table, then the volume-level facts, then what needs attention.
+ *
+ * @param {string} volume - The installment number.
+ * @param {Object[]} volumeRows - That volume's chapter rows.
+ * @returns {string[]} The Markdown lines.
+ */
+function volumeSection(volume, volumeRows) {
+  const folder = volumeRows[0].folder;
+  const lines = [];
+  lines.push(`## Volume ${volume} — ${folder}`);
+  lines.push("");
+  lines.push("| Chapter | Title | Outcome | Text | Verify | Retranslates | Ratchet | Polish |");
+  lines.push("|---|---|---|---|---|---|---|---|");
+  for (const r of volumeRows) {
+    const verify =
+      r.verifyScore === null
+        ? "—"
+        : `${r.verifyScore}/100 ${r.verifyPass ? "PASS" : "FAIL"}` + (r.tiebreak ? " (tiebreak)" : "");
+    lines.push(
+      `| ${r.id} | ${r.title} | ${r.outcome} | ${r.published} | ${verify} | ` +
+        `${r.retranslateAttempts} | ${r.ratchetedBack ? `back to ${r.bestScore}` : r.bestScore === null ? "—" : `${r.bestScore}`} | ` +
+        `${r.polishScore === null ? "—" : `${r.polishScore}/100${r.polishAccepted ? " ✓" : ""}`} |`
+    );
   }
-  return lines.join("\n");
+  lines.push("");
+
+  // The deterministic cross-chapter scan is a VOLUME-level fact (a name spelled
+  // two ways is only visible across the volume), so it is reported once here
+  // rather than repeated on every chapter row.
+  const variantCount = volumeRows.reduce((n, r) => Math.max(n, r.renderingVariants || 0), 0);
+  const variantConflicts = volumeRows.reduce((n, r) => Math.max(n, r.renderingVariantConflicts || 0), 0);
+  if (variantCount > 0) {
+    lines.push(
+      `**Rendering variants (deterministic scan, no model call): ${variantCount}**` +
+        (variantConflicts > 0
+          ? ` — including ${variantConflicts} HIGH conflict(s) where the glossary gives one term two renderings and this volume uses both.`
+          : "") +
+        ` Details in \`${folder}/translation-verification.md\`.`
+    );
+    lines.push("");
+  }
+  const crossFindings = volumeRows.reduce((n, r) => Math.max(n, r.crossChapterFindings || 0), 0);
+  const crossHigh = volumeRows.reduce((n, r) => Math.max(n, r.crossChapterHigh || 0), 0);
+  if (crossFindings > 0) {
+    lines.push(
+      `**Cross-chapter audit: ${crossFindings} finding(s) naming chapters in this volume**` +
+        (crossHigh > 0
+          ? ` — ${crossHigh} HIGH, which the \`retranslate\` pass repairs even in a chapter that passed its own verification.`
+          : "") +
+        ` Details in \`${folder}/volume-consistency.md\`.`
+    );
+    lines.push("");
+  }
+
+  const flagged = volumeRows.filter((r) => !r.outcome.startsWith("PUBLISHED"));
+  if (flagged.length > 0) {
+    lines.push(`### Needs attention — Volume ${volume}`);
+    lines.push("");
+    for (const r of flagged) {
+      lines.push(`- **${r.id} — ${r.title}**: ${r.outcome}` + (r.verifyScore !== null ? ` (score ${r.verifyScore}/100)` : ""));
+    }
+    lines.push("");
+  }
+  return lines;
+}
+
+/**
+ * Every volume's section, in the order the volumes were read.
+ *
+ * @param {Map<string, Object[]>} byVolume
+ * @returns {string[]} The Markdown lines.
+ */
+function volumeSections(byVolume) {
+  const lines = [];
+  for (const [volume, volumeRows] of byVolume) lines.push(...volumeSection(volume, volumeRows));
+  return lines;
 }
 
 /**
