@@ -8,11 +8,10 @@ require("dotenv").config();
 const fs = require("fs").promises;
 require("../types");
 const harness = require("../harness");
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, authorMaxStepsFor, findingsMergeMaxStepsFor, writePromptDump, selectSectionsByRelevance } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("../configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("../utils/fs");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("../utils/qa-loop");
+const { parseAcceptanceReply, validatorMaxStepsFor } = require("../utils/prompt");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking } = require("../configs/shared");
+const { assertRealToolCalls } = require("../utils/agents");
+const { runSharedQaLoop, runWriteTurn } = require("../utils/qa-loop");
 
 const { maxValidationIterations } = require("./config");
 const { buildFeedbackTurnPrompt, buildValidatorTurnPrompt } = require("./prompts");
@@ -65,18 +64,18 @@ async function runFeedback(ctx) {
   const { values, volumeDir, fsGate } = ctx;
   const author = await harness.createAgentHandle({ name: `author-voice-feedback-${values.INSTALLMENT_NUMBER}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: await voiceAuthorMaxSteps(ctx) });
   try {
-    const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx), { label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}` });
-    assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
-    const feedbackFallbackUsed = await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)", feedbackResult?.text);
-    // Recovery turn: ONLY when a file was actually missing after the fallback —
-    // never over files the agent already wrote correctly.
-    if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-      const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-      const recoveryResult = await author.sendTurn(voiceRecoveryPrompt(hasContent, true), { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}` });
-      assertRealToolCalls(recoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback recovery)", recoveryResult?.text);
-    }
-    await assertRealOutput([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)");
+    // The shared turn protocol (utils/qa-loop/turn.js).
+    await runWriteTurn(author, {
+      prompt: buildFeedbackTurnPrompt(ctx),
+      label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}`,
+      who: "the author agent (feedback pass)",
+      writesTo: [ctx.voiceOutputFile, ctx.povOutputFile],
+      recoveryLabel: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}`,
+      recoveryWho: "the author agent (feedback recovery)",
+      recoveryPrompt: (hasContent) => voiceRecoveryPrompt(hasContent, true),
+      verifyOutput: true,
+      assertToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
+    });
     // The cumulative invariant, re-checked after every rewrite: a feedback pass
     // that rewrote the reference from memory is how characters disappear from it
     // (see assertVoiceCarryForward).

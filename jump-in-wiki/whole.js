@@ -17,11 +17,11 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError } = require("../configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, isPublishableArtifact, writeProvenanceSidecar, fingerprintFiles } = require("../utils/fs");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("../utils/qa-loop");
-const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("../utils/prompt");
+const { ON_QA_LIMIT } = require("../configs/shared");
+const { fileExists, assertWroteWithFallback, assertRealOutput } = require("../utils/fs");
+const { assertRealToolCalls } = require("../utils/agents");
+const { validatorMaxStepsFor } = require("../utils/prompt");
+const { runSharedQaLoop, runWriteTurn } = require("../utils/qa-loop");
 
 const { buildWikiAuthorSystemPrompt, buildWikiAuthorTurnPrompt, buildWikiFeedbackTurnPrompt, buildWikiValidatorSystemPrompt, buildWikiValidatorTurnPrompt } = require("./prompts");
 const { runChunkedVolumeAgent } = require("./chunked");
@@ -225,40 +225,29 @@ async function runQaLoop(ctx, author) {
  */
 async function runWikiFeedback(ctx, author, iteration) {
   const { values, wikiOutputFile, sharedWikiOutputFile } = ctx;
-  const wikiFeedbackResult = await author.sendTurn(
-    buildWikiFeedbackTurnPrompt(ctx),
-    { label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
-  );
-  assertRealToolCalls(wikiFeedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
-  const wikiFeedbackFallbackUsed = await assertWroteWithFallback(
-    [wikiOutputFile, sharedWikiOutputFile],
-    "the author agent (feedback pass)",
-    wikiFeedbackResult?.text
-  );
-
-  // Recovery turn for feedback pass: if the model produced no output,
-  // re-send the full feedback task.
-  if (wikiFeedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-    const wikiFeedbackHasContent = wikiFeedbackResult?.text && wikiFeedbackResult.text.trim().length > 0;
-    const wikiFeedbackRecoveryPrompt = wikiFeedbackHasContent
+  // The shared turn protocol (utils/qa-loop/turn.js). The wiki's recovery prompt
+  // is kept here because it names the two files and how they pair up — the one
+  // thing the generic wording cannot say. No assertRealOutput: this stage reuses
+  // the author session that built the wiki, and the loop's own stalled-round
+  // check is what catches a feedback turn that wrote nothing.
+  await runWriteTurn(author, {
+    prompt: buildWikiFeedbackTurnPrompt(ctx),
+    label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    who: "the author agent (feedback pass)",
+    writesTo: [wikiOutputFile, sharedWikiOutputFile],
+    recoveryLabel: `jump-in-wiki-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    recoveryWho: "the author agent (feedback recovery)",
+    recoveryPrompt: (hasContent) => hasContent
       ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
         `Both files have been temporarily written from your chat reply, but they must be written properly using writeFile. ` +
         `Please rewrite both files using writeFile now. Use the exact same content you generated in your previous message: ` +
         `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`
       : `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you produced no output.\n\n` +
         `Please read the source materials and the validation report and write both files using writeFile now: ` +
-        `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`;
-    const wikiFeedbackRecoveryResult = await author.sendTurn(
-      wikiFeedbackRecoveryPrompt,
-      { label: `jump-in-wiki-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
-    );
-    assertRealToolCalls(wikiFeedbackRecoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
-    await assertWroteWithFallback(
-      [wikiOutputFile, sharedWikiOutputFile],
-      "the author agent (feedback recovery)",
-      wikiFeedbackRecoveryResult?.text
-    );
-  }
+        `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`,
+    verifyOutput: false,
+    assertToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
+  });
 }
 
 // ─── Export for use as a module ─────────────────────────────────────────────

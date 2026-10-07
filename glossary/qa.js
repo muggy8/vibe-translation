@@ -12,11 +12,10 @@ require("dotenv").config();
 const fs = require("fs").promises;
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, authorMaxStepsFor, findingsMergeMaxStepsFor, writePromptDump } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("../configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("../utils/fs");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("../utils/qa-loop");
+const { parseAcceptanceReply, validatorMaxStepsFor } = require("../utils/prompt");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking } = require("../configs/shared");
+const { assertRealToolCalls } = require("../utils/agents");
+const { runSharedQaLoop, runWriteTurn } = require("../utils/qa-loop");
 
 const { maxValidationIterations } = require("./config");
 const { buildGlossaryFeedbackTurnPrompt, buildGlossaryValidatorTurnPrompt } = require("./prompts");
@@ -153,38 +152,24 @@ async function runGlossaryFeedback(ctx, iteration) {
     maxSteps: await glossaryAuthorMaxSteps(ctx),
   });
   try {
-    const feedbackResult = await feedbackAuthor.sendTurn(
-      buildGlossaryFeedbackTurnPrompt(ctx),
-      { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}` }
-    );
-    assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
-    const feedbackFallbackUsed = await assertWroteWithFallback(
-      glossaryOutputFile,
-      "the author agent (feedback pass)",
-      feedbackResult?.text
-    );
-
-    // Recovery turn for feedback pass: if the model produced no output,
-    // re-send the full feedback task.
-    if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-      const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-      const recoveryPrompt = glossaryRecoveryPrompt(
-        hasContent,
-        '"glossary.md"',
-        "the volume source, the validation report and the current glossary"
-      );
-      const feedbackRecoveryResult = await feedbackAuthor.sendTurn(
-        recoveryPrompt,
-        { label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}` }
-      );
-      assertRealToolCalls(feedbackRecoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(
-        glossaryOutputFile,
-        "the author agent (feedback recovery)",
-        feedbackRecoveryResult?.text
-      );
-    }
-    await assertRealOutput(glossaryOutputFile, "the author agent (feedback pass)");
+    // The shared turn protocol (utils/qa-loop/turn.js) — the same six steps every
+    // file-writing stage in this pipeline owes, in one place.
+    await runWriteTurn(feedbackAuthor, {
+      prompt: buildGlossaryFeedbackTurnPrompt(ctx),
+      label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}`,
+      who: "the author agent (feedback pass)",
+      writesTo: glossaryOutputFile,
+      recoveryLabel: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}`,
+      recoveryWho: "the author agent (feedback recovery)",
+      recoveryPrompt: (hasContent) =>
+        glossaryRecoveryPrompt(
+          hasContent,
+          '"glossary.md"',
+          "the volume source, the validation report and the current glossary"
+        ),
+      verifyOutput: true,
+      assertToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
+    });
   } finally {
     await feedbackAuthor.close();
   }
