@@ -88,6 +88,7 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
 | `glossary.js`, `character-voice.js`, `style-guide.js`, `jump-in-wiki.js` | `glossary/`, `character-voice/`, `style-guide/`, `jump-in-wiki/` |
 | `translate.js`, `verify-translate.js`, `polish.js`, `retranslate.js` | `translate/`, `verify-translate/`, `polish/`, `retranslate/` |
 | `delivery.js` | `delivery/` |
+| `autopilot.js` | `autopilot/` |
 | `utils/source/epub.js`, `glossary/carry-forward.js` | `utils/source/epub/`, `glossary/carry-forward/` — a submodule that outgrew itself splits the same way, inside its own folder |
 | `configs/shared.js` | `configs/shared/` (4 files) |
 | `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js`, `utils/qa-loop.js`, `utils/series-run.js`, `utils/fs.js`, `utils/ledger.js`, `utils/postmortem.js`, `utils/tokens.js`, `utils/delivery-verify.js` | the matching folder under `utils/` |
