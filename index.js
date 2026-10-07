@@ -376,6 +376,257 @@ function recordAssessment(step, report, ctx) {
   return { written: result.written, error: result.error };
 }
 
+// ─── Running the steps ────────────────────────────────────────────────────────
+
+/**
+ * Say what an EARLIER run already saw, before this one starts.
+ *
+ * Free to know, and it changes what is worth doing: a finding class that a re-run never clears is
+ * structural, and spending another intervention on it is the spinning the ledger exists to prevent.
+ *
+ * @param {boolean} runLedger
+ * @param {string} thisRun
+ * @returns {void}
+ */
+function reportPriorRuns(runLedger, thisRun) {
+  if (!runLedger) return;
+  const prior = readLedger();
+  if (prior.error) console.log(`[index] ledger: ${prior.error}`);
+  for (const r of recurringFindings(prior.entries, thisRun)) {
+    console.log(
+      `[index] ledger: ${r.finding} has appeared in ${r.runs} recorded run(s) ` +
+        `(${r.steps.join(", ")}) — a re-run is not clearing it`
+    );
+  }
+}
+
+/**
+ * Which finding severities treat a step as failed, even when the step exited 0.
+ *
+ * @param {{counts: {HIGH: number, MEDIUM: number, LOW: number}}} report
+ * @param {string} failOn - "high" (default) / "medium" / "never".
+ * @returns {boolean}
+ */
+function failOnFindings(report, failOn) {
+  if (failOn === "never") return false;
+  if (failOn === "medium") return report.counts.HIGH + report.counts.MEDIUM > 0;
+  return report.counts.HIGH > 0;
+}
+
+/**
+ * Assess one finished step (the post-mortem), and never let the assessment itself be the failure:
+ * a check that cannot run is reported as such, with an empty report behind it.
+ *
+ * @param {string} stepName
+ * @param {{seriesDir: string, volumeArg: string|null, outDir: string}} ctx
+ * @returns {Promise<Object>} The post-mortem report (possibly carrying `error`).
+ */
+async function assessStep(stepName, { seriesDir, volumeArg, outDir }) {
+  try {
+    const report = await runPostMortem({ step: stepName, seriesDir, volumeArg });
+    await writePostMortemReport(report, outDir);
+    return report;
+  } catch (err) {
+    return {
+      step: stepName,
+      ok: false,
+      findings: [],
+      counts: { HIGH: 0, MEDIUM: 0, LOW: 0, volumes: 0, checked: 0 },
+      markdown: "",
+      error: `the assessment itself failed: ${err.message}`,
+    };
+  }
+}
+
+/**
+ * Print one assessment: the counts, the report's location, and the findings a reader can act on
+ * (capped, because a step that broke everywhere produces hundreds).
+ *
+ * @param {string} stepName
+ * @param {Object} report
+ * @param {string} outDir
+ * @returns {void}
+ */
+function reportAssessment(stepName, report, outDir) {
+  const { HIGH, MEDIUM, LOW } = report.counts;
+  console.log(
+    `[index] ${stepName} post-mortem — ${report.ok ? "CLEAN" : "FINDINGS"} ` +
+      `(${HIGH} HIGH, ${MEDIUM} MEDIUM, ${LOW} LOW) — ${path.relative(ROOT, path.join(outDir, `${stepName}.md`))}`
+  );
+  if (report.error) console.log(`[index]   assessment could not run: ${report.error}`);
+  for (const f of report.findings.slice(0, 12)) {
+    console.log(`[index]   [${f.severity}] ${f.volume ? `v${f.volume} ` : ""}${f.file} — ${f.kind}`);
+  }
+  if (report.findings.length > 12) {
+    console.log(`[index]   … ${report.findings.length - 12} more (see the report)`);
+  }
+}
+
+/**
+ * Record what this step left behind, then ask the free question: did a PREVIOUS run leave the same
+ * thing? A finding class that survives a re-run is structural, and the answer changes what the
+ * delivery stage should spend on it.
+ *
+ * @param {string} stepName
+ * @param {Object|null} report
+ * @param {{volumeArg: string|null, structural: Object|null, stepOk: boolean, runLedger: boolean, thisRun: string}} ctx
+ * @returns {void}
+ */
+function recordStepAssessment(stepName, report, ctx) {
+  if (!ctx.runLedger) return;
+  const recorded = recordAssessment(stepName, report, {
+    volume: ctx.volumeArg,
+    structural: ctx.structural,
+    stepOk: ctx.stepOk,
+  });
+  if (!recorded.written) return;
+  for (const r of recurringFindings(readLedger().entries, ctx.thisRun)) {
+    if (!r.steps.includes(stepName)) continue;
+    console.log(
+      `[index]   ledger: ${r.finding} also appeared in ${r.runs - 1} earlier recorded ` +
+        `run(s) on ${stepName} — re-running this step is not clearing it`
+    );
+  }
+}
+
+/**
+ * Run one step, assess it, and decide whether the run continues.
+ *
+ * @param {{name: string, run: Function}} step
+ * @param {{gulpArgs: string[], failOn: string, runAssessment: boolean, runLedger: boolean, seriesDir: string, volumeArg: string|null, outDir: string, thisRun: string}} ctx
+ * @returns {Promise<{entry: Object, stop: boolean}>} `stop` is why the loop breaks: a structural
+ *   failure (never continued past, whatever ON_TASK_ERROR says — the remaining steps are guaranteed
+ *   to fail on the same missing foundation, and each attempt costs a model container switch, gotcha
+ *   21) or a failed step under ON_TASK_ERROR=abort.
+ */
+async function runOneStep(step, ctx) {
+  const started = Date.now();
+  console.log(`\n[index] === ${step.name} ===`);
+
+  const run = await runStep(step.name, ctx.gulpArgs);
+  const stepOk = run.code === 0;
+  const entry = { name: step.name, ok: stepOk, code: run.code, structural: run.structural };
+
+  for (const line of digestOf(run.output)) console.log(`[index]   ${line}`);
+  console.log(
+    `[index] ${step.name} — ${stepOk ? "ok" : `FAILED (exit ${run.code}${run.killed ? ", killed on timeout" : ""})`}` +
+      ` — ${((Date.now() - started) / 1000).toFixed(1)}s`
+  );
+
+  if (!stepOk && run.structural) {
+    entry.ok = false;
+    entry.structural = run.structural;
+    console.error(
+      `[index] ${step.name} failed STRUCTURALLY (${run.structural.message}) — ` +
+        `stopping. The remaining steps depend on what this step did not build.`
+    );
+    recordStepAssessment(step.name, null, {
+      volumeArg: ctx.volumeArg,
+      structural: run.structural,
+      stepOk,
+      runLedger: ctx.runLedger,
+      thisRun: ctx.thisRun,
+    });
+    return { entry, stop: true };
+  }
+
+  // Assess BEFORE the next step starts. That is the whole point of running the pipeline a step at a
+  // time: a broken glossary is found here, not after the translation stage has already paid for it.
+  if (ctx.runAssessment) {
+    const report = await assessStep(step.name, ctx);
+    entry.findings = report;
+    reportAssessment(step.name, report, ctx.outDir);
+
+    if (failOnFindings(report, ctx.failOn)) {
+      entry.ok = false;
+      console.error(
+        `[index] ${step.name} left findings at or above the fail-on level ` +
+          `(${ctx.failOn}) — treating the step as failed.`
+      );
+    }
+
+    recordStepAssessment(step.name, report, {
+      volumeArg: ctx.volumeArg,
+      structural: null,
+      stepOk,
+      runLedger: ctx.runLedger,
+      thisRun: ctx.thisRun,
+    });
+  }
+
+  if (!entry.ok) {
+    const onTaskError = String(process.env.ON_TASK_ERROR || "abort").trim().toLowerCase();
+    if (onTaskError !== "continue") {
+      console.error(
+        `[index] stopping (ON_TASK_ERROR=abort). Later steps build on what this step ` +
+          `did not produce.`
+      );
+      return { entry, stop: true };
+    }
+    console.error(
+      `[index] ${step.name} failed — continuing with the remaining steps ` +
+        `(ON_TASK_ERROR=continue).`
+    );
+  }
+
+  return { entry, stop: false };
+}
+
+/**
+ * The run's summary: one line per step, the reports' location, and the ledger's account of this run.
+ *
+ * @param {Object[]} results
+ * @param {{stopped: boolean, outDir: string, runLedger: boolean, thisRun: string}} ctx
+ * @returns {void}
+ */
+function printSummary(results, { stopped, outDir, runLedger, thisRun }) {
+  const totalFindings = results.reduce((n, r) => n + (r.findings ? r.findings.findings.length : 0), 0);
+
+  console.log(`\n[index] === summary ===`);
+  for (const r of results) {
+    const f = r.findings
+      ? ` — post-mortem ${r.findings.counts.HIGH}H/${r.findings.counts.MEDIUM}M/${r.findings.counts.LOW}L`
+      : "";
+    const why = r.structural ? " (structural)" : "";
+    console.log(`[index]   ${r.name}: ${r.ok ? "ok" : "FAILED"}${f}${why}`);
+  }
+  if (stopped) console.log(`[index]   (stopped early — later steps did not run)`);
+  if (totalFindings > 0) console.log(`[index]   reports: ${path.relative(ROOT, outDir)}/`);
+
+  if (!runLedger) return;
+  const ledger = readLedger();
+  if (ledger.error) console.log(`[index]   ledger: ${ledger.error}`);
+  console.log(`[index]   ${renderLedgerMarkdown(ledger.entries, thisRun).trimEnd()}`);
+}
+
+/**
+ * The last act of a failed run: name the steps that failed, and say what to do about them — which
+ * depends on whether the ledger has seen these findings before.
+ *
+ * The advice used to be unconditional: "re-run, it is cheap". When the ledger shows this run's
+ * findings also survived an earlier run, that advice IS the spinning this file exists to stop.
+ *
+ * @param {Object[]} results
+ * @param {{runLedger: boolean, thisRun: string}} ctx
+ * @returns {number} The process exit code.
+ */
+function exitForFailures(results, { runLedger, thisRun }) {
+  const failed = results.filter((r) => !r.ok);
+  if (failed.length === 0) return 0;
+  const recurring = runLedger ? recurringFindings(readLedger().entries, thisRun) : [];
+  console.error(
+    `[index] ${failed.length} of ${results.length} step(s) failed: ` +
+      `${failed.map((f) => f.name).join(", ")}. ` +
+      (recurring.length
+        ? `Re-running has NOT cleared: ${recurring.map((r) => r.finding).join(", ")} ` +
+          `(seen in ${recurring[0].runs} recorded runs). A repeat of an action that already ` +
+          `failed is not a repair — read the reports before running again.`
+        : `Re-run (the idempotent skip-checks make a re-run cheap) — the steps that ` +
+          `finished are not repeated.`)
+  );
+  return 1;
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -409,182 +660,35 @@ async function runPipelineSteps(parsed) {
       `fail-on: ${parsed.failOn} | flags: ${parsed.gulpArgs.join(" ") || "(none)"}`
   );
 
-  // What an EARLIER run already saw. Free to know, and it changes what is worth doing:
-  // a finding class that a re-run never clears is structural, and spending another
-  // intervention on it is the spinning this ledger exists to prevent.
-  if (runLedger) {
-    const prior = readLedger();
-    if (prior.error) console.log(`[index] ledger: ${prior.error}`);
-    const recurring = recurringFindings(prior.entries, thisRun);
-    for (const r of recurring) {
-      console.log(
-        `[index] ledger: ${r.finding} has appeared in ${r.runs} recorded run(s) ` +
-          `(${r.steps.join(", ")}) — a re-run is not clearing it`
-      );
-    }
-  }
+  // What an EARLIER run already saw, printed before this one spends anything.
+  reportPriorRuns(runLedger, thisRun);
 
   /** @type {Array<{name: string, ok: boolean, code: number|null, findings?: Object, structural?: Object|null}>} */
   const results = [];
   let stopped = false;
 
+  const ctx = {
+    gulpArgs: parsed.gulpArgs,
+    failOn: parsed.failOn,
+    runAssessment,
+    runLedger,
+    seriesDir,
+    volumeArg,
+    outDir,
+    thisRun,
+  };
+
   for (const step of parsed.steps) {
-    const started = Date.now();
-    console.log(`\n[index] === ${step.name} ===`);
-
-    const run = await runStep(step.name, parsed.gulpArgs);
-    const stepOk = run.code === 0;
-    const entry = { name: step.name, ok: stepOk, code: run.code, structural: run.structural };
-
-    for (const line of digestOf(run.output)) console.log(`[index]   ${line}`);
-    console.log(
-      `[index] ${step.name} — ${stepOk ? "ok" : `FAILED (exit ${run.code}${run.killed ? ", killed on timeout" : ""})`}` +
-        ` — ${((Date.now() - started) / 1000).toFixed(1)}s`
-    );
-
-    // A structural failure is never continued past, whatever ON_TASK_ERROR says:
-    // the remaining steps are guaranteed to fail on the same missing foundation,
-    // and each attempt costs a model container switch (gotcha 21).
-    if (!stepOk && run.structural) {
-      entry.ok = false;
-      entry.structural = run.structural;
-      console.error(
-        `[index] ${step.name} failed STRUCTURALLY (${run.structural.message}) — ` +
-          `stopping. The remaining steps depend on what this step did not build.`
-      );
-      if (runLedger) recordAssessment(step.name, null, { volume: volumeArg, structural: run.structural, stepOk });
-      results.push(entry);
+    const { entry, stop } = await runOneStep(step, ctx);
+    results.push(entry);
+    if (stop) {
       stopped = true;
       break;
     }
-
-    // Assess BEFORE the next step starts. That is the whole point of running the
-    // pipeline a step at a time: a broken glossary is found here, not after the
-    // translation stage has already paid for it.
-    if (runAssessment) {
-      let report;
-      try {
-        report = await runPostMortem({ step: step.name, seriesDir, volumeArg });
-        await writePostMortemReport(report, outDir);
-      } catch (err) {
-        report = {
-          step: step.name,
-          ok: false,
-          findings: [],
-          counts: { HIGH: 0, MEDIUM: 0, LOW: 0, volumes: 0, checked: 0 },
-          markdown: "",
-          error: `the assessment itself failed: ${err.message}`,
-        };
-      }
-      entry.findings = report;
-
-      const { HIGH, MEDIUM, LOW } = report.counts;
-      console.log(
-        `[index] ${step.name} post-mortem — ${report.ok ? "CLEAN" : "FINDINGS"} ` +
-          `(${HIGH} HIGH, ${MEDIUM} MEDIUM, ${LOW} LOW) — ${path.relative(ROOT, path.join(outDir, `${step.name}.md`))}`
-      );
-      if (report.error) console.log(`[index]   assessment could not run: ${report.error}`);
-      for (const f of report.findings.slice(0, 12)) {
-        console.log(`[index]   [${f.severity}] ${f.volume ? `v${f.volume} ` : ""}${f.file} — ${f.kind}`);
-      }
-      if (report.findings.length > 12) {
-        console.log(`[index]   … ${report.findings.length - 12} more (see the report)`);
-      }
-
-      const shouldFail =
-        parsed.failOn === "never"
-          ? false
-          : parsed.failOn === "medium"
-            ? HIGH + MEDIUM > 0
-            : HIGH > 0;
-      if (shouldFail) {
-        entry.ok = false;
-        console.error(
-          `[index] ${step.name} left findings at or above the fail-on level ` +
-            `(${parsed.failOn}) — treating the step as failed.`
-        );
-      }
-
-      // Record what this step left behind, then ask the free question: did a PREVIOUS
-      // run leave the same thing? A finding class that survives a re-run is structural,
-      // and the answer changes what the delivery stage should spend on it.
-      if (runLedger) {
-        const recorded = recordAssessment(step.name, report, {
-          volume: volumeArg,
-          structural: null,
-          stepOk,
-        });
-        if (recorded.written) {
-          const ledger = readLedger();
-          for (const r of recurringFindings(ledger.entries, thisRun)) {
-            if (!r.steps.includes(step.name)) continue;
-            console.log(
-              `[index]   ledger: ${r.finding} also appeared in ${r.runs - 1} earlier recorded ` +
-                `run(s) on ${step.name} — re-running this step is not clearing it`
-            );
-          }
-        }
-      }
-    }
-
-    results.push(entry);
-
-    if (!entry.ok) {
-      const onTaskError = String(process.env.ON_TASK_ERROR || "abort").trim().toLowerCase();
-      if (onTaskError !== "continue") {
-        console.error(
-          `[index] stopping (ON_TASK_ERROR=abort). Later steps build on what this step ` +
-            `did not produce.`
-        );
-        stopped = true;
-        break;
-      }
-      console.error(
-        `[index] ${step.name} failed — continuing with the remaining steps ` +
-          `(ON_TASK_ERROR=continue).`
-      );
-    }
   }
 
-  // ─── Summary ────────────────────────────────────────────────────────────────
-  const failed = results.filter((r) => !r.ok);
-  const totalFindings = results.reduce((n, r) => n + (r.findings ? r.findings.findings.length : 0), 0);
-
-  console.log(`\n[index] === summary ===`);
-  for (const r of results) {
-    const f = r.findings
-      ? ` — post-mortem ${r.findings.counts.HIGH}H/${r.findings.counts.MEDIUM}M/${r.findings.counts.LOW}L`
-      : "";
-    const why = r.structural ? " (structural)" : "";
-    console.log(`[index]   ${r.name}: ${r.ok ? "ok" : "FAILED"}${f}${why}`);
-  }
-  if (stopped) console.log(`[index]   (stopped early — later steps did not run)`);
-  if (totalFindings > 0) console.log(`[index]   reports: ${path.relative(ROOT, outDir)}/`);
-
-  if (runLedger) {
-    const ledger = readLedger();
-    if (ledger.error) console.log(`[index]   ledger: ${ledger.error}`);
-    console.log(`[index]   ${renderLedgerMarkdown(ledger.entries, thisRun).trimEnd()}`);
-  }
-
-  if (failed.length > 0) {
-    // The advice used to be unconditional: "re-run, it is cheap". When the ledger shows
-    // this run's findings also survived an earlier run, that advice is the spinning this
-    // file exists to stop, so it is said differently.
-    const recurring = runLedger ? recurringFindings(readLedger().entries, thisRun) : [];
-    console.error(
-      `[index] ${failed.length} of ${results.length} step(s) failed: ` +
-        `${failed.map((f) => f.name).join(", ")}. ` +
-        (recurring.length
-          ? `Re-running has NOT cleared: ${recurring.map((r) => r.finding).join(", ")} ` +
-            `(seen in ${recurring[0].runs} recorded runs). A repeat of an action that already ` +
-            `failed is not a repair — read the reports before running again.`
-          : `Re-run (the idempotent skip-checks make a re-run cheap) — the steps that ` +
-            `finished are not repeated.`)
-    );
-    return 1;
-  }
-  return 0;
+  printSummary(results, { stopped, outDir, runLedger, thisRun });
+  return exitForFailures(results, { runLedger, thisRun });
 }
 
 /**
