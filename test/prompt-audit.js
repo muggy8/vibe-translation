@@ -204,6 +204,29 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount }) {
   if (shapeGaps.length) fail("call-shape", "a call's tool schemas do not match the kind of call it is.", shapeGaps);
   else pass("call-shape", `${identified.filter((i) => AGENT_KINDS.has(i.kind)).length} agent turn(s) all had tools; ${identified.filter((i) => ONE_SHOT_KINDS.has(i.kind)).length} one-shot call(s) all had none.`);
 
+  // ─── 2b. A pipeline-stage agent must NOT be handed the memory tools ─────────
+  // The context-management layer (utils/context.js) is deliberately limited to the
+  // delivery roles — the diagnostics team and the dev team — because those turns are
+  // uncapped and may read for a long time. A stage agent's whole job is the opposite:
+  // it must keep everything it read IN context while it amends a cumulative document.
+  // Handing it `manage_context` would let it set aside the very text it is required
+  // to preserve, which is how 457 glossary terms once vanished (gotcha 64). The
+  // harness only adds those tools for a managed handle, so a stage request carrying
+  // them means the opt-in leaked into a stage.
+  const CONTEXT_MEMORY_TOOLS = ["manage_context", "recall_memory"];
+  const stageMemoryGaps = [];
+  for (const { entry, kind } of identified) {
+    if (!AGENT_KINDS.has(kind)) continue;
+    const names = new Set(entry.tools.map((tool) => tool.name));
+    for (const name of CONTEXT_MEMORY_TOOLS) {
+      if (names.has(name)) {
+        stageMemoryGaps.push(`#${entry.index} ${kind}: a pipeline-stage agent was offered \`${name}\` — context offloading is for the delivery layer only`);
+      }
+    }
+  }
+  if (stageMemoryGaps.length) fail("stage-context-offload", "a stage agent was given the tools that let it put its own reading out of context.", stageMemoryGaps);
+  else pass("stage-context-offload", `${identified.filter((i) => AGENT_KINDS.has(i.kind)).length} stage agent turn(s) offered neither memory tool — their reading stays in context.`);
+
   // ─── 3. The translator's contract (Hy-MT2): one user message, official sampling
   const translator = identified.filter((i) => i.kind === "translate" || i.kind === "retranslate");
   const translatorGaps = [];

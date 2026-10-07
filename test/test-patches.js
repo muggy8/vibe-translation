@@ -208,7 +208,18 @@ function goodProposal(extra = {}) {
     ownerNote: "",
     actualChanges: ["glossary.js", "utils/prompt.js"],
     usage: { input: 1200, output: 300 },
-    maxSteps: 60,
+    // How the dev turn actually ran. This role has no step cap any more, so the
+    // record carries the SHAPE of the turn instead of a limit it never had
+    // (`turnShapeOf` in utils/agents.js) — and the report prints the harness's own
+    // ending word rather than softening it.
+    turnShape: {
+      chunks: 2,
+      toolCalls: 14,
+      offloads: 1,
+      offloadedTokens: 9100,
+      compactions: 0,
+      endedAs: "complete",
+    },
     ...extra,
   };
 }
@@ -874,7 +885,14 @@ async function scenarioTheReportRendersWhatTheManagerCanCheck() {
   assert.ok(/How the manager checks it:/.test(md), md);
   assert.ok(/Questions back to the manager/.test(md), md);
   assert.ok(/For the account owner only/.test(md), md);
-  assert.ok(/Dev turn: 60 step cap/.test(md), md);
+  // The turn is reported as what it did, not as a limit it does not have: an uncapped
+  // dev turn shows its tool calls, how many chunks it needed, what was set aside on
+  // disk, and the harness's own word for how it ended.
+  assert.ok(
+    /Dev turn: 14 tool call\(s\) over 2 chunk\(s\), no step cap, 1 read answer\(s\) set aside on disk \(9100 tokens\), ended: complete/.test(md),
+    md
+  );
+  assert.ok(!/step cap \d+/.test(md), "the report names no step cap for a role that has none");
   assert.ok(!/^[-+]{3} /m.test(md), "the manager reads a proposal, not a diff");
 
   // The header names what is waiting, because the tree is what the next run executes.

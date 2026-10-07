@@ -17,10 +17,13 @@
  *   2. **A refusal is not a lie about the work.** The same collector must NOT report the edit the patch
  *      exists for as a tool-set refusal — this role really is offered `writeFile` and `editFile`.
  *   3. **The proposal is parsed fail-closed**, like `parseAcceptanceReply` and the diagnosis contract.
- *   4. **The step cap follows the reading** and sits above the auditor's, because this turn reads the
- *      code AND writes the change (gotcha 64/65 are both stories about a cap that ran out mid-work).
- *   5. **The tool note says what the role actually has** — including that it has no shell, so it may not
- *      claim it ran the tests. `AGENT_TOOLS_NOTE` is a promise about writing and is not appended here.
+ *   4. **The turn has no step cap, and its record says how it actually ran.** This role used to get a
+ *      cap scaled by what the ticket points at; it no longer has one, and the record therefore reports
+ *      the turn's SHAPE (chunks, tool calls, what it set aside, how it ended) instead of a budget it
+ *      stayed under (CONTEXT-MANAGEMENT-DESIGN.md §4.1/§4.9).
+ *   5. **The tool note says what the role actually has** — five file tools, two memory tools, a working
+ *      window it can see, and no shell, so it may not claim it ran the tests. `AGENT_TOOLS_NOTE` is a
+ *      promise about writing and is not appended here.
  *   6. **The brief names the folder the turn is about to edit**, so a turn pointed at one tree is not
  *      fingerprinted against another.
  *   7. **A whole dev turn runs for real** against the scripted endpoint: the edit lands on disk, the
@@ -63,6 +66,7 @@ process.env.AI_MAX_TOKENS = "";
 process.env.RESEARCH_ENABLED = "false";
 
 const { AGENT_TOOLS_NOTE } = require("../configs/shared");
+const { turnShapeOf } = require("../utils/agents");
 const devteam = require("../utils/devteam");
 const diagnostics = require("../utils/diagnostics");
 const patches = require("../utils/patches");
@@ -488,26 +492,57 @@ async function scenarioTheProposalIsParsedFailClosed() {
   for (const signal of DELIVERABLE_SIGNALS) assert.ok(badSignal.message.includes(signal.name), `the refusal does not name ${signal.name}`);
 }
 
-// ─── 3. The step cap ──────────────────────────────────────────────────────────
+// ─── 3. The turn has no step cap ──────────────────────────────────────────────
 
-/** The cap follows what the turn has to read, and this turn reads code AND writes the change. */
-async function scenarioTheStepCapFollowsTheReading() {
-  assert.strictEqual(devteam.devteamMaxStepsFor(0), 40, "the floor: a tiny ticket still gets a real turn");
-  assert.strictEqual(devteam.devteamMaxStepsFor(32768), 35 + 5, "one 32 KB page is 3 steps");
-  assert.strictEqual(devteam.devteamMaxStepsFor(32768 * 10), 32 + 30);
-  assert.strictEqual(devteam.devteamMaxStepsFor(32768 * 100), devteam.DEVTEAM_STEP_CAP_CEILING);
-  assert.strictEqual(devteam.DEVTEAM_STEP_CAP_CEILING, 160);
-
-  // The auditor stays cheaper than the team that edits: same reading, smaller cap, both capped.
-  for (const bytes of [0, 32768, 32768 * 4, 32768 * 20, 32768 * 200]) {
-    assert.ok(
-      devteam.devteamMaxStepsFor(bytes) > diagnostics.diagnosticsMaxStepsFor(bytes),
-      `at ${bytes} bytes the dev turn must be allowed more steps than the audit turn`
-    );
+/**
+ * This role used to get a step cap scaled by what the ticket points at (3 steps per 32 KB page, floor 40,
+ * ceiling 160), and the auditor that summons it was capped at 120. Neither cap exists any more, and the
+ * point here is that they are GONE rather than merely raised: a patch record that names a ceiling this
+ * role does not have states a limit that does not exist, and a reader of `patches.md` would go looking
+ * for a number to raise when there is nothing to raise.
+ *
+ * What replaced the cap is not "no wall". The turn runs in CHUNKS, and between chunks the harness moves
+ * the chunk's old read answers to disk instead of throwing them away, so a long turn keeps its reading
+ * instead of paying to rediscover it (`utils/context.js`, CONTEXT-MANAGEMENT-DESIGN.md §4.1/§4.9). What
+ * stops a turn that is going nowhere is the repetition detector and a loose turn clock — both named in
+ * the note this role reads. So the record of a turn is now its SHAPE: how many pieces of work it needed,
+ * how much of its reading it had to set aside, and the harness's own word for how it ended.
+ */
+async function scenarioTheDevTurnHasNoStepCap() {
+  // Gone, not hidden behind a bigger number. Neither role names a cap any more.
+  const capNames = ["devteamMaxStepsFor", "DEVTEAM_STEP_CAP_CEILING", "STEP_CAP_PAGE_BYTES"];
+  for (const [who, mod] of [["the dev team", devteam], ["the diagnostics team", diagnostics]]) {
+    for (const name of [...capNames, "diagnosticsMaxStepsFor", "DIAGNOSIS_STEP_CAP_CEILING"]) {
+      assert.strictEqual(name in mod, false, `${who} must not still carry ${name} — the turn has no cap`);
+    }
   }
-  assert.ok(
-    diagnostics.diagnosticsMaxStepsFor(32768 * 200) === diagnostics.DIAGNOSIS_STEP_CAP_CEILING,
-    "the auditor is capped at 120"
+
+  // And the role is TOLD what stands in the cap's place, in the note it reads before it reads anything.
+  const note = devteam.DEVTEAM_TOOLS_NOTE;
+  assert.ok(note.includes("working window"), "the note names the window the turn can see filling up");
+  assert.ok(/repeat/i.test(note), "the note names repeating itself as one of the two walls");
+  assert.ok(/manage_context/.test(note) && /recall_memory/.test(note), "the note names the two memory tools");
+
+  // The record that replaced "the cap it ran under". `endedAs` is the harness's own word, kept verbatim:
+  // a record must not be able to soften "stopped" into "finished", and a turn that never handed a result
+  // back records nothing rather than a row of zeroes that reads like it made no tool calls.
+  const shape = turnShapeOf({
+    chunks: 3,
+    toolCalls: [{}, {}, {}],
+    offloads: [{ tokensBefore: 500, tokensAfter: 200 }, { tokensBefore: 400, tokensAfter: 100 }],
+    compactions: 0,
+    result: "stopped",
+  });
+  assert.deepStrictEqual(
+    shape,
+    { chunks: 3, toolCalls: 3, offloads: 2, offloadedTokens: 600, compactions: 0, endedAs: "stopped" },
+    JSON.stringify(shape)
+  );
+  assert.strictEqual(turnShapeOf({ chunks: 1, toolCalls: [], result: "max_steps" }).endedAs, "max_steps");
+  assert.deepStrictEqual(
+    turnShapeOf(null),
+    { chunks: 0, toolCalls: 0, offloads: 0, offloadedTokens: 0, compactions: 0, endedAs: null },
+    "a turn that died before the harness handed a result back records nothing"
   );
 }
 
@@ -533,6 +568,38 @@ async function scenarioTheToolNoteSaysWhatTheRoleHas() {
     note.includes("FOLDER") && note.includes("filename ENDING") && note.includes('not `"*.md"`'),
     "the grep contract (gotcha 60): a FOLDER where a model passes a file, and a filename ENDING where it writes a wildcard"
   );
+
+  // The two memory tools the harness adds for this role, and the window it can see filling up. A role
+  // with no step limit has to be TOLD what replaced the limit, or it behaves as if nothing did.
+  assert.ok(
+    note.includes("five file tools and two memory tools"),
+    "the note counts what the role really has, including the memory tools the harness adds"
+  );
+  assert.ok(
+    note.includes("manage_context") && note.includes("recall_memory"),
+    "both memory tools are named with their arguments, not hinted at"
+  );
+  assert.ok(
+    note.includes("## Your working window"),
+    "the note names the thing that DOES run out — how much text the turn can hold at once"
+  );
+  assert.ok(
+    /\|\s*working window:\s*[\d,]+ \/ [\d,]+ tokens \(\d+%\)/.test(note),
+    "the note shows the shape of the line every tool answer ends with, so the turn recognises it"
+  );
+  assert.ok(
+    note.includes("no step limit"),
+    "the turn is told the cap is gone, so it does not spend the turn reasoning about a budget that does not exist (gotcha 8's shape)"
+  );
+  assert.ok(
+    note.includes("Setting a read aside is not forgetting it"),
+    "setting text aside is not the same as losing it, and the note says so where the agent would otherwise assume it"
+  );
+  assert.ok(
+    note.includes("Your own edits are never set aside"),
+    "a dev turn must know its own changes stay in front of it — the write side is never moved to disk"
+  );
+  assert.ok(note.includes("## How to finish"), "the work-in-one-pass instruction survived the rewrite");
 
   for (const banned of [
     "utils/tickets.js",
@@ -634,7 +701,11 @@ async function scenarioAWholeDevTurnRunsForReal() {
     assert.strictEqual(result.patch.status, "proposed");
     assert.strictEqual(result.patch.ticketId, ticket.id);
     assert.strictEqual(result.patch.optionId, option.id, "the patch is bound to the option the manager chose");
-    assert.ok(result.maxSteps >= 40 && result.maxSteps <= devteam.DEVTEAM_STEP_CAP_CEILING);
+    assert.ok(result.turnShape, "the turn records how it ran, because it has no cap to record against");
+    assert.strictEqual(result.turnShape.chunks, 1, "this turn fits in one chunk — the scripted answer needs four steps");
+    assert.ok(result.turnShape.toolCalls >= 3, "the reads and the edit are counted");
+    assert.strictEqual(result.turnShape.offloads, 0, "nothing had to be set aside on a turn this short");
+    assert.strictEqual(result.turnShape.endedAs, "complete", "the harness's own word for the ending, kept verbatim");
     assert.ok(result.usage, "the turn's token usage is stored with the proposal it produced");
     assert.deepStrictEqual(result.problems, [], result.problems[0] && result.problems[0].message);
     assert.deepStrictEqual(result.warnings, [], "a legitimate proposal is not flagged (the false-positive half)");
@@ -667,13 +738,15 @@ async function scenarioAWholeDevTurnRunsForReal() {
     assert.deepStrictEqual(result.patch.testChain.before, "node checks/green.js");
     assert.deepStrictEqual(result.patch.testChain.after, "node checks/green.js");
 
-    // The wire really advertised the five tools and nothing else.
+    // The wire really advertised the five file tools plus the two memory tools the harness adds for this
+    // role, and nothing else. The memory tools are the harness's, not this module's: the write gate still
+    // judges exactly the five file tools the banned-path table is written against.
     const advertisedNames = backend.requests.map((r) =>
       (r.tools || []).map((t) => t.name ?? t.function?.name).filter(Boolean).sort().join(",")
     );
     assert.ok(advertisedNames.length >= 3, "reads, the edit, the refused writes, then the answer");
     for (const names of advertisedNames) {
-      assert.strictEqual(names, "editFile,grep,listFiles,readFile,writeFile", names);
+      assert.strictEqual(names, "editFile,grep,listFiles,manage_context,readFile,recall_memory,writeFile", names);
     }
 
     // And the manager's report says what the team tried.
@@ -983,7 +1056,7 @@ const scenarios = [
   ["the write boundary refuses by rule, and the tool set refuses deletion", scenarioTheWriteBoundaryRefusesByRule],
   ["both layers of the boundary are recorded, and a real edit is not a refusal", scenarioBothLayersAreRecorded],
   ["the proposal is parsed fail-closed, and the last block is the answer", scenarioTheProposalIsParsedFailClosed],
-  ["the step cap follows the reading and stays above the auditor's", scenarioTheStepCapFollowsTheReading],
+  ["the turn has no step cap, and the record says how it ran", scenarioTheDevTurnHasNoStepCap],
   ["the tool note says what the role actually has", scenarioTheToolNoteSaysWhatTheRoleHas],
   ["the brief carries the ticket and names the tree it will edit", scenarioTheBriefCarriesTheTicketAndNamesTheTree],
   ["a whole dev turn: the edit lands, the banned write is recorded, the proposal is attached", scenarioAWholeDevTurnRunsForReal],

@@ -38,6 +38,12 @@
  * is the dangerous part of this design and it is worth saying out loud — the working tree IS what
  * `npm run pipeline` executes (gotcha 66), which is why `pendingPatches()` gates act mode, why only
  * one team works at a time, and why a patch may not land while a run is in progress.
+ *
+ * Cost (plan §9): one model call per patch, and the turn is UNCAPPED — it keeps its own working window
+ * by setting its old read answers aside on disk (see the note below `DELETION_REFUSAL`, and
+ * `utils/context.js`). What bounds it is the repetition detector and the turn clock, not a step count:
+ * this role reads code before it writes it, and a step count is exactly what threw away a paid-for
+ * dev turn mid-edit (gotcha 64/65).
  */
 "use strict";
 
@@ -45,7 +51,7 @@ const fs = require("fs");
 const path = require("path");
 
 const harness = require("../harness");
-const { assertRealToolCalls } = require("./agents");
+const { assertRealToolCalls, turnShapeOf } = require("./agents");
 const { extractJsonObject } = require("./manifest");
 const patches = require("./patches");
 const tickets = require("./tickets");
@@ -70,34 +76,37 @@ const DELETION_REFUSAL =
   "on the account owner's behalf. Say in ownerNote what should be removed, and let the account owner " +
   "remove it.";
 
-/** The page unit the step caps are scaled by — the same one utils/prompt.js uses (gotcha 4). */
-const STEP_CAP_PAGE_BYTES = 32768;
-
-/**
- * Ceiling on the dev turn's step cap. Higher than the diagnostics team's 120 on purpose: this role has
- * to read the code AND write the change, and gotcha 64/65 are both stories about a cap that ran out
- * mid-work throwing away a paid-for turn. It is still a ceiling, because a turn that needs more
- * reading than this is being pointed at the wrong problem — and there is deliberately no token budget
- * anywhere in this layer (plan §9): what stops a spin is the ledger, not a spending limit.
+/*
+ * This role has NO step cap, on purpose (plan §7). It used to carry
+ * `min(160, max(40, pages * 3 + 32))` — 3 steps per 32 KB of evidence the ticket pointed at, ceiling
+ * 160 — and the ceiling was justified in a comment as "a turn that needs more reading than this is
+ * being pointed at the wrong problem". That is exactly the sentence a cap writes about itself, and the
+ * live run disproved it: the diagnosis this role's own ticket came out of ran 39 steps, made 73 tool
+ * calls, spent 7.2M tokens, re-opened the same file 12 times, and answered with ZERO characters of
+ * text — because the cap stopped it mid-reading, not because the problem was too big for a turn.
+ * gotcha 64 and gotcha 65 are the same story twice more: 25 step-cap warnings in one run, and a
+ * 46-tool-call feedback pass that ran out of steps before it had written anything.
+ *
+ * What bounds the turn now instead of a step count:
+ *   - the repetition detector (AGENT_REPEAT_LIMIT) — the same call, the same arguments, the same
+ *     answer, three times, is the shape of a spin, and it stops the turn where a step count would
+ *     only have stopped it later and less honestly;
+ *   - the turn clock (AGENT_TURN_MAX_MS) — a loose wall, not a budget;
+ *   - the working window (utils/context.js) — old read answers are SET ASIDE on disk rather than
+ *     dropped, so "I have read too much" is no longer a reason to run out of room, and the agent can
+ *     call `recall_memory` to bring one back.
+ * There is still deliberately no token budget anywhere in this layer (plan §9): what stops a spin is
+ * the ledger (gotcha 69), not a spending limit.
  */
-const DEVTEAM_STEP_CAP_CEILING = 160;
-
-/**
- * @param {number} readBytes - The size of the evidence the ticket points at.
- * @returns {number}
- */
-function devteamMaxStepsFor(readBytes) {
-  const pages = Math.max(1, Math.ceil(Math.max(0, readBytes || 0) / STEP_CAP_PAGE_BYTES));
-  return Math.min(DEVTEAM_STEP_CAP_CEILING, Math.max(40, pages * 3 + 32));
-}
 
 /**
  * The tool note appended to the system prompt in code (the convention: prompt files stay
  * mode-agnostic, mode-specific text is appended here — see AGENTS.md §11).
  *
- * Two things it must say that `AGENT_TOOLS_NOTE` cannot: which files this role may NOT write, and the
- * fact that it has no shell. The harness gives an agent no way to run a command, so a brief that
- * asked the team to "run the tests" would spend capped steps discovering that it cannot, and a
+ * Three things it must say that `AGENT_TOOLS_NOTE` cannot: which files this role may NOT write, the
+ * fact that it has no shell, and how its working window works now that this turn has no step limit.
+ * The harness gives an agent no way to run a command, so a brief that
+ * asked the team to "run the tests" would spend the turn discovering that it cannot, and a
  * proposal that claimed it had run them would be unverifiable (gotcha 8's `deleteFile` transcripts are
  * exactly this shape: turns reasoning about a tool that does not exist).
  */
@@ -105,8 +114,9 @@ const DEVTEAM_TOOLS_NOTE = `
 
 ## Your tools (you may write, inside a boundary)
 
-You have five tools: \`readFile(filePath)\`, \`listFiles(dirPath)\`, \`grep(pattern, dirPath, glob?, ignoreCase?)\`,
-\`writeFile(filePath, content)\`, \`editFile(filePath, oldString, newString)\`.
+You have five file tools and two memory tools: \`readFile(filePath)\`, \`listFiles(dirPath)\`,
+\`grep(pattern, dirPath, glob?, ignoreCase?)\`, \`writeFile(filePath, content)\`,
+\`editFile(filePath, oldString, newString)\`, \`manage_context(note?)\` and \`recall_memory(query, limit?)\`.
 
 - \`editFile\`'s parameter is \`oldString\` / \`newString\`. There is no \`oldText\`.
 - \`grep\` and \`listFiles\` take a FOLDER, not a file. To search one file, pass its folder and use
@@ -133,9 +143,27 @@ A refused write is recorded on the patch and the manager reads it. If you believ
 is the right answer, do not try to edit it — write it in \`ownerNote\` instead, in prose, with the
 evidence, and name what you would change. That is the only route to a change in those files.
 
+## Your working window (read this before you read anything)
+
+You have no step limit: this turn ends when you propose, when you start repeating yourself, or when the
+clock runs out. What DOES run out is how much text you can hold in mind at once, and every tool answer
+ends with a line saying how full that is:
+
+\`| working window: 57,500 / 262,144 tokens (22%)\`
+
+- **getting full** — call \`manage_context()\` BEFORE your next read. It sets aside the oldest read
+  answers and leaves a note of where they went, so the turn can keep going.
+- **FULL** — call it immediately. The next read is at risk of being cut off.
+- Setting a read aside is not forgetting it. \`recall_memory("a phrase from it")\` searches everything
+  this turn has set aside and brings back the matching part, named with the file it came from. Recall
+  it instead of opening the whole file again.
+- **Your own edits are never set aside.** Only the answers you READ are moved to disk. Every change you
+  made stays in front of you, so you always know what you have already written.
+
 ## How to finish
 
-Work in one pass: grep to locate, read what you located, change it, then answer. Then write the
+Work in one pass: grep to locate, read what you located, change it, then answer. Do not re-read a file
+you have already read — if you cannot recall what it said, search what you set aside. Then write the
 proposal as ONE fenced \`\`\`json block, exactly this shape:
 
 \`\`\`json
@@ -266,8 +294,9 @@ function parseProposalReply(text) {
           kind: "empty-reply",
           message:
             "the dev turn produced no proposal. The turn's tool calls and any files it wrote are still " +
-            "in the working tree and in .logs/ — read them before re-running, because a turn that ran " +
-            "out of steps mid-edit is a different problem from a turn that answered nothing.",
+            "in the working tree and in .logs/ — read them before re-running, because a turn stopped for " +
+            "repeating itself or for running past the turn clock is a different problem from a turn that " +
+            "answered nothing, and this turn has no step limit to blame.",
         },
       ],
     };
@@ -374,9 +403,11 @@ function renderTicketForDev({ ticket, patch, option, seriesDir, root = ROOT }) {
 }
 
 /**
- * Total size of the files a ticket points at — the number the step cap is scaled by. The same rule
- * and the same shape as `evidenceFootprint` in utils/diagnostics.js, so the two roles size the same
- * ticket the same way (gotcha 64: a cap that does not follow the reading throws away paid-for work).
+ * Total size of the files a ticket points at. The same rule and the same shape as `evidenceFootprint`
+ * in utils/diagnostics.js, so the two roles size the same ticket the same way — but the number is no
+ * longer a step cap: it is printed so a reader can see how much the turn was pointed at, and it is the
+ * thing the working window has to absorb (gotcha 64: a turn that cannot hold what it was pointed at
+ * throws away paid-for work; the fix is to set the old read answers aside, not to count steps).
  *
  * @param {Object} ticket
  * @param {string[]} [extraFiles]
@@ -422,7 +453,7 @@ async function evidenceFootprint(ticket, extraFiles = [], seriesDir = "", root =
  * @param {string} [input.root]
  * @param {{json: string, markdown: string}} [input.patchPaths]
  * @param {string} [input.ticketsFile]
- * @returns {Promise<{ok: boolean, patch: Object|null, problems: Object[], warnings: Object[], writeAttempts: Object[], actualChanges: string[], usage: Object|null, maxSteps: number, error: string|null}>}
+ * @returns {Promise<{ok: boolean, patch: Object|null, problems: Object[], warnings: Object[], writeAttempts: Object[], actualChanges: string[], usage: Object|null, turnShape: Object|null, error: string|null}>}
  */
 async function workTicket({ ticketId, seriesDir, root = ROOT, patchPaths = patches.patchPaths(), ticketsFile = tickets.ticketPaths().json }) {
   const fail = (error, extra = {}) => ({
@@ -433,7 +464,7 @@ async function workTicket({ ticketId, seriesDir, root = ROOT, patchPaths = patch
     writeAttempts: [],
     actualChanges: [],
     usage: null,
-    maxSteps: 0,
+    turnShape: null,
     error,
     ...extra,
   });
@@ -475,7 +506,13 @@ async function workTicket({ ticketId, seriesDir, root = ROOT, patchPaths = patch
   if (!option) return fail(`option ${patch.optionId} is no longer on ticket ${ticketId}.`);
 
   const footprint = await evidenceFootprint(ticket, [], seriesDir, root);
-  const maxSteps = devteamMaxStepsFor(footprint.bytes);
+  // The evidence size is PRINTED, not spent on a cap. This turn is uncapped, so the number that
+  // explains a long dev turn afterwards is "how much it was pointed at", and the run log is where the
+  // account owner reads it.
+  harness.logLine(
+    `[devteam] ${ticket.id}: evidence is ${footprint.files.length} file(s), ` +
+      `${footprint.bytes} bytes — uncapped turn, old read answers offloaded to disk as it fills`
+  );
 
   const gate = await patchFsTools({ cwd: root, allowedDirs: [root] });
 
@@ -496,7 +533,13 @@ async function workTicket({ ticketId, seriesDir, root = ROOT, patchPaths = patch
         tools: gate.tools,
         approve: gate.approve,
         cwd: root,
-        maxSteps,
+        // The delivery-layer context management: no step cap, the working window is reported on every
+        // tool answer, and old read answers are set aside on disk where they stay recallable
+        // (`utils/context.js`). The harness adds `manage_context` / `recall_memory` to the tool set for
+        // a managed role — this module does not add them itself, so the write gate still judges exactly
+        // the five file tools the banned-path table is written against (gotcha 75), and the two memory
+        // tools come in through the harness rather than as paths the sandbox was asked to approve.
+        contextManagement: true,
       });
       try {
         const reply = await agent.sendTurn(renderTicketForDev({ ticket, patch, option, seriesDir, root }), {
@@ -536,10 +579,13 @@ async function workTicket({ ticketId, seriesDir, root = ROOT, patchPaths = patch
       writeAttempts: attempts,
       actualChanges,
       usage: null,
-      maxSteps,
+      // No turn record: the turn threw before the harness handed one back, so the honest value is
+      // "unknown", not a row of zeroes that reads like the turn made no tool calls.
+      turnShape: null,
       error: unfinished(`the dev turn did not finish (${turnError.message}).`) +
-        " The turn's own record is in .logs/ — read it before re-running, because a turn that ran out " +
-        "of steps mid-edit is a different problem from a turn that answered nothing.",
+        " The turn's own record is in .logs/ — read it before re-running, because a turn stopped for " +
+        "repeating itself or for running past the turn clock is a different problem from a turn that " +
+        "answered nothing, and this turn has no step limit to blame.",
     };
   }
 
@@ -554,7 +600,7 @@ async function workTicket({ ticketId, seriesDir, root = ROOT, patchPaths = patch
       writeAttempts: attempts,
       actualChanges,
       usage: result.usage || null,
-      maxSteps,
+      turnShape: turnShapeOf(result),
       error: unfinished("the dev team produced no proposal."),
     };
   }
@@ -575,7 +621,7 @@ async function workTicket({ ticketId, seriesDir, root = ROOT, patchPaths = patch
       refusedWrites: attempts,
       chain: { before: chainBefore.script, after: chainAfter.script },
       usage: result.usage || null,
-      maxSteps,
+      turnShape: turnShapeOf(result),
     },
     patchPaths
   );
@@ -589,7 +635,7 @@ async function workTicket({ ticketId, seriesDir, root = ROOT, patchPaths = patch
     writeAttempts: attempts,
     actualChanges,
     usage: result.usage || null,
-    maxSteps,
+    turnShape: turnShapeOf(result),
     error: written.error || null,
   };
 }
@@ -648,10 +694,8 @@ function describePatch(patch) {
 
 module.exports = {
   ROOT,
-  DEVTEAM_STEP_CAP_CEILING,
   DEVTEAM_TOOLS_NOTE,
   DELETION_REFUSAL,
-  devteamMaxStepsFor,
   patchFsTools,
   collectPatchWriteAttempts,
   parseProposalReply,

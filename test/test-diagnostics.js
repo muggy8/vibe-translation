@@ -9,11 +9,12 @@
  *
  * Four things are pinned here, and each one is a rule that would otherwise live only in a prompt:
  *
- *   1. **Read-only, enforced twice.** The agent is handed exactly three tools, and its approve gate
- *      refuses every mutating call anyway — and RECORDS each refusal. This is gotcha 8's two-layer
- *      pattern applied to writes: advertising a tool the sandbox will not honour wastes a capped
- *      step on the model discovering it, and a refusal nobody records is a support team that quietly
- *      tried to repair the data it was asked to explain.
+ *   1. **Read-only, enforced twice.** The agent is handed exactly three read tools (plus the two
+ *      memory tools the harness adds), and its approve gate refuses every mutating call anyway — and
+ *      RECORDS each refusal. This is gotcha 8's two-layer pattern applied to writes: advertising a
+ *      tool the sandbox will not honour wastes part of the turn on the model discovering it, and a
+ *      refusal nobody records is a support team that quietly tried to repair the data it was asked
+ *      to explain.
  *   2. **The reply has a shape, and the shape check is fail-closed** (gotcha 7, same as the
  *      acceptance replies). A cause-less, option-less answer is not a thin diagnosis, it is a failed
  *      check.
@@ -60,6 +61,7 @@ process.env.RESEARCH_ENABLED = "false";
 const harness = require("../harness");
 const diagnostics = require("../utils/diagnostics");
 const tickets = require("../utils/tickets");
+const agents = require("../utils/agents");
 const { startFakeBackend } = require("./fake-backend");
 
 const SERIES = "Owaresuki";
@@ -240,9 +242,14 @@ async function scenarioOnlyReadToolsAreAdvertised() {
   assert.deepStrictEqual(gate.dropped.slice().sort(), ["editFile", "writeFile"]);
   assert.ok(!("writeFile" in gate.tools) && !("editFile" in gate.tools) && !("deleteFile" in gate.tools));
 
-  // The tool note must promise the same three, for the same reason AGENTS.md gotcha 8 exists: a
-  // tool the sandbox will not honour is a step of a capped budget spent discovering that.
-  assert.ok(/three tools/.test(diagnostics.DIAGNOSIS_TOOLS_NOTE), "the note says how many tools there are");
+  // The tool note must promise the same three READ tools, for the same reason AGENTS.md gotcha 8
+  // exists: a tool the sandbox will not honour is a step spent discovering that. The two memory
+  // tools are named too, because the harness adds them to this role's set (utils/context.js) and a
+  // note that does not mention them leaves the agent to guess what they are for.
+  assert.ok(
+    /three senses and two memory tools/.test(diagnostics.DIAGNOSIS_TOOLS_NOTE),
+    "the note says how many tools there are, and separates the senses from the memory tools"
+  );
   assert.ok(
     /no writeFile, no editFile, no deleteFile/.test(diagnostics.DIAGNOSIS_TOOLS_NOTE),
     "the note names what is missing rather than leaving the model to guess"
@@ -251,6 +258,23 @@ async function scenarioOnlyReadToolsAreAdvertised() {
     !diagnostics.DIAGNOSIS_TOOLS_NOTE.includes("writeFile(filePath)"),
     "the note does not describe a write tool as if the role had it"
   );
+
+  // The role is uncapped now, so the working window is the size limit it actually has — and the note
+  // is the only place the agent learns what the line on every tool answer means. A role told it has
+  // no step limit, and never told what DOES run out, is a role that discovers it at 262k tokens.
+  const note = diagnostics.DIAGNOSIS_TOOLS_NOTE;
+  assert.ok(note.includes("manage_context") && note.includes("recall_memory"), "both memory tools are named");
+  assert.ok(/## Your working window/.test(note), "the note has a section about the working window");
+  assert.ok(
+    /\|\s*working window:\s*[\d,]+ \/ [\d,]+ tokens \(\d+%\)/.test(note),
+    "the note shows the agent the exact shape of the line stamped on every tool answer"
+  );
+  assert.ok(/no step limit/.test(note), "the note says out loud that this turn has no step limit");
+  assert.ok(
+    /Setting a read aside is not forgetting it/.test(note),
+    "the note tells the role that setting a read aside is not losing it — the whole point of the memory tools"
+  );
+  assert.ok(/re-read a file you have\s+already read/.test(note), "the note names the failure this role actually had: re-opening the same file");
 }
 
 // ─── 2. The gate refuses every mutating call, and records it ──────────────────
@@ -632,21 +656,50 @@ async function scenarioManagerAnswersAreCheckedOnTheAnswer() {
   assert.ok(/no open question/.test(noQuestion.error), noQuestion.error);
 }
 
-// ─── 9. The step cap follows the reading, and has a ceiling ───────────────────
+// ─── 9. The turn has no step cap, and says what stands in its place ───────────
 
-async function scenarioStepCapScalesAndIsCapped() {
-  assert.strictEqual(diagnostics.diagnosticsMaxStepsFor(0), 30, "a ticket with nothing to read still gets a floor");
-  assert.strictEqual(diagnostics.diagnosticsMaxStepsFor(32768), 30, "one page is 27 steps, so the floor is what stands");
-  // 3 steps per 32 KB page + 24 fixed: grep to locate a span, readFile to read it, and the paging the
-  // 64 KB read cap forces on a cumulative artifact (gotcha 58/64).
-  assert.strictEqual(diagnostics.diagnosticsMaxStepsFor(32768 * 10), 10 * 3 + 24, "the cap follows the reading");
-  assert.strictEqual(diagnostics.diagnosticsMaxStepsFor(32768 * 31), 31 * 3 + 24);
-  assert.strictEqual(diagnostics.diagnosticsMaxStepsFor(32768 * 32), diagnostics.DIAGNOSIS_STEP_CAP_CEILING, "the ceiling binds at 1 MB of evidence");
-  assert.strictEqual(diagnostics.diagnosticsMaxStepsFor(1024 * 1024 * 4), diagnostics.DIAGNOSIS_STEP_CAP_CEILING);
-  assert.strictEqual(diagnostics.DIAGNOSIS_STEP_CAP_CEILING, 120);
-  // There is deliberately no token budget for this role (plan §9): the ceiling is a step cap, and
-  // what stops a spin is the ledger.
+async function scenarioTheDiagnosisTurnHasNoStepCap() {
+  // Gone, not hidden behind a bigger number. The old cap (3 steps per 32 KB page, ceiling 120) is
+  // what produced the failure this role actually had: a 73-call, 7.2M-token diagnosis whose last 39
+  // steps re-opened the same file because its transcript had outgrown the server, answering with
+  // nothing. A cap decides how early that happens; it does not prevent it. CONTEXT-MANAGEMENT-DESIGN.md §7.1.
+  const capNames = [
+    "diagnosticsMaxStepsFor",
+    "DIAGNOSIS_STEP_CAP_CEILING",
+    "devteamMaxStepsFor",
+    "DEVTEAM_STEP_CAP_CEILING",
+    "STEP_CAP_PAGE_BYTES",
+  ];
+  for (const name of capNames) {
+    assert.strictEqual(name in diagnostics, false, `the diagnostics team must not still carry ${name}`);
+  }
+
+  // No token budget either, and no knob for either one: a limit the role can switch off is not a
+  // limit (gotcha 70), and a spending limit would hide the spin behind a cost error.
   assert.strictEqual(process.env.DIAGNOSIS_TOKEN_BUDGET, undefined);
+  assert.strictEqual(process.env.DIAGNOSIS_MAX_STEPS, undefined);
+
+  // What replaced them: the evidence size is PRINTED for the reader of the run log, and the role is
+  // TOLD, in the note it reads before it reads anything, what does run out.
+  const note = diagnostics.DIAGNOSIS_TOOLS_NOTE;
+  assert.ok(/working window/.test(note), "the note names the window the turn can see filling up");
+  assert.ok(/repeat/i.test(note), "the note names repeating itself as one of the walls");
+  assert.ok(/manage_context/.test(note) && /recall_memory/.test(note), "the note names the two memory tools");
+
+  // And the record that replaced "the cap it ran under". `endedAs` is the harness's own word, kept
+  // verbatim: a record must not soften "stopped" into "finished".
+  const shape = agents.turnShapeOf({
+    chunks: 2,
+    toolCalls: [{ name: "readFile" }, { name: "grep" }, { name: "readFile" }],
+    offloads: [{ tokensBefore: 90000, tokensAfter: 40000 }],
+    compactions: 0,
+    result: "stopped",
+  });
+  assert.strictEqual(shape.chunks, 2);
+  assert.strictEqual(shape.toolCalls, 3);
+  assert.strictEqual(shape.offloads, 1);
+  assert.strictEqual(shape.offloadedTokens, 50000);
+  assert.strictEqual(shape.endedAs, "stopped", "the harness's own word, not a softer one");
 }
 
 // ─── 10. The whole turn, against the real harness and the real file tools ─────
@@ -727,11 +780,17 @@ async function scenarioRealTurnStaysReadOnly() {
 
     assert.ok(result.ok, `${result.error}\n${result.problems.map((p) => p.message).join("\n")}`);
 
-    // The advertised tool set on the wire: exactly the three. The prompt audit's rule that a tool
-    // the sandbox would always refuse must not be advertised (AGENTS.md gotcha 8) — asserted at the
-    // request, where the model actually sees it.
+    // The advertised tool set on the wire: the three read tools plus the two memory tools the harness
+    // adds to a managed role. The prompt audit's rule that a tool the sandbox would always refuse
+    // must not be advertised (AGENTS.md gotcha 8) — asserted at the request, where the model actually
+    // sees it. `writeFile` / `editFile` / `deleteFile` are absent because `readOnlyFsTools` never
+    // hands them over, not because the gate is expected to catch them.
     const advertised = (backend.requests[0].tools || []).map((t) => t.name ?? t.function?.name).filter(Boolean).sort();
-    assert.deepStrictEqual(advertised, ["grep", "listFiles", "readFile"], JSON.stringify(advertised));
+    assert.deepStrictEqual(
+      advertised,
+      ["grep", "listFiles", "manage_context", "readFile", "recall_memory"],
+      JSON.stringify(advertised)
+    );
     assert.ok(backend.requests.length >= 3, "the turn really ran: reads, the refused write, then the answer");
 
     // Nothing on disk moved. Not the artifact, not the code, not the transcript.
@@ -774,7 +833,14 @@ async function scenarioRealTurnStaysReadOnly() {
     assert.ok(result.warnings.some((w) => w.kind === "outcome-only-verification"));
     assert.strictEqual(ticket.diagnosis.stateMovedDuringDiagnosis, false, "nothing else was writing this fixture");
     assert.strictEqual(ticket.diagnosis.attempts, 1);
-    assert.ok(ticket.diagnosis.maxSteps >= 30, "the cap the turn ran under is recorded");
+    // The record of how the turn ran replaced the record of the cap it ran under. A turn that ran
+    // under a cap this role no longer has would state a limit that does not exist.
+    const shape = ticket.diagnosis.turnShape;
+    assert.ok(shape, "the turn's shape is recorded next to the answer");
+    assert.strictEqual(shape.chunks, 1, "three scripted steps fit inside one chunk");
+    assert.ok(shape.toolCalls >= 5, `the reads and the refused writes are counted: ${shape.toolCalls}`);
+    assert.strictEqual(shape.offloads, 0, "a short turn never needed to set a read aside");
+    assert.strictEqual(shape.endedAs, "complete", "the harness's own word for how the turn ended");
     assert.ok(ticket.diagnosis.usage, "the turn's token usage is recorded next to the answer");
   } finally {
     await backend.close();
@@ -906,7 +972,7 @@ async function scenarioCli() {
 // ─── Runner ───────────────────────────────────────────────────────────────────
 
 const scenarios = [
-  ["only the three read tools are advertised", scenarioOnlyReadToolsAreAdvertised],
+  ["the role is handed three read tools and no write tools", scenarioOnlyReadToolsAreAdvertised],
   ["the gate refuses and records every write", scenarioGateRefusesAndRecordsEveryWrite],
   ["the read-only set can read the code and the transcripts", scenarioReadOnlyToolsCanActuallyReadEverything],
   ["the reply contract: what refuses, what warns", scenarioReplyContract],
@@ -915,7 +981,7 @@ const scenarios = [
   ["an answer with nothing usable is not an answer", scenarioEveryOptionRefusedIsNotAnAnswer],
   ["a cited file the turn never opened is reported", scenarioCrossChecksReads],
   ["the manager's answers are checked on what they cite", scenarioManagerAnswersAreCheckedOnTheAnswer],
-  ["the step cap follows the reading and stops at a ceiling", scenarioStepCapScalesAndIsCapped],
+  ["the turn has no step cap and no token budget", scenarioTheDiagnosisTurnHasNoStepCap],
   ["a real turn leaves the fixture byte-identical", scenarioRealTurnStaysReadOnly],
   ["one diagnosis per ticket unless --reask", scenarioReaskingIsRefusedWithoutTheFlag],
   ["an unparseable answer is a failed check, not an empty diagnosis", scenarioAnUnparseableAnswerIsAFailureNotAnEmptyDiagnosis],

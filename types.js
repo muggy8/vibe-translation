@@ -282,7 +282,11 @@
  * @property {number} [retry] — Error retries.
  * @property {boolean} [thinking] — Thinking mode.
  * @property {string} [thinkingLevel] — reasoning_effort level.
- * @property {number} [contextWindow] — Compaction window.
+ * @property {number} [contextWindow] — Context window the turn's working-window pressure is measured against.
+ * @property {boolean} [contextManagement] — Opt in to the delivery-layer context management (uncapped
+ *   turn run in chunks, `manage_context` / `recall_memory` tools, offload-to-disk instead of lossy
+ *   compaction). Only the roles named in `utils/context.js`'s `CONTEXT_MANAGED_ROLES` can opt in; a
+ *   pipeline stage agent asking for it is ignored, because keeping everything in context IS its job.
  */
 
 /**

@@ -34,8 +34,10 @@
  *
  * Cost (plan §9): the deterministic post-mortem is the free tier, and only what it flags is worth a
  * model call. A ticket is exactly that flag — it exists because re-running already failed twice.
- * The turn's step cap follows what it must read (gotcha 4/64), with a ceiling, because an auditor
- * that out-spends the stage it is auditing is the mistake gotcha 67 warns about.
+ * The turn is UNCAPPED and keeps its own working window by setting its old read answers aside on disk
+ * (see the note below `DIAGNOSIS_COSTS`, and `utils/context.js`): what bounds it is the repetition
+ * detector and the turn clock, not a step count, because a step count is what made the diagnosis this
+ * role actually ran answer with nothing.
  */
 "use strict";
 
@@ -43,7 +45,7 @@ const fs = require("fs");
 const path = require("path");
 
 const harness = require("../harness");
-const { assertRealToolCalls } = require("./agents");
+const { assertRealToolCalls, turnShapeOf } = require("./agents");
 const { extractJsonObject } = require("./manifest");
 const { fingerprintFiles } = require("./fs");
 const tickets = require("./tickets");
@@ -70,15 +72,16 @@ const READ_ONLY_REFUSAL =
 /** The three cost words an option may use. Free/cheap/expensive, not a token figure a guess invented. */
 const DIAGNOSIS_COSTS = ["free", "cheap", "expensive"];
 
-/** The page unit the step caps are scaled by — the same one utils/prompt.js uses (gotcha 4). */
-const STEP_CAP_PAGE_BYTES = 32768;
-
 /**
- * Ceiling on the diagnostics turn's step cap. Not a token budget (there is deliberately no such
- * thing — plan §9): it is the guard that keeps the auditor cheaper than the stage it audits
- * (gotcha 67). A diagnosis that needs more reading than this is a diagnosis of the wrong thing.
+ * This role has NO step cap and no token budget, on purpose (CONTEXT-MANAGEMENT-DESIGN.md §7.1).
+ * The old cap (3 steps per 32 KB page, ceiling 120) was the shape of the failure this role actually
+ * had: a 73-call, 7.2M-token diagnosis that spent its last 39 steps re-opening the same file because
+ * its transcript had grown past what the server would accept, and answered with nothing. A cap cannot
+ * fix that — it only decides how early the turn dies. What bounds this turn instead: the repetition
+ * detector (the same call, the same answer, three times = it is spinning, stop it), the turn clock
+ * (`AGENT_TURN_MAX_MS`, a wall not a budget), and the offload store that lets a long read stay
+ * available after it leaves the working window (`utils/context.js`).
  */
-const DIAGNOSIS_STEP_CAP_CEILING = 120;
 
 /**
  * @typedef {Object} DiagnosisOption
@@ -171,37 +174,23 @@ const CODE_ONLY_QUESTION = [
 ];
 
 /**
- * Step cap for one diagnosis turn, scaled by what it has to read (gotcha 4/64: a cap that is too
- * low throws away work the run already paid for — here, it throws away the whole ticket).
- *
- * The reading is the ticket's own evidence plus the artifact the finding is about, so the cap grows
- * with the size of the document in question, not with a guess about the model.
- *
- * The rate is THREE steps per 32 KB page, not the validator's two, because a read-only turn has to
- * prove each claim twice: `grep` to locate the span and `readFile` to read it, and a cumulative
- * artifact is read in pages (gotcha 58's cap is 64 KB, so a 474 KB glossary is eight calls on its
- * own). The floor is what a ticket with nothing to read still gets; the ceiling is what keeps the
- * auditor cheaper than the stage it audits (gotcha 67) — a diagnosis that needs more reading than
- * that is a diagnosis of the wrong thing, and the honest move is to say so, not to page forever.
- *
- * @param {number} readBytes - Total size of the files this ticket points at.
- * @returns {number} The step cap.
- */
-function diagnosticsMaxStepsFor(readBytes) {
-  const pages = Math.max(1, Math.ceil(Math.max(0, readBytes || 0) / STEP_CAP_PAGE_BYTES));
-  return Math.min(DIAGNOSIS_STEP_CAP_CEILING, Math.max(30, pages * 3 + 24));
-}
-
-/**
  * The tool note appended to the system prompt in code (the convention: prompt files stay
  * mode-agnostic, mode-specific text is appended here). It promises exactly the tools the role has —
  * the mistake `AGENT_TOOLS_NOTE` cannot be reused for is that it promises five and demands writing.
+ *
+ * It names the two memory tools the harness adds for this role (`manage_context` / `recall_memory`,
+ * `utils/context.js`) because a tool the agent was never told about is a tool it does not use, and
+ * this role's failure was exactly that: a 73-call turn that kept re-opening the same file because it
+ * had no way to put an old read down. The working-window line is described here too — it is printed
+ * on every tool answer, and an agent that does not know what it means ignores it.
  */
 const DIAGNOSIS_TOOLS_NOTE = `
 
 ## Your tools (read-only — this is not a suggestion)
 
-You have exactly three tools: \`readFile(filePath)\`, \`listFiles(dirPath)\`, \`grep(pattern, dirPath, glob?, ignoreCase?)\`.
+You have three senses and two memory tools, and nothing else: \`readFile(filePath)\`,
+\`listFiles(dirPath)\`, \`grep(pattern, dirPath, glob?, ignoreCase?)\`, \`manage_context(note?)\` and
+\`recall_memory(query, limit?)\`.
 There is no writeFile, no editFile, no deleteFile. You cannot create, change or remove a file, and
 the sandbox refuses the attempt rather than ignoring it — an attempt is recorded on the ticket.
 
@@ -212,8 +201,23 @@ the sandbox refuses the attempt rather than ignoring it — an attempt is record
 - You may read anywhere in the project: the code, the prompts, the run transcripts under \`.logs/\`,
   every artifact, and the reports in \`.postmortem/\`.
 
-Work in one pass: grep to locate, read what you located, then answer. Do not re-read a file you
-have already read.`;
+## Your working window (read this before you read anything)
+
+You have no step limit: this turn ends when you answer, when you start repeating yourself, or when
+the clock runs out. What DOES run out is how much text you can hold in mind at once, and every tool
+answer ends with a line saying how full that is:
+
+\`| working window: 57,500 / 262,144 tokens (22%)\`
+
+- **getting full** — call \`manage_context()\` BEFORE your next read. It sets aside the oldest read
+  answers and leaves a note of where they went, so the turn can keep going.
+- **FULL** — call it immediately. The next read is at risk of being cut off.
+- Setting a read aside is not forgetting it. \`recall_memory("a phrase from it")\` searches everything
+  this turn has set aside and brings back the matching part, named with the file it came from. Recall
+  it instead of opening the whole file again.
+
+Work in one pass: grep to locate, read what you located, then answer. Do not re-read a file you have
+already read — if you cannot recall what it said, search what you set aside.`;
 
 /**
  * Build the read-only tool set and its gate.
@@ -575,8 +579,12 @@ function normalizeReadPath(p) {
  *   - a call that ERRORED covers nothing. "I searched it and the search failed" is not reading, and
  *     counting it would let a reply cite a file it only managed to fail to open.
  *
+ * And a third, because this role now sets its old reads aside instead of holding them: a
+ * `recall_memory` call covers the file its match came from. Setting a read down and bringing the
+ * sentence back is reading, not guessing.
+ *
  * @param {string[]} claimed - The reply's `read` list.
- * @param {Array<{name: string, input: Object, error: string|null}>} observed - The turn's tool calls.
+ * @param {Array<{name: string, input: Object, output: *, error: string|null}>} observed - The turn's tool calls.
  * @returns {{observed: Array<{tool: string, path: string, errored?: boolean}>, unsupported: string[], unmentioned: string[]}}
  */
 function crossCheckReads(claimed, observed) {
@@ -598,18 +606,76 @@ function crossCheckReads(claimed, observed) {
   const folders = new Set(
     opened.filter((o) => !o.errored && o.scopedToFolder && o.path).map((o) => o.path)
   );
+
+  // A `recall_memory` call IS reading. This role now sets its old read answers aside on disk instead
+  // of holding them, and a recall brings the text back with the file it came from recorded on the
+  // match. Without this rule the new memory tools would manufacture gotcha 74's exact false
+  // positive: a diagnosis that read `utils/glossary.js`, set it aside, recalled the sentence it
+  // needed, and cited the file would be reported as citing something it never opened.
+  const recalled = [];
+  const recalledPaths = new Set();
+  for (const call of observed || []) {
+    if (call.name !== "recall_memory" || call.error) continue;
+    for (const p of recalledSourceFiles(call.output)) {
+      const path = normalizeReadPath(p);
+      if (!path || recalledPaths.has(path)) continue;
+      recalledPaths.add(path);
+      recalled.push({ tool: "recall_memory", path });
+    }
+  }
+
   const covers = (p) =>
     files.has(p) ||
+    recalledPaths.has(p) ||
     [...folders].some((f) => f === "." || f === "" || p.startsWith(`${f}/`));
 
   const claimedSet = new Set((claimed || []).map(normalizeReadPath).filter(Boolean));
   const unsupported = [...claimedSet].filter((p) => !covers(p));
+  // `unmentioned` stays the READ calls only: a recall that matched five files is a lookup, not five
+  // documents the turn read, and reporting each match as "you read this and never mentioned it"
+  // would turn a memory tool into a warning machine.
   const unmentioned = [...new Set(opened.map((o) => o.path))].filter((p) => p && !claimedSet.has(p));
   return {
-    observed: opened.map(({ tool, path: p, errored }) => ({ tool, path: p, ...(errored ? { errored: true } : {}) })),
+    observed: [
+      ...opened.map(({ tool, path: p, errored }) => ({ tool, path: p, ...(errored ? { errored: true } : {}) })),
+      ...recalled,
+    ],
     unsupported,
     unmentioned,
   };
+}
+
+/**
+ * The files a `recall_memory` answer names as the source of what it brought back.
+ *
+ * Defensive about the shape on purpose: the AI SDK wraps a tool's JSON answer as
+ * `{ type: "json", value: {…} }`, the harness has recorded a bare object and a string in other
+ * places, and a cross-check that silently reads nothing would report an honest diagnosis as a
+ * guessed one (gotcha 74).
+ *
+ * @param {*} output - The recorded output of one `recall_memory` call.
+ * @returns {string[]} The source file paths its matches came from.
+ */
+function recalledSourceFiles(output) {
+  let value = output;
+  if (value && typeof value === "object" && value.type === "json" && value.value !== undefined) {
+    value = value.value;
+  }
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return [];
+    }
+  }
+  const out = new Set();
+  for (const match of (value && Array.isArray(value.matched) ? value.matched : [])) {
+    if (match && typeof match.sourceFile === "string" && match.sourceFile) out.add(match.sourceFile);
+    for (const f of (match && Array.isArray(match.sourceFiles) ? match.sourceFiles : [])) {
+      if (typeof f === "string" && f) out.add(f);
+    }
+  }
+  return [...out];
 }
 
 /**
@@ -651,18 +717,19 @@ function collectWriteAttempts(refusals, toolCalls) {
 }
 
 /**
- * Total size of the files a ticket points at — the number the step cap is scaled by.
+ * The files a ticket points at, and how big they are — measured so a turn's reading can be described
+ * afterwards, not so a cap can be computed from it (this role has no step cap; see the note under
+ * `DIAGNOSIS_COSTS`).
  *
  * Missing files count as zero rather than failing: a ticket whose evidence is gone is a different
- * problem (and the turn will discover that by itself), and inventing bytes for it would inflate the
- * cap for no reason.
+ * problem (and the turn will discover that by itself), and inventing bytes for it would report a size
+ * nobody measured.
  *
  * @param {import("./tickets").Ticket} ticket
  * @param {string[]} extraFiles
  * @param {string} [seriesDir] - The series the ticket is about. A ticket's evidence is named the
  *   way the triage named it — relative to the series folder — so resolving it only against this
- *   repo would find nothing and quietly hand the turn the smallest step cap for the biggest
- *   artifact.
+ *   repo would find nothing and report an empty footprint for the biggest artifact.
  * @returns {Promise<{bytes: number, files: string[]}>}
  */
 async function evidenceFootprint(ticket, extraFiles = [], seriesDir = "") {
@@ -773,7 +840,13 @@ async function diagnoseTicket({ ticketId, seriesDir, root = ROOT, reask = false,
 
   const where = { seriesDir, root };
   const footprint = await evidenceFootprint(ticket, [], seriesDir);
-  const maxSteps = diagnosticsMaxStepsFor(footprint.bytes);
+  // The evidence size is PRINTED, not spent on a cap. This turn is uncapped, so the number that
+  // explains a long diagnosis afterwards is "how much it was pointed at", and the run log is where
+  // the account owner reads it.
+  harness.logLine(
+    `[diagnostics] ${ticket.id}: evidence is ${footprint.files.length} file(s), ` +
+      `${footprint.bytes} bytes — uncapped turn, old read answers offloaded to disk as it fills`
+  );
 
   const gate = await readOnlyFsTools({ cwd: root, allowedDirs: [root] });
 
@@ -799,7 +872,13 @@ async function diagnoseTicket({ ticketId, seriesDir, root = ROOT, reask = false,
       tools: gate.tools,
       approve: gate.approve,
       cwd: root,
-      maxSteps,
+      // The delivery-layer context management: no step cap, the working window is reported on every
+      // tool answer, and old read answers are set aside on disk where they stay recallable
+      // (`utils/context.js`). The harness adds `manage_context` / `recall_memory` to the tool set for
+      // a managed role — this module does not add them itself, so the read-only tool SET stays the
+      // three senses the contract pins (gotcha 74) and the two memory tools come in through the
+      // harness, which is also what keeps `collectWriteAttempts`' "not advertised" layer honest.
+      contextManagement: true,
     });
     try {
       const reply = await agent.sendTurn(renderTicketForDiagnosis(ticket, where), {
@@ -892,7 +971,12 @@ async function diagnoseTicket({ ticketId, seriesDir, root = ROOT, reask = false,
       observedReads: reads.observed,
       citedWithoutReading: reads.unsupported,
       attemptedWrites: attempts,
-      maxSteps,
+      // How the turn actually ran, in place of the step cap it used to run under. This role is
+      // uncapped (see the note under `DIAGNOSIS_COSTS`), so a record naming a cap it never had would
+      // state a limit that does not exist — and the next reader would go looking for a ceiling to
+      // raise. The useful facts are how many pieces the turn needed, how much of its reading it had
+      // to set aside on disk, and how it ended.
+      turnShape: turnShapeOf(result),
       usage: result.usage || null,
       stateMovedDuringDiagnosis: moved,
     },
@@ -950,10 +1034,8 @@ module.exports = {
   READ_TOOL_NAMES,
   DIAGNOSIS_COSTS,
   DIAGNOSIS_CONTRACT,
-  DIAGNOSIS_STEP_CAP_CEILING,
   DIAGNOSIS_TOOLS_NOTE,
   READ_ONLY_REFUSAL,
-  diagnosticsMaxStepsFor,
   readOnlyFsTools,
   loadSystemPrompt,
   renderTicketForDiagnosis,

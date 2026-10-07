@@ -57,4 +57,43 @@ function assertRealToolCalls(result, who, volumeLabel) {
   );
 }
 
-module.exports = { emittedToolCallAsText, assertRealToolCalls };
+/**
+ * How an agent turn actually RAN, as a record — the honest replacement for "the step cap it ran
+ * under" on a turn that has no step cap.
+ *
+ * The delivery-layer roles (the diagnostics team, the dev team) are uncapped: their turn is bounded
+ * by the repetition detector and a loose turn clock, and the harness runs it in CHUNKS, setting old
+ * read answers aside on disk when the working window fills (`utils/context.js`,
+ * `CONTEXT-MANAGEMENT-DESIGN.md` §4.1/§4.9). So a ticket or patch record that names a cap those
+ * roles never had states a limit that does not exist — a reader of `tickets.md` would go looking for
+ * a ceiling to raise, and there is none. What a reader actually wants is the shape the turn took:
+ * how many pieces of work it needed, how much of its reading it had to set aside, and how it ended.
+ *
+ * `endedAs` is the harness's own word for the ending, kept verbatim so a record cannot soften one:
+ * `"complete"` (it answered), `"stopped"` (a guard stopped it — repeating itself, the turn clock, or
+ * the working window refusing), `"error"` (the endpoint failed), `"max_steps"` (only a turn that DOES
+ * run under a cap can end this way), `null` (the turn recorded nothing).
+ *
+ * @param {Object|null} result - The merged result object returned by an agent sendTurn.
+ * @returns {{chunks: number, toolCalls: number, offloads: number, offloadedTokens: number, compactions: number, endedAs: string|null}}
+ */
+function turnShapeOf(result) {
+  const r = result || {};
+  const offloads = Array.isArray(r.offloads) ? r.offloads : [];
+  let offloadedTokens = 0;
+  for (const off of offloads) {
+    const before = Number(off && off.tokensBefore) || 0;
+    const after = Number(off && off.tokensAfter) || 0;
+    if (before > after) offloadedTokens += before - after;
+  }
+  return {
+    chunks: Number(r.chunks) || 0,
+    toolCalls: Array.isArray(r.toolCalls) ? r.toolCalls.length : 0,
+    offloads: offloads.length,
+    offloadedTokens,
+    compactions: Number(r.compactions) || 0,
+    endedAs: typeof r.result === "string" ? r.result : null,
+  };
+}
+
+module.exports = { emittedToolCallAsText, assertRealToolCalls, turnShapeOf };

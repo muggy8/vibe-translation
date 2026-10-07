@@ -621,7 +621,10 @@ function validateProposalShape(proposal) {
  * @property {{hash: string, at: string, files: string[]}} [commit]
  * @property {Object} [reverted]
  * @property {Object} [usage] - The dev turn's token usage, recorded like the diagnosis's.
- * @property {number} [maxSteps] - The step cap that turn ran under.
+ * @property {{chunks: number, toolCalls: number, offloads: number, offloadedTokens: number,
+ *   compactions: number, endedAs: string|null}} [turnShape] - How the dev turn actually ran: how
+ *   many tool calls it made, how many pieces it needed, how much of its reading it had to set aside
+ *   on disk, and how it ended. Replaces the step cap this role no longer has.
  */
 
 /**
@@ -878,7 +881,8 @@ function declaredChangesMatch(declared, actual) {
  * @param {{before: string|null, after: string|null}} [reply.chain] - The `npm test` script read before
  *   the dev turn and again after it. Checked here, inside the door, so no caller can skip it.
  * @param {Object} [reply.usage]
- * @param {number} [reply.maxSteps]
+ * @param {Object} [reply.turnShape] - How the dev turn actually ran (see `turnShapeOf` in
+ *   utils/agents.js). Replaces the step cap this role no longer has.
  * @param {{json: string, markdown: string}} [paths]
  * @returns {{patch: Patch|null, problems: Object[], warnings: Object[], error: string|null}}
  */
@@ -983,7 +987,7 @@ function recordProposal(patchId, reply, paths = patchPaths()) {
   // was refused" on a patch that was accepted.
   patch.problems = [];
   patch.usage = reply.usage || null;
-  patch.maxSteps = reply.maxSteps || null;
+  patch.turnShape = reply.turnShape || null;
   // The test chain as it stood before and after the turn, kept on the record. `validateProposalShape`
   // already refuses a chain that lost a suite, but the numbers behind that judgment belong next to the
   // proposal: a reader deciding whether to accept the patch is entitled to see what the pinned checks
@@ -1514,12 +1518,17 @@ function renderProposalMarkdown(patch) {
           : "")
     );
   }
-  if (patch.maxSteps || patch.usage) {
+  if (patch.turnShape || patch.usage) {
     const u = patch.usage || {};
-    lines.push(
-      ``,
-      `*Dev turn: ${patch.maxSteps || "?"} step cap, ${u.input || "?"} input / ${u.output || "?"} output tokens.*`
-    );
+    const s = patch.turnShape;
+    const ran = s
+      ? `${s.toolCalls} tool call(s) over ${s.chunks} chunk(s), no step cap` +
+        (s.offloads
+          ? `, ${s.offloads} read answer(s) set aside on disk (${s.offloadedTokens} tokens)`
+          : "") +
+        `, ended: ${s.endedAs || "not recorded"}`
+      : "shape not recorded";
+    lines.push(``, `*Dev turn: ${ran}; ${u.input || "?"} input / ${u.output || "?"} output tokens.*`);
   }
   return lines.filter((l) => l !== "").join("\n");
 }

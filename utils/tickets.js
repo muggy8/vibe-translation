@@ -99,6 +99,11 @@ const { readBoolEnv } = require("../configs/shared");
  * @property {Array<{tool: string, path: string, reason: string}>} [attemptedWrites] - Every write
  *   the read-only gate refused during that turn. A silently dropped attempt would be a support team
  *   that quietly edited the corpus it was asked about.
+ * @property {{chunks: number, toolCalls: number, offloads: number, offloadedTokens: number,
+ *   compactions: number, endedAs: string|null}} [turnShape] - How the answering turn actually ran:
+ *   how many pieces of work it needed, how many tool calls it made, how much of its reading it had
+ *   to set aside on disk to keep going, and the harness's own word for how it ended. This role is
+ *   uncapped, so this is the record that explains a long diagnosis — not a step cap it never had.
  * @property {number} [attempts] - How many times this ticket has been asked (1 on the first answer).
  * @property {string} at - ISO timestamp.
  */
@@ -795,6 +800,8 @@ function attachOptions(ticketId, options, paths = ticketPaths()) {
  * @param {Array<{tool: string, path: string}>} [reply.observedReads]
  * @param {string[]} [reply.citedWithoutReading]
  * @param {Array<{tool: string, path: string, reason: string}>} [reply.attemptedWrites]
+ * @param {Object} [reply.turnShape] - How the answering turn actually ran (chunks, tool calls, how
+ *   much reading it set aside on disk, how it ended). Replaces the step cap this role no longer has.
  * @param {{json?: string, markdown?: string}} [paths]
  * @returns {{ticket: Ticket|null, allowed: TicketOption[], refused: Object[], error: string|null}}
  */
@@ -829,7 +836,9 @@ function recordDiagnosis(ticketId, reply, paths = ticketPaths()) {
     observedReads: (reply && reply.observedReads) || [],
     citedWithoutReading: (reply && reply.citedWithoutReading) || [],
     attemptedWrites: (reply && reply.attemptedWrites) || [],
-    maxSteps: Number(reply && reply.maxSteps) || null,
+    // How the answering turn actually ran. This role has no step cap, so a stored cap would state a
+    // limit that does not exist; the shape says how many pieces the turn needed and how it ended.
+    turnShape: (reply && reply.turnShape) || null,
     usage: (reply && reply.usage) || null,
     stateMovedDuringDiagnosis: Boolean(reply && reply.stateMovedDuringDiagnosis),
     attempts: (prior && prior.attempts ? prior.attempts : 0) + 1,
@@ -1125,6 +1134,18 @@ function renderTicketMarkdown(ticket) {
         const layer = w.layer ? ` (stopped by ${w.layer})` : "";
         lines.push(`- \`${w.tool}\` on \`${w.path}\`${layer} — ${w.reason}`);
       }
+    }
+    if (d.turnShape) {
+      const s = d.turnShape;
+      const aside =
+        s.offloads > 0
+          ? `, ${s.offloads} read answer(s) set aside on disk (${s.offloadedTokens} tokens) it could read back`
+          : "";
+      lines.push(
+        ``,
+        `**How that turn ran** (no step cap — this role is uncapped): ${s.toolCalls} tool call(s) ` +
+          `over ${s.chunks} chunk(s)${aside}; it ended: ${s.endedAs || "not recorded"}.`
+      );
     }
   }
   if (ticket.noUsableOptions) {

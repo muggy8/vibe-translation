@@ -688,12 +688,27 @@ function runAuditSelfTest() {
     })
   );
 
+  // 13. A stage agent handed the delivery layer's memory tools. A stage turn is the
+  //     one turn that must keep everything it read in context while it amends a
+  //     cumulative document; letting it set its own reading aside is gotcha 64's
+  //     failure shape rebuilt out of good intentions.
+  log.push(
+    entry(i++, {
+      stage: "glossary",
+      system: authorSystem,
+      user: authorUser(vol01),
+      tools: [...fsTools, { name: "manage_context", description: "", parameters: ["note"] }],
+      toolCalls: [{ name: "manage_context", arguments: { note: "done with the early reads" } }],
+    })
+  );
+
   const audit = auditPromptLog(log, { workflow, seriesDir: selfDir });
   const reported = new Set(audit.findings.map((f) => f.rule));
   const expected = [
     "tool-argument-names",
     "tool-not-advertised",
     "call-shape",
+    "stage-context-offload",
     "translator-contract",
     "translation-shape",
     "cumulative-reference-path",

@@ -44,6 +44,7 @@ process.env.ON_VOLUME_ERROR = "abort";
 process.env.ON_QA_LIMIT = "fail";
 
 const harness = require("../harness");
+const ctxm = require("../utils/context");
 const { startFakeBackend } = require("./fake-backend");
 const { assertRealToolCalls } = require("../utils/agents");
 const { isTooBigForOnePassError } = require("../configs/shared");
@@ -671,6 +672,256 @@ async function scenarioModeFallback() {
   }
 }
 
+// ─── 8. Context management: a delivery-layer turn sets its old reads aside ───
+
+/**
+ * A fixture whose size this project's own token estimate can actually see.
+ *
+ * The text is pure Hiragana on purpose: `utils/tokens.js` counts characters per
+ * script, and the payload a real diagnosis turn carries is Japanese prose inside a
+ * JSON wrapper. Latin filler of the same length reads as about a third of the size
+ * and the offload boundary never fires, so the scenario would prove nothing.
+ * 168 lines x 40 characters is ~5,700 estimated tokens per read; five of them
+ * against the 16,000-token window this suite pins is the shape of the live failure
+ * this change exists for — a diagnosis turn that read the same file twelve times,
+ * spent 7.2M tokens, and never answered.
+ *
+ * @param {number} lines
+ * @param {number} charsPerLine
+ * @returns {string}
+ */
+function hiraganaPage(lines, charsPerLine) {
+  const rows = [];
+  for (let r = 0; r < lines; r += 1) {
+    let line = "";
+    for (let c = 0; c < charsPerLine; c += 1) {
+      line += String.fromCharCode(0x3042 + ((r * 31 + c * 7) % 86));
+    }
+    rows.push(line);
+  }
+  return `${rows.join("\n")}\n`;
+}
+
+/** The tool answers one request carried, joined so a marker can be counted in them. */
+function toolTextOf(req) {
+  return req.messages
+    .filter((m) => m.role === "tool")
+    .map((m) => String(m.content || ""))
+    .join("\n");
+}
+
+function countMarker(text, marker) {
+  return text.split(marker).length - 1;
+}
+
+/**
+ * The whole point of the redesign, end to end through the real agent loop:
+ * a managed turn runs out of room, and instead of the session quietly summarising
+ * its own history away, the harness moves the old read answers to DISK and keeps
+ * going. Nothing is discarded, and the agent is told where to get it back.
+ */
+async function scenarioManagedTurnOffloadsInsteadOfCompacting() {
+  // Both knobs are read per call (utils/context.js), so a scenario may pin them
+  // for itself without disturbing the other scenarios in this file.
+  const prevKeep = process.env.CONTEXT_KEEP_RECENT_TOKENS;
+  const prevChunk = process.env.AGENT_CONTEXT_CHUNK_STEPS;
+  process.env.CONTEXT_KEEP_RECENT_TOKENS = "9000"; // of this suite's 16,000-token window
+  process.env.AGENT_CONTEXT_CHUNK_STEPS = "3"; // small, so the turn really is several chunks
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ctxoffload-"));
+  const FILES = 5;
+  for (let i = 1; i <= FILES; i += 1) fs.writeFileSync(path.join(dir, `big-${i}.md`), hiraganaPage(168, 40));
+
+  // Each scripted reply reports the honest size of the request it is answering, so
+  // the number the pressure line is built from is a measurement, not a guess.
+  const replyFor = (req) => {
+    const step = req.messages.filter((m) => m.role === "assistant").length;
+    const prompt = ctxm.estimateMessagesTokens(req.messages);
+    const usage = { prompt_tokens: prompt, completion_tokens: 8, total_tokens: prompt + 8 };
+    if (step < FILES) {
+      return { text: "", toolCalls: [{ name: "readFile", arguments: { filePath: `big-${step + 1}.md` } }], usage };
+    }
+    if (step === FILES) {
+      // The agent asks for help on its own, because the pressure line in every tool
+      // result told it the window was getting full. That is the load-bearing piece:
+      // the paper this design came from measured models calling these tools about
+      // zero times unless the pressure was stated out loud next to every answer.
+      return { text: "", toolCalls: [{ name: "manage_context", arguments: { note: "the early reads are done" } }], usage };
+    }
+    return { text: "I have read all five files and answered.", usage };
+  };
+
+  const backend = await startFakeBackend({ model: "stub", reply: replyFor });
+  backend.pointEnvAt();
+  try {
+    const { tools, approve } = await harness.createGatedFsTools({ cwd: dir, allowedDirs: [dir] });
+    const handle = await harness.createAgentHandle({
+      name: "diagnostics",
+      systemPrompt: "You are a read-only support agent.",
+      tools,
+      approve,
+      cwd: dir,
+      contextManagement: true,
+    });
+    assert.strictEqual(handle.session.autoCompact, false, "the library's silent summariser is off on every handle");
+
+    const result = await quiet(() => handle.sendTurn("Read each of the five big files, then answer.", { label: "ctxoff-TCK-1" }));
+    await handle.close();
+
+    assert.strictEqual(result.chunks, 3, "one uncapped turn ran as three chunks (AGENT_CONTEXT_CHUNK_STEPS=3)");
+    assert.strictEqual(result.result, "complete", "the turn finished by answering, not by being stopped");
+    assert.strictEqual(result.compactions, 0, "nothing was summarised away — that is the whole change");
+    assert.strictEqual(result.toolCalls.length, FILES + 1, "five reads plus the agent's own request for help");
+
+    assert.strictEqual(result.offloads.length, 2, "two offloads: one the harness had to do, one the agent asked for");
+    const reasons = result.offloads.map((o) => o.reason);
+    assert.deepStrictEqual(reasons, ["hard-limit", "agent-request"], "the record says who decided each one");
+    for (const off of result.offloads) {
+      assert.ok(off.tokensAfter < off.tokensBefore, `the ${off.reason} offload made the conversation smaller (${off.tokensBefore} -> ${off.tokensAfter})`);
+      assert.ok(off.offloadedCount > 0, "it moved at least one read answer");
+      assert.ok(fs.existsSync(off.file), `the moved text is on disk at ${off.file}`);
+      assert.ok(
+        off.file.startsWith(path.join(harness.currentRunDir(), "agent-diagnostics")),
+        "it lives beside that turn's own log, not somewhere the agent has to guess"
+      );
+    }
+    // The door back is real: what was set aside can be listed from the folder.
+    const listed = ctxm.listOffloads(result.offloads[0].dir);
+    assert.ok(listed.length >= 1, "the offload folder can be read back");
+
+    // 5 reads + 1 manage_context + 1 final answer = 7 model requests.
+    assert.strictEqual(backend.requests.length, 7, "the turn kept working instead of stopping");
+
+    const first = toolTextOf(backend.requests[0]);
+    assert.strictEqual(countMarker(first, "[context offload "), 0, "the first request had nothing moved yet");
+
+    const last = toolTextOf(backend.requests.at(-1));
+    // One map block per offload, plus a one-line pointer where each moved answer used
+    // to be. Two offloads moved four read answers between them.
+    assert.strictEqual(countMarker(last, "[context offload "), 2, "one map block per offload, still in the conversation");
+    assert.strictEqual(countMarker(last, "[offloaded "), 2, "the moved answers left a pointer, not a blank");
+    assert.ok(/working window: [\d,]+ \/ 16,000 tokens/.test(last), "the pressure line reached the model on every tool answer");
+    assert.ok(last.includes("recall_memory("), "the map tells the agent how to get the text back");
+    assert.ok(
+      backend.requests.some((req) => req.tools?.some((t) => t.function?.name === "manage_context")),
+      "the memory tools were advertised on the wire, not only in the prompt text"
+    );
+
+    const summary = fs.readFileSync(path.join(harness.currentRunDir(), "summary.log"), "utf8");
+    assert.ok(/offloaded \d+ read result\(s\) at chunk 1: \d+ -> \d+ tokens \(hard-limit\)/.test(summary), "the harness logged what it moved and why");
+    assert.ok(summary.includes('the agent asked: "the early reads are done"'), "the agent's own reason is recorded in its words");
+
+    ok("a managed turn sets its old reads aside on disk and keeps working — nothing was summarised away");
+  } finally {
+    await backend.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    if (prevKeep === undefined) delete process.env.CONTEXT_KEEP_RECENT_TOKENS;
+    else process.env.CONTEXT_KEEP_RECENT_TOKENS = prevKeep;
+    if (prevChunk === undefined) delete process.env.AGENT_CONTEXT_CHUNK_STEPS;
+    else process.env.AGENT_CONTEXT_CHUNK_STEPS = prevChunk;
+  }
+}
+
+/**
+ * The wall on an uncapped turn is repetition, not a step count.
+ *
+ * A stuck agent is one that makes the same call and gets the same answer. That is
+ * the shape the live diagnosis turn had (it re-opened the same file twelve times),
+ * and it is detectable without deciding in advance how many steps a job is worth.
+ */
+async function scenarioStuckAgentIsStoppedByRepetition() {
+  const prevLimit = process.env.AGENT_REPEAT_LIMIT;
+  process.env.AGENT_REPEAT_LIMIT = "3";
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ctxrepeat-"));
+  fs.writeFileSync(path.join(dir, "glossary.js"), "the same page, read again and again\n");
+
+  const backend = await startFakeBackend({
+    model: "stub",
+    reply: () => ({ text: "", toolCalls: [{ name: "readFile", arguments: { filePath: "glossary.js" } }] }),
+  });
+  backend.pointEnvAt();
+  try {
+    const { tools, approve } = await harness.createGatedFsTools({ cwd: dir, allowedDirs: [dir] });
+    const handle = await harness.createAgentHandle({
+      name: "diagnostics",
+      systemPrompt: "You are a read-only support agent.",
+      tools,
+      approve,
+      cwd: dir,
+      contextManagement: true,
+    });
+
+    let err = null;
+    try {
+      await quiet(() => handle.sendTurn("Keep reading that file until you find the answer.", { label: "ctxspin-TCK-1" }));
+    } catch (e) {
+      err = e;
+    }
+    await handle.close();
+
+    assert.ok(err, "the turn was stopped");
+    assert.match(err.message, /repeated the same tool call/, "it was stopped for repeating itself, not for running out of steps");
+    assert.match(err.message, /AGENT_REPEAT_LIMIT=3/, "the wall names the knob it came from");
+    assert.ok(backend.requests.length <= 4, `it stopped after ${backend.requests.length} requests instead of paying for the same call again`);
+
+    const summary = fs.readFileSync(path.join(harness.currentRunDir(), "summary.log"), "utf8");
+    assert.ok(/repeated the same tool call \(readFile/.test(summary), "the repetition is greppable in the run log");
+
+    ok("a stuck agent is stopped by repeating the same call, and the turn is not charged for it again");
+  } finally {
+    await backend.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    if (prevLimit === undefined) delete process.env.AGENT_REPEAT_LIMIT;
+    else process.env.AGENT_REPEAT_LIMIT = prevLimit;
+  }
+}
+
+/**
+ * Compaction is limited to the delivery layer.
+ *
+ * A pipeline-stage agent must keep everything in its context — that is the job. So
+ * its handle has the library's silent summariser OFF, and a request that genuinely
+ * does not fit comes back as the tagged size error the whole-installment →
+ * chapter-by-chapter fallback is built to repair, instead of a quietly worse artifact.
+ */
+async function scenarioStageHandleDoesNotCompact() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ctxstage-"));
+  fs.writeFileSync(path.join(dir, "source.md"), "a volume too big for one pass\n");
+
+  const backend = await startFakeBackend({ model: "stub" });
+  backend.fail("tooBig");
+  backend.pointEnvAt();
+  try {
+    const { tools, approve } = await harness.createGatedFsTools({ cwd: dir, allowedDirs: [dir] });
+    const handle = await harness.createAgentHandle({
+      name: "glossary-author-01",
+      systemPrompt: "You are a pipeline stage agent.",
+      tools,
+      approve,
+      cwd: dir,
+      maxSteps: 6,
+    });
+    assert.strictEqual(handle.session.autoCompact, false, "a stage handle has no silent summariser either");
+
+    let err = null;
+    try {
+      await quiet(() => handle.sendTurn("Read the source and write the glossary.", { label: "ctxstage-01" }));
+    } catch (e) {
+      err = e;
+    }
+    await handle.close();
+
+    assert.ok(err, "the turn failed");
+    assert.ok(isTooBigForOnePassError(err), "the server's refusal is tagged as the one failure chunking repairs");
+    assert.strictEqual(backend.requests.length, 1, "it did not spend a second doomed request at the same size");
+    ok("a stage agent's oversized pass is reported as a size problem, not smoothed over by summarising its own context");
+  } finally {
+    await backend.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // ─── runner ──────────────────────────────────────────────────────────────────
 
 (async () => {
@@ -682,6 +933,9 @@ async function scenarioModeFallback() {
   await scenarioCalibrationProbe();
   await scenarioRoleEndpoints();
   await scenarioModeFallback();
+  await scenarioManagedTurnOffloadsInsteadOfCompacting();
+  await scenarioStuckAgentIsStoppedByRepetition();
+  await scenarioStageHandleDoesNotCompact();
   console.log(`\ntest-fake-backend.js: ${passed} checks passed.`);
 })().catch((err) => {
   console.error(`\nFAIL: ${err && err.message}`);

@@ -329,7 +329,16 @@ async function runDevTurn(ticketId, { seriesDir, json }) {
   // option), and a container switch costs a model load (gotcha 22).
   const result = await devteam.workTicket({ ticketId, seriesDir, patchPaths });
   if (result.patch) console.log(devteam.describePatch(result.patch));
-  if (result.maxSteps) console.log(`  step cap: ${result.maxSteps} (scaled to ${result.patch ? "the ticket's evidence" : "the ticket"})`);
+  if (result.turnShape) {
+    const s = result.turnShape;
+    console.log(
+      `  turn shape: ${s.toolCalls} tool call(s) over ${s.chunks} chunk(s), uncapped` +
+        (s.offloads
+          ? `, ${s.offloads} read answer(s) set aside on disk (${s.offloadedTokens} tokens)`
+          : "") +
+        `, ended: ${s.endedAs || "not recorded"}`
+    );
+  }
   if (result.actualChanges.length) {
     console.log(`  changed in the working tree: ${result.actualChanges.join(", ")}`);
   } else {
