@@ -118,6 +118,22 @@ async function testHalfBuilt() {
   assert.ok(!wipe.files.some((f) => /\.rejected/.test(f)), "quarantine evidence is never in a wipe list (Tier C)");
   assert.ok(!wipe.files.some((f) => /character-voice/.test(f)), "another step's files are not this step's to remove");
 
+  // What the wipe leaves alone is NAMED, when there is something to leave alone. The fixture plants
+  // another step's gate evidence in this very folder, which is the case the wording has to get right.
+  assert.deepStrictEqual(
+    wipe.quarantinesKept,
+    ["character-voice.md.rejected"],
+    "the file the wipe must not touch is named, not described in the abstract"
+  );
+  assert.ok(
+    !wipe.files.some((f) => /\.rejected/.test(f)),
+    "named — and still never in the list of things to remove (Tier C)"
+  );
+  assert.ok(
+    resumeStep.reasons.some((r) => r.includes("`character-voice.md.rejected`")),
+    JSON.stringify(resumeStep.reasons)
+  );
+
   // `--force --volume NN` does not cascade (gotcha 66), so no step may be proposed with a
   // volume filter. The plan's own reason text says "not --volume", which is why the check is on
   // the flags and the primitive, not on the prose.
@@ -139,6 +155,23 @@ async function testHalfBuilt() {
   assert.ok(
     voice.reasons.some((r) => r.includes("gate evidence")),
     "the leftover evidence is reported, not acted on"
+  );
+
+  // …and when the folder holds NONE, the plan does not claim any. This is the half that used to read
+  // "the quarantine evidence beside them is kept" about a folder with no quarantine in it, which a
+  // reader takes as a fact about the disk (gotcha 81).
+  await fs.promises.rm(path.join(vol2, "character-voice.md.rejected"), { force: true });
+  const bare = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+  const bareStep = bare.steps.find((s) => s.action === "run" || s.action === "ticket");
+  assert.strictEqual(bareStep.step, "glossary");
+  assert.deepStrictEqual(bareStep.wipeFirst[0].quarantinesKept, [], "nothing is promised about evidence that is not there");
+  assert.ok(
+    bareStep.reasons.some((r) => r.includes("nothing else in that volume folder is touched")),
+    JSON.stringify(bareStep.reasons)
+  );
+  assert.ok(
+    !bareStep.reasons.some((r) => r.includes("quarantine evidence beside them")),
+    JSON.stringify(bareStep.reasons)
   );
 
   console.log("  half-built: picks up at the right step and volume, wipes only that step's outputs");

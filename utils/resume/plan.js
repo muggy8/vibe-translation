@@ -266,18 +266,26 @@ function chooseRepair(plan, { state, fromVolume }) {
     plan.cascade = true;
     plan.countsAsIntervention = true;
     const folder = (state.manifest.volumes.find((v) => String(v.installmentNumber) === String(fromVolume)) || {}).folder;
+    // The quarantine evidence beside the outputs is named, when there IS any. Saying "the evidence is
+    // kept" about a folder that holds none is the same mistake gotcha 81 is about: a standing sentence
+    // that reads as a claim about the disk.
+    const inventory = (state.volumes || []).find((v) => String(v.installment) === String(fromVolume)) || null;
+    const keptEvidence = inventory ? inventory.quarantines : [];
     if (folder) {
       plan.wipeFirst = [
         {
           volumeDir: path.join(state.seriesDir, folder),
           files: declaredOutputsFor(resumeStep, fromVolume),
+          quarantinesKept: keptEvidence,
         },
       ];
     }
     plan.reasons.push(
       `the cumulative invariant rebuilds every volume after ${fromVolume}, so the primitive is: remove ${fromVolume}'s ${resumeStep} outputs, then run ${resumeStep} over the whole series.`,
       "not --volume: a filtered run puts one volume in the loop, so the later volumes stay built on the broken one (gotcha 66).",
-      "the declared outputs only — the quarantine evidence beside them is kept."
+      keptEvidence.length
+        ? `the declared outputs only — ${keptEvidence.map((n) => `\`${n}\``).join(", ")} beside them is kept.`
+        : `the declared outputs only — nothing else in that volume folder is touched.`
     );
   } else if (CHAPTER_STATE_STEPS.has(resumeStep)) {
     plan.actionName = "re-translate-volume";

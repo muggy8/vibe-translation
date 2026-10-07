@@ -165,7 +165,11 @@ function renderResumePlanMarkdown(plan) {
     for (const w of s.wipeFirst) {
       lines.push(`- remove first, in \`${w.volumeDir}\`:`);
       for (const f of w.files) lines.push(`  - ${f}`);
-      lines.push(`  - (and nothing else — the quarantine evidence beside them stays)`);
+      lines.push(
+        w.quarantinesKept && w.quarantinesKept.length
+          ? `  - (and nothing else — ${w.quarantinesKept.map((n) => `\`${n}\``).join(", ")} beside them stays)`
+          : `  - (and nothing else in that volume folder is touched)`
+      );
     }
     lines.push(``);
   }
