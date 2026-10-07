@@ -129,7 +129,10 @@ You may read anywhere in the project. You may WRITE only inside this project's o
 are refused even if you try:
 
 - \`utils/tickets.js\`, \`utils/resume.js\`, \`utils/delivery-verify.js\`, \`utils/ledger.js\`,
-  \`utils/runlock.js\`, \`utils/patches.js\` — the rules that constrain you and the manager.
+  \`utils/runlock.js\`, \`utils/patches.js\` — the rules that constrain you and the manager. Several of
+  them are the cover over a folder of the same name (\`utils/tickets/\`, \`utils/resume/\`,
+  \`utils/delivery-verify/\`, \`utils/patches/\`): the ban covers the cover AND everything inside it,
+  because rewriting the page inside is the same edit as rewriting the cover.
 - \`test/test-tickets.js\`, \`test/test-resume.js\`, \`test/test-delivery-verify.js\`,
   \`test/test-ledger.js\`, \`test/test-delivery-act.js\`, \`test/test-diagnostics.js\`,
   \`test/test-patches.js\` — the tests that prove those rules work.
