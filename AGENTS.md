@@ -76,7 +76,7 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
   `utils/resume/`, `utils/delivery-verify`, `utils/ledger`, `utils/runlock`,
   `utils/patches/` are banned patch paths for the dev team, exactly like the single files
   they replaced (`utils/patches/rules.js`) — the ban covers the barrel and the folder alike,
-  and three of them are still single files today, so splitting one must not change what
+  and only `utils/runlock.js` is still a single file today, so splitting one must not change what
   the ban covers;
 - `__dirname` in a subfolder is the subfolder: a root-level task module needs a
   `projectRoot` alias passed down, a `utils/` module needs a `utilsDir` alias.
@@ -89,7 +89,7 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
 | `translate.js`, `verify-translate.js`, `polish.js`, `retranslate.js` | `translate/`, `verify-translate/`, `polish/`, `retranslate/` |
 | `delivery.js` | `delivery/` |
 | `configs/shared.js` | `configs/shared/` (4 files) |
-| `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js`, `utils/qa-loop.js`, `utils/series-run.js` | the matching folder under `utils/` |
+| `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js`, `utils/qa-loop.js`, `utils/series-run.js`, `utils/fs.js`, `utils/ledger.js`, `utils/delivery-verify.js` | the matching folder under `utils/` |
 
 `test/module-layer.js` is the helper that lets a test which scans source text follow a module
 into its folder (`readModuleLayer(rootDir, "utils/translate.js")`).
