@@ -18,7 +18,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { ON_QA_LIMIT } = require("../configs/shared");
-const { fileExists, assertWroteWithFallback, assertRealOutput } = require("../utils/fs");
+const { fileExists, assertRealOutput } = require("../utils/fs");
 const { assertRealToolCalls } = require("../utils/agents");
 const { validatorMaxStepsFor } = require("../utils/prompt");
 const { runSharedQaLoop, runWriteTurn } = require("../utils/qa-loop");
@@ -106,47 +106,31 @@ async function runVolumeAgent(ctx) {
           "utf8"
         );
       }
-      const wikiGenResult = await author.sendTurn(buildWikiAuthorTurnPrompt(ctx), {
+      await runWriteTurn(author, {
+        prompt: buildWikiAuthorTurnPrompt(ctx),
         label: `jump-in-wiki-generate-${values.INSTALLMENT_NUMBER}`,
-      });
-      assertRealToolCalls(wikiGenResult, "the author agent", values.INSTALLMENT_NUMBER);
-      const wikiFallbackUsed = await assertWroteWithFallback(
-        [wikiOutputFile, sharedWikiOutputFile],
-        "the author agent",
-        wikiGenResult?.text
-      );
-
-      // Recovery turn: if the model replied in chat instead of writeFile,
-      // send a second turn asking it to write both files using the content
-      // it already generated (the model's session still has that context).
-      if (wikiFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-        console.log(
+        who: "the author agent",
+        writesTo: [wikiOutputFile, sharedWikiOutputFile],
+        // The wiki owes TWO documents, so its recovery prompt names both of them and says what
+        // already happened to them — the shared default cannot know that.
+        recoveryPrompt: (hasContent) =>
+          hasContent
+            ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
+              `Both files have been temporarily written from your chat reply, but they must be written properly using writeFile. ` +
+              `Please rewrite both files using writeFile now. Use the exact same content you generated in your previous message: ` +
+              `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`
+            : `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you produced no output.\n\n` +
+              `Please read the source materials and write both files using writeFile now: ` +
+              `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`,
+        recoveryLabel: `jump-in-wiki-recovery-${values.INSTALLMENT_NUMBER}`,
+        recoveryWho: "the author agent (recovery)",
+        recoveryNote:
           `Volume ${values.INSTALLMENT_NUMBER}: sending recovery turn ` +
-            `(model replied in chat instead of writeFile)...`
-        );
-        const wikiHasContent = wikiGenResult?.text && wikiGenResult.text.trim().length > 0;
-        const wikiRecoveryPrompt = wikiHasContent
-          ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead.\n\n` +
-            `Both files have been temporarily written from your chat reply, but they must be written properly using writeFile. ` +
-            `Please rewrite both files using writeFile now. Use the exact same content you generated in your previous message: ` +
-            `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`
-          : `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you produced no output.\n\n` +
-            `Please read the source materials and write both files using writeFile now: ` +
-            `write wiki.md to "wiki.md" and shared-wiki.md to "shared-wiki.md".`;
-        const wikiRecoveryResult = await author.sendTurn(
-          wikiRecoveryPrompt,
-          { label: `jump-in-wiki-recovery-${values.INSTALLMENT_NUMBER}` }
-        );
-        assertRealToolCalls(wikiRecoveryResult, "the author agent (recovery)", values.INSTALLMENT_NUMBER);
-        // Overwrite with the recovery output (may be the same content, now via writeFile).
-        await assertWroteWithFallback(
-          [wikiOutputFile, sharedWikiOutputFile],
-          "the author agent (recovery)",
-          wikiRecoveryResult?.text
-        );
-      }
-      // Hard stop: a surviving scaffold stub is a failure, not an artifact.
-      await assertRealOutput([wikiOutputFile, sharedWikiOutputFile], "the author agent");
+          `(model replied in chat instead of writeFile)...`,
+        // Hard stop: a surviving scaffold stub is a failure, not an artifact.
+        verifyOutput: true,
+        assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
+      });
     }
 
     await runQaLoop(ctx, author);

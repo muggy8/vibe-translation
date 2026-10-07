@@ -9,8 +9,9 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types");
 const harness = require("../harness");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("../utils/fs");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
+const { inlineReferenceMessage } = require("../utils/fs");
+const { assertRealToolCalls } = require("../utils/agents");
+const { runWriteTurn } = require("../utils/qa-loop");
 const {
   resolveSourceBundle,
   decideProcessingMode,
@@ -95,20 +96,20 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV compilation${seg ? ` for chapter ${seg.id}` : ""}...`);
   const author = await harness.createAgentHandle({ name: `author-voice-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: await voiceAuthorMaxSteps(ctx, seg) });
   try {
-    const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults, seg, si), { label: `character-voice-compile-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
-    assertRealToolCalls(compileResult, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
-    const compileFallbackUsed = await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, compileResult?.text);
-    // Recovery turn: ONLY when a file was actually missing after the fallback —
-    // never over files the agent already wrote correctly.
-    if (compileFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-      const hasContent = compileResult?.text && compileResult.text.trim().length > 0;
-      const recoveryResult = await author.sendTurn(voiceRecoveryPrompt(hasContent, Boolean(ctx.voiceSeeded)), { label: `character-voice-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
-      assertRealToolCalls(recoveryResult, `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, recoveryResult?.text);
-    }
-    // Hard stop: the recovery turn is the last chance — a still-missing,
-    // empty or stubbed artifact is a failure, not an output.
-    await assertRealOutput([ctx.voiceOutputFile, ctx.povOutputFile], `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`);
+    const who = `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`;
+    await runWriteTurn(author, {
+      prompt: buildAuthorTurnPrompt(ctx, extractionResults, seg, si),
+      label: `character-voice-compile-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      who,
+      writesTo: [ctx.voiceOutputFile, ctx.povOutputFile],
+      recoveryPrompt: (hasContent) => voiceRecoveryPrompt(hasContent, Boolean(ctx.voiceSeeded)),
+      recoveryLabel: `character-voice-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      recoveryWho: `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`,
+      // Hard stop: the recovery turn is the last chance — a still-missing, empty or stubbed
+      // artifact is a failure, not an output.
+      verifyOutput: true,
+      assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
+    });
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved voice reference to ${ctx.voiceOutputFile} and POV map to ${ctx.povOutputFile}${seg ? ` (after chapter ${seg.id})` : ""}`);
   } finally { await author.close(); }
 }

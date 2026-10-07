@@ -5,12 +5,11 @@
  */
 
 require("dotenv").config();
-const fs = require("fs").promises;
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("../configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("../utils/fs");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
+const { AGENT_TOOLS_NOTE } = require("../configs/shared");
+const { assertRealToolCalls } = require("../utils/agents");
+const { runWriteTurn } = require("../utils/qa-loop");
 
 const { buildGlossaryAuthorTurnPrompt } = require("./prompts");
 const { glossaryAuthorMaxSteps, glossaryRecoveryPrompt } = require("./authoring");
@@ -41,48 +40,23 @@ async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, 
     maxSteps: await glossaryAuthorMaxSteps(ctx, seg),
   });
   try {
-    const amendResult = await author.sendTurn(
-      buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg, si),
-      { label: `glossary-amend-${values.INSTALLMENT_NUMBER}${labelSuffix}` }
-    );
-    assertRealToolCalls(amendResult, `the author agent (amend${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
-    const fallbackUsed = await assertWroteWithFallback(
-      glossaryOutputFile,
-      "the author agent",
-      amendResult?.text
-    );
-
-    // Recovery turn: if the model replied in chat instead of writeFile,
-    // send a second turn asking it to write the file using the content
-    // it already generated (the model's session still has that context).
-    if (fallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-      console.log(
+    await runWriteTurn(author, {
+      prompt: buildGlossaryAuthorTurnPrompt(ctx, terms, researchNotesAvailable, seg, si),
+      label: `glossary-amend-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      who: `the author agent (amend${seg ? `, chapter ${seg.id}` : ""})`,
+      writesTo: glossaryOutputFile,
+      recoveryPrompt: (hasContent) =>
+        glossaryRecoveryPrompt(hasContent, '"glossary.md"', "the volume source and the new-terms list"),
+      recoveryLabel: `glossary-recovery-${values.INSTALLMENT_NUMBER}`,
+      recoveryWho: "the author agent (recovery)",
+      recoveryNote:
         `Volume ${values.INSTALLMENT_NUMBER}: sending recovery turn ` +
-          `(model replied in chat instead of writeFile)...`
-      );
-      const hasContent = amendResult?.text && amendResult.text.trim().length > 0;
-      const recoveryPrompt = glossaryRecoveryPrompt(
-        hasContent,
-        '"glossary.md"',
-        "the volume source and the new-terms list"
-      );
-      const recoveryResult = await author.sendTurn(
-        recoveryPrompt,
-        { label: `glossary-recovery-${values.INSTALLMENT_NUMBER}` }
-      );
-      assertRealToolCalls(recoveryResult, "the author agent (recovery)", values.INSTALLMENT_NUMBER);
-      // The recovery turn EDITS the file (see glossaryRecoveryPrompt), so the
-      // fallback here only ever fills a gap the edit left — it can no longer
-      // replace a complete glossary with the text of one chat reply.
-      await assertWroteWithFallback(
-        glossaryOutputFile,
-        "the author agent (recovery)",
-        recoveryResult?.text
-      );
-    }
-    // Hard stop: the recovery turn is the last chance — a still-missing or
-    // empty glossary is a failure, not an output.
-    await assertRealOutput(glossaryOutputFile, "the author agent");
+        `(model replied in chat instead of writeFile)...`,
+      // Hard stop: the recovery turn is the last chance — a still-missing or empty glossary is a
+      // failure, not an output.
+      verifyOutput: true,
+      assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
+    });
 
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: saved the glossary to ${glossaryOutputFile}`

@@ -9,8 +9,9 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types");
 const harness = require("../harness");
-const { fileExists, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("../utils/fs");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
+const { inlineReferenceMessage } = require("../utils/fs");
+const { assertRealToolCalls } = require("../utils/agents");
+const { runWriteTurn } = require("../utils/qa-loop");
 const {
   resolveSourceBundle,
   decideProcessingMode,
@@ -96,20 +97,19 @@ async function runCompile(ctx, extractionOutput, seg = null, si = null) {
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running style-guide compilation${seg ? ` for chapter ${seg.id}` : ""}...`);
   const author = await harness.createAgentHandle({ name: `author-style-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: buildAuthorSystemPrompt(authorSystemPrompt), tools: ctx.fsGate.tools, approve: ctx.fsGate.approve, cwd: ctx.volumeDir, maxSteps: await styleAuthorMaxSteps(ctx, seg) });
   try {
-    const compileResult = await author.sendTurn(buildAuthorTurnPrompt(ctx, extractionResults, seg, si), { label: `style-guide-compile-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
-    assertRealToolCalls(compileResult, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
-    const compileFallbackUsed = await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`, compileResult?.text);
-    // Recovery turn: ONLY when the file was actually missing after the
-    // fallback — never over a file the agent already wrote correctly.
-    if (compileFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-      const hasContent = compileResult?.text && compileResult.text.trim().length > 0;
-      const recoveryResult = await author.sendTurn(styleRecoveryPrompt(hasContent, Boolean(ctx.styleSeeded)), { label: `style-guide-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
-      assertRealToolCalls(recoveryResult, `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`, recoveryResult?.text);
-    }
-    // Hard stop: the recovery turn is the last chance — a still-missing,
-    // empty or stubbed guide is a failure, not an output.
-    await assertRealOutput(ctx.styleOutputFile, `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`);
+    await runWriteTurn(author, {
+      prompt: buildAuthorTurnPrompt(ctx, extractionResults, seg, si),
+      label: `style-guide-compile-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      who: `the author agent (compile${seg ? `, chapter ${seg.id}` : ""})`,
+      writesTo: ctx.styleOutputFile,
+      recoveryPrompt: (hasContent) => styleRecoveryPrompt(hasContent, Boolean(ctx.styleSeeded)),
+      recoveryLabel: `style-guide-compile-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      recoveryWho: `the author agent (compile recovery${seg ? `, chapter ${seg.id}` : ""})`,
+      // Hard stop: the recovery turn is the last chance — a still-missing, empty or stubbed guide
+      // is a failure, not an output.
+      verifyOutput: true,
+      assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
+    });
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: saved style guide to ${ctx.styleOutputFile}${seg ? ` (after chapter ${seg.id})` : ""}`);
   } finally { await author.close(); }
 }

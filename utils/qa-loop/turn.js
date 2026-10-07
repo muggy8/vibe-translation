@@ -76,9 +76,11 @@ function validationReportRecoveryPrompt(hasContent, partialFile) {
  *   recoveryPrompt?: (hasContent: boolean) => string,
  *   recoveryLabel?: string,
  *   recoveryWho?: string,
+ *   recoveryNote?: string,
  *   verifyOutput?: boolean,
- * }} o - `who` names this agent in the failure messages; `verifyOutput` gates the
- *   final "did it actually write?" stop (see assertRealOutput in utils/fs.js).
+ * }} o - `who` names this agent in the failure messages; `recoveryNote` is what the stage prints
+ *   before it sends the second turn, in its own words; `verifyOutput` gates the final "did it
+ *   actually write?" stop (see assertRealOutput in utils/fs.js).
  * @returns {Promise<{fallbackUsed: boolean}>} `fallbackUsed` when the chat reply
  *   had to stand in for a missing file (or nothing usable was found).
  */
@@ -90,6 +92,8 @@ async function runWriteTurn(agent, o) {
   // Recovery turn: ONLY when the file was actually missing after the fallback —
   // never over a file the agent already wrote correctly.
   if (fallbackUsed && o.recoveryPrompt && process.env.AGENT_RECOVERY_ENABLED !== "false") {
+    // A stage may say what it is about to do, in its own words, before the second turn.
+    if (o.recoveryNote) console.log(o.recoveryNote);
     const hasContent = result?.text && result.text.trim().length > 0;
     const recovery = await agent.sendTurn(o.recoveryPrompt(hasContent), {
       label: o.recoveryLabel || `${o.label}-recovery`,

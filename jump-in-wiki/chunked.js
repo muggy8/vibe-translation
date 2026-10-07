@@ -16,9 +16,9 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { ON_QA_LIMIT } = require("../configs/shared");
-const { fileExists, assertWroteWithFallback, assertRealOutput } = require("../utils/fs");
+const { fileExists } = require("../utils/fs");
 const { assertRealToolCalls } = require("../utils/agents");
-const { runPerChapterQaLoop } = require("../utils/qa-loop");
+const { runPerChapterQaLoop, runWriteTurn } = require("../utils/qa-loop");
 const { validatorMaxStepsFor, findingsMergeMaxStepsFor } = require("../utils/prompt");
 
 const { buildWikiAuthorSystemPrompt, buildWikiFindingsMergePrompt, buildWikiMergeTurnPrompt, buildWikiSectionTurnPrompt, buildWikiSegmentFeedbackPrompt, buildWikiSegmentValidatorPrompt, buildWikiValidatorSystemPrompt } = require("./prompts");
@@ -81,26 +81,22 @@ async function runChunkedVolumeAgent(ctx) {
       maxSteps: 40,
     });
     try {
-      const sectionResult = await sectionAuthor.sendTurn(
-        buildWikiSectionTurnPrompt(ctx, segment, si),
-        { label: `jump-in-wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}` }
-      );
-      assertRealToolCalls(sectionResult, `the section author agent (chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-      const sectionFallbackUsed = await assertWroteWithFallback(sectionFile, "the section author agent", sectionResult?.text);
-      if (sectionFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-        const hasSection = sectionResult?.text && sectionResult.text.trim().length > 0;
-        const sectionRecoveryPrompt = hasSection
-          ? `You were asked to write this chapter's wiki section to "wiki-${segment.id}.md" using writeFile, but you replied with the content in your chat message instead. Please write the file using writeFile now with the exact same content.`
-          : `You produced no output. Please write this chapter's wiki section to "wiki-${segment.id}.md" using writeFile now.`;
-        const sectionRecoveryResult = await sectionAuthor.sendTurn(sectionRecoveryPrompt, {
-          label: `jump-in-wiki-section-recovery-${values.INSTALLMENT_NUMBER}-${segment.id}`,
-        });
-        assertRealToolCalls(sectionRecoveryResult, `the section author agent (chapter ${segment.id}, recovery)`, values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(sectionFile, "the section author agent (recovery)", sectionRecoveryResult?.text);
-      }
-      // Hard stop: a chapter section left as a stub would be merged straight
-      // into wiki.md / shared-wiki.md as finished work.
-      await assertRealOutput(sectionFile, `the section author agent (chapter ${segment.id})`);
+      await runWriteTurn(sectionAuthor, {
+        prompt: buildWikiSectionTurnPrompt(ctx, segment, si),
+        label: `jump-in-wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+        who: `the section author agent (chapter ${segment.id})`,
+        writesTo: sectionFile,
+        recoveryPrompt: (hasSection) =>
+          hasSection
+            ? `You were asked to write this chapter's wiki section to "wiki-${segment.id}.md" using writeFile, but you replied with the content in your chat message instead. Please write the file using writeFile now with the exact same content.`
+            : `You produced no output. Please write this chapter's wiki section to "wiki-${segment.id}.md" using writeFile now.`,
+        recoveryLabel: `jump-in-wiki-section-recovery-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+        recoveryWho: `the section author agent (chapter ${segment.id}, recovery)`,
+        // Hard stop: a chapter section left as a stub would be merged straight into
+        // wiki.md / shared-wiki.md as finished work.
+        verifyOutput: true,
+        assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
+      });
     } finally {
       await sectionAuthor.close();
     }
@@ -131,33 +127,22 @@ async function runChunkedVolumeAgent(ctx) {
     maxSteps: 40,
   });
   try {
-    const mergeResult = await merger.sendTurn(buildWikiMergeTurnPrompt(ctx), {
+    await runWriteTurn(merger, {
+      prompt: buildWikiMergeTurnPrompt(ctx),
       label: `jump-in-wiki-merge-${values.INSTALLMENT_NUMBER}`,
+      who: "the merge agent",
+      writesTo: [wikiOutputFile, sharedWikiOutputFile],
+      recoveryPrompt: (hasContent) =>
+        hasContent
+          ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead. Please rewrite both files using writeFile now with the exact same content.`
+          : `You produced no output. Please read the chapter sections and write "wiki.md" and "shared-wiki.md" using writeFile now.`,
+      recoveryLabel: `jump-in-wiki-merge-recovery-${values.INSTALLMENT_NUMBER}`,
+      recoveryWho: "the merge agent (recovery)",
+      // Hard stop: the merged wiki is the deliverable — a surviving stub is a failure, not an
+      // artifact.
+      verifyOutput: true,
+      assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
     });
-    assertRealToolCalls(mergeResult, "the merge agent", values.INSTALLMENT_NUMBER);
-    const mergeFallbackUsed = await assertWroteWithFallback(
-      [wikiOutputFile, sharedWikiOutputFile],
-      "the merge agent",
-      mergeResult?.text
-    );
-    if (mergeFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-      const hasContent = mergeResult?.text && mergeResult.text.trim().length > 0;
-      const recoveryPrompt = hasContent
-        ? `You were asked to write the complete wiki to "wiki.md" and "shared-wiki.md" using writeFile, but you replied with the content in your chat message instead. Please rewrite both files using writeFile now with the exact same content.`
-        : `You produced no output. Please read the chapter sections and write "wiki.md" and "shared-wiki.md" using writeFile now.`;
-      const recoveryResult = await merger.sendTurn(recoveryPrompt, {
-        label: `jump-in-wiki-merge-recovery-${values.INSTALLMENT_NUMBER}`,
-      });
-      assertRealToolCalls(recoveryResult, "the merge agent (recovery)", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(
-        [wikiOutputFile, sharedWikiOutputFile],
-        "the merge agent (recovery)",
-        recoveryResult?.text
-      );
-    }
-    // Hard stop: the merged wiki is the deliverable — a surviving stub is a
-    // failure, not an artifact.
-    await assertRealOutput([wikiOutputFile, sharedWikiOutputFile], "the merge agent");
   } finally {
     await merger.close();
   }
