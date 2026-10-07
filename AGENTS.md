@@ -89,7 +89,7 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
 | `translate.js`, `verify-translate.js`, `polish.js`, `retranslate.js` | `translate/`, `verify-translate/`, `polish/`, `retranslate/` |
 | `delivery.js` | `delivery/` |
 | `configs/shared.js` | `configs/shared/` (4 files) |
-| `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js`, `utils/qa-loop.js`, `utils/series-run.js`, `utils/fs.js`, `utils/ledger.js`, `utils/delivery-verify.js` | the matching folder under `utils/` |
+| `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js`, `utils/qa-loop.js`, `utils/series-run.js`, `utils/fs.js`, `utils/ledger.js`, `utils/postmortem.js`, `utils/delivery-verify.js` | the matching folder under `utils/` |
 
 `test/module-layer.js` is the helper that lets a test which scans source text follow a module
 into its folder (`readModuleLayer(rootDir, "utils/translate.js")`).
