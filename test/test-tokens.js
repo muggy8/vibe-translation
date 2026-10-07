@@ -27,6 +27,7 @@ const HOOKS_DIR_ENV = "AI_CLIENT_HOOKS_DIR";
 const realHooksDir = process.env[HOOKS_DIR_ENV];
 process.env[HOOKS_DIR_ENV] = path.join(tmp, "hooks-none");
 
+const { dropModuleLayer } = require("./module-layer");
 const tokens = require("../utils/tokens");
 const {
   scriptMixOf,
@@ -224,7 +225,7 @@ const { runVolumeWithModeFallback } = require("../utils/qa-loop");
   assert.ok(second.cjkWeight === first.cjkWeight);
 
   // A fresh process reuses the persisted entry instead of re-probing.
-  delete require.cache[require.resolve("../utils/tokens")];
+  dropModuleLayer(__dirname, "../utils/tokens.js");
   const tokens2 = require("../utils/tokens");
   const reused = await tokens2.ensureTokenCalibration(endpoint, { sampleText: sample, label: "stub", log: () => {} });
   assert.ok(Math.abs(reused.cjkWeight - first.cjkWeight) < 1e-9, "the persisted calibration is reused");
@@ -236,7 +237,7 @@ const { runVolumeWithModeFallback } = require("../utils/qa-loop");
   harness.measurePromptTokens = async () => {
     throw new Error("endpoint unreachable");
   };
-  delete require.cache[require.resolve("../utils/tokens")];
+  dropModuleLayer(__dirname, "../utils/tokens.js");
   const tokens3 = require("../utils/tokens");
   fs.rmSync(process.env.TOKEN_CALIBRATION_FILE, { force: true });
   const fellBack = await tokens3.ensureTokenCalibration(
@@ -249,7 +250,7 @@ const { runVolumeWithModeFallback } = require("../utils/qa-loop");
   harness.measurePromptTokens = async () => {
     throw new Error("--dry-run must not probe");
   };
-  delete require.cache[require.resolve("../utils/tokens")];
+  dropModuleLayer(__dirname, "../utils/tokens.js");
   const tokens4 = require("../utils/tokens");
   const dry = await tokens4.ensureTokenCalibration(endpoint, { sampleText: sample, label: "dry", dryRun: true, log: () => {} });
   assert.strictEqual(dry.cjkWeight, tokens4.DEFAULT_CJK_WEIGHT, "--dry-run calibrates nothing");

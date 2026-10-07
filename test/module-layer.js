@@ -34,4 +34,42 @@ function readModuleLayer(rootDir, file, folder) {
   return parts.join("\n");
 }
 
-module.exports = { readModuleLayer };
+/**
+ * Forget a module's whole LAYER, so the next `require` builds it from scratch.
+ *
+ * A suite that simulates "a fresh process" used to delete one cache entry. A module
+ * that is now a face over a folder has several entries, and deleting only the face
+ * leaves the implementation's own state — a Map of what this process already
+ * measured, the coefficients it settled on — alive behind the reloaded face. That is
+ * not a fresh process, and a test that believes it is will assert the wrong thing.
+ *
+ * @param {string} rootDir - The project root.
+ * @param {string} file - The module's file name, relative to rootDir ("utils/tokens.js").
+ * @param {string} [folder] - The implementation folder. Defaults to the folder named after the file.
+ * @returns {number} How many cache entries were dropped.
+ */
+function dropModuleLayer(rootDir, file, folder) {
+  const targets = [path.join(rootDir, file)];
+  const dir = path.join(rootDir, folder || file.replace(/\.js$/, ""));
+  if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+    for (const name of fs.readdirSync(dir).sort()) {
+      if (name.endsWith(".js")) targets.push(path.join(dir, name));
+    }
+  }
+  let dropped = 0;
+  for (const target of targets) {
+    let resolved;
+    try {
+      resolved = require.resolve(target);
+    } catch {
+      continue; // not loadable from here — nothing to forget
+    }
+    if (require.cache[resolved]) {
+      delete require.cache[resolved];
+      dropped++;
+    }
+  }
+  return dropped;
+}
+
+module.exports = { readModuleLayer, dropModuleLayer };
