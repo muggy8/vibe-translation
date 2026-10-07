@@ -101,10 +101,18 @@ const TASK_FILES = [
   ["polish.js", "polish"],
 ];
 
+// A task's implementation may live in the folder named after it (glossary.js is the
+// public face, glossary/ holds the logic). The wiring being pinned is the TASK's, not
+// one file's, so the scan reads the whole layer.
+const { readModuleLayer } = require("./module-layer");
+const projectRoot = path.join(__dirname, "..");
+
 for (const [file, taskName] of TASK_FILES) {
-  const src = fs.readFileSync(path.join(__dirname, "..", file), "utf8");
+  const src = readModuleLayer(projectRoot, file);
   assert.ok(
-    /require\("\.\/configs\/shared"\)/.test(src) && /volumeFailureError/.test(src),
+    // The path is relative to wherever the code lives: a module inside glossary/
+    // reaches the same file as "../configs/shared".
+    /require\("\.{1,2}\/configs\/shared"\)/.test(src) && /volumeFailureError/.test(src),
     `${file} imports volumeFailureError from configs/shared`
   );
   assert.ok(

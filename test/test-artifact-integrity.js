@@ -568,7 +568,7 @@ async function scenarioFileToolContract() {
  * at once, and an error used to be pinned onto a call that succeeded.
  */
 function scenarioToolCallLogging() {
-  const src = fs.readFileSync(path.join(__dirname, "..", "harness.js"), "utf8");
+  const src = require("./module-layer").readModuleLayer(path.join(__dirname, ".."), "harness.js", "ai");
   assert.ok(/case "tool\.done":/.test(src), 'consumeEvents handles the "tool.done" event (the missing case)');
   assert.ok(/toolCallId: event\.toolCallId/.test(src), "a collected tool call carries the id that pairs it with its result");
 
