@@ -9,6 +9,7 @@ a volume fails, which languages, and where a finished artifact is published.
 
 const path = require("path");
 const { readBoolEnv, normalizePolicy } = require("./env");
+const { applySeriesLocationDefault } = require("../env-defaults");
 
 /**
  * Where a series-level artifact copy is published: SERIES_ARTIFACTS_DIR,
@@ -188,17 +189,26 @@ const ON_QA_LIMIT = normalizePolicy(
  * hours in. `dryRun` skips the AI_API_KEY check because --dry-run makes no
  * AI calls.
  *
+ * SERIES_LOCATION is NOT on the list: it has a default — the repo's own
+ * `epub_source/` folder (configs/env-defaults.js) — and this applies it as the
+ * backstop for a caller that did not come through an entry point. A backstop, not
+ * the mechanism: the task modules that read the variable at require time are
+ * already loaded by now, which is why every entry point applies the default first
+ * (AGENTS.md gotcha 79). An unset SERIES_LOCATION therefore never fails a run; an
+ * unset one pointing at an empty `epub_source/` fails at intake, where the message
+ * can name the folder it looked in.
+ *
  * SERIES_NAME is never required: the series name is a decision the intake step
  * makes (step 0 of the default run) and every task reads it from the manifest.
  * Set SERIES_NAME only to override what the intake agent concluded.
  *
  * @param {{dryRun?: boolean}} [opts]
  * @param {boolean} [opts.dryRun] - True when running with --dry-run.
- * @throws {Error} Naming every missing required variable.
+ * @throws {Error} Naming every missing variable.
  */
 function validateRequiredEnv({ dryRun = false } = {}) {
+  applySeriesLocationDefault();
   const missing = [];
-  if (!process.env.SERIES_LOCATION) missing.push("SERIES_LOCATION");
   if (!dryRun && !process.env.AI_API_KEY) missing.push("AI_API_KEY");
   if (missing.length > 0) {
     throw new Error(

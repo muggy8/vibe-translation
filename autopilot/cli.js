@@ -9,6 +9,10 @@
 
 const fs = require("fs");
 
+// The loop drives ONE named series; it does not inherit the pipeline's default source
+// folder (AGENTS.md gotcha 79).
+const { chosenSeriesLocation } = require("../configs/env-defaults");
+
 const { runTurnWithHooks, AUTOPILOT_TASK } = require("../utils/hooks");
 const { readArgs, resolveMode, maxIterations } = require("./settings");
 const { runLoop } = require("./loop");
@@ -32,7 +36,7 @@ async function main() {
     return;
   }
 
-  const seriesDir = args.seriesDir || process.env.SERIES_LOCATION || null;
+  const seriesDir = args.seriesDir || chosenSeriesLocation() || null;
   if (!seriesDir) {
     console.error(
       `[autopilot] SERIES_LOCATION is not set, and --series=<dir> was not given. The loop needs to know which series it is driving.`

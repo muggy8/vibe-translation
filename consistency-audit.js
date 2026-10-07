@@ -37,7 +37,9 @@
  *   npx gulp consistency-audit --force     # re-audit even if the report is fresh
  */
 
-require("dotenv").config();
+// .env, then the one setting that has a default — both before any task module is
+// required, because several of them read these values at require time (gotcha 79).
+require("./configs/env-defaults").bootstrapEnv();
 const fs = require("fs").promises;
 const path = require("path");
 require("./types");

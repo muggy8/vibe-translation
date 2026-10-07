@@ -1,0 +1,51 @@
+# docker-compose.yml — the pipeline as a one-shot job.
+#
+#   cp .env.example .env                 # point it at your model server (AI_BASE_URL, AI_API_KEY, AI_MODEL)
+#   mkdir -p epub_source .logs .postmortem .dry-run   # once: Docker creates a missing mounted folder as root
+#   # put your books in epub_source/
+#   docker compose up --build            # the whole pipeline, one step at a time
+#
+# Everything the pipeline writes lands in ./epub_source on your machine.
+# The long version, including how to reach a model server running on your own computer,
+# is docs/docker.md.
+
+services:
+  pipeline:
+    build: .
+    image: ai-client
+    # Run as the user calling docker, so the files the pipeline writes into the mounted
+    # folders come out owned by you and not by root. UID/GID come from your shell; 1000
+    # is the fallback, which is also the user the image itself runs as.
+    user: "${UID:-1000}:${GID:-1000}"
+
+    # Your settings. SERIES_LOCATION inside the container is a path INSIDE the container:
+    # `epub_source` (the value .env.example ships with) is this same folder, mounted
+    # below, so the default works unchanged. An absolute host path in .env does not work
+    # unless you mount it at that same path.
+    env_file: .env
+
+    volumes:
+      # Your books, and everything the pipeline builds next to them.
+      - ./epub_source:/app/ai-client/epub_source
+      # The run transcripts (what every model call was asked and answered) and the step
+      # runner's machine state (post-mortems, the ledger, tickets). Both are gitignored.
+      - ./.logs:/app/ai-client/.logs
+      - ./.postmortem:/app/ai-client/.postmortem
+      # --dry-run writes the prompts it WOULD have sent here.
+      - ./.dry-run:/app/ai-client/.dry-run
+      # The token-calibration cache: machine state, kept out of the repo.
+      - ai-client-cache:/app/ai-client/.cache
+
+    environment:
+      TOKEN_CALIBRATION_FILE: /app/ai-client/.cache/token-calibration.json
+
+    # So that AI_BASE_URL=http://host.docker.internal:<port>/v1 reaches a model server
+    # running on your own machine. (Inside a container, `localhost` is the container.)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Forward Ctrl-C to the pipeline instead of killing it sideways.
+    init: true
+
+volumes:
+  ai-client-cache:

@@ -43,6 +43,9 @@ const {
 const { resolveRunSettings, isStructuralError } = require("../configs/shared");
 const {
   buildDeterministicManifest,
+  isSourceEntry,
+  isDocumentationFile,
+  firstSourceInVolumeDir,
   readCommittedLayout,
   applyCommittedLayout,
   confidenceGate,
@@ -1173,6 +1176,48 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.strictEqual(confidenceGate({}).ok, true, "0 also disables the missing-confidence check");
   delete process.env.DISCOVER_MIN_CONFIDENCE;
 
+  // ─── what counts as a source file (the scan the dry run AND the intake agent use)
+  const scanDir = makeTmpDir("ai-client-scan-");
+  for (const name of [
+    "book.epub",
+    "notes.txt",
+    "story.md",
+    "README.md",
+    "glossary.md",
+    "translation-ch01.md",
+    "cover.png",
+  ]) {
+    await fs.promises.writeFile(path.join(scanDir, name), "x", "utf8");
+  }
+  const scanned = (await fs.promises.readdir(scanDir, { withFileTypes: true }))
+    .filter((e) => isSourceEntry(e))
+    .map((e) => e.name)
+    .sort();
+  assert.deepStrictEqual(
+    scanned,
+    ["book.epub", "notes.txt", "story.md"],
+    "books in; documentation and pipeline output out"
+  );
+  assert.strictEqual(isDocumentationFile("README.md"), true, "the folder's own README");
+  assert.strictEqual(isDocumentationFile("readme.txt"), true, "any spelling of it");
+  assert.strictEqual(isDocumentationFile("README"), true, "with no extension too");
+  assert.strictEqual(isDocumentationFile("story.md"), false, "but not a book that merely reads well");
+
+  // A README inside a VOLUME folder is not the staged book either.
+  const volumeScan = makeTmpDir("ai-client-volume-scan-");
+  await fs.promises.writeFile(path.join(volumeScan, "README.md"), "# note\n", "utf8");
+  assert.strictEqual(
+    await firstSourceInVolumeDir(volumeScan, "Series(01)"),
+    null,
+    "a volume folder holding only a README holds no book"
+  );
+  await fs.promises.writeFile(path.join(volumeScan, "series-01.epub"), "x", "utf8");
+  assert.strictEqual(
+    await firstSourceInVolumeDir(volumeScan, "Series(01)"),
+    "series-01.epub",
+    "and the book that is really there is still found"
+  );
+
   // ─── the deterministic (--dry-run) layout: a flat pile gets staged ─────────
   const flatDir = makeTmpDir("ai-client-flat-");
   await writeEpub(flatDir, "side-story.epub", {
@@ -1188,6 +1233,13 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
     sections: [{ file: "c1.xhtml", title: "One", text: JP_TEXT }],
   });
   await fs.promises.writeFile(path.join(flatDir, "glossary.md"), "# not a book\n");
+  // The default source folder ships with a README explaining what to drop in it, and
+  // a README ends in `.md` — the shape of a staged book. It must never become volume 01.
+  await fs.promises.writeFile(
+    path.join(flatDir, "README.md"),
+    "# Where your books go\n\nDrop the volumes here.\n",
+    "utf8"
+  );
   const flat = await buildDeterministicManifest(flatDir, {
     sourceLanguage: "Japanese",
     targetLanguage: "English",
@@ -1196,6 +1248,10 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.strictEqual(flat.schema, MANIFEST_SCHEMA);
   assert.strictEqual(flat.volumes.length, 2, "only the two books became volumes");
   assert.ok(!flat.volumes.some((v) => v.folder.includes("glossary")), "pipeline output is never a source");
+  assert.ok(
+    !flat.volumes.some((v) => /readme/i.test(v.folder) || /readme/i.test(v.sourceFile || "")),
+    "a README is documentation about the folder, not a book in it"
+  );
   assert.deepStrictEqual(flat.volumes.map((v) => v.installmentNumber), ["01", "02"], "natural order, numbered");
   assert.ok(
     await fs.promises.stat(path.join(flatDir, "side-story(01)", "side-story.epub")),

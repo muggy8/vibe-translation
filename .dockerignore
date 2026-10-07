@@ -1,0 +1,37 @@
+# What never belongs inside the image.
+#
+# Two principles: (1) your data and your secrets are mounted in at run time, never
+# baked into a layer; (2) this machine's run history is not the pipeline.
+
+# Git, and the machine state the pipeline writes as it runs
+.git/
+.logs/
+.postmortem/
+.dry-run/
+.cache/
+.token-calibration.json
+*.log
+npm-debug.log*
+
+# Secrets. The keys reach the container through its environment (env_file in
+# docker-compose.yml, or --env-file / -e on docker run), which is also why the app's
+# own dotenv load inside the container finds no .env and simply keeps what it was given.
+.env
+.env.local
+.env.*.local
+
+# Installed on the host, for the host's platform — the image installs its own
+node_modules/
+
+# Your books, and everything the pipeline builds next to them. They are mounted into
+# the container at run time; only the folder's README belongs in the image.
+epub_source/*
+!epub_source/README.md
+*.epub
+
+# Per-machine hooks (git-style, gitignored). A hook shells out to whatever the local
+# machine has — docker, curl, a private CLI — and none of that exists in this image.
+# The README and the samples come along; the real hooks do not.
+/hooks/*
+!/hooks/README.md
+!/hooks/*.sample

@@ -60,6 +60,10 @@ require("./types"); // JSDoc type definitions
 
 const path = require("path");
 
+// The delivery layer names the series it is answering about; it does not inherit the
+// pipeline's default source folder (AGENTS.md gotcha 79).
+const { chosenSeriesLocation } = require("./configs/env-defaults");
+
 const devteam = require("./utils/devteam");
 const patches = require("./utils/patches");
 const { readTickets, ticketPaths } = require("./utils/tickets");
@@ -421,10 +425,11 @@ async function main() {
     return;
   }
 
-  const seriesDir = args.seriesDir || process.env.SERIES_LOCATION || "";
+  const seriesDir = args.seriesDir || chosenSeriesLocation() || "";
   if (!seriesDir) {
     console.error(`✗ refused: no series folder. Pass --series=<dir> or set SERIES_LOCATION. The team needs to` +
-      ` know which folder the ticket is about, and guessing is how a patch is written against the wrong book.`);
+      ` know which folder the ticket is about, and guessing is how a patch is written against the wrong book` +
+      ` — including a folder inherited from the pipeline's default, which says nothing about THIS run.`);
     process.exitCode = 2;
     return;
   }

@@ -42,6 +42,8 @@ carrying its own part of the story. Reject and list in `discovery.excluded`:
   siblings);
 - duplicates of the same book (same content, different file name) — keep one;
 - files belonging to a different series or a different author's work;
+- a README or other note about the folder itself — it describes the books, it is
+  not one;
 - anything the pipeline itself generated (glossaries, wikis, translations,
   validation reports, extracted chapter files, image folders).
 

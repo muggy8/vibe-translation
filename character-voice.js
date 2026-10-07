@@ -22,7 +22,9 @@
  * instead of reading all of them.
  */
 
-require("dotenv").config();
+// .env, then the one setting that has a default — both before any task module is
+// required, because several of them read these values at require time (gotcha 79).
+require("./configs/env-defaults").bootstrapEnv();
 require("./types");
 const { emittedToolCallAsText } = require("./utils/agents");
 

@@ -95,6 +95,12 @@ test-series/test_story(2)/*
 # is what the tasks read)
 *.epub
 
+# Default source folder (SERIES_LOCATION when unset — configs/env-defaults.js):
+# the books you drop in, and everything the pipeline builds next to them, are
+# yours and never committed. Only the README is tracked.
+epub_source/*
+!epub_source/README.md
+
 # ── Generated translation artifacts ─────────────────────────────────────────
 # When SERIES_LOCATION points at a folder INSIDE this repo, the pipeline writes
 # these into the series dir and its volume folders. They are ignored by name so

@@ -1,6 +1,6 @@
-# Gotchas 70–78 — the delivery layer: the option filter, the resume triage, the run lock, the acceptance test, the two support teams, the loop, and the uncapped turn
+# Gotchas 70–79 — the delivery layer: the option filter, the resume triage, the run lock, the acceptance test, the two support teams, the loop, the uncapped turn, and the default source folder
 
-> Gotchas **70–78** of the AGENTS.md gotcha list. The whole list is indexed from AGENTS.md §2.
+> Gotchas **70–79** of the AGENTS.md gotcha list. The whole list is indexed from AGENTS.md §2.
 
 Hard-won: each one exists because of something that went wrong on a real run.
 Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md).
@@ -192,4 +192,9 @@ Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md
    pointers visible on the wire, a stuck agent stopped for repeating itself, and a stage handle whose oversized pass is
    tagged as the size failure the fallback repairs. `test/test-diagnostics.js` and `test/test-devteam.js` each assert
    the old cap names are ABSENT from their role module. See docs/delivery-layer.md "Uncapped turns".
+
+79. **A default has to be applied where the setting is READ, and a source folder that ships with the repo has to be a folder a book scan can be trusted in.** `SERIES_LOCATION` used to have no default at all: a clone with no `.env` failed before any step ran, and the answer to "where do I put my books?" was a path in a document nobody read. It now defaults to the repo's own `epub_source/` folder (`configs/env-defaults.js`). Three things about that are load-bearing.
+    - **Half the task modules turn the variable into a constant when they are required** — `const seriesDir = process.env.SERIES_LOCATION` in `translate/config.js`, `character-voice/config.js`, `verify-translate/config.js`, `polish/config.js` and `consistency-audit.js`. A default applied where the value is *used* — inside `validateRequiredEnv`, which runs when a task STARTS — is invisible to them: their constant was already `undefined`, and the task fails with "SERIES_LOCATION is not set" while the entry point has a perfectly good one. So `applySeriesLocationDefault()` is called at the top of every entry point, immediately after dotenv and before any task module is required; `validateRequiredEnv` calls it too, as the backstop for a caller that came in sideways. `test/test-env-defaults.js` pins the ordering by requiring `translate.js` in a clean child process and then reading `translate/config.js`'s constant — the check that fails if the default ever moves somewhere later.
+    - **A default that is announced is a default; one that is silent is a surprise.** When the default is what got used, the run names the folder it chose on its first line. An explicit value is left exactly as written (a relative one stays relative — resolving it is the consumer's business, not the default's), and nothing is announced. The delivery-layer roles keep demanding an explicit series (`--series=<dir>` or `SERIES_LOCATION`): a manager, a diagnostics turn and a patch are answers about ONE run, and naming which one is not a setting to inherit.
+    - **The folder ships with a README, and a README ends in `.md`.** The two scans that answer "is this a book?" (`isSourceEntry` and `firstSourceInVolumeDir` in `intake/deterministic.js`) accept any `.md` that is not pipeline output — which is exactly the shape of the file that explains the folder. `isDocumentationFile` refuses it, and `system-prompts/translation-target.md` carries the same rule in prose because the intake agent lists the folder with its own tools. A default source folder that turned its own instructions into volume 01 would be worse than no default at all.
 

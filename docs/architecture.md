@@ -106,7 +106,7 @@ Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md
 
 **Un-monitored run policies** (front-loaded in `.env`, see docs/environment.md): the pipeline is built to run un-monitored overnight / for multiple days, so the decisions that would otherwise need a human are env-driven (code defaults keep the safe "fail loudly" behavior):
 
-- `validateRequiredEnv({ dryRun })` (configs/shared.js) runs at the top of every task and fails fast with a single message naming every missing required variable (`SERIES_LOCATION`, and `AI_API_KEY` for live runs — `SERIES_NAME` is never required, the intake step decides it, see docs/architecture.md.5) — a misconfigured `.env` is caught at run start, not hours in.
+- `validateRequiredEnv({ dryRun })` (configs/shared.js) runs at the top of every task and fails fast with a single message naming every missing required variable (`AI_API_KEY` for live runs; `SERIES_NAME` is never required, the intake step decides it, see docs/architecture.md.5; `SERIES_LOCATION` is not on the list either — it defaults to the repo's own `epub_source/` folder, which this call fills in as the backstop, while the real application happens at the entry points, see gotcha 79) — a misconfigured `.env` is caught at run start, not hours in.
 - `ON_VOLUME_ERROR` (`abort` default / `skip`): when a volume's processing throws, the per-volume body of each task is wrapped in a try/catch — `skip` records the volume and continues with the next one (in the cumulative tasks the next volume then misses its previous artifact and is skipped in turn by `ON_MISSING_PREVIOUS=skip`, cascading to the end of the task). **Skipping is not succeeding:** every task ends by calling `volumeFailureError(taskName, failedVolumes, totalVolumes)` (configs/shared.js) and throws it, so a task that skipped volumes fails the run with a named summary. A `structuralError` is never skippable — the catch rethrows it whatever the policy says.
 - `ON_MISSING_PREVIOUS` (`abort` default / `skip`): replaces the "process the earlier volume first" throw in the three cumulative tasks with an optional warn-and-skip.
 - `ON_QA_LIMIT` (`accept` default / `fail`): when the QA loop hits `QA_MAX_ITERATIONS` without a passing grade — accept the output as-is (legacy) or fail the volume.
@@ -115,7 +115,7 @@ Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md
 
 ### 3.5 Series intake (`get-translation-target.js`, the `discover` task)
 
-Step 0 of the pipeline. The old behavior — "every volume is a folder named `<Series Name>(NN)` containing one text file" — is replaced by an agent that is handed only `SERIES_LOCATION` and works the rest out by looking at the files.
+Step 0 of the pipeline. The old behavior — "every volume is a folder named `<Series Name>(NN)` containing one text file" — is replaced by an agent that is handed only `SERIES_LOCATION` and works the rest out by looking at the files. Which folder that is: `SERIES_LOCATION`, defaulting to the repo's own `epub_source/` (configs/env-defaults.js, gotcha 79) — an empty one fails the step with the folder named, and `isSourceEntry` refuses a README, so the file that explains the folder never becomes volume 01.
 
 Flow (`getTranslationTarget()` → `discoverSeries()`):
 

@@ -1473,16 +1473,23 @@ assert.doesNotThrow(
   "SERIES_NAME is never required: the intake step decides it and the manifest carries it"
 );
 
+// SERIES_LOCATION is not on the list either: unset, it defaults to the repo's own
+// epub_source/ folder (configs/env-defaults.js), and validateRequiredEnv applies that
+// default as the backstop for a caller that did not come through an entry point.
 delete process.env.SERIES_LOCATION;
-assert.throws(
+assert.doesNotThrow(
   () => validateRequiredEnv({ dryRun: true }),
-  /SERIES_LOCATION/,
-  "SERIES_LOCATION is always required"
+  "SERIES_LOCATION unset: the run defaults to <repo>/epub_source instead of failing"
+);
+assert.strictEqual(
+  process.env.SERIES_LOCATION,
+  path.resolve(__dirname, "..", "epub_source"),
+  "the default is the repo's epub_source folder, absolute"
 );
 assert.throws(
   () => validateRequiredEnv(),
-  /SERIES_LOCATION.*AI_API_KEY/,
-  "the message aggregates every missing variable"
+  /AI_API_KEY/,
+  "the variable that IS required still fails the run, and the message names it"
 );
 
 // ─── isSourceStale / sourceFingerprint (configs/shared) ─────────────────────

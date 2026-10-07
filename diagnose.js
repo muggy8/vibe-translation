@@ -61,6 +61,9 @@ const {
   unansweredQuestions,
 } = require("./utils/tickets");
 const { runInProgress, describeRunLock } = require("./utils/runlock");
+// The team answers a ticket about ONE series; it does not inherit the pipeline's default
+// source folder (AGENTS.md gotcha 79).
+const { chosenSeriesLocation } = require("./configs/env-defaults");
 
 /**
  * Read the CLI flags this command owns. Unknown flags are refused: a mistyped flag on a tool that
@@ -271,7 +274,7 @@ async function main() {
     return 2;
   }
 
-  const seriesDir = args.seriesDir || process.env.SERIES_LOCATION || null;
+  const seriesDir = args.seriesDir || chosenSeriesLocation() || null;
   if (!seriesDir) {
     console.error(
       `I need to know which series this ticket is about. Pass --series=<dir> or set SERIES_LOCATION.`

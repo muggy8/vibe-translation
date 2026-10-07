@@ -23,8 +23,14 @@ diagnostics role, a code-changing dev team, a delivery manager and a loop that d
 
 ### Quickstart
 
+The books go in **`epub_source/`** (that folder *is* the default `SERIES_LOCATION` — unset
+it and the pipeline looks there); the settings go in **`.env`** (`cp .env.example .env`).
+`README.md` is the front door for someone who has never seen the project; this file is the
+index for working on it.
+
 | Command | What it does |
 |---|---|
+| `docker compose up --build` | **The whole pipeline in a container**: your books in `epub_source/`, your settings in `.env`, nothing else to install. `docs/docker.md` |
 | `npx gulp discover` | Series intake only: work out the volumes, order, names, exclusions; write `translation-target.json` + `translation-plan.md` |
 | `npx gulp glossary` / `character-voice` / `style-guide` / `jump-in-wiki` | One pre-production task (all volumes) |
 | `npx gulp consistency-audit` | The cross-artifact sign-off (writes `consistency-report.md`) |
@@ -50,15 +56,16 @@ diagnostics role, a code-changing dev team, a delivery manager and a loop that d
 | working on a pre-production pipeline (glossary / wiki / character voice / style guide / audit / handoff) | `docs/pipelines.md` |
 | working on the translation stage (translate / verify / retranslate / polish) | `docs/pipelines.md` §8.5 |
 | adding or renaming a setting | `docs/environment.md` |
+| putting the pipeline on a new machine, or running it in a container | `docs/docker.md` |
 | writing code or tests here | `docs/conventions.md` |
-| about to change a behavior you do not understand | **the gotchas** — `docs/gotchas-1-20.md`, `docs/gotchas-21-45.md`, `docs/gotchas-46-63.md`, `docs/gotchas-64-69.md`, `docs/gotchas-70-78.md` |
+| about to change a behavior you do not understand | **the gotchas** — `docs/gotchas-1-20.md`, `docs/gotchas-21-45.md`, `docs/gotchas-46-63.md`, `docs/gotchas-64-69.md`, `docs/gotchas-70-79.md` |
 
 Each map doc ends with a table of the **implementation folders** its module was cut into
 (§3 below): what each file in the folder holds and how long it is.
 
 Code comments cite `AGENTS.md gotcha N`. The numbers are unchanged from when the gotchas were
 one file: the list now lives in the five `docs/gotchas-*.md` slices (1–20, 21–45, 46–63,
-64–69, 70–78), and each slice says which part of the list it holds.
+64–69, 70–79), and each slice says which part of the list it holds.
 
 ## 3. The implementation folders
 

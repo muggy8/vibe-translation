@@ -30,6 +30,23 @@ const { fileExists, stageSourceFile } = require("../utils/fs");
 const { MANIFEST_SCHEMA, isVolumeArtifact } = require("./config");
 
 /**
+ * Is this name documentation about the folder rather than a book inside it?
+ *
+ * The default source folder (`epub_source/`) carries a README so a fresh clone knows
+ * what to drop there, and a series folder may carry one too. A README ends in `.md`,
+ * which is otherwise the shape of a staged book, so the two scans that decide "is this
+ * a source file?" have to say no to it explicitly — otherwise the file that explains
+ * the folder becomes volume 01.
+ *
+ * @param {string} name - A file name.
+ * @returns {boolean} true for README / readme.md / README.txt and nothing else.
+ */
+function isDocumentationFile(name) {
+  return /^readme(\.(md|txt|markdown))?$/i.test(name);
+}
+
+
+/**
  * Is this directory entry a book the intake could stage?
  *
  * `Dirent.isFile()` answers NO for a shortcut, and a staged book is now usually
@@ -45,6 +62,7 @@ function isSourceEntry(entry) {
   return (
     (entry.isFile() || entry.isSymbolicLink()) &&
     /\.(epub|txt|md)$/i.test(entry.name) &&
+    !isDocumentationFile(entry.name) &&
     !isVolumeArtifact(entry.name)
   );
 }
@@ -74,7 +92,10 @@ async function firstSourceInVolumeDir(volumeDir, folderName) {
     return null;
   }
   const sources = names.filter(
-    (name) => /\.(epub|txt|md)$/i.test(name) && !isVolumeArtifact(name)
+    (name) =>
+      /\.(epub|txt|md)$/i.test(name) &&
+      !isDocumentationFile(name) &&
+      !isVolumeArtifact(name)
   );
   if (sources.length === 0) return null;
   return orderBy(sources)[0];
@@ -259,6 +280,7 @@ function deriveSeriesName(volumes, seriesDir) {
 
 
 module.exports = {
+  isDocumentationFile,
   isSourceEntry,
   firstSourceInVolumeDir,
   buildDeterministicManifest,

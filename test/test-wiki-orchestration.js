@@ -50,6 +50,11 @@ process.env.QA_MAX_ITERATIONS = "4";
 process.env.ON_QA_LIMIT = "accept";
 process.env.ON_VOLUME_ERROR = "skip";
 process.env.ON_MISSING_PREVIOUS = "skip";
+// The task's own entry gate (validateRequiredEnv) demands a key even when every model call
+// below is stubbed. Pinned here rather than inherited: a test must run the same way with no
+// `.env` in the repo at all (a fresh clone, or a container), and it must never depend on
+// whatever the local `.env` happens to set.
+process.env.AI_API_KEY = "offline-test-key-not-a-real-endpoint";
 
 const childScenario = process.argv.find((a) => a.startsWith("--child="))?.replace("--child=", "") || null;
 

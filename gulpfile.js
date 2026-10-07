@@ -64,7 +64,9 @@
  *                                     # remaining steps run for un-monitored runs)
  */
 
-require("dotenv").config();
+// .env, then the one setting that has a default — both before any task module is
+// required, because several of them read these values at require time (AGENTS.md gotcha 79).
+require("./configs/env-defaults").bootstrapEnv();
 const fs = require("fs");
 const path = require("path");
 const { discoverSeries } = require("./get-translation-target");

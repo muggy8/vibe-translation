@@ -59,8 +59,10 @@
  */
 
 
-// The env file is read BEFORE anything that turns a knob into a value at require time.
-require("dotenv").config();
+// The env file is read BEFORE anything that turns a knob into a value at require time,
+// and so is the one knob that has a default: the step children inherit both, and
+// gulpfile.js reads the task modules only after this point (AGENTS.md gotcha 79).
+require("./configs/env-defaults").bootstrapEnv();
 
 const { main } = require("./index/main");
 

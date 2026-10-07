@@ -39,8 +39,15 @@ into a variable nothing ever used.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `SERIES_LOCATION` | — (required) | Folder holding the series — the intake agent explores it (volume folders, loose `.epub`/text files, art books, …) |
+| `SERIES_LOCATION` | `<repo>/epub_source` | Folder holding the series — the intake agent explores it (volume folders, loose `.epub`/text files, art books, …), and every artifact is written next to the books. **Unset, it is the repo's own `epub_source/` folder**, which ships empty with a README saying what to drop in: a clone can run without ever naming a path. The run says out loud when it used the default; set the variable and it is used exactly as written (a relative value stays relative). An empty source folder is not a silent zero-volume run — intake fails and names the folder it looked in. → gotcha 79 |
 | `SERIES_NAME` | — (optional) | Series name. Unset, the intake agent decides it from what the books say; set it and it **overrides** that decision (the agent is told to use it verbatim) |
+
+`SERIES_LOCATION` is the only setting with a default, and the default is applied at the top
+of every entry point (`configs/env-defaults.js`) rather than where the value is read —
+several task modules turn it into a constant when they are required, and a default applied
+later would be invisible to them (gotcha 79). In a container it is a path INSIDE the
+container; `epub_source` works there because `docker-compose.yml` mounts the repo's own
+folder at exactly that place (docs/docker.md).
 
 ### Series intake (`DISCOVER_*`)
 
