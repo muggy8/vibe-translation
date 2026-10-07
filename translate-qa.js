@@ -145,6 +145,98 @@ function reportVerifyStop({ reason, round, maxRounds, failed, noDraft }) {
   );
 }
 
+// ─── One round, in pieces ────────────────────────────────────────────────────
+
+/**
+ * The verify half of a round: the batch, then what it found in one line.
+ *
+ * @param {Function} verifyTask - `verifyTranslate` behind its hooks.
+ * @param {number} round - One-based round number.
+ * @param {number} maxRounds - The round limit, for the log line.
+ * @returns {Promise<{verified: number, passed: number, failed: number, skipped: number, noDraft: number, disputes: number}>}
+ *   The batch's counters, as `verify-translate` reported them.
+ */
+async function runVerifyBatch(verifyTask, round, maxRounds) {
+  console.log(`[translate-qa] round ${round}/${maxRounds} — verification batch…`);
+  const v = await verifyTask();
+  console.log(
+    `[translate-qa] round ${round}: ${v.verified} verified, ${v.passed} PASS, ${v.failed} FAIL, ` +
+      `${v.skipped} skipped (up to date), ${v.noDraft} without draft.` +
+      (v.disputes > 0
+        ? ` ${v.disputes} glossary dispute(s) open — the retranslate pass must keep those renderings; ` +
+          `run the glossary task to settle them.`
+        : "")
+  );
+  return v;
+}
+
+/**
+ * What one round did, as the run ledger records it.
+ *
+ * `retranslated` starts null so a round that stopped after the verify batch is distinguishable from a
+ * round that retranslated nothing — the two mean different things to whoever reads the ledger next.
+ *
+ * @param {number} round - One-based round number.
+ * @param {Object} v - The verify batch's counters.
+ * @returns {Object} The round record.
+ */
+function roundRecord(round, v) {
+  return {
+    round,
+    verified: v.verified,
+    passed: v.passed,
+    failed: v.failed,
+    skipped: v.skipped,
+    noDraft: v.noDraft,
+    ...(v.disputes > 0 ? { disputes: v.disputes } : {}),
+    retranslated: null,
+  };
+}
+
+/**
+ * The retranslate half of a round.
+ *
+ * @param {Function} retranslateTask - `retranslate` behind its hooks.
+ * @param {number} round - One-based round number.
+ * @param {number} failed - How many chapters the verify batch said need work.
+ * @returns {Promise<{retranslated: number}>} What the batch actually applied.
+ */
+async function runRetranslateBatch(retranslateTask, round, failed) {
+  console.log(`[translate-qa] round ${round} — retranslate batch (${failed} FAIL chapter(s))…`);
+  return retranslateTask();
+}
+
+/**
+ * End the loop the way a stop-decision ends it: write the translation report, then return.
+ *
+ * Every stop path writes the report. A loop that exits without it leaves the series with drafts whose
+ * state nothing describes, and the next step reads the report, not the drafts.
+ *
+ * @param {{seriesDir: string, manifest: Object, dryRun: boolean, rounds: Object[], reason: string}} opts
+ * @returns {Promise<{rounds: Object[], reason: string}>} The value the task returns.
+ */
+async function finishWithReport({ seriesDir, manifest, dryRun, rounds, reason }) {
+  await writeTranslationReport({ seriesDir, manifest, volumes: null, dryRun });
+  return { rounds, reason };
+}
+
+/**
+ * `--dry-run`: exactly one full round of prompt dumps, no model call.
+ *
+ * The sub-tasks make no AI calls in a dry run, and the hook runner skips hooks under `--dry-run`.
+ *
+ * @param {Function} verifyTask - `verifyTranslate` behind its hooks.
+ * @param {Function} retranslateTask - `retranslate` behind its hooks.
+ * @returns {Promise<{rounds: Object[], reason: string}>}
+ */
+async function previewOneRound(verifyTask, retranslateTask) {
+  console.log("[translate-qa] --dry-run: previewing one round (verify batch + retranslate batch).");
+  await verifyTask();
+  await retranslateTask();
+  console.log("[translate-qa] --dry-run preview complete.");
+  return { rounds: [], reason: "dry-run" };
+}
+
 // ─── Task entry ─────────────────────────────────────────────────────────────
 
 /**
@@ -152,7 +244,7 @@ function reportVerifyStop({ reason, round, maxRounds, failed, noDraft }) {
  *
  * @returns {Promise<{rounds: Array<{round: number, verified: number, passed: number, failed: number, skipped: number, noDraft: number, retranslated: number|null}>, reason: string}>}
  *   `reason` is one of "disabled", "dry-run", "all-pass", "round-limit",
- *   "stalled", "no-drafts"; `rounds` records each completed round's counters (the
+ *   "stalled", "missing-drafts"; `rounds` records each completed round's counters (the
  *   retranslate half of a round is null when the loop stopped after the
  *   verify batch).
  */
@@ -175,18 +267,7 @@ async function translateQa() {
   const verifyTask = withHooks("verify-translate", verifyTranslate);
   const retranslateTask = withHooks("retranslate", retranslate);
 
-  if (dryRun) {
-    // Preview exactly one full round: verify prompt dumps + retranslate
-    // prompt dumps (the sub-tasks make no AI calls; the hook runner skips
-    // hooks under --dry-run).
-    console.log(
-      "[translate-qa] --dry-run: previewing one round (verify batch + retranslate batch)."
-    );
-    await verifyTask();
-    await retranslateTask();
-    console.log("[translate-qa] --dry-run preview complete.");
-    return { rounds: [], reason: "dry-run" };
-  }
+  if (dryRun) return previewOneRound(verifyTask, retranslateTask);
 
   const maxRounds = qaMaxRounds();
   const seriesDir = process.env.SERIES_LOCATION;
@@ -201,26 +282,8 @@ async function translateQa() {
 
   const rounds = [];
   for (let round = 1; round <= maxRounds; round++) {
-    console.log(`[translate-qa] round ${round}/${maxRounds} — verification batch…`);
-    const v = await verifyTask();
-    console.log(
-      `[translate-qa] round ${round}: ${v.verified} verified, ${v.passed} PASS, ${v.failed} FAIL, ` +
-        `${v.skipped} skipped (up to date), ${v.noDraft} without draft.` +
-        (v.disputes > 0
-          ? ` ${v.disputes} glossary dispute(s) open — the retranslate pass must keep those renderings; ` +
-            `run the glossary task to settle them.`
-          : "")
-    );
-    const roundRec = {
-      round,
-      verified: v.verified,
-      passed: v.passed,
-      failed: v.failed,
-      skipped: v.skipped,
-      noDraft: v.noDraft,
-      ...(v.disputes > 0 ? { disputes: v.disputes } : {}),
-      retranslated: null,
-    };
+    const v = await runVerifyBatch(verifyTask, round, maxRounds);
+    const roundRec = roundRecord(round, v);
     rounds.push(roundRec);
 
     // Nothing to QA at all: no chapter has a draft. Re-running verify/retranslate
@@ -262,12 +325,10 @@ async function translateQa() {
         failed: v.failed,
         noDraft: v.noDraft,
       });
-      await writeTranslationReport({ seriesDir, manifest, volumes: null, dryRun });
-      return { rounds, reason: afterVerify.reason };
+      return await finishWithReport({ seriesDir, manifest, dryRun, rounds, reason: afterVerify.reason });
     }
 
-    console.log(`[translate-qa] round ${round} — retranslate batch (${v.failed} FAIL chapter(s))…`);
-    const r = await retranslateTask();
+    const r = await runRetranslateBatch(retranslateTask, round, v.failed);
     roundRec.retranslated = r.retranslated;
     const afterRetranslate = qaLoopDecision({ phase: "after-retranslate", retranslated: r.retranslated });
     if (afterRetranslate.stop) {
@@ -276,8 +337,7 @@ async function translateQa() {
           `already carries exactly those findings). Keeping the latest drafts; re-run with --force ` +
           `to retry.`
       );
-      await writeTranslationReport({ seriesDir, manifest, volumes: null, dryRun });
-      return { rounds, reason: "stalled" };
+      return await finishWithReport({ seriesDir, manifest, dryRun, rounds, reason: "stalled" });
     }
   }
 
