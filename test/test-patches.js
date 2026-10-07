@@ -279,6 +279,8 @@ async function scenarioBannedPathsNameTheirRule() {
     // A guard module's SPLIT LAYER is the guard: `utils/patches.js` is the cover of the
     // book, and the table that decides what this team may touch lives inside it.
     ["utils/patches/rules.js", "constraint-tables"],
+    ["utils/tickets/banned-options.js", "constraint-tables"],
+    ["utils/resume/menu.js", "constraint-tables"],
     ["test/test-tickets.js", "constraint-tests"],
     ["test/test-patches.js", "constraint-tests"],
     ["hooks/pre-glossary.sh", "edit-hooks"],
