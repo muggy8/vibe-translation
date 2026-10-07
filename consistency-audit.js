@@ -47,6 +47,7 @@ const { AGENT_TOOLS_NOTE, validateRequiredEnv, resolveRunSettings, structuralErr
 const { fileExists, assertWrote } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { getTranslationTarget } = require("./get-translation-target");
+const { readRunArgs } = require("./utils/series-run");
 const { sha256OfFile } = require("./utils/source");
 
 const clientDir = __dirname;
@@ -168,22 +169,198 @@ function provenanceMatches(sidecar, currentHashes) {
 }
 
 /**
+ * All four series-root artifacts must exist: the audit is a sign-off over the full set, not a
+ * partial check. The error names the task to run for each one, because "run the pipeline" is not an
+ * instruction an operator can act on at 3am.
+ *
+ * @param {string} seriesDir
+ * @returns {Promise<void>}
+ * @throws {Error} Naming every missing artifact and the task that produces it.
+ */
+async function requireAuditArtifacts(seriesDir) {
+  const missing = (
+    await Promise.all(
+      AUDIT_ARTIFACTS.map(async ([file, name]) =>
+        (await fileExists(path.join(seriesDir, file))) ? null : [file, name]
+      )
+    )
+  ).filter(Boolean);
+  if (missing.length === 0) return;
+  throw new Error(
+    `Cannot run the consistency audit — missing series-root artifact(s): ` +
+      `${missing.map(([file, name]) => `${file} (${name})`).join(", ")}. ` +
+      `Run the corresponding pre-production task(s) first (glossary / ` +
+      `character-voice / style-guide / jump-in-wiki) and re-run the pipeline.`
+  );
+}
+
+/**
+ * Whether the existing report still signs off the state on disk — a content check, not a timestamp
+ * check, so a restored or touched artifact (old mtime, backup copy) can never trick a stale report
+ * into passing. Reports from before the provenance sidecar existed (or with a corrupt one) fall back
+ * to the legacy "report newer than all artifacts" mtime check. No AI call.
+ *
+ * @param {string} reportFile
+ * @param {string} seriesDir
+ * @returns {Promise<boolean>} True when the audit can be skipped.
+ */
+async function auditIsFresh(reportFile, seriesDir) {
+  const currentHashes = await hashAuditArtifacts(seriesDir);
+  const sidecar = await loadAuditProvenance(reportFile);
+
+  if (sidecar) {
+    if (provenanceMatches(sidecar, currentHashes)) {
+      console.log(
+        `consistency-report.md fingerprints all four artifacts — skipping ` +
+          `(use --force to re-audit).`
+      );
+      return true;
+    }
+    const stale = AUDIT_ARTIFACTS.filter(
+      ([file]) => sidecar.artifactHashes[file] !== currentHashes[file]
+    ).map(([file]) => file);
+    console.log(
+      `consistency-report.md is stale (changed artifact(s): ${stale.join(", ")}) — re-auditing.`
+    );
+    return false;
+  }
+
+  const reportMtime = (await fs.stat(reportFile)).mtimeMs;
+  const staleInputs = (
+    await Promise.all(
+      AUDIT_ARTIFACTS.map(async ([file]) => {
+        const st = await fs.stat(path.join(seriesDir, file));
+        return st.mtimeMs > reportMtime ? file : null;
+      })
+    )
+  ).filter(Boolean);
+  if (staleInputs.length === 0) {
+    console.log(
+      `consistency-report.md is newer than all four artifacts (no provenance sidecar — legacy check) — skipping ` +
+        `(use --force to re-audit).`
+    );
+    return true;
+  }
+  console.log(
+    `consistency-report.md is stale (newer artifact(s): ${staleInputs.join(", ")}) — re-auditing.`
+  );
+  return false;
+}
+
+/**
+ * The auditor's write gate: it must be able to READ anywhere (it consults the volume folders for
+ * context) but may WRITE only the report. The base gate confines writes to the series root; this
+ * ANDs it with a single-file check so the four artifacts under audit are genuinely read-only — a
+ * wider gate would let the agent "fix" an artifact by overwriting it, corrupting the very thing it
+ * is judging.
+ *
+ * @param {string} seriesDir
+ * @param {Object} fsGate - The harness's gated file tools.
+ * @returns {(call: Object) => boolean}
+ */
+function auditorApprove(seriesDir, fsGate) {
+  const reportResolved = path.resolve(seriesDir, REPORT_FILE);
+  return (call) => {
+    if (!fsGate.approve(call)) return false;
+    if (call.toolName === "writeFile" || call.toolName === "editFile") {
+      const resolved = path.resolve(seriesDir, typeof call.input?.filePath === "string" ? call.input.filePath : "");
+      return resolved === reportResolved;
+    }
+    return true; // reads pass; deleteFile is already denied by the base gate
+  };
+}
+
+/**
+ * Run the audit agent and check that it actually produced the report.
+ *
+ * @param {{seriesDir: string, systemPrompt: string, turnPrompt: string, fsGate: Object, reportFile: string}} args
+ * @returns {Promise<void>}
+ */
+async function runAuditAgent({ seriesDir, systemPrompt, turnPrompt, fsGate, reportFile }) {
+  const auditor = await harness.createAgentHandle({
+    name: "consistency-auditor",
+    systemPrompt: systemPrompt + AGENT_TOOLS_NOTE,
+    tools: fsGate.tools,
+    approve: auditorApprove(seriesDir, fsGate),
+    cwd: seriesDir,
+    maxSteps: MAX_STEPS,
+  });
+  try {
+    const result = await auditor.sendTurn(turnPrompt, { label: "consistency-audit" });
+    assertRealToolCalls(result, "the audit agent");
+    await assertWrote(reportFile, "the audit agent");
+  } finally {
+    await auditor.close();
+  }
+}
+
+/**
+ * The audited state must be exactly what was hashed before the agent ran. A report signs off a
+ * specific state; if that state moved while the audit was in flight, the report describes a world
+ * that no longer exists — and the next skip-check would treat it as current.
+ *
+ * (The write gate makes agent tampering impossible; this is the belt to the braces, and it also
+ * catches an external writer.)
+ *
+ * @param {string} seriesDir
+ * @param {Object<string, string>} hashesBefore
+ * @returns {Promise<Object<string, string>>} The hashes after the run, for the provenance sidecar.
+ * @throws {Error} A structural one: the audit is void.
+ */
+async function assertAuditedStateUnchanged(seriesDir, hashesBefore) {
+  const hashesAfter = await hashAuditArtifacts(seriesDir);
+  const tampered = AUDIT_ARTIFACTS.filter(([file]) => hashesAfter[file] !== hashesBefore[file]).map(
+    ([f, name]) => name
+  );
+  if (tampered.length === 0) return hashesAfter;
+  throw structuralError(
+    `The audit is void: ${tampered.join(", ")} changed while the audit agent was running ` +
+      `(its hash before the run differs from the hash after). The report signs off a ` +
+      `state that no longer exists on disk. Re-run "npx gulp consistency-audit --force" ` +
+      `once the artifacts are stable.`
+  );
+}
+
+/**
+ * Log the verdict. The report is the deliverable: a FAIL is logged loudly but does not fail the
+ * task, because the artifacts stay on disk and a fixer re-runs the offending task(s) and re-audits
+ * with --force.
+ *
+ * @param {string} reportFile
+ * @returns {Promise<void>}
+ */
+async function logAuditVerdict(reportFile) {
+  const report = await fs.readFile(reportFile, "utf8");
+  const verdictMatch = report.match(/\*\*(PASS|FAIL)\*\*/);
+  const verdict = verdictMatch ? verdictMatch[1] : "UNPARSED";
+  console.log(
+    `Consistency audit complete — verdict: ${verdict} → ${reportFile}` +
+      (verdict === "FAIL"
+        ? "\n  The audit found blocking inconsistencies. Fix the flagged artifacts " +
+          "(re-run the offending task), then re-audit with --force before " +
+          "translation."
+        : verdict === "PASS"
+          ? "\n  The four artifacts are consistent — the series is signed off for translation."
+          : "\n  Could not parse the verdict from the report — review it manually.")
+  );
+}
+
+/**
  * The gulp task entry point for the consistency-audit workflow.
  */
 async function consistencyAudit() {
-  const dryRun = process.argv.includes("--dry-run");
-  const force = process.argv.includes("--force");
+  const { dryRun, force } = readRunArgs();
   console.log("consistency-audit task starting...");
   validateRequiredEnv({ dryRun });
   // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
   const manifest = await getTranslationTarget({ dryRun });
-  // Series name + languages: .env override > the intake manifest's decision >
-  // the default (see resolveRunSettings in configs/shared.js).
+  // Series name + languages: .env override > the intake manifest's decision > the default (see
+  // resolveRunSettings in configs/shared.js).
   const runSettings = resolveRunSettings(manifest);
-  // Use the module-level seriesDir (SERIES_LOCATION) — NOT manifest.seriesLocation.
-  // That field is provenance metadata (see the identical note in glossary.js /
-  // character-voice.js): a Windows-generated "C:\..." path is not absolute on
-  // Linux and would make every file op resolve relative to the CWD.
+  // Use the module-level seriesDir (SERIES_LOCATION) — NOT manifest.seriesLocation. That field is
+  // provenance metadata (see the identical note in glossary.js / character-voice.js): a
+  // Windows-generated "C:\..." path is not absolute on Linux and would make every file op resolve
+  // relative to the CWD.
   const values = {
     SOURCE_NAME: runSettings.seriesName,
     VOLUME_COUNT: String(manifest.volumes.length),
@@ -206,142 +383,30 @@ async function consistencyAudit() {
     return;
   }
 
-  // All four artifacts must exist — the audit is a sign-off over the full set.
-  const missing = (
-    await Promise.all(
-      AUDIT_ARTIFACTS.map(async ([file, name]) =>
-        (await fileExists(path.join(seriesDir, file))) ? null : [file, name]
-      )
-    )
-  ).filter(Boolean);
-  if (missing.length > 0) {
-    throw new Error(
-      `Cannot run the consistency audit — missing series-root artifact(s): ` +
-        `${missing.map(([file, name]) => `${file} (${name})`).join(", ")}. ` +
-        `Run the corresponding pre-production task(s) first (glossary / ` +
-        `character-voice / style-guide / jump-in-wiki) and re-run the pipeline.`
-    );
-  }
+  // The audit is a sign-off over the full set.
+  await requireAuditArtifacts(seriesDir);
 
-  // Idempotency: the report is valid while its provenance sidecar still
-  // fingerprints the four artifacts EXACTLY (a content check — a restored /
-  // touched artifact with an old mtime can never pass it). Reports from
-  // before the sidecar existed (or with a corrupt one) fall back to the
-  // legacy "report newer than all artifacts" mtime check. No AI call.
-  if (!force && (await fileExists(reportFile))) {
-    const currentHashes = await hashAuditArtifacts(seriesDir);
-    const sidecar = await loadAuditProvenance(reportFile);
-    if (sidecar) {
-      if (provenanceMatches(sidecar, currentHashes)) {
-        console.log(
-          `consistency-report.md fingerprints all four artifacts — skipping ` +
-            `(use --force to re-audit).`
-        );
-        return;
-      }
-      const stale = AUDIT_ARTIFACTS.filter(
-        ([file]) => sidecar.artifactHashes[file] !== currentHashes[file]
-      ).map(([file]) => file);
-      console.log(
-        `consistency-report.md is stale (changed artifact(s): ${stale.join(", ")}) — re-auditing.`
-      );
-    } else {
-      const reportMtime = (await fs.stat(reportFile)).mtimeMs;
-      const staleInputs = (
-        await Promise.all(
-          AUDIT_ARTIFACTS.map(async ([file]) => {
-            const st = await fs.stat(path.join(seriesDir, file));
-            return st.mtimeMs > reportMtime ? file : null;
-          })
-        )
-      ).filter(Boolean);
-      if (staleInputs.length === 0) {
-        console.log(
-          `consistency-report.md is newer than all four artifacts (no provenance sidecar — legacy check) — skipping ` +
-            `(use --force to re-audit).`
-        );
-        return;
-      }
-      console.log(
-        `consistency-report.md is stale (newer artifact(s): ${staleInputs.join(", ")}) — re-auditing.`
-      );
-    }
-  }
+  // Idempotency: skip while the report still fingerprints the four artifacts exactly.
+  if (!force && (await fileExists(reportFile)) && (await auditIsFresh(reportFile, seriesDir))) return;
 
-  // The auditor's sandbox: it must be able to READ anywhere (it consults the
-  // volume folders for context) but may WRITE only the report. The base gate
-  // confines writes to the series root; we AND it with a single-file check so
-  // the four artifacts under audit are genuinely read-only (a wider gate would
-  // let the agent "fix" an artifact by overwriting it, corrupting the very
-  // thing it is judging).
   const fsGate = await harness.createGatedFsTools({ cwd: seriesDir, allowedDirs: [seriesDir] });
-  const reportResolved = path.resolve(seriesDir, REPORT_FILE);
-  const auditorApprove = (call) => {
-    if (!fsGate.approve(call)) return false;
-    if (call.toolName === "writeFile" || call.toolName === "editFile") {
-      const resolved = path.resolve(seriesDir, typeof call.input?.filePath === "string" ? call.input.filePath : "");
-      return resolved === reportResolved;
-    }
-    return true; // reads pass; deleteFile is already denied by the base gate
-  };
 
-  // Hash the four artifacts BEFORE the agent runs. A report signs off a
-  // specific state; if the state changes while the audit is in flight, the
-  // report is about a different world than the one on disk when the next
-  // skip-check reads it. (The sandbox above makes agent tampering impossible;
-  // this is the belt to the braces — it also catches an external writer.)
+  // Hash the four artifacts BEFORE the agent runs, so the report can be proved to describe the state
+  // it was written against.
   const hashesBefore = await hashAuditArtifacts(seriesDir);
 
-  const auditor = await harness.createAgentHandle({
-    name: "consistency-auditor",
-    systemPrompt: systemPrompt + AGENT_TOOLS_NOTE,
-    tools: fsGate.tools,
-    approve: auditorApprove,
-    cwd: seriesDir,
-    maxSteps: MAX_STEPS,
-  });
-  try {
-    const result = await auditor.sendTurn(turnPrompt, { label: "consistency-audit" });
-    assertRealToolCalls(result, "the audit agent");
-    await assertWrote(reportFile, "the audit agent");
-  } finally {
-    await auditor.close();
-  }
+  await runAuditAgent({ seriesDir, systemPrompt, turnPrompt, fsGate, reportFile });
 
-  // The audited state must be exactly what we hashed before the agent ran.
-  const hashesAfter = await hashAuditArtifacts(seriesDir);
-  const tampered = AUDIT_ARTIFACTS.filter(([file]) => hashesAfter[file] !== hashesBefore[file]).map(([f, name]) => name);
-  if (tampered.length > 0) {
-    throw structuralError(
-      `The audit is void: ${tampered.join(", ")} changed while the audit agent was running ` +
-        `(its hash before the run differs from the hash after). The report signs off a ` +
-        `state that no longer exists on disk. Re-run "npx gulp consistency-audit --force" ` +
-        `once the artifacts are stable.`
-    );
-  }
+  const hashesAfter = await assertAuditedStateUnchanged(seriesDir, hashesBefore);
 
-  // Record the fingerprints of the state this report signs off, so the next
-  // run can skip deterministically (best-effort — a failure only means the
-  // next run falls back to the legacy mtime check).
+  // Record the fingerprints of the state this report signs off, so the next run can skip
+  // deterministically (best-effort — a failure only means the next run falls back to the legacy mtime
+  // check).
   await writeAuditProvenance(reportFile, hashesAfter);
 
-  // Log the verdict (the report is the deliverable — a FAIL is logged loudly
-  // but does not fail the task: the artifacts stay on disk and a fixer re-runs
-  // the offending task(s), then `npx gulp consistency-audit --force`).
-  const report = await fs.readFile(reportFile, "utf8");
-  const verdictMatch = report.match(/\*\*(PASS|FAIL)\*\*/);
-  const verdict = verdictMatch ? verdictMatch[1] : "UNPARSED";
-  console.log(
-    `Consistency audit complete — verdict: ${verdict} → ${reportFile}` +
-      (verdict === "FAIL"
-        ? "\n  The audit found blocking inconsistencies. Fix the flagged artifacts " +
-          "(re-run the offending task), then re-audit with --force before " +
-          "translation."
-        : verdict === "PASS"
-          ? "\n  The four artifacts are consistent — the series is signed off for translation."
-          : "\n  Could not parse the verdict from the report — review it manually.")
-  );
+  await logAuditVerdict(reportFile);
 }
+
 
 // ─── Exports ────────────────────────────────────────────────────────────────
 
