@@ -109,16 +109,23 @@ const projectRoot = path.join(__dirname, "..");
 
 for (const [file, taskName] of TASK_FILES) {
   const src = readModuleLayer(projectRoot, file);
+  // The volume loop is now shared for the stages whose loop is the ordinary "walk the volumes in
+  // reading order" shape (utils/series-run.js). Either way the task has to NAME ITSELF: a summary
+  // that names the wrong stage is how a run log blames the wiki for a glossary that broke.
+  const usesSharedLoop = /require\("\.{1,2}\/utils\/series-run"\)/.test(src);
+
   assert.ok(
     // The path is relative to wherever the code lives: a module inside glossary/
     // reaches the same file as "../configs/shared".
-    /require\("\.{1,2}\/configs\/shared"\)/.test(src) && /volumeFailureError/.test(src),
-    `${file} imports volumeFailureError from configs/shared`
+    usesSharedLoop ||
+      (/require\("\.{1,2}\/configs\/shared"\)/.test(src) && /volumeFailureError/.test(src)),
+    `${file} reaches the volume-failure gate — its own copy or through the shared volume loop`
   );
   assert.ok(
-    new RegExp(`volumeFailureError\\("${taskName}"`).test(src),
+    new RegExp(`(volumeFailureError|runVolumeSeries)\\("${taskName}"`).test(src),
     `${file} builds its failure summary under its own task name`
   );
+  if (usesSharedLoop) continue;
   assert.ok(
     /if \(volumeError\) \{?\s*throw/.test(src),
     `${file} throws the summary (a summary that is only logged is the original bug)`
@@ -128,6 +135,16 @@ for (const [file, taskName] of TASK_FILES) {
     /isStructuralError\(err\)/.test(src),
     `${file} treats a structural failure as un-skippable even with ON_VOLUME_ERROR=skip`
   );
+}
+
+// The shared volume loop carries the same guarantees for every task that uses it. Pinned here rather
+// than per task, because a guarantee moved into a shared helper is only real if the helper still
+// holds it.
+{
+  const src = fs.readFileSync(path.join(__dirname, "..", "utils", "series-run", "loop.js"), "utf8");
+  assert.ok(/volumeFailureError\(taskName/.test(src), "the shared loop builds the summary under the caller's task name");
+  assert.ok(/isStructuralError\(err\)/.test(src), "the shared loop never skips a structural failure");
+  assert.ok(/if \(volumeError\) throw volumeError/.test(src), "the shared loop throws the summary, not just logs it");
 }
 
 // The same rule at the STEP level: the default run's ON_TASK_ERROR=continue must
