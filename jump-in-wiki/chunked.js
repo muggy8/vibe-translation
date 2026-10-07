@@ -16,7 +16,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { ON_QA_LIMIT } = require("../configs/shared");
-const { fileExists } = require("../utils/fs");
+const { fileExists, scaffoldStub } = require("../utils/fs");
 const { assertRealToolCalls } = require("../utils/agents");
 const { runPerChapterQaLoop, runAuthorStage } = require("../utils/qa-loop");
 const { validatorMaxStepsFor, findingsMergeMaxStepsFor } = require("../utils/prompt");
@@ -37,7 +37,7 @@ const { wikiAcceptanceCheck } = require("./acceptance");
  * @param {WikiVolumeCtx} ctx - The volume context (must include bundle).
  */
 async function runChunkedVolumeAgent(ctx) {
-  const { values, bundle, volumeDir, wikiOutputFile, sharedWikiOutputFile } = ctx;
+  const { values, bundle, volumeDir } = ctx;
   console.log(
     `Volume ${values.INSTALLMENT_NUMBER}: chapter-by-chapter fallback ` +
       `(${bundle.segments.length} segments, ${bundle.wholeChars} chars whole)...`
@@ -45,76 +45,111 @@ async function runChunkedVolumeAgent(ctx) {
   const fsGate = await harness.createGatedFsTools({ cwd: volumeDir, allowedDirs: [volumeDir] });
   ctx.fsGate = fsGate;
 
-  // Remove stale strays from earlier runs (agent name drift).
-  for (const stray of [
-    `jump-in-wiki-${values.INSTALLMENT_NUMBER}.md`,
-    "jump-in-wiki-shared.md",
-  ]) {
+  await removeStaleWikiStrays(ctx);
+
+  // Per-chapter section generation (fresh author agent per chapter).
+  for (let si = 0; si < bundle.segments.length; si++) {
+    await writeChapterSection(ctx, fsGate, bundle.segments[si], si);
+  }
+
+  // Merge pass: assemble wiki.md + shared-wiki.md from the sections.
+  await mergeChapterSections(ctx, fsGate);
+
+  // QA loop: per-chapter validation partials → findings merge → acceptance.
+  await runChunkedQaLoop(ctx);
+}
+
+/**
+ * Delete the files an earlier run left under a name this run does not write.
+ *
+ * The wiki's whole-installment path writes `jump-in-wiki-NN.md` / `jump-in-wiki-shared.md`; the
+ * chapter-by-chapter path writes `wiki.md` / `shared-wiki.md`. Whichever path a volume took before,
+ * the other path's leftovers sit in the same folder looking like finished deliverables, and the
+ * artifact assessment counts them (gotcha 58).
+ *
+ * @param {WikiVolumeCtx} ctx
+ * @returns {Promise<void>}
+ */
+async function removeStaleWikiStrays(ctx) {
+  const { values, volumeDir } = ctx;
+  for (const stray of [`jump-in-wiki-${values.INSTALLMENT_NUMBER}.md`, "jump-in-wiki-shared.md"]) {
     const strayPath = path.join(volumeDir, stray);
     if (await fileExists(strayPath)) {
       await fs.rm(strayPath);
       console.log(`Removed the stale file "${stray}" (leftover from a previous run).`);
     }
   }
+}
 
-  // Per-chapter section generation (fresh author agent per chapter).
-  for (let si = 0; si < bundle.segments.length; si++) {
-    const segment = bundle.segments[si];
-    const sectionFile = path.join(volumeDir, `wiki-${segment.id}.md`);
-    if (!(await fileExists(sectionFile))) {
-      await fs.writeFile(
-        sectionFile,
-        `(stub — the agent replaces this with the complete wiki section for chapter ${segment.id} of volume ${values.INSTALLMENT_NUMBER})\n`,
-        "utf8"
-      );
+/**
+ * One chapter's wiki section, written by a fresh author agent that sees the previous chapter's
+ * section for continuity and the shared wiki read-only.
+ *
+ * @param {WikiVolumeCtx} ctx
+ * @param {{tools: Object, approve: Function}} fsGate - The volume's sandbox gate.
+ * @param {import("../types").SourceSegment} segment - The chapter being read.
+ * @param {number} si - Zero-based position in reading order.
+ * @returns {Promise<void>}
+ * @throws {Error} When the chapter's section is still missing, empty, or the stub after the recovery turn.
+ */
+async function writeChapterSection(ctx, fsGate, segment, si) {
+  const { values, bundle, volumeDir } = ctx;
+  const sectionFile = path.join(volumeDir, `wiki-${segment.id}.md`);
+  await scaffoldStub(
+    sectionFile,
+    `stub — the agent replaces this with the complete wiki section for chapter ${segment.id} of volume ${values.INSTALLMENT_NUMBER}`
+  );
+  console.log(
+    `Volume ${values.INSTALLMENT_NUMBER}: chapter ${segment.id} (${segment.title}), ` +
+      `${si + 1}/${bundle.segments.length} — writing the wiki section (author agent)...`
+  );
+  await runAuthorStage(
+    {
+      name: `wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+      systemPrompt: buildWikiAuthorSystemPrompt(ctx),
+      tools: fsGate.tools,
+      approve: fsGate.approve,
+      cwd: volumeDir,
+      maxSteps: 40,
+    },
+    {
+      prompt: buildWikiSectionTurnPrompt(ctx, segment, si),
+      label: `jump-in-wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+      who: `the section author agent (chapter ${segment.id})`,
+      writesTo: sectionFile,
+      recoveryPrompt: (hasSection) =>
+        hasSection
+          ? `You were asked to write this chapter's wiki section to "wiki-${segment.id}.md" using writeFile, but you replied with the content in your chat message instead. Please write the file using writeFile now with the exact same content.`
+          : `You produced no output. Please write this chapter's wiki section to "wiki-${segment.id}.md" using writeFile now.`,
+      recoveryLabel: `jump-in-wiki-section-recovery-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+      recoveryWho: `the section author agent (chapter ${segment.id}, recovery)`,
+      // Hard stop: a chapter section left as a stub would be merged straight into
+      // wiki.md / shared-wiki.md as finished work.
+      verifyOutput: true,
+      assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
     }
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: chapter ${segment.id} (${segment.title}), ` +
-        `${si + 1}/${bundle.segments.length} — writing the wiki section (author agent)...`
-    );
-    await runAuthorStage(
-      {
-        name: `wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}`,
-        systemPrompt: buildWikiAuthorSystemPrompt(ctx),
-        tools: fsGate.tools,
-        approve: fsGate.approve,
-        cwd: volumeDir,
-        maxSteps: 40,
-      },
-      {
-        prompt: buildWikiSectionTurnPrompt(ctx, segment, si),
-        label: `jump-in-wiki-section-${values.INSTALLMENT_NUMBER}-${segment.id}`,
-        who: `the section author agent (chapter ${segment.id})`,
-        writesTo: sectionFile,
-        recoveryPrompt: (hasSection) =>
-          hasSection
-            ? `You were asked to write this chapter's wiki section to "wiki-${segment.id}.md" using writeFile, but you replied with the content in your chat message instead. Please write the file using writeFile now with the exact same content.`
-            : `You produced no output. Please write this chapter's wiki section to "wiki-${segment.id}.md" using writeFile now.`,
-        recoveryLabel: `jump-in-wiki-section-recovery-${values.INSTALLMENT_NUMBER}-${segment.id}`,
-        recoveryWho: `the section author agent (chapter ${segment.id}, recovery)`,
-        // Hard stop: a chapter section left as a stub would be merged straight into
-        // wiki.md / shared-wiki.md as finished work.
-        verifyOutput: true,
-        assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
-      }
-    );
-  }
+  );
+}
 
-  // Merge pass: assemble wiki.md + shared-wiki.md from the sections.
-  if (!(await fileExists(wikiOutputFile))) {
-    await fs.writeFile(
-      wikiOutputFile,
-      `(stub — the merge pass replaces this with the complete volume wiki for volume ${values.INSTALLMENT_NUMBER})\n`,
-      "utf8"
-    );
-  }
-  if (!(await fileExists(sharedWikiOutputFile))) {
-    await fs.writeFile(
-      sharedWikiOutputFile,
-      `(stub — the merge pass replaces this with the complete shared wiki)\n`,
-      "utf8"
-    );
-  }
+/**
+ * Assemble the volume's two deliverables from the chapter sections.
+ *
+ * The wiki is the exception among the four volume tasks: instead of carrying the previous chapter's
+ * artifact forward into the next chapter's prompt, the sections are merged once at the end, which is
+ * why both deliverables are scaffolded here and both are refused if the merge leaves them as stubs.
+ *
+ * @param {WikiVolumeCtx} ctx
+ * @param {{tools: Object, approve: Function}} fsGate - The volume's sandbox gate.
+ * @returns {Promise<void>}
+ * @throws {Error} When either deliverable is still missing, empty, or the stub after the recovery turn.
+ */
+async function mergeChapterSections(ctx, fsGate) {
+  const { values, volumeDir, wikiOutputFile, sharedWikiOutputFile } = ctx;
+  await scaffoldStub(
+    wikiOutputFile,
+    `stub — the merge pass replaces this with the complete volume wiki for volume ${values.INSTALLMENT_NUMBER}`
+  );
+  await scaffoldStub(sharedWikiOutputFile, "stub — the merge pass replaces this with the complete shared wiki");
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: merging the chapter sections into the wiki (merge agent)...`);
   await runAuthorStage(
     {
@@ -142,9 +177,6 @@ async function runChunkedVolumeAgent(ctx) {
       assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
     }
   );
-
-  // QA loop: per-chapter validation partials → findings merge → acceptance.
-  await runChunkedQaLoop(ctx);
 }
 
 

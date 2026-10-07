@@ -18,7 +18,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { ON_QA_LIMIT } = require("../configs/shared");
-const { fileExists, assertRealOutput } = require("../utils/fs");
+const { fileExists, assertRealOutput, scaffoldStub } = require("../utils/fs");
 const { assertRealToolCalls } = require("../utils/agents");
 const { validatorMaxStepsFor } = require("../utils/prompt");
 const { runSharedQaLoop, runWriteTurn } = require("../utils/qa-loop");
@@ -90,22 +90,13 @@ async function runVolumeAgent(ctx) {
     } else {
       console.log("Calling the AI for initial wiki generation (author agent)...");
       // Scaffold stubs: pre-create both output files so the agent overwrites
-      // existing files (a stronger name anchor than "create a new file") and
-      // a crashed run leaves identifiable stubs instead of nothing.
-      if (!(await fileExists(wikiOutputFile))) {
-        await fs.writeFile(
-          wikiOutputFile,
-          `(stub — the agent replaces this with the complete volume wiki for volume ${values.INSTALLMENT_NUMBER})\n`,
-          "utf8"
-        );
-      }
-      if (!(await fileExists(sharedWikiOutputFile))) {
-        await fs.writeFile(
-          sharedWikiOutputFile,
-          `(stub — the agent replaces this with the complete shared wiki)\n`,
-          "utf8"
-        );
-      }
+      // existing files (a stronger name anchor than "create a new file") and a
+      // crashed run leaves identifiable stubs instead of nothing.
+      await scaffoldStub(
+        wikiOutputFile,
+        `stub — the agent replaces this with the complete volume wiki for volume ${values.INSTALLMENT_NUMBER}`
+      );
+      await scaffoldStub(sharedWikiOutputFile, "stub — the agent replaces this with the complete shared wiki");
       await runWriteTurn(author, {
         prompt: buildWikiAuthorTurnPrompt(ctx),
         label: `jump-in-wiki-generate-${values.INSTALLMENT_NUMBER}`,

@@ -44,6 +44,29 @@ async function assertWrote(filePaths, who) {
 const STUB_MARKER = "(stub —";
 
 /**
+ * Pre-write the scaffold stub a pass is about to replace, unless something is already there.
+ *
+ * Two reasons the workflows do this: an agent OVERWRITING a named file is a stronger anchor than one
+ * told to create a file, and a run that dies part-way leaves a file that says it is scaffolding rather
+ * than leaving nothing at all. The second reason is why the marker is a constant — `isPlaceholderContent`
+ * refuses a stub that survived into the output, so the writer and the detector must agree on the shape,
+ * and they live in the same file so they cannot drift.
+ *
+ * An existing file is left alone: a previous attempt's real work is not scaffolding, and overwriting it
+ * with a stub would turn progress into a hole the next check reports as a failure.
+ *
+ * @param {string} filePath - The file the pass is about to replace.
+ * @param {string} stubLine - The line naming what replaces it, without the surrounding parentheses.
+ * @returns {Promise<boolean>} True when the stub was written; false when the file already existed.
+ */
+async function scaffoldStub(filePath, stubLine) {
+  const exists = await fs.promises.stat(filePath).then(() => true, () => false);
+  if (exists) return false;
+  await fs.promises.writeFile(filePath, `(${stubLine})\n`, "utf8");
+  return true;
+}
+
+/**
  * Decide whether file content counts as "the agent did not actually write this".
  *
  * Three shapes qualify: the file is absent (null), it is empty or whitespace,
@@ -307,6 +330,7 @@ async function isPublishableArtifact(filePath, artifactName = "series artifact")
 module.exports = {
   STUB_MARKER,
   FALLBACK_MIN_CONTENT_CHARS,
+  scaffoldStub,
   assertWrote,
   assertRealOutput,
   assertWroteWithFallback,

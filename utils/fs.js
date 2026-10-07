@@ -24,6 +24,7 @@ module.exports = {
   shortcutTarget: exists.shortcutTarget,
   STUB_MARKER: outputChecks.STUB_MARKER,
   FALLBACK_MIN_CONTENT_CHARS: outputChecks.FALLBACK_MIN_CONTENT_CHARS,
+  scaffoldStub: outputChecks.scaffoldStub,
   assertWrote: outputChecks.assertWrote,
   assertRealOutput: outputChecks.assertRealOutput,
   assertWroteWithFallback: outputChecks.assertWroteWithFallback,
