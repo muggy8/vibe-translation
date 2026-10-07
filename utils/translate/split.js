@@ -285,6 +285,20 @@ function translateChunkCap() {
 
 
 /**
+ * The character rule that stands in when the token plan has nothing to work with.
+ *
+ * Only the FALLBACK now: the size rule is planChapterSplit (tokens, against this role's window and
+ * output cap). TRANSLATE_CHUNK_CHARS remains a hard ceiling when an operator sets it explicitly (see
+ * translateChunkCap) — arithmetic does not overrule a deliberate limit (gotcha 57).
+ * @returns {number} TRANSLATE_CHUNK_CHARS (default 24000, minimum 2000).
+ */
+function translateChunkChars() {
+  const parsed = parseInt(process.env.TRANSLATE_CHUNK_CHARS, 10);
+  return Number.isFinite(parsed) ? Math.max(2000, parsed) : 24000;
+}
+
+
+/**
  * The measured output ratio of the volumes this series has already translated.
  *
  * The pipeline's own past runs are the best available estimate of what the next
@@ -329,6 +343,77 @@ async function measureOutputRatio(volumeDirs, { sourceLanguage = "", targetLangu
   return { ratio: Math.min(measured, table * 1.5), chapters, sourceTokens, draftTokens };
 }
 
+// ─── The chapter planner (one rule, two stages) ──────────────────────────────
+
+
+/**
+ * Build the rule that decides how big a chapter part may be — in tokens, not characters.
+ *
+ * The translate stage and the retranslate stage MUST use the same rule: verify graded the chapter the
+ * translate stage produced, and a retranslate that cut the chapter differently would be re-scoring a
+ * different book. Having the two stages each carry their own copy is how that agreement quietly
+ * breaks.
+ *
+ * The old rule was one character constant for every chapter, every model and every language. Measured
+ * against the real series it split 55 of 133 chapters for no reason the numbers supported — and every
+ * split is a seam where the continuity tail has to rebuild the join and a name can drift between
+ * parts. planChapterSplit bounds a part by BOTH limits that actually exist: the request the server
+ * will admit, and the answer the output cap can hold.
+ *
+ * @param {{
+ *   refs: {background?: string, styleRules?: string, voiceNotes?: string},
+ *   template: string,
+ *   thinkingMode: string,
+ *   sourceLanguage: string,
+ *   targetLanguage: string,
+ *   previousVolumeDirs?: string[],
+ *   roleWindow: number,
+ *   outputReserve: number,
+ *   label?: string,
+ * }} input - The stage's references, its prompt template, and the role's context budget.
+ * @returns {Promise<{ split: (text: string, carry?: {continuityText?: string, terminologyLines?: string[], findingsText?: string}) => {parts: string[], plan: Object}, ratio: Object, thinkingFactor: number }>}
+ */
+async function createChapterPlanner(input) {
+  const { refs, template, thinkingMode, sourceLanguage, targetLanguage, roleWindow, outputReserve } = input;
+  const hardCap = translateChunkCap();
+  // The answer-size ratio, measured from this series' own earlier volumes when it has any (their
+  // sources and drafts are both on disk), else the per-pair table. Fail-open: the first volume gets
+  // the same assumption the old code made.
+  const ratio = await measureOutputRatio(input.previousVolumeDirs || [], { sourceLanguage, targetLanguage });
+  const outputRatio = ratio.ratio ?? outputRatioFor(sourceLanguage, targetLanguage);
+  const thinkingFactor = thinkingOutputFactor(thinkingMode);
+
+  /**
+   * Split one chapter by the token plan, falling back to the character rule only when the token rule
+   * has nothing to work with.
+   * @param {string} text - The chapter source text.
+   * @param {{continuityText?: string, terminologyLines?: string[], findingsText?: string}} [carry] - The reference material this chapter's prompt will carry.
+   * @returns {{parts: string[], plan: Object}}
+   */
+  const split = (text, { continuityText = "", terminologyLines = [], findingsText = "" } = {}) => {
+    const plan = planChapterSplit({
+      sourceText: text,
+      referenceTokens:
+        estimateTokens(terminologyLines.join("\n")) +
+        estimateTokens(refs.background || "") +
+        estimateTokens(refs.styleRules || "") +
+        estimateTokens(refs.voiceNotes || "") +
+        estimateTokens(continuityText),
+      findingsTokens: estimateTokens(findingsText),
+      instructionsTokens: estimateTokens(template) + 400,
+      roleWindow,
+      outputReserve,
+      outputRatio,
+      thinkingFactor,
+      hardCapChars: hardCap,
+    });
+    const limit = plan.maxChars > 0 ? plan.maxChars : translateChunkChars();
+    return { parts: splitChapter(text, limit), plan };
+  };
+
+  return { split, ratio, outputRatio, thinkingFactor, hardCap };
+}
+
 // ─── Reference extraction (glossary / style guide) ─────────────────────────
 
 
@@ -341,5 +426,7 @@ module.exports = {
   thinkingOutputFactor,
   planChapterSplit,
   translateChunkCap,
+  translateChunkChars,
+  createChapterPlanner,
   measureOutputRatio,
 };

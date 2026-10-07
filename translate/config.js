@@ -30,12 +30,13 @@ const translateTemplateFile = path.join(clientDir, "user-prompts", "translate.md
  * role's window and output cap). This number stands in when the token rule has
  * nothing to work with, and TRANSLATE_CHUNK_CHARS remains a hard ceiling when an
  * operator sets it explicitly (see translateChunkCap).
- * @returns {number} TRANSLATE_CHUNK_CHARS (default 24000, minimum 2000).
+ *
+ * The rule itself lives in utils/translate/split.js next to the token plan it
+ * falls back to, because the chapter planner needs it and a task module must not
+ * be imported by a shared helper. It is re-exported below so existing imports
+ * keep working.
  */
-function translateChunkChars() {
-  const parsed = parseInt(process.env.TRANSLATE_CHUNK_CHARS, 10);
-  return Number.isFinite(parsed) ? Math.max(2000, parsed) : 24000;
-}
+const { translateChunkChars } = require("../utils/translate");
 
 
 /**
