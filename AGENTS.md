@@ -73,9 +73,11 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
 - keep every exported name available from the barrel, including the re-exported helpers;
 - split along the seams the file already documents (its `// ─── Section ───` banners);
 - never move a **guard table** out of its module's protected paths: `utils/tickets/`,
-  `utils/resume/`, `utils/delivery-verify/`, `utils/ledger/`, `utils/runlock/`,
+  `utils/resume/`, `utils/delivery-verify`, `utils/ledger`, `utils/runlock`,
   `utils/patches/` are banned patch paths for the dev team, exactly like the single files
-  they replaced (`utils/patches/rules.js`);
+  they replaced (`utils/patches/rules.js`) — the ban covers the barrel and the folder alike,
+  and three of them are still single files today, so splitting one must not change what
+  the ban covers;
 - `__dirname` in a subfolder is the subfolder: a root-level task module needs a
   `projectRoot` alias passed down, a `utils/` module needs a `utilsDir` alias.
 
@@ -84,9 +86,9 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
 | `harness.js` | `ai/` (10 files) — **not** `harness/`, which holds the planned REPL/PTC documents |
 | `get-translation-target.js` | `intake/` |
 | `glossary.js`, `character-voice.js`, `style-guide.js`, `jump-in-wiki.js` | `glossary/`, `character-voice/`, `style-guide/`, `jump-in-wiki/` |
-| `translate.js`, `verify-translate.js`, `polish.js` | `translate/`, `verify-translate/`, `polish/` |
+| `translate.js`, `verify-translate.js`, `polish.js`, `retranslate.js` | `translate/`, `verify-translate/`, `polish/`, `retranslate/` |
 | `delivery.js` | `delivery/` |
-| `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js` | the matching folder under `utils/` |
+| `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js`, `utils/qa-loop.js`, `utils/series-run.js` | the matching folder under `utils/` |
 
 `test/module-layer.js` is the helper that lets a test which scans source text follow a module
 into its folder (`readModuleLayer(rootDir, "utils/translate.js")`).

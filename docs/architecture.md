@@ -51,14 +51,15 @@ Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md
    is never touched by a feedback pass. The loop mechanics (rolling window,
    state persistence, criterion check, recovery gating, the passing-grade
    re-grade, the no-op feedback stop, `ON_QA_LIMIT` policy)
-   run through the shared loop in `utils/qa-loop.js`; each task injects only
+   run through the shared loop in `utils/qa-loop/whole.js`; each task injects only
    its validator, acceptance check, feedback stage, feedback artifact list, and
    log lines. The four
-   CHUNKED (chapter-by-chapter) loops keep their own inline loop but call the
-   same `confirmExceptionalScore` and `confirmPassingScore` helpers and run the
-   same no-op check, so a top-band grade gets the same
-   temperature-0 confirmation everywhere and a consensus accepts the volume
-   before the expensive per-chapter feedback round.
+   CHUNKED (chapter-by-chapter) loops are the SAME loop with per-chapter stages —
+   `utils/qa-loop/chunked.js` — so the grading half, the consensus gates, the
+   no-op check and the `ON_QA_LIMIT` policy are one implementation for both modes
+   rather than two that have to be kept in step. A task supplies three stage
+   descriptions (validator / findings-merge / feedback: what to say, to whom, and
+   what each must leave on disk) plus its grader and its log lines.
 
    **A passing grade earns its remaining samples by re-grading, not by
    rewriting** (`confirmPassingScore`, `ACCEPTANCE_CONFIRM_ON_PASSING`, default
