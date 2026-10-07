@@ -82,16 +82,45 @@ function parseTerms(output) {
 function truncateGlossary(content, sourceText) {
   if (!content || content.length <= GLOSSARY_TRUNCATION_THRESHOLD) return content;
 
-  // Group the file into runs: a table (consecutive "|…" lines) or a single
-  // other line. Inside a table, line 0 is the column header and line 1 the
-  // |---| separator; everything after that is one term entry.
-  //
-  // (Rewritten: this helper used to split on "- Term:" list items, but the
-  // glossary the workflow prompts for is a set of Markdown TABLES
-  // (`| source | rendering | notes |`), so the split found zero entries and the
-  // helper returned the file unchanged no matter how big it got — the
-  // truncation AGENTS.md describes had never actually happened.)
-  const lines = content.split("\n");
+  const runs = splitIntoRuns(content.split("\n"));
+  const src = (sourceText || "").trim();
+  const rows = collectDataRows(runs, src);
+  if (rows.length <= GLOSSARY_TRUNCATION_MAX_ENTRIES) return content;
+
+  const keep = chooseRowsToKeep(rows, src);
+  const { lines, droppedSections } = renderKeptRuns(runs, keep);
+  const keptOccurs = rows.filter((r) => r.occurs === true && keep.has(`${r.runIdx}:${r.lineIdx}`)).length;
+
+  lines.splice(
+    1,
+    0,
+    "",
+    truncationNote({
+      total: rows.length,
+      kept: keep.size,
+      keptOccurs,
+      dropped: rows.length - keep.size,
+      droppedSections: droppedSections.size,
+      hasSource: Boolean(src),
+    })
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Group the file into runs: a table (consecutive "|…" lines) or a single other line. Inside a table,
+ * line 0 is the column header and line 1 the |---| separator; everything after that is one term entry.
+ *
+ * (Rewritten: this helper used to split on "- Term:" list items, but the glossary the workflow prompts
+ * for is a set of Markdown TABLES (`| source | rendering | notes |`), so the split found zero entries
+ * and the helper returned the file unchanged no matter how big it got — the truncation AGENTS.md
+ * describes had never actually happened.)
+ *
+ * @param {string[]} lines - The glossary file, split on newlines.
+ * @returns {Array<{kind: "table"|"line", block: string[], dataFrom?: number, section: number|null}>}
+ *   The runs, in document order. `section` on a table is the run index of the heading it sits under.
+ */
+function splitIntoRuns(lines) {
   const runs = [];
   let currentSection = null;
   for (let i = 0; i < lines.length; i++) {
@@ -114,10 +143,21 @@ function truncateGlossary(content, sourceText) {
     }
     runs.push({ kind: "line", block: [lines[i]] });
   }
+  return runs;
+}
 
-  // Every data row, tagged with the section heading it belongs to and whether
-  // its source term occurs in the text being translated.
-  const src = (sourceText || "").trim();
+/**
+ * Every data row in the file, tagged with the run it belongs to and whether its source term actually
+ * occurs in the text being processed.
+ *
+ * That last tag is the whole relevance rule: a row is worth showing the extractor when the volume in
+ * front of it contains the term, whatever position the row holds in the glossary.
+ *
+ * @param {Array<{kind: string, block: string[], dataFrom?: number}>} runs
+ * @param {string} src - The trimmed source text, or "" when none was given.
+ * @returns {Array<{runIdx: number, lineIdx: number, term: string, occurs: boolean|null}>}
+ */
+function collectDataRows(runs, src) {
   const rows = [];
   runs.forEach((run, runIdx) => {
     if (run.kind !== "table") return;
@@ -131,11 +171,20 @@ function truncateGlossary(content, sourceText) {
       });
     }
   });
-  const totalData = rows.length;
-  if (totalData <= GLOSSARY_TRUNCATION_MAX_ENTRIES) return content;
+  return rows;
+}
 
-  // Relevance first, document order within each group. Without a source text the
-  // old behavior is kept (the newest window, and the note says so).
+/**
+ * Which rows survive the window.
+ *
+ * Relevance first, document order within each group. Without a source text the old behavior is kept
+ * (the newest window, and the note says so).
+ *
+ * @param {Array<{runIdx: number, lineIdx: number, occurs: boolean|null}>} rows
+ * @param {string} src - The trimmed source text, or "".
+ * @returns {Set<string>} The `runIdx:lineIdx` keys of the rows to keep.
+ */
+function chooseRowsToKeep(rows, src) {
   const hasSource = Boolean(src);
   const ordered = hasSource
     ? [...rows].sort((a, b) => {
@@ -145,13 +194,20 @@ function truncateGlossary(content, sourceText) {
         return a.lineIdx - b.lineIdx;
       })
     : [...rows].reverse();
-  const keep = new Set(ordered.slice(0, GLOSSARY_TRUNCATION_MAX_ENTRIES).map((r) => `${r.runIdx}:${r.lineIdx}`));
-  const keptOccurs = ordered.slice(0, GLOSSARY_TRUNCATION_MAX_ENTRIES).filter((r) => r.occurs === true).length;
-  const dropped = totalData - keep.size;
+  return new Set(ordered.slice(0, GLOSSARY_TRUNCATION_MAX_ENTRIES).map((r) => `${r.runIdx}:${r.lineIdx}`));
+}
 
-  // Re-render the runs, keeping only the rows that survived, and dropping a
-  // heading whose tables lost every row.
-  const out = [];
+/**
+ * Re-render the runs keeping only the rows that survived, and dropping a heading whose tables lost
+ * every row — so the model is never told about a section it cannot see.
+ *
+ * @param {Array<{kind: string, block: string[], dataFrom?: number, section: number|null}>} runs
+ * @param {Set<string>} keep - The `runIdx:lineIdx` keys chosen by {@link chooseRowsToKeep}.
+ * @returns {{lines: string[], droppedSections: Set<number|null>}} The rendered file body, and the
+ *   headings that were dropped with it.
+ */
+function renderKeptRuns(runs, keep) {
+  const rendered = new Map();
   const droppedSections = new Set();
   for (const [runIdx, run] of runs.entries()) {
     if (run.kind !== "table") continue;
@@ -163,38 +219,43 @@ function truncateGlossary(content, sourceText) {
       droppedSections.add(run.section);
       continue;
     }
-    out.push({ runIdx, lines: [...run.block.slice(0, run.dataFrom), ...kept] });
-  }
-  const keptRunIdx = new Set(out.map((o) => o.runIdx));
-  const final = [];
-  for (const [runIdx, run] of runs.entries()) {
-    if (run.kind === "table") {
-      const rendered = out.find((o) => o.runIdx === runIdx);
-      if (rendered) final.push(...rendered.lines);
-      continue;
-    }
-    // A heading whose tables were truncated away entirely is dropped, so the
-    // model is not told about a section it cannot see.
-    if (/^#{1,6}\s+/.test(run.block[0].trim()) && droppedSections.has(runIdx)) continue;
-    final.push(...run.block);
+    rendered.set(runIdx, [...run.block.slice(0, run.dataFrom), ...kept]);
   }
 
-  const keptCount = totalData - dropped;
-  final.splice(
-    1,
-    0,
-    "",
-    src
-      ? `[TRUNCATED: this glossary has ${totalData} term rows. Showing ${keptCount} of them — every row ` +
-        `whose source term occurs in the text being translated (${keptOccurs} such row(s) are included), ` +
-        `then the rest in document order. ${dropped} row(s)${droppedSections.size ? ` and ${droppedSections.size} fully omitted section(s)` : ""} ` +
-        `are not shown; they are carried forward UNCHANGED in the file itself, so do not re-add a term ` +
-        `as new merely because it is absent from what you can see here.]`
-      : `[TRUNCATED: this glossary has ${totalData} term rows. Showing the ${keptCount} in document order; ` +
-        `${dropped} row(s)${droppedSections.size ? ` and ${droppedSections.size} fully omitted section(s)` : ""} are omitted. ` +
-        `Earlier entries are carried forward unchanged in the file itself — reconcile NEW terms against what is shown here.]`
-  );
-  return final.join("\n");
+  const lines = [];
+  for (const [runIdx, run] of runs.entries()) {
+    if (run.kind === "table") {
+      const block = rendered.get(runIdx);
+      if (block) lines.push(...block);
+      continue;
+    }
+    if (/^#{1,6}\s+/.test(run.block[0].trim()) && droppedSections.has(runIdx)) continue;
+    lines.push(...run.block);
+  }
+  return { lines, droppedSections };
+}
+
+/**
+ * The line the truncated copy announces itself with.
+ *
+ * It has to say what is missing AND that the missing rows still exist in the file: without the second
+ * half, an extractor seeing 200 of 445 rows reports the other 245 as brand-new terms, which is how
+ * volume after volume re-rediscovered its own protagonists.
+ *
+ * @param {{total: number, kept: number, keptOccurs: number, dropped: number, droppedSections: number, hasSource: boolean}} stats
+ * @returns {string} The note.
+ */
+function truncationNote({ total, kept, keptOccurs, dropped, droppedSections, hasSource }) {
+  const omitted = `${dropped} row(s)${droppedSections ? ` and ${droppedSections} fully omitted section(s)` : ""}`;
+  return hasSource
+    ? `[TRUNCATED: this glossary has ${total} term rows. Showing ${kept} of them — every row ` +
+      `whose source term occurs in the text being translated (${keptOccurs} such row(s) are included), ` +
+      `then the rest in document order. ${omitted} ` +
+      `are not shown; they are carried forward UNCHANGED in the file itself, so do not re-add a term ` +
+      `as new merely because it is absent from what you can see here.]`
+    : `[TRUNCATED: this glossary has ${total} term rows. Showing the ${kept} in document order; ` +
+      `${omitted} are omitted. ` +
+      `Earlier entries are carried forward unchanged in the file itself — reconcile NEW terms against what is shown here.]`;
 }
 
 

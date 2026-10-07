@@ -26,6 +26,15 @@ const { openEpub, isEpubPath, htmlToPlainText } = require("../utils/source");
 
 const { artbookMaxTextChars, minVolumeTextChars } = require("./config");
 
+/** Below this, the archive holds no real image payload at all (bytes from the zip's central directory). */
+const MIN_ARTBOOK_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/** Images must be at least this many times the text pages before the archive counts as image-dominated. */
+const ARTBOOK_IMAGE_RATIO = 20;
+
+/** More than this fraction replacement characters, and the "text" file is a binary file renamed. */
+const MAX_UNDECODABLE_TEXT_RATIO = 0.02;
+
 /**
  * Validate one volume's "is this actually a book?" judgment.
  *
@@ -102,83 +111,119 @@ function validateVolumeIntegrity(integrity, where) {
 async function checkVolumeSourceShape(seriesDir, volume) {
   const sourcePath = path.resolve(seriesDir, volume.sourceFile);
   const stats = { textChars: 0, imageBytes: 0, sections: 0 };
+  return isEpubPath(sourcePath)
+    ? checkArchiveSourceShape(volume, sourcePath, stats)
+    : checkTextSourceShape(volume, sourcePath, stats);
+}
 
-  if (isEpubPath(sourcePath)) {
-    let book = null;
-    try {
-      book = await openEpub(sourcePath);
-    } catch (err) {
-      return { ok: false, stats, problem: `"${volume.sourceFile}" will not open as an archive: ${err.message}` };
-    }
-    const sections = book.textItems || [];
-    stats.sections = sections.length;
-    if (sections.length === 0) {
-      return {
-        ok: false,
-        stats,
-        problem: `"${volume.sourceFile}" has no readable text sections at all — an archive with nothing to read is not a volume.`,
-      };
-    }
-    // Count the prose ACROSS THE BOOK, stopping as soon as it is obvious the book
-    // is a book. Sampling the first N sections is not a measurement: for a real
-    // novel those sections are the cover, the colophon, the caution page and the
-    // table of contents (observed live: a 151,245-character book sampled to
-    // 8,419, and all 17 volumes of a real series were rejected as art books).
-    const ceiling = artbookMaxTextChars();
-    let textChars = 0;
-    for (const section of sections) {
-      try {
-        const html = await book.zip.file(section.zipPath).async("string");
-        textChars += htmlToPlainText(html).length;
-      } catch {
-        /* an unreadable section just contributes nothing; the floors below catch it */
-      }
-      if (textChars > ceiling) break; // both checks below are already satisfied
-    }
-    stats.textChars = textChars;
-    const floor = minVolumeTextChars();
-    if (textChars < floor) {
-      return {
-        ok: false,
-        stats,
-        problem:
-          `"${volume.sourceFile}" yields only ${textChars} characters of text across ` +
-          `${sections.length} section(s) — under the ${floor}-character floor for ` +
-          `"this file contains a readable text at all".`,
-      };
-    }
-    // Art-book signal: BYTES compared against BYTES, and only when the prose is
-    // thin enough for the archive's composition to outweigh the agent's judgment.
-    // "the file is far bigger than its text" identifies nothing — a real light
-    // novel IS mostly image bytes (observed: a 9.6 MB book holding 575 KB of
-    // XHTML and 9.2 MB of illustration plates), so that rule called every
-    // illustrated book an art book. The sizes come from the zip's central
-    // directory, so no image is ever decompressed.
-    const payload = book.payload || { textBytes: 0, otherBytes: 0 };
-    stats.imageBytes = payload.otherBytes;
-    const MIN_ARTBOOK_IMAGE_BYTES = 5 * 1024 * 1024; // below this the archive holds no real image payload
-    const ARTBOOK_IMAGE_RATIO = 20; // images at least this many times the text pages
-    if (
-      payload.textBytes > 0 &&
-      payload.otherBytes >= MIN_ARTBOOK_IMAGE_BYTES &&
-      payload.otherBytes >= ARTBOOK_IMAGE_RATIO * payload.textBytes &&
-      textChars <= ceiling
-    ) {
-      return {
-        ok: false,
-        stats,
-        problem:
-          `"${volume.sourceFile}" carries ${(payload.otherBytes / 1024 / 1024).toFixed(1)} MB of images ` +
-          `against ${(payload.textBytes / 1024).toFixed(0)} KB of text pages, and only ${textChars} ` +
-          `characters of prose — an image-dominated archive with no book's worth of text in it, i.e. ` +
-          `an art book, whatever the intake agent reported. Exclude it, or raise ` +
-          `DISCOVER_ARTBOOK_MAX_TEXT_CHARS (now ${ceiling}) if this book really is that thin.`,
-      };
-    }
-    return { ok: true, stats };
+/**
+ * An archive source: does it open, does it hold readable text, and is that text a book's worth?
+ *
+ * @param {TranslationTargetVolume} volume
+ * @param {string} sourcePath - Resolved.
+ * @param {{textChars: number, imageBytes: number, sections: number}} stats - Filled in as the checks go.
+ * @returns {Promise<{ok: boolean, problem?: string, stats: Object}>}
+ */
+async function checkArchiveSourceShape(volume, sourcePath, stats) {
+  let book = null;
+  try {
+    book = await openEpub(sourcePath);
+  } catch (err) {
+    return { ok: false, stats, problem: `"${volume.sourceFile}" will not open as an archive: ${err.message}` };
   }
 
-  // Plain text / Markdown source.
+  const sections = book.textItems || [];
+  stats.sections = sections.length;
+  if (sections.length === 0) {
+    return {
+      ok: false,
+      stats,
+      problem: `"${volume.sourceFile}" has no readable text sections at all — an archive with nothing to read is not a volume.`,
+    };
+  }
+
+  const ceiling = artbookMaxTextChars();
+  const textChars = await countBookProse(book, sections, ceiling);
+  stats.textChars = textChars;
+
+  const floor = minVolumeTextChars();
+  if (textChars < floor) {
+    return {
+      ok: false,
+      stats,
+      problem:
+        `"${volume.sourceFile}" yields only ${textChars} characters of text across ` +
+        `${sections.length} section(s) — under the ${floor}-character floor for ` +
+        `"this file contains a readable text at all".`,
+    };
+  }
+
+  // Art-book signal: BYTES compared against BYTES, and only when the prose is thin enough for the
+  // archive's composition to outweigh the agent's judgment. "the file is far bigger than its text"
+  // identifies nothing — a real light novel IS mostly image bytes (observed: a 9.6 MB book holding
+  // 575 KB of XHTML and 9.2 MB of illustration plates), so that rule called every illustrated book an
+  // art book. The sizes come from the zip's central directory, so no image is ever decompressed.
+  const payload = book.payload || { textBytes: 0, otherBytes: 0 };
+  stats.imageBytes = payload.otherBytes;
+  if (
+    payload.textBytes > 0 &&
+    payload.otherBytes >= MIN_ARTBOOK_IMAGE_BYTES &&
+    payload.otherBytes >= ARTBOOK_IMAGE_RATIO * payload.textBytes &&
+    textChars <= ceiling
+  ) {
+    return {
+      ok: false,
+      stats,
+      problem:
+        `"${volume.sourceFile}" carries ${(payload.otherBytes / 1024 / 1024).toFixed(1)} MB of images ` +
+        `against ${(payload.textBytes / 1024).toFixed(0)} KB of text pages, and only ${textChars} ` +
+        `characters of prose — an image-dominated archive with no book's worth of text in it, i.e. ` +
+        `an art book, whatever the intake agent reported. Exclude it, or raise ` +
+        `DISCOVER_ARTBOOK_MAX_TEXT_CHARS (now ${ceiling}) if this book really is that thin.`,
+    };
+  }
+  return { ok: true, stats };
+}
+
+/**
+ * How much prose the archive holds, counted ACROSS THE BOOK, stopping as soon as it is obvious the book
+ * is a book.
+ *
+ * Sampling the first N sections is not a measurement: for a real novel those sections are the cover, the
+ * colophon, the caution page and the table of contents (observed live: a 151,245-character book sampled
+ * to 8,419, and all 17 volumes of a real series were rejected as art books).
+ *
+ * An unreadable section contributes nothing rather than failing the volume — the floors in the caller
+ * catch a book that is mostly unreadable.
+ *
+ * @param {{zip: Object, textItems: Array<{zipPath: string}>}} book
+ * @param {Array<{zipPath: string}>} sections
+ * @param {number} ceiling - Stop once the prose passes this: both downstream checks are already satisfied.
+ * @returns {Promise<number>} The characters of plain text found.
+ */
+async function countBookProse(book, sections, ceiling) {
+  let textChars = 0;
+  for (const section of sections) {
+    try {
+      const html = await book.zip.file(section.zipPath).async("string");
+      textChars += htmlToPlainText(html).length;
+    } catch {
+      /* an unreadable section just contributes nothing; the floors in the caller catch it */
+    }
+    if (textChars > ceiling) break;
+  }
+  return textChars;
+}
+
+/**
+ * A plain text / Markdown source: is there text, is it enough, and is it actually text?
+ *
+ * @param {TranslationTargetVolume} volume
+ * @param {string} sourcePath - Resolved.
+ * @param {{textChars: number, imageBytes: number, sections: number}} stats - Filled in as the checks go.
+ * @returns {Promise<{ok: boolean, problem?: string, stats: Object}>}
+ */
+async function checkTextSourceShape(volume, sourcePath, stats) {
   let raw = "";
   try {
     raw = await fs.readFile(sourcePath, "utf8");
@@ -191,6 +236,7 @@ async function checkVolumeSourceShape(seriesDir, volume) {
   if (!text) {
     return { ok: false, stats, problem: `"${volume.sourceFile}" is empty.` };
   }
+
   const floor = minVolumeTextChars();
   if (text.length < floor) {
     return {
@@ -201,9 +247,10 @@ async function checkVolumeSourceShape(seriesDir, volume) {
         `${floor}-character floor for "this file contains a readable text at all".`,
     };
   }
+
   // A binary file renamed to .txt/.md shows up as replacement characters.
   const junkRatio = (text.match(/\uFFFD/g) || []).length / text.length;
-  if (junkRatio > 0.02) {
+  if (junkRatio > MAX_UNDECODABLE_TEXT_RATIO) {
     return {
       ok: false,
       stats,
