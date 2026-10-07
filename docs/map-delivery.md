@@ -68,7 +68,7 @@ the whole layer.
 | `delivery/gates.js` | 140 | The three gates every act-mode step passes before anything is touched: the closed action menu (a Tier C move is refused BY NAME at execution time, not only in the proposal), the per-step intervention budget, and the anti-spin ledger. A refusal wipes nothing — a refusal that deleted first would be… |
 | `delivery/tickets.js` | 428 | The questions the manager is allowed to ask: the evidence it actually looked at, what it already tried (read out of the ledger, not from memory), and the wording keyed on the triage's own escalation — the triage REFUSED to try, so a ticket claiming an attempt that never happened gets answered by … |
 | `delivery/act.js` | 307 | Executing the plan one step at a time: wipe the step's declared outputs (never .rejected evidence), spawn the real step runner in its own process, re-read the state, judge the outcome by comparing the deliverable before and after, and record it under the NEWEST recorded run — a manager that inven… |
-| `delivery/main.js` | 192 | The verbs on the escalation ladder (--open-ticket, --choose, --accept-patch, --reject-patch), the run-lock refusal, and the wiring of the above. Each is one act at a time; two in one command is refused. |
+| `delivery/main.js` | 282 | The verbs on the escalation ladder (--open-ticket, --choose, --accept-patch, --reject-patch), the run-lock refusal, and the wiring of the above. Each is one act at a time; two in one command is refused. |
 
 ### `utils/resume/` — the implementation of `utils/resume.js` (24 lines of face)
 
