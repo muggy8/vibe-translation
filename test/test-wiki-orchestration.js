@@ -103,6 +103,7 @@ function installStubs() {
           prompt,
           turn: turns.length,
           volumeDir: currentVolumeDir,
+          maxSteps: cfg.maxSteps,
         };
         turns.push(entry);
         agentTurns.push(entry);
@@ -335,6 +336,180 @@ async function scenarioSessionShape() {
   }
 }
 
+// ─── 3b. The chapter-by-chapter wiki path (the shared chunked QA loop) ───────
+// The fallback path for a volume too large for one pass. It is where the wiki
+// used to differ from the other three tasks in ways nobody chose: its
+// per-chapter validators got no recovery turn and no "did it actually write?"
+// stop, it re-implemented its own grader, and its findings merger ran under the
+// flat step cap that a many-chapter volume outgrows. These scenarios pin the
+// shared behaviour the wiki now shares.
+
+/** The volume context runChunkedVolumeAgent needs: a bundle cut into chapters. */
+function makeChunkedCtx(v, installment = "01") {
+  const ctx = makeCtx(v, { installment });
+  const segments = ["ch1", "ch2", "ch3"].map((id, i) => ({
+    id,
+    file: `book-${id}.md`,
+    title: `Chapter ${i + 1}`,
+    bodyChars: 40,
+  }));
+  for (const s of segments) {
+    fs.writeFileSync(path.join(v.volumeDir, s.file), `# ${s.title}\n\nBody text for ${s.id}. 本文テキスト。\n`, "utf8");
+  }
+  fs.writeFileSync(path.join(v.volumeDir, "book-whole.md"), "# Whole\n\n" + "Body. ".repeat(120), "utf8");
+  ctx.chunked = true;
+  ctx.bundle = {
+    ...ctx.bundle,
+    format: "epub",
+    segments,
+    wholeChars: 120,
+    wholePath: path.join(v.volumeDir, "book-whole.md"),
+  };
+  return ctx;
+}
+
+/**
+ * The scripted agents of the chapter-by-chapter path: a section author per
+ * chapter, one merge agent, a validator per chapter, one findings merger, and a
+ * feedback author per chapter.
+ * @param {string[]} acceptanceReplies
+ * @param {{validatorsWrite?: boolean, feedbackWrites?: boolean}} [behaviour]
+ * @returns {{agent: (name: string, entry: Object) => {text: string, toolCalls: Object[]}, oneShot: (label: string) => string}}
+ */
+function makeChunkedScript(acceptanceReplies, behaviour = {}) {
+  const { validatorsWrite = true, feedbackWrites = true } = behaviour;
+  let i = 0;
+  return {
+    agent(name, entry) {
+      const volumeDir = entry.volumeDir;
+      if (name.startsWith("wiki-section-")) {
+        const id = name.split("-").pop();
+        fs.writeFileSync(
+          path.join(volumeDir, `wiki-${id}.md`),
+          `# Wiki section (${entry.label})\n\nReal section text for ${id}.\n`,
+          "utf8"
+        );
+        return { text: "wrote the section", toolCalls: [{ toolName: "writeFile" }] };
+      }
+      if (name.startsWith("wiki-merge-")) {
+        writeWiki(volumeDir, entry.label);
+        return { text: "wrote both files", toolCalls: [{ toolName: "writeFile" }] };
+      }
+      if (name.startsWith("wiki-validator-merge-")) {
+        writeValidationReport(volumeDir, "01", entry.label);
+        return { text: "wrote the report", toolCalls: [{ toolName: "writeFile" }] };
+      }
+      if (name.startsWith("wiki-validator-")) {
+        const id = name.split("-").pop();
+        if (validatorsWrite) {
+          fs.writeFileSync(
+            path.join(volumeDir, `jump-in-wiki-validation-01-${id}.md`),
+            `# Validation partial (${entry.label})\n\nFINDING [LOW] chapters=${id} — a finding the merger consolidates.\n`,
+            "utf8"
+          );
+          return { text: "wrote the partial", toolCalls: [{ toolName: "writeFile" }] };
+        }
+        return { text: "", toolCalls: [{ toolName: "readFile" }] };
+      }
+      if (name.startsWith("wiki-feedback-")) {
+        if (feedbackWrites) {
+          fs.appendFileSync(path.join(volumeDir, "wiki.md"), "\nA correction the feedback pass applied.\n", "utf8");
+        }
+        return { text: "", toolCalls: [{ toolName: "readFile" }] };
+      }
+      throw new Error(`Unexpected agent handle: ${name}`);
+    },
+    oneShot(label) {
+      if (!label.startsWith("jump-in-wiki-acceptance-")) throw new Error(`Unexpected one-shot: ${label}`);
+      const reply = acceptanceReplies[Math.min(i, acceptanceReplies.length - 1)];
+      i += 1;
+      return reply;
+    },
+  };
+}
+
+async function scenarioChunkedWikiFlow() {
+  const v = makeVolumeDir();
+  script = makeChunkedScript([pass(88), pass(90)]);
+  agentTurns = [];
+  oneShotCalls = [];
+  currentVolumeDir = v.volumeDir;
+  try {
+    await wiki.runChunkedVolumeAgent(makeChunkedCtx(v));
+
+    const sections = agentTurns.filter((t) => t.name.startsWith("wiki-section-"));
+    assert.strictEqual(
+      new Set(sections.map((t) => t.name)).size,
+      3,
+      "one section author per chapter, each in its own session"
+    );
+    assert.ok(agentTurns.some((t) => t.name === "wiki-merge-01"), "the chapter sections are merged into the wiki");
+    assert.ok(
+      fs.readFileSync(path.join(v.volumeDir, "wiki.md"), "utf8").includes("Real wiki text"),
+      "and the merged wiki is real text, not the stub the merge pass was anchored on"
+    );
+
+    const validators = agentTurns.filter((t) => t.name.startsWith("wiki-validator-") && !t.name.startsWith("wiki-validator-merge-"));
+    assert.ok(validators.length >= 3, "a validator per chapter");
+    for (const id of ["ch1", "ch2", "ch3"]) {
+      assert.ok(
+        fs.existsSync(path.join(v.volumeDir, `jump-in-wiki-validation-01-${id}.md`)),
+        `chapter ${id} left its own validation partial`
+      );
+    }
+    assert.ok(
+      agentTurns.some((t) => t.name.startsWith("wiki-validator-merge-")),
+      "and a findings-merge agent consolidated them into the standard report"
+    );
+
+    // The grading is the shared wikiAcceptanceCheck — the same call the
+    // whole-installment path makes, under the same label.
+    assert.ok(
+      oneShotCalls.some((c) => c.label === "jump-in-wiki-acceptance-01-1"),
+      "the chapter-by-chapter loop grades through the shared acceptance check"
+    );
+
+    const mergeTurn = agentTurns.find((t) => t.name.startsWith("wiki-validator-merge-"));
+    assert.ok(
+      mergeTurn.maxSteps > 20,
+      `the findings merger's step cap scales with the partials it must read (got ${mergeTurn.maxSteps}; a flat 20 lost a whole validation round on a 10-chapter volume)`
+    );
+  } finally {
+    currentVolumeDir = null;
+    fs.rmSync(v.root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A chapter validator that wrote nothing is re-sent the task once, and then the
+ * volume fails. Before the shared loop, the wiki had neither half of this: the
+ * hole in the report was merged and graded anyway.
+ */
+async function scenarioChunkedValidatorWritesNothing() {
+  const v = makeVolumeDir();
+  script = makeChunkedScript([pass(88)], { validatorsWrite: false });
+  agentTurns = [];
+  currentVolumeDir = v.volumeDir;
+  try {
+    await assert.rejects(
+      () => wiki.runChunkedVolumeAgent(makeChunkedCtx(v)),
+      /never wrote real output/,
+      "a chapter validator that produced nothing fails the volume instead of leaving a hole in the report"
+    );
+    assert.ok(
+      agentTurns.some((t) => t.label.startsWith("jump-in-wiki-validate-recovery-")),
+      "after the task was re-sent to the same validator agent"
+    );
+    assert.ok(
+      !agentTurns.some((t) => t.name.startsWith("wiki-validator-merge-")),
+      "and the loop never went on to consolidate partials it does not have"
+    );
+  } finally {
+    currentVolumeDir = null;
+    fs.rmSync(v.root, { recursive: true, force: true });
+  }
+}
+
 // ─── 4. Task-level: the cascade + the last-existing root copy (spawned) ──────
 
 /**
@@ -521,6 +696,8 @@ async function main() {
   await scenarioGenerationSkipped();
   await scenarioStubIsNotAnArtifact();
   await scenarioSessionShape();
+  await scenarioChunkedWikiFlow();
+  await scenarioChunkedValidatorWritesNothing();
 
   for (const name of ["cascade", "partial", "passing"]) {
     const out = execFileSync(process.execPath, [__filename, `--child=${name}`], { encoding: "utf8" });
