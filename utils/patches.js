@@ -131,7 +131,11 @@ const CHECK_TIMEOUT_MS = 30 * 60 * 1000;
 const BANNED_PATCH_PATHS = [
   {
     id: "constraint-tables",
-    pattern: /^utils\/(?:tickets|resume|delivery-verify|ledger|runlock|patches)\.js$/,
+    // The table AND every module it was split into. `utils/tickets.js` is the public face
+    // of a layer whose rules now live in `utils/tickets/`, so a pattern that ends in `.js`
+    // protects the cover of the book and not the book — and the cover is the file a
+    // well-meaning reader would never edit anyway.
+    pattern: /^utils\/(?:tickets|resume|delivery-verify|ledger|runlock|patches)(?:\.js|\/)/,
     because:
       "these are the rules that constrain the manager, the diagnostics team and this team: the " +
       "banned-option filter, the closed action menu, the deliverable signal table, the anti-spin " +

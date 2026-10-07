@@ -1,0 +1,114 @@
+/**
+ * The QA loop's parts: a fresh validator agent per iteration writes the validation report, the acceptance one-shot scores the reference 0-100, and a fresh author agent applies feedback in HIGH → MEDIUM → LOW order. The state file is saved on every iteration INCLUDING the accepting one, so accepted volumes are skipped on re-run.
+ *
+ * Part of the character-voice.js layer (split out of the original single file).
+ */
+
+require("dotenv").config();
+const fs = require("fs").promises;
+require("../types");
+const harness = require("../harness");
+const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, authorMaxStepsFor, findingsMergeMaxStepsFor, writePromptDump, selectSectionsByRelevance } = require("../utils/prompt");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("../configs/shared");
+const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("../utils/fs");
+const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
+const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("../utils/qa-loop");
+
+const { maxValidationIterations } = require("./config");
+const { buildFeedbackTurnPrompt, buildValidatorTurnPrompt } = require("./prompts");
+const { assertVoiceCarryForward } = require("./carry-forward");
+const { voiceAuthorMaxSteps, voiceRecoveryPrompt } = require("./amend");
+
+/**
+ * QA loop: validator -> acceptance -> feedback (the shared loop in
+ * utils/qa-loop.js — this wrapper supplies the character-voice-specific
+ * pieces: validator naming/prompts, the acceptance check, the feedback
+ * stage, and the log lines).
+ * @param {CharacterVoiceVolumeCtx} ctx
+ */
+async function runQaLoop(ctx) {
+  const { values, volumeDir, sourceFile, validationOutputFile, fsGate } = ctx;
+  const result = await runSharedQaLoop({
+    volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
+    maxIterations: maxValidationIterations,
+    onQaLimit: ON_QA_LIMIT,
+    validationOutputFile,
+    stateFile: validationOutputFile.replace(".md", "-rolling-state.json"),
+    sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
+    createValidatorAgent: async (iteration) => harness.createAgentHandle({ name: `validator-voice-${values.INSTALLMENT_NUMBER}-${iteration}`, systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: validatorMaxStepsFor((await fs.stat(sourceFile)).size) }),
+    buildValidatorTurn: (iteration) => buildValidatorTurnPrompt(ctx),
+    validatorLabel: (iteration) => `character-voice-validate-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    validatorRecoveryLabel: (iteration) => `character-voice-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}`,
+    validatorRecoveryPrompt: (hasContent) => hasContent ? `You were asked to write "character-voice-validation.md" using writeFile, but you replied in chat. Please rewrite the report using writeFile now with the same content.` : `You produced no output. Please write the validation report to "character-voice-validation.md" using writeFile now.`,
+    assertRealToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
+    acceptanceLogLine: () => "Calling the AI for the acceptance check...",
+    acceptanceCheck: (iteration) => acceptanceCheck(ctx, iteration),
+    // Exceptional-score confirmation re-grades (see utils/qa-loop.js).
+    confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+    feedbackLogLine: () => "Calling the AI to apply the validation feedback (author agent)...",
+    runFeedback: (iteration) => runFeedback(ctx),
+    // The loop stops when a feedback pass leaves these byte-identical: a turn
+    // that only read is not an iteration (see fingerprintFiles in utils/fs.js).
+    feedbackArtifactFiles: [ctx.voiceOutputFile, ctx.povOutputFile],
+    limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`,
+  });
+  ctx.limitReached = result.limitReached;
+  return result;
+}
+
+
+/**
+ * Run the feedback stage: fresh author agent applies validation feedback.
+ * @param {CharacterVoiceVolumeCtx} ctx
+ */
+async function runFeedback(ctx) {
+  const { values, volumeDir, fsGate } = ctx;
+  const author = await harness.createAgentHandle({ name: `author-voice-feedback-${values.INSTALLMENT_NUMBER}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: await voiceAuthorMaxSteps(ctx) });
+  try {
+    const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx), { label: `character-voice-feedback-${values.INSTALLMENT_NUMBER}` });
+    assertRealToolCalls(feedbackResult, "the author agent (feedback pass)", values.INSTALLMENT_NUMBER);
+    const feedbackFallbackUsed = await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)", feedbackResult?.text);
+    // Recovery turn: ONLY when a file was actually missing after the fallback —
+    // never over files the agent already wrote correctly.
+    if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
+      const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
+      const recoveryResult = await author.sendTurn(voiceRecoveryPrompt(hasContent, true), { label: `character-voice-feedback-recovery-${values.INSTALLMENT_NUMBER}` });
+      assertRealToolCalls(recoveryResult, "the author agent (feedback recovery)", values.INSTALLMENT_NUMBER);
+      await assertWroteWithFallback([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback recovery)", recoveryResult?.text);
+    }
+    await assertRealOutput([ctx.voiceOutputFile, ctx.povOutputFile], "the author agent (feedback pass)");
+    // The cumulative invariant, re-checked after every rewrite: a feedback pass
+    // that rewrote the reference from memory is how characters disappear from it
+    // (see assertVoiceCarryForward).
+    await assertVoiceCarryForward(ctx, "the feedback pass");
+  } finally { await author.close(); }
+}
+
+
+/**
+ * Shared acceptance check: always a tool-less single-shot call.
+ * The model scores the audited output 0–100 (100 = perfect, 0 = atrocious);
+ * the score — not a binary verdict — is what the rolling window tracks.
+ * @param {CharacterVoiceVolumeCtx} ctx
+ * @param {number} iteration
+ * @returns {Promise<number | null>} The parsed score (0–100), or `null`
+ *   when no valid score could be extracted (treated as a failed check).
+ */
+async function acceptanceCheck(ctx, iteration, temperature) {
+  const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt, voiceOutputFile, povOutputFile } = ctx;
+  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: voiceOutputFile, name: "character-voice.md" }, { file: povOutputFile, name: "pov-map.md" }, { file: validationOutputFile, name: "character-voice-validation.md" }, { text: acceptancePrompt }], temperature: temperature ?? judgeTemperature(), ...judgeThinking("ACCEPTANCE"), label: `character-voice-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
+  const reply = parseAcceptanceReply(acceptanceOutput);
+  if (reply === null) {
+    console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response (got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`);
+  } else {
+    console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${reply.score}/100` + (reply.band ? ` (band: ${reply.band})` : "") + (reply.note ? ` — ${reply.note}` : "") + ` (passing score: ${ACCEPTANCE_PASSING_SCORE})`);
+  }
+  return reply ? reply.score : null;
+}
+
+
+module.exports = {
+  runQaLoop,
+  runFeedback,
+  acceptanceCheck,
+};
