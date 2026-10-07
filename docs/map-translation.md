@@ -77,7 +77,7 @@ the whole layer.
 | `utils/translate/loop.js` | 321 | The QA loop's decisions: whether a chapter is worth retranslating, when the loop stops, and the draft ratchet that lets a chapter move only FORWARD. |
 | `utils/translate/repair.js` | 271 | Targeted correction: fix the passage the findings quote instead of translating the whole chapter again, plus `planTargetedRepair' — whether the source↔draft mapping can be trusted at all. |
 | `utils/translate/terminology.js` | 266 | Reading the reference artifacts: the glossary table (rows, alias spellings, renderings) and the style guide's rules, plus the compact glossary block a prompt is given. |
-| `utils/translate/references.js` | 293 | The reference material a chapter is translated with: the volume's cumulative references (shared wiki, volume wiki, POV map, voice notes, glossary terms, disputed renderings), the per-chapter invalidation key, and the cross-volume continuity tail. |
+| `utils/translate/references.js` | 339 | The reference material a chapter is translated with: the volume's cumulative references (shared wiki, volume wiki, POV map, voice notes, glossary terms, disputed renderings), the per-chapter invalidation key, and the cross-volume continuity tail. |
 | `utils/translate/prompt.js` | 354 | What the model is actually asked, and how the ask is fitted to the role's context window. |
 | `utils/translate/consistency.js` | 321 | The cross-chapter consistency pass — the translation stage's one blind spot: a name rendered two ways inside one volume is invisible to a per-chapter check. |
 | `utils/translate/variants.js` | 200 | The rendering-variant scan — free, no model call: every glossary term used in a volume is checked against the PUBLISHED text. |

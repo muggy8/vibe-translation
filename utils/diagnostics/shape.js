@@ -120,19 +120,8 @@ function validateDiagnosisShape(diagnosis) {
   }
 
   const cause = typeof diagnosis.cause === "string" ? diagnosis.cause.trim() : "";
-  if (!cause) {
-    problems.push({
-      kind: "no-cause",
-      message:
-        `a diagnosis must state the cause: the mechanism that produced this finding, in language a ` +
-        `customer can follow. ${DIAGNOSIS_CONTRACT[0].why}`,
-    });
-  } else if (cause.length < 60) {
-    warnings.push({
-      kind: "thin-cause",
-      message: `the cause is ${cause.length} characters. Name the mechanism, not the label — "the guard fired" is the finding, restated.`,
-    });
-  }
+  problems.push(...causeProblems(cause));
+  warnings.push(...causeWarnings(cause));
 
   const rawOptions = Array.isArray(diagnosis.options) ? diagnosis.options : [];
   if (!rawOptions.length) {
@@ -148,65 +137,14 @@ function validateDiagnosisShape(diagnosis) {
   /** @type {DiagnosisOption[]} */
   const options = [];
   rawOptions.forEach((raw, index) => {
-    const label = raw && typeof raw.label === "string" ? raw.label.trim() : "";
-    const touches = Array.isArray(raw && raw.touches) ? raw.touches.map((t) => String(t).trim()).filter(Boolean) : [];
-    const cost = raw && typeof raw.cost === "string" ? raw.cost.trim().toLowerCase() : "";
-    const risk = raw && typeof raw.risk === "string" ? raw.risk.trim() : "";
-    const verify = raw && typeof raw.verify === "string" ? raw.verify.trim() : "";
-    const missing = [];
-    if (!label) missing.push("label");
-    if (!touches.length) missing.push("touches");
-    if (!DIAGNOSIS_COSTS.includes(cost)) missing.push("cost");
-    if (!risk) missing.push("risk");
-    if (!verify) missing.push("verify");
-    if (missing.length) {
-      problems.push({
-        kind: "option-incomplete",
-        message:
-          `option ${index + 1}${label ? ` ("${label}")` : ""} is missing ${missing.join(", ")}. ` +
-          `Every option must say what it touches, what it costs (${DIAGNOSIS_COSTS.join(" / ")}), ` +
-          `what it could break, and how the manager verifies it afterwards.`,
-      });
-      return;
-    }
-    /** @type {DiagnosisOption} */
-    const option = {
-      label,
-      touches,
-      cost,
-      risk,
-      verify,
-      requiresCodeChange: Boolean(raw.requiresCodeChange),
-    };
-    if (verificationIsOutcomeOnly(verify)) {
-      option.outcomeOnlyVerification = true;
-      warnings.push({
-        kind: "outcome-only-verification",
-        message:
-          `option "${label}" offers "the finding disappears" as its only check. That answer is ` +
-          `available for free — switching a check off moves every report that names the finding ` +
-          `(gotcha 73). It is NOT refused here: rejecting it is the job of the before/after ` +
-          `comparison of the deliverable (utils/delivery-verify.js), which is the only thing in ` +
-          `this codebase that can tell "the book got better" from "the complaint stopped".`,
-      });
-    }
-    options.push(option);
+    const parsed = readDiagnosisOption(raw, index);
+    problems.push(...parsed.problems);
+    warnings.push(...parsed.warnings);
+    if (parsed.option) options.push(parsed.option);
   });
 
   const questions = Array.isArray(diagnosis.questions) ? diagnosis.questions.map((q) => String(q).trim()).filter(Boolean) : [];
-  for (const q of questions) {
-    const verdict = questionIsAnswerableByCustomer(q);
-    if (!verdict.answerable) {
-      problems.push({
-        kind: "unanswerable-question",
-        message:
-          `the question "${q}" can only be answered by someone who can read ${verdict.matched}. ` +
-          `The manager may read the plan of record, what each volume folder holds, the step reports, ` +
-          `the ledger and the publish report — nothing else. Ask about the book, the reports, or what ` +
-          `the account owner intended.`,
-      });
-    }
-  }
+  problems.push(...unanswerableQuestionProblems(questions));
 
   const read = Array.isArray(diagnosis.read) ? diagnosis.read.map((r) => String(r).trim()).filter(Boolean) : [];
   if (!read.length) {
@@ -230,6 +168,122 @@ function validateDiagnosisShape(diagnosis) {
 
   const out = { ...diagnosis, cause, options, questions, read, recommend };
   return { ok: problems.length === 0, diagnosis: out, problems, warnings };
+}
+
+/**
+ * The cause: the one part of a diagnosis the manager cannot verify for themselves.
+ *
+ * A missing cause is a problem (the role's whole job is to explain a mechanism). A short one is a
+ * warning, because "the guard fired" is the finding restated rather than an explanation of it, and the
+ * length is not something a machine can judge better than the reader who has to act on it.
+ *
+ * @param {string} cause - The trimmed cause, or "" when the reply gave none.
+ * @returns {Array<{kind: string, message: string}>} The problems.
+ */
+function causeProblems(cause) {
+  if (cause) return [];
+  return [
+    {
+      kind: "no-cause",
+      message:
+        `a diagnosis must state the cause: the mechanism that produced this finding, in language a ` +
+        `customer can follow. ${DIAGNOSIS_CONTRACT[0].why}`,
+    },
+  ];
+}
+
+/**
+ * @param {string} cause
+ * @returns {Array<{kind: string, message: string}>} The warnings.
+ */
+function causeWarnings(cause) {
+  if (!cause || cause.length >= 60) return [];
+  return [
+    {
+      kind: "thin-cause",
+      message: `the cause is ${cause.length} characters. Name the mechanism, not the label — "the guard fired" is the finding, restated.`,
+    },
+  ];
+}
+
+/**
+ * One option, read against the five things every option must say.
+ *
+ * An option missing one of them is not repaired here: it is reported, because an option the manager
+ * cannot judge is worse than no option — it looks like a decision was offered.
+ *
+ * @param {Object} raw - What the reply offered.
+ * @param {number} index - Zero-based position, for the message.
+ * @returns {{option: DiagnosisOption|null, problems: Array<{kind: string, message: string}>, warnings: Array<{kind: string, message: string}>}}
+ */
+function readDiagnosisOption(raw, index) {
+  const problems = [];
+  const warnings = [];
+  const label = raw && typeof raw.label === "string" ? raw.label.trim() : "";
+  const touches = Array.isArray(raw && raw.touches) ? raw.touches.map((t) => String(t).trim()).filter(Boolean) : [];
+  const cost = raw && typeof raw.cost === "string" ? raw.cost.trim().toLowerCase() : "";
+  const risk = raw && typeof raw.risk === "string" ? raw.risk.trim() : "";
+  const verify = raw && typeof raw.verify === "string" ? raw.verify.trim() : "";
+
+  const missing = [];
+  if (!label) missing.push("label");
+  if (!touches.length) missing.push("touches");
+  if (!DIAGNOSIS_COSTS.includes(cost)) missing.push("cost");
+  if (!risk) missing.push("risk");
+  if (!verify) missing.push("verify");
+  if (missing.length) {
+    problems.push({
+      kind: "option-incomplete",
+      message:
+        `option ${index + 1}${label ? ` ("${label}")` : ""} is missing ${missing.join(", ")}. ` +
+        `Every option must say what it touches, what it costs (${DIAGNOSIS_COSTS.join(" / ")}), ` +
+        `what it could break, and how the manager verifies it afterwards.`,
+    });
+    return { option: null, problems, warnings };
+  }
+
+  /** @type {DiagnosisOption} */
+  const option = { label, touches, cost, risk, verify, requiresCodeChange: Boolean(raw.requiresCodeChange) };
+  if (verificationIsOutcomeOnly(verify)) {
+    option.outcomeOnlyVerification = true;
+    warnings.push({
+      kind: "outcome-only-verification",
+      message:
+        `option "${label}" offers "the finding disappears" as its only check. That answer is ` +
+        `available for free — switching a check off moves every report that names the finding ` +
+        `(gotcha 73). It is NOT refused here: rejecting it is the job of the before/after ` +
+        `comparison of the deliverable (utils/delivery-verify.js), which is the only thing in ` +
+        `this codebase that can tell "the book got better" from "the complaint stopped".`,
+    });
+  }
+  return { option, problems, warnings };
+}
+
+/**
+ * The questions a diagnosis may ask back — checked against who is being asked.
+ *
+ * The manager answers tickets by reading reports, not code. A question that requires reading the code
+ * is not a question, it is the diagnostics team's own work handed sideways (gotcha 70).
+ *
+ * @param {string[]} questions - The trimmed questions the reply asked.
+ * @returns {Array<{kind: string, message: string}>} The problems.
+ */
+function unanswerableQuestionProblems(questions) {
+  const problems = [];
+  for (const q of questions) {
+    const verdict = questionIsAnswerableByCustomer(q);
+    if (!verdict.answerable) {
+      problems.push({
+        kind: "unanswerable-question",
+        message:
+          `the question "${q}" can only be answered by someone who can read ${verdict.matched}. ` +
+          `The manager may read the plan of record, what each volume folder holds, the step reports, ` +
+          `the ledger and the publish report — nothing else. Ask about the book, the reports, or what ` +
+          `the account owner intended.`,
+      });
+    }
+  }
+  return problems;
 }
 
 
