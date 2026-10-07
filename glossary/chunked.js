@@ -12,11 +12,10 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, authorMaxStepsFor, findingsMergeMaxStepsFor, writePromptDump } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("../configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("../utils/fs");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("../utils/qa-loop");
+const { validatorMaxStepsFor, findingsMergeMaxStepsFor } = require("../utils/prompt");
+const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, ON_QA_LIMIT } = require("../configs/shared");
+const { fileExists, inlineReferenceMessage } = require("../utils/fs");
+const { runPerChapterQaLoop, validationReportRecoveryPrompt } = require("../utils/qa-loop");
 const {
   resolveSourceBundle,
   decideProcessingMode,
@@ -229,258 +228,115 @@ async function runChunkedVolumeAgent(ctx) {
  * acceptance one-shot scores it; on a failed window, per-chapter feedback
  * agents apply the chapter-tagged findings.
  *
+ * The loop itself — the iterations, the rolling window, the consensus gates, the
+ * stalled-round check, the ON_QA_LIMIT policy — is the shared one in
+ * utils/qa-loop/chunked.js. What is written here is only what the glossary says
+ * to its agents and what it must not lose while they say it.
+ *
  * @param {GlossaryVolumeCtx} ctx - The volume context (must include ctx.fsGate).
  */
 async function runChunkedQaLoop(ctx) {
   const { values, bundle, volumeDir, glossaryOutputFile, validationOutputFile } = ctx;
   const fsGate = ctx.fsGate;
-  const recentRollingScores = [];
+  const n = values.INSTALLMENT_NUMBER;
 
-  for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: validation iteration ` +
-        `${iteration}/${maxValidationIterations} (chapter by chapter)...`
-    );
+  /** The validation partial one chapter's validator owes. @param {import("../types").SourceSegment} segment */
+  const partialFile = (segment) => path.join(volumeDir, `glossary-validation-${segment.id}.md`);
 
-    // Per-chapter validation partials (fresh agent per chapter).
-    for (let si = 0; si < bundle.segments.length; si++) {
-      const segment = bundle.segments[si];
-      const partialFile = path.join(volumeDir, `glossary-validation-${segment.id}.md`);
-      const validator = await harness.createAgentHandle({
-        name: `validator-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
-        systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE,
-        tools: fsGate.tools,
-        approve: fsGate.approve,
-        cwd: volumeDir,
-        maxSteps: validatorMaxStepsFor((await fs.stat(path.join(volumeDir, segment.file))).size),
-      });
-      try {
-        const validateResult = await validator.sendTurn(
-          buildGlossarySegmentValidatorPrompt(ctx, segment, si),
-          { label: `glossary-validate-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
-        );
-        assertRealToolCalls(validateResult, `the validator agent (chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-        const validateFallbackUsed = await assertWroteWithFallback(
-          partialFile,
-          `the validator agent (chapter ${segment.id})`,
-          validateResult?.text
-        );
-        // Recovery turn: ONLY when the partial was actually missing after the
-        // fallback — never over a file the agent already wrote correctly.
-        if (validateFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-          const hasContent = validateResult?.text && validateResult.text.trim().length > 0;
-          const recoveryPrompt = hasContent
-            ? `You were asked to write the validation report to "${path.basename(partialFile)}" using writeFile, but you replied with the content in your chat message instead. Please rewrite the complete report using writeFile now.`
-            : `You produced no output. Please read the materials and write the complete validation report to "${path.basename(partialFile)}" using writeFile now.`;
-          const recoveryResult = await validator.sendTurn(recoveryPrompt, {
-            label: `glossary-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
-          });
-          assertRealToolCalls(recoveryResult, `the validator agent (recovery, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-          await assertWroteWithFallback(
-            partialFile,
-            `the validator agent (recovery, chapter ${segment.id})`,
-            recoveryResult?.text
-          );
-        }
-        await assertRealOutput(partialFile, `the validator agent (chapter ${segment.id})`);
-      } finally {
-        await validator.close();
-      }
-    }
+  // The state this chapter's correction must not shrink, read before its turn
+  // and compared after it (see the amend pass above — the same failure mode,
+  // reached from the other side).
+  let feedbackBaseline = null;
 
-    // Findings merge: consolidate the partials into the standard report.
-    const merger = await harness.createAgentHandle({
-      name: `validator-merge-${values.INSTALLMENT_NUMBER}-${iteration}`,
-      systemPrompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE,
-      tools: fsGate.tools,
-      approve: fsGate.approve,
-      cwd: volumeDir,
+  const result = await runPerChapterQaLoop({
+    volumeLabel: `Volume ${n}`,
+    installment: n,
+    cwd: volumeDir,
+    tools: fsGate.tools,
+    approve: fsGate.approve,
+    chapters: bundle.segments,
+    maxIterations: maxValidationIterations,
+    onQaLimit: ON_QA_LIMIT,
+    validationOutputFile,
+    sourceFingerprint: bundle ? bundle.sourceFingerprint : undefined,
+    feedbackArtifactFiles: [glossaryOutputFile],
+    acceptanceCheck: (iteration) => acceptanceCheck(ctx, iteration),
+    confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+    stalledLogLine: () =>
+      `Volume ${n}: the per-chapter feedback round changed NOTHING — ` +
+      `glossary.md is byte-identical to what it was before it. Stopping the QA loop here rather ` +
+      `than paying for another round of per-chapter validators over an unchanged glossary. Check ` +
+      `the feedback agents' turn logs in .logs/ for turns that only read (the usual shape: step ` +
+      `cap reached before anything was written).`,
+    limitReachedLogLine: () =>
+      `Volume ${n}: reached the validation iteration limit ` +
+      `without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`,
+
+    validate: {
+      name: ({ iteration, segment }) => `validator-${n}-${iteration}-${segment.id}`,
+      systemPrompt: () => ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE,
+      maxSteps: async ({ segment }) => validatorMaxStepsFor((await fs.stat(path.join(volumeDir, segment.file))).size),
+      prompt: ({ segment, si }) => buildGlossarySegmentValidatorPrompt(ctx, segment, si),
+      label: ({ iteration, segment }) => `glossary-validate-${n}-${iteration}-${segment.id}`,
+      recoveryLabel: ({ iteration, segment }) => `glossary-validate-recovery-${n}-${iteration}-${segment.id}`,
+      recoveryWho: ({ segment }) => `the validator agent (recovery, chapter ${segment.id})`,
+      recoveryPrompt: (hasContent, { segment }) => validationReportRecoveryPrompt(hasContent, partialFile(segment)),
+      writesTo: ({ segment }) => partialFile(segment),
+      who: ({ segment }) => `the validator agent (chapter ${segment.id})`,
+    },
+
+    merge: {
+      name: ({ iteration }) => `validator-merge-${n}-${iteration}`,
+      systemPrompt: () => ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE,
       // The merger reads every chapter partial AND the glossary it is auditing,
       // then writes one consolidated report. A fixed 20 ran out on a 10-chapter
       // volume (observed: 34 read/grep calls before it could write anything),
       // which threw away the whole validation round's work. Scale it with the
       // number of partials plus the pages of glossary it must read.
-      maxSteps: findingsMergeMaxStepsFor(
-        bundle.segments.length,
-        (await fs.stat(glossaryOutputFile)).size
-      ),
-    });
-    try {
-      const mergeResult = await merger.sendTurn(
-        buildGlossaryFindingsMergePrompt(ctx),
-        { label: `glossary-validate-merge-${values.INSTALLMENT_NUMBER}-${iteration}` }
-      );
-      assertRealToolCalls(mergeResult, "the findings-merge agent", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(validationOutputFile, "the findings-merge agent", mergeResult?.text);
-      await assertRealOutput(validationOutputFile, "the findings-merge agent");
-    } finally {
-      await merger.close();
-    }
+      maxSteps: async () =>
+        findingsMergeMaxStepsFor(bundle.segments.length, (await fs.stat(glossaryOutputFile)).size),
+      prompt: () => buildGlossaryFindingsMergePrompt(ctx),
+      label: ({ iteration }) => `glossary-validate-merge-${n}-${iteration}`,
+      writesTo: () => validationOutputFile,
+      who: () => "the findings-merge agent",
+    },
 
-    // Acceptance (unchanged: tool-less one-shot over the standard report).
-    const score = await acceptanceCheck(ctx, iteration);
-    if (score !== null) {
-      recentRollingScores.push(score);
-      if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) recentRollingScores.shift();
-    }
-    const stateFilePath = validationOutputFile.replace(".md", "-rolling-state.json");
-    await saveRollingState(stateFilePath, recentRollingScores, {
-      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-    });
-
-    // The same exceptional-score confirmation the whole-installment loop runs
-    // (utils/qa-loop.js): a top-band grade is re-graded at temperature 0 and the
-    // calm judging temperature, and a consensus accepts the volume WITHOUT the
-    // expensive per-chapter feedback round below.
-    const exceptional = await confirmExceptionalScore({
-      score,
-      recentRollingScores,
-      confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
-      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
-      stateFile: stateFilePath,
-      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-    });
-    if (exceptional.accepted) {
-      // The chunked loop's contract: the only other way out of the loop is the
-      // iteration limit (which sets ctx.limitReached). Reaching here means the
-      // consensus accepted the volume, so record HOW it was accepted for the
-      // run summary and stop before the per-chapter feedback round.
-      ctx.acceptedBy = "exceptional-consensus";
-      break;
-    }
-
-    if (meetsAcceptanceCriteria(recentRollingScores)) {
-      const avg = computeRollingAverage(recentRollingScores);
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 ` +
-          `(${recentRollingScores.length} checks) meets the passing score ` +
-          `${ACCEPTANCE_PASSING_SCORE}. Accepted.`
-      );
-      break;
-    }
-
-    // A grade that already passes earns the window's remaining samples by
-    // re-grading this glossary, not by paying for a per-chapter feedback round
-    // plus a second full round of per-chapter validators (see confirmPassingScore).
-    const passing = await confirmPassingScore({
-      score,
-      recentRollingScores,
-      confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
-      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
-      stateFile: stateFilePath,
-      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-    });
-    if (passing.accepted) {
-      ctx.acceptedBy = "passing-consensus";
-      break;
-    }
-
-    // Per-chapter feedback (fresh agent per chapter, chapter-tagged findings).
-    // Fingerprinted first: a feedback round that changed nothing is not progress,
-    // and another iteration would re-audit an unchanged glossary.
-    const beforeFeedback = await fingerprintFiles(glossaryOutputFile);
-    for (let si = 0; si < bundle.segments.length; si++) {
-      const segment = bundle.segments[si];
-      const feedbackAuthor = await harness.createAgentHandle({
-        name: `feedback-author-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
-        systemPrompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
-        tools: fsGate.tools,
-        approve: fsGate.approve,
-        cwd: volumeDir,
-        maxSteps: await glossaryAuthorMaxSteps(ctx, segment),
-      });
-      // The state this chapter's correction must not shrink (see the amend
-      // pass above — the same failure mode, reached from the other side).
-      let feedbackBaseline = null;
-      try {
-        feedbackBaseline = await fs.readFile(glossaryOutputFile, "utf8");
-      } catch {
-        feedbackBaseline = null;
-      }
-      // The index must describe the glossary as it is NOW, chapter by chapter.
-      if (feedbackBaseline !== null) ctx.glossaryIndex = buildGlossaryIndex(feedbackBaseline);
-
-      try {
-        const feedbackResult = await feedbackAuthor.sendTurn(
-          buildGlossarySegmentFeedbackPrompt(ctx, segment, si),
-          { label: `glossary-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
-        );
-        assertRealToolCalls(feedbackResult, `the author agent (feedback pass, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-        const feedbackFallbackUsed = await assertWroteWithFallback(
-          glossaryOutputFile,
-          `the author agent (feedback pass, chapter ${segment.id})`,
-          feedbackResult?.text
-        );
-        // Recovery turn: ONLY when the glossary was actually missing after the
-        // fallback — never over a file the agent already wrote correctly.
-        if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-          const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-          const recoveryPrompt = glossaryRecoveryPrompt(
-            hasContent,
-            '"glossary.md"',
-            `the chapter source, the validation report, and the current glossary`
-          );
-          const recoveryResult = await feedbackAuthor.sendTurn(recoveryPrompt, {
-            label: `glossary-feedback-recovery-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
-          });
-          assertRealToolCalls(recoveryResult, `the author agent (feedback recovery, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-          await assertWroteWithFallback(
-            glossaryOutputFile,
-            `the author agent (feedback recovery, chapter ${segment.id})`,
-            recoveryResult?.text
+    feedback: {
+      name: ({ iteration, segment }) => `feedback-author-${n}-${iteration}-${segment.id}`,
+      systemPrompt: () => ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE,
+      maxSteps: ({ segment }) => glossaryAuthorMaxSteps(ctx, segment),
+      prompt: ({ segment, si }) => buildGlossarySegmentFeedbackPrompt(ctx, segment, si),
+      label: ({ iteration, segment }) => `glossary-feedback-${n}-${iteration}-${segment.id}`,
+      recoveryLabel: ({ iteration, segment }) => `glossary-feedback-recovery-${n}-${iteration}-${segment.id}`,
+      recoveryWho: ({ segment }) => `the author agent (feedback recovery, chapter ${segment.id})`,
+      recoveryPrompt: (hasContent) =>
+        glossaryRecoveryPrompt(
+          hasContent,
+          '"glossary.md"',
+          `the chapter source, the validation report, and the current glossary`
+        ),
+      writesTo: () => glossaryOutputFile,
+      who: ({ segment }) => `the author agent (feedback pass, chapter ${segment.id})`,
+      beforeChapter: async ({ segment }) => {
+        feedbackBaseline = await fs.readFile(glossaryOutputFile, "utf8").catch(() => null);
+        // The index must describe the glossary as it is NOW, chapter by chapter.
+        if (feedbackBaseline !== null) ctx.glossaryIndex = buildGlossaryIndex(feedbackBaseline);
+      },
+      afterChapter: async ({ segment }) => {
+        if (feedbackBaseline !== null) {
+          await guardCarryForwardAgainst(
+            ctx,
+            feedbackBaseline,
+            `the feedback pass for chapter ${segment.id}`,
+            "the glossary as of the previous chapter"
           );
         }
-        await assertRealOutput(glossaryOutputFile, `the author agent (feedback pass, chapter ${segment.id})`);
-      } finally {
-        await feedbackAuthor.close();
-      }
+      },
+    },
+  });
 
-      if (feedbackBaseline !== null) {
-        await guardCarryForwardAgainst(
-          ctx,
-          feedbackBaseline,
-          `the feedback pass for chapter ${segment.id}`,
-          "the glossary as of the previous chapter"
-        );
-      }
-    }
-
-    if ((await fingerprintFiles(glossaryOutputFile)) === beforeFeedback) {
-      console.error(
-        `Volume ${values.INSTALLMENT_NUMBER}: the per-chapter feedback round changed NOTHING — ` +
-          `glossary.md is byte-identical to what it was before it. Stopping the QA loop here rather ` +
-          `than paying for another round of per-chapter validators over an unchanged glossary. Check ` +
-          `the feedback agents' turn logs in .logs/ for turns that only read (the usual shape: step ` +
-          `cap reached before anything was written).`
-      );
-      ctx.limitReached = true;
-      await saveRollingState(stateFilePath, recentRollingScores, {
-        sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-        stalled: true,
-      });
-      if (ON_QA_LIMIT === "fail") {
-        throw new Error(
-          `Volume ${values.INSTALLMENT_NUMBER}: the feedback round applied nothing (ON_QA_LIMIT=fail).`
-        );
-      }
-      break;
-    }
-
-    if (iteration === maxValidationIterations) {
-      ctx.limitReached = true;
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
-          `without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`
-      );
-      if (ON_QA_LIMIT === "fail") {
-        throw new Error(
-          `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
-            `without a passing grade (ON_QA_LIMIT=fail).`
-        );
-      }
-      break;
-    }
-  }
+  ctx.acceptedBy = result.acceptedBy;
+  ctx.limitReached = result.limitReached;
 }
 
 

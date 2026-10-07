@@ -15,11 +15,11 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError } = require("../configs/shared");
-const { fileExists, assertWrote, assertWroteWithFallback, assertRealOutput, hasRealOutput, isPublishableArtifact, writeProvenanceSidecar, fingerprintFiles } = require("../utils/fs");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("../utils/qa-loop");
-const { transformUserPrompt, isPassingVerdict, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, writePromptDump } = require("../utils/prompt");
+const { ON_QA_LIMIT } = require("../configs/shared");
+const { fileExists, assertWroteWithFallback, assertRealOutput } = require("../utils/fs");
+const { assertRealToolCalls } = require("../utils/agents");
+const { runPerChapterQaLoop } = require("../utils/qa-loop");
+const { validatorMaxStepsFor, findingsMergeMaxStepsFor } = require("../utils/prompt");
 
 const { buildWikiAuthorSystemPrompt, buildWikiFindingsMergePrompt, buildWikiMergeTurnPrompt, buildWikiSectionTurnPrompt, buildWikiSegmentFeedbackPrompt, buildWikiSegmentValidatorPrompt, buildWikiValidatorSystemPrompt } = require("./prompts");
 const { maxValidationIterations } = require("./config");
@@ -174,216 +174,84 @@ async function runChunkedVolumeAgent(ctx) {
  * unchanged acceptance one-shot scores it; on a failed window, per-chapter
  * feedback agents apply the chapter-tagged findings to wiki.md + shared-wiki.md.
  *
+ * The loop itself — the iterations, the rolling window, the consensus gates, the
+ * stalled-round check, the ON_QA_LIMIT policy — is the shared one in
+ * utils/qa-loop/chunked.js. The grading is the shared wikiAcceptanceCheck too:
+ * this loop used to re-implement it inline, which is how the two ways of
+ * validating a wiki drifted apart.
+ *
  * @param {WikiVolumeCtx} ctx - The volume context (must include ctx.fsGate).
  */
 async function runChunkedQaLoop(ctx) {
   const { values, bundle, volumeDir, wikiOutputFile, sharedWikiOutputFile, validationOutputFile } = ctx;
   const fsGate = ctx.fsGate;
-  const recentRollingScores = [];
+  const n = values.INSTALLMENT_NUMBER;
 
-  for (let iteration = 1; iteration <= maxValidationIterations; iteration++) {
-    console.log(
-      `Volume ${values.INSTALLMENT_NUMBER}: validation iteration ` +
-        `${iteration}/${maxValidationIterations} (chapter by chapter)...`
-    );
+  /** The validation partial one chapter's validator owes. @param {import("../types").SourceSegment} segment */
+  const partialFile = (segment) => path.join(volumeDir, `jump-in-wiki-validation-${n}-${segment.id}.md`);
 
-    // Per-chapter validation partials (fresh agent per chapter).
-    for (let si = 0; si < bundle.segments.length; si++) {
-      const segment = bundle.segments[si];
-      const partialFile = path.join(
-        volumeDir,
-        `jump-in-wiki-validation-${values.INSTALLMENT_NUMBER}-${segment.id}.md`
-      );
-      const validator = await harness.createAgentHandle({
-        name: `wiki-validator-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
-        systemPrompt: buildWikiValidatorSystemPrompt(ctx),
-        tools: fsGate.tools,
-        approve: fsGate.approve,
-        cwd: volumeDir,
-        maxSteps: validatorMaxStepsFor((await fs.stat(path.join(volumeDir, segment.file))).size),
-      });
-      try {
-        const validateResult = await validator.sendTurn(
-          buildWikiSegmentValidatorPrompt(ctx, segment, si),
-          { label: `jump-in-wiki-validate-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
-        );
-        assertRealToolCalls(validateResult, `the validator agent (chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(
-          partialFile,
-          `the validator agent (chapter ${segment.id})`,
-          validateResult?.text
-        );
-      } finally {
-        await validator.close();
-      }
-    }
+  const result = await runPerChapterQaLoop({
+    volumeLabel: `Volume ${n}`,
+    installment: n,
+    cwd: volumeDir,
+    tools: fsGate.tools,
+    approve: fsGate.approve,
+    chapters: bundle.segments,
+    maxIterations: maxValidationIterations,
+    onQaLimit: ON_QA_LIMIT,
+    validationOutputFile,
+    sourceFingerprint: bundle ? bundle.sourceFingerprint : undefined,
+    feedbackArtifactFiles: [wikiOutputFile, sharedWikiOutputFile],
+    acceptanceCheck: (iteration) => wikiAcceptanceCheck(ctx, iteration),
+    confirmationCheck: ({ index, temperature }) => wikiAcceptanceCheck(ctx, `confirm${index + 1}`, temperature),
+    stalledLogLine: () =>
+      `Volume ${n}: the per-chapter feedback round changed NOTHING — ` +
+      `wiki.md and shared-wiki.md are byte-identical to what they were before it. Stopping the QA ` +
+      `loop here rather than paying for another round of per-chapter validators over an unchanged ` +
+      `wiki. Check the feedback agents' turn logs in .logs/ for turns that only read (the usual ` +
+      `shape: step cap reached before anything was written).`,
+    limitReachedLogLine: () =>
+      `Volume ${n}: reached the validation iteration limit ` +
+      `without a passing grade. The last feedback pass is unvalidated; re-run the task to validate it.`,
 
-    // Findings merge: consolidate the partials into the standard report.
-    const merger = await harness.createAgentHandle({
-      name: `wiki-validator-merge-${values.INSTALLMENT_NUMBER}-${iteration}`,
-      systemPrompt: buildWikiValidatorSystemPrompt(ctx),
-      tools: fsGate.tools,
-      approve: fsGate.approve,
-      cwd: volumeDir,
-      maxSteps: 20,
-    });
-    try {
-      const mergeResult = await merger.sendTurn(
-        buildWikiFindingsMergePrompt(ctx),
-        { label: `jump-in-wiki-validate-merge-${values.INSTALLMENT_NUMBER}-${iteration}` }
-      );
-      assertRealToolCalls(mergeResult, "the findings-merge agent", values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(validationOutputFile, "the findings-merge agent", mergeResult?.text);
-    } finally {
-      await merger.close();
-    }
+    validate: {
+      name: ({ iteration, segment }) => `wiki-validator-${n}-${iteration}-${segment.id}`,
+      systemPrompt: () => buildWikiValidatorSystemPrompt(ctx),
+      maxSteps: async ({ segment }) => validatorMaxStepsFor((await fs.stat(path.join(volumeDir, segment.file))).size),
+      prompt: ({ segment, si }) => buildWikiSegmentValidatorPrompt(ctx, segment, si),
+      label: ({ iteration, segment }) => `jump-in-wiki-validate-${n}-${iteration}-${segment.id}`,
+      writesTo: ({ segment }) => partialFile(segment),
+      who: ({ segment }) => `the validator agent (chapter ${segment.id})`,
+    },
 
-    // Acceptance: tool-less one-shot over the wiki artifacts + standard report.
-    const acceptanceOutput = await harness.runOneShot({
-      systemPrompt: ctx.acceptanceSystemPrompt,
-      messages: [
-        { file: ctx.wikiOutputFile, name: "wiki.md" },
-        { file: ctx.sharedWikiOutputFile, name: "shared-wiki.md" },
-        { file: validationOutputFile, name: path.basename(validationOutputFile) },
-        { text: ctx.acceptanceUserPrompt },
-      ],
-      temperature: judgeTemperature(),
-      ...judgeThinking("ACCEPTANCE"),
-      label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
-    });
-    const reply = parseAcceptanceReply(acceptanceOutput);
-    if (reply === null) {
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response ` +
-          `(got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`
-      );
-    } else {
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: acceptance check: score ${reply.score}/100` +
-          (reply.band ? ` (band: ${reply.band})` : "") +
-          (reply.note ? ` — ${reply.note}` : "") +
-          ` (passing score: ${ACCEPTANCE_PASSING_SCORE})`
-      );
-    }
-    if (reply) {
-      recentRollingScores.push(reply.score);
-      if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) recentRollingScores.shift();
-    }
-    const wikiStateFile = validationOutputFile.replace(".md", "-rolling-state.json");
-    await saveRollingState(wikiStateFile, recentRollingScores, {
-      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-    });
+    merge: {
+      name: ({ iteration }) => `wiki-validator-merge-${n}-${iteration}`,
+      systemPrompt: () => buildWikiValidatorSystemPrompt(ctx),
+      // Same rule as the other three tasks' merger (see findingsMergeMaxStepsFor
+      // in utils/prompt.js): it reads every chapter partial plus the wiki it is
+      // auditing before it can write anything, and a flat cap throws away the
+      // whole validation round when it runs out mid-read.
+      maxSteps: async () =>
+        findingsMergeMaxStepsFor(bundle.segments.length, (await fs.stat(wikiOutputFile).catch(() => ({ size: 0 }))).size),
+      prompt: () => buildWikiFindingsMergePrompt(ctx),
+      label: ({ iteration }) => `jump-in-wiki-validate-merge-${n}-${iteration}`,
+      writesTo: () => validationOutputFile,
+      who: () => "the findings-merge agent",
+    },
 
-    // The same exceptional-score confirmation the whole-installment loop runs
-    // (utils/qa-loop.js): a top-band grade is re-graded at temperature 0 and the
-    // calm judging temperature, and a consensus accepts the volume WITHOUT the
-    // expensive per-chapter feedback round below.
-    const exceptional = await confirmExceptionalScore({
-      score: reply ? reply.score : null,
-      recentRollingScores,
-      confirmationCheck: ({ index, temperature }) => wikiAcceptanceCheck(ctx, `confirm${index + 1}`, temperature),
-      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
-      stateFile: wikiStateFile,
-      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-    });
-    if (exceptional.accepted) {
-      ctx.acceptedBy = "exceptional-consensus";
-      break;
-    }
+    feedback: {
+      name: ({ iteration, segment }) => `wiki-feedback-${n}-${iteration}-${segment.id}`,
+      systemPrompt: () => buildWikiAuthorSystemPrompt(ctx),
+      maxSteps: () => 40,
+      prompt: ({ segment, si }) => buildWikiSegmentFeedbackPrompt(ctx, segment, si),
+      label: ({ iteration, segment }) => `jump-in-wiki-feedback-${n}-${iteration}-${segment.id}`,
+      writesTo: () => [wikiOutputFile, sharedWikiOutputFile],
+      who: ({ segment }) => `the author agent (feedback pass, chapter ${segment.id})`,
+    },
+  });
 
-    if (meetsAcceptanceCriteria(recentRollingScores)) {
-      const avg = computeRollingAverage(recentRollingScores);
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: rolling average ${avg.toFixed(1)}/100 ` +
-          `(${recentRollingScores.length} checks) meets the passing score ` +
-          `${ACCEPTANCE_PASSING_SCORE}. Accepted.`
-      );
-      break;
-    }
-
-    // A grade that already passes earns the window's remaining samples by
-    // re-grading this wiki, not by paying for a per-chapter feedback round plus a
-    // second full round of per-chapter validators (see confirmPassingScore).
-    const passing = await confirmPassingScore({
-      score: reply ? reply.score : null,
-      recentRollingScores,
-      confirmationCheck: ({ index, temperature }) => wikiAcceptanceCheck(ctx, `confirm${index + 1}`, temperature),
-      volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
-      stateFile: wikiStateFile,
-      sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-    });
-    if (passing.accepted) {
-      ctx.acceptedBy = "passing-consensus";
-      break;
-    }
-
-    // Per-chapter feedback (fresh author agent per chapter, chapter-tagged
-    // findings). Fingerprinted first: a feedback round that changed nothing is
-    // not progress, and another iteration would re-audit an unchanged wiki.
-    const watchedWikiFiles = [wikiOutputFile, sharedWikiOutputFile];
-    const beforeFeedback = await fingerprintFiles(watchedWikiFiles);
-    for (let si = 0; si < bundle.segments.length; si++) {
-      const segment = bundle.segments[si];
-      const feedbackAuthor = await harness.createAgentHandle({
-        name: `wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}`,
-        systemPrompt: buildWikiAuthorSystemPrompt(ctx),
-        tools: fsGate.tools,
-        approve: fsGate.approve,
-        cwd: volumeDir,
-        maxSteps: 40,
-      });
-      try {
-        const feedbackResult = await feedbackAuthor.sendTurn(
-          buildWikiSegmentFeedbackPrompt(ctx, segment, si),
-          { label: `jump-in-wiki-feedback-${values.INSTALLMENT_NUMBER}-${iteration}-${segment.id}` }
-        );
-        assertRealToolCalls(feedbackResult, `the author agent (feedback pass, chapter ${segment.id})`, values.INSTALLMENT_NUMBER);
-        await assertWroteWithFallback(
-          [wikiOutputFile, sharedWikiOutputFile],
-          `the author agent (feedback pass, chapter ${segment.id})`,
-          feedbackResult?.text
-        );
-      } finally {
-        await feedbackAuthor.close();
-      }
-    }
-
-    if ((await fingerprintFiles(watchedWikiFiles)) === beforeFeedback) {
-      console.error(
-        `Volume ${values.INSTALLMENT_NUMBER}: the per-chapter feedback round changed NOTHING — ` +
-          `wiki.md and shared-wiki.md are byte-identical to what they were before it. Stopping the QA ` +
-          `loop here rather than paying for another round of per-chapter validators over an unchanged ` +
-          `wiki. Check the feedback agents' turn logs in .logs/ for turns that only read (the usual ` +
-          `shape: step cap reached before anything was written).`
-      );
-      ctx.limitReached = true;
-      await saveRollingState(wikiStateFile, recentRollingScores, {
-        sourceFingerprint: ctx.bundle ? ctx.bundle.sourceFingerprint : undefined,
-        stalled: true,
-      });
-      if (ON_QA_LIMIT === "fail") {
-        throw new Error(
-          `Volume ${values.INSTALLMENT_NUMBER}: the feedback round applied nothing (ON_QA_LIMIT=fail).`
-        );
-      }
-      break;
-    }
-
-    if (iteration === maxValidationIterations) {
-      ctx.limitReached = true;
-      console.log(
-        `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit ` +
-          `without a passing grade. The last feedback pass is unvalidated; re-run the task to validate it.`
-      );
-      if (ON_QA_LIMIT === "fail") {
-        throw new Error(
-          `Volume ${values.INSTALLMENT_NUMBER}: hit the validation iteration limit ` +
-            `without a passing grade (ON_QA_LIMIT=fail).`
-        );
-      }
-      break;
-    }
-  }
+  ctx.acceptedBy = result.acceptedBy;
+  ctx.limitReached = result.limitReached;
 }
 
 

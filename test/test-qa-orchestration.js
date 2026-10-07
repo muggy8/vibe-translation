@@ -58,6 +58,7 @@ if (!childFailLimit) {
 
 const harness = require("../harness");
 const cv = require("../character-voice");
+const { runPerChapterQaLoop } = require("../utils/qa-loop");
 const {
   loadRollingState,
   isAcceptedState,
@@ -778,6 +779,237 @@ async function scenarioConfirmExceptionalScore() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ─── the chapter-by-chapter QA loop (utils/qa-loop/chunked.js) ───────────────
+// The four tasks' fallback loops are this one loop plus three stage descriptions.
+// The glossary flow test drives it end to end through a real task; these drive the
+// shared layer directly, so a change to the layer cannot hide behind one task.
+
+const CHUNKED_PARTIAL =
+  "# Validation partial\n\nFINDING [LOW] chapters=ch1 — one Notes cell is longer than a gloss.\n";
+const CHUNKED_REPORT =
+  "# Validation report\n\nThe artifact covers the chapter sources. No HIGH findings.\n\n" +
+  "FINDING [LOW] chapters=ch1 — one Notes cell is longer than a gloss.\n";
+/** A chat reply long enough to look like the document the validator owes (see looksLikeArtifact in utils/fs.js). */
+const CHUNKED_CHAT_REPLY = `# Validation partial\n\n${"FINDING [LOW] — a finding written in chat instead of with writeFile.\n".repeat(40)}`;
+
+/**
+ * A two-chapter volume and the cfg the shared chunked loop expects.
+ * @param {{volumeDir: string}} v
+ * @param {Object} [overrides] - Scenario changes to the cfg.
+ * @returns {{cfg: Object, artifact: string, report: string, partialFile: (id: string) => string}}
+ */
+function makeChunkedCfg(v, overrides = {}) {
+  const chapters = [
+    { id: "ch1", file: "book-ch1.md", title: "Chapter 1", bodyChars: 40 },
+    { id: "ch2", file: "book-ch2.md", title: "Chapter 2", bodyChars: 40 },
+  ];
+  for (const s of chapters) {
+    fs.writeFileSync(path.join(v.volumeDir, s.file), `# ${s.title}\n\nBody text for ${s.id}.\n`, "utf8");
+  }
+  const artifact = path.join(v.volumeDir, "artifact.md");
+  fs.writeFileSync(
+    artifact,
+    `# Artifact\n\n${"A real document line the feedback round can change.\n".repeat(30)}`,
+    "utf8"
+  );
+  const report = path.join(v.volumeDir, "artifact-validation.md");
+  const partialFile = (id) => path.join(v.volumeDir, `artifact-validation-${id}.md`);
+
+  const cfg = {
+    volumeLabel: "Volume 01",
+    installment: "01",
+    tools: {},
+    approve: async () => true,
+    cwd: v.volumeDir,
+    chapters,
+    maxIterations: Number(process.env.QA_MAX_ITERATIONS),
+    onQaLimit: "accept",
+    validationOutputFile: report,
+    sourceFingerprint: "fp-001",
+    feedbackArtifactFiles: [artifact],
+    acceptanceCheck: async () => 50,
+    limitReachedLogLine: () => "Volume 01: reached the validation iteration limit without a passing grade.",
+    validate: {
+      name: ({ iteration, segment }) => `chunk-validator-${iteration}-${segment.id}`,
+      systemPrompt: () => "You audit one chapter.",
+      maxSteps: () => 10,
+      prompt: ({ segment }) => `audit ${segment.id}`,
+      label: ({ iteration, segment }) => `chunk-validate-${iteration}-${segment.id}`,
+      writesTo: ({ segment }) => partialFile(segment.id),
+      who: ({ segment }) => `the validator agent (chapter ${segment.id})`,
+    },
+    merge: {
+      name: ({ iteration }) => `chunk-merge-${iteration}`,
+      systemPrompt: () => "You consolidate the partials.",
+      maxSteps: () => 10,
+      prompt: () => "consolidate the partials",
+      label: ({ iteration }) => `chunk-merge-${iteration}`,
+      writesTo: () => report,
+      who: () => "the findings-merge agent",
+    },
+    feedback: {
+      name: ({ iteration, segment }) => `chunk-feedback-${iteration}-${segment.id}`,
+      systemPrompt: () => "You apply this chapter's findings.",
+      maxSteps: () => 10,
+      prompt: ({ segment }) => `apply the findings for ${segment.id}`,
+      label: ({ iteration, segment }) => `chunk-feedback-${iteration}-${segment.id}`,
+      writesTo: () => artifact,
+      who: ({ segment }) => `the author agent (feedback pass, chapter ${segment.id})`,
+    },
+  };
+  return { cfg: { ...cfg, ...overrides }, artifact, report, partialFile };
+}
+
+/**
+ * The scripted agents for a chunked-loop scenario: validators write their
+ * chapter's partial, the merger consolidates it, feedback either moves the
+ * artifact or (the failure the loop exists to catch) leaves it alone.
+ * @param {{artifact: string, report: string, partialFile: (id: string) => string, writes?: boolean, chatReply?: boolean, silent?: boolean}} opts
+ *   The files the stages owe, plus how the scripted agents behave.
+ * @returns {{oneShot: () => string, agent: (name: string) => {text: string}}}
+ */
+function chunkedScript(opts) {
+  const { artifact, report, partialFile, writes, chatReply, silent } = opts;
+  return {
+    oneShot: () => '{"score": 80, "band": "Pass", "note": "fixture"}',
+    agent: (name) => {
+      if (name.startsWith("chunk-validator-")) {
+        if (silent) return { text: "" };
+        if (chatReply) return { text: CHUNKED_CHAT_REPLY };
+        fs.writeFileSync(partialFile(name.split("-").pop()), CHUNKED_PARTIAL, "utf8");
+        return { text: "" };
+      }
+      if (name.startsWith("chunk-merge-")) {
+        fs.writeFileSync(report, CHUNKED_REPORT, "utf8");
+        return { text: "" };
+      }
+      if (name.startsWith("chunk-feedback-") && writes) {
+        fs.appendFileSync(artifact, "\nA correction the feedback round applied.\n", "utf8");
+      }
+      return { text: "" };
+    },
+  };
+}
+
+/**
+ * The loop accepts on the rolling window and stops BEFORE the second feedback
+ * round — the expensive half of an iteration is not paid for twice.
+ */
+async function scenarioChunkedAcceptsOnRollingWindow() {
+  const v = makeVolumeDir();
+  const { cfg, artifact, report, partialFile } = makeChunkedCfg(v, { acceptanceCheck: async () => 80 });
+  try {
+    script = chunkedScript({ artifact, report, partialFile, writes: true });
+    callLog = [];
+    const result = await runPerChapterQaLoop(cfg);
+    assert.strictEqual(result.accepted, true, "the window accepted the volume");
+    assert.strictEqual(result.acceptedBy, "rolling-window", "the loop reports WHICH way it got out");
+    assert.strictEqual(result.limitReached, false, "the budget was not spent");
+    assert.strictEqual(agentCalls("chunk-validator-").length, 4, "two iterations × two chapters of validators");
+    assert.strictEqual(agentCalls("chunk-merge-").length, 2, "one findings merge per iteration");
+    assert.strictEqual(
+      agentCalls("chunk-feedback-").length,
+      2,
+      "the feedback round ran once (the first failed grade) and not again after the accepting grade"
+    );
+    const state = await loadState(report);
+    assert.deepStrictEqual(state.results, [80, 80], "the window holds both grades");
+    assert.strictEqual(state.acceptedBy, "rolling-window", "the state records HOW it accepted");
+    assert.strictEqual(isAcceptedState(state), true, "a re-run skips this volume");
+  } finally {
+    cleanup(v.root);
+  }
+}
+
+/**
+ * A feedback round that changed nothing is not progress: the loop stops, records
+ * it as stalled, and does not buy another round of per-chapter validators.
+ */
+async function scenarioChunkedStalledRound() {
+  const v = makeVolumeDir();
+  const { cfg, artifact, report, partialFile } = makeChunkedCfg(v);
+  try {
+    script = chunkedScript({ artifact, report, partialFile, writes: false });
+    callLog = [];
+    const result = await runPerChapterQaLoop(cfg);
+    assert.strictEqual(result.accepted, false, "a failing window does not accept");
+    assert.strictEqual(result.limitReached, true, "the loop reports it stopped");
+    assert.strictEqual(result.stalled, true, "and reports WHY it stopped");
+    assert.strictEqual(agentCalls("chunk-validator-").length, 2, "one round of validators, not two");
+    assert.strictEqual(agentCalls("chunk-feedback-").length, 2, "every chapter still got its feedback pass — that is what proved it was a no-op");
+    const state = await loadState(report);
+    assert.strictEqual(state.stalled, true, "the state file says 'applied nothing', not 'ran out of iterations'");
+  } finally {
+    cleanup(v.root);
+  }
+}
+
+/**
+ * A feedback round that DOES move the artifact keeps going, and the budget is
+ * what ends the loop.
+ */
+async function scenarioChunkedIterationLimit() {
+  const v = makeVolumeDir();
+  const { cfg, artifact, report, partialFile } = makeChunkedCfg(v);
+  try {
+    script = chunkedScript({ artifact, report, partialFile, writes: true });
+    callLog = [];
+    const result = await runPerChapterQaLoop(cfg);
+    assert.strictEqual(result.accepted, false, "no grade ever passed");
+    assert.strictEqual(result.stalled, undefined, "the loop did not stop for a no-op round");
+    assert.strictEqual(result.limitReached, true, "the iteration budget ended it");
+    assert.strictEqual(
+      agentCalls("chunk-validator-").length,
+      2 * cfg.maxIterations,
+      "every iteration ran its full round of per-chapter validators"
+    );
+  } finally {
+    cleanup(v.root);
+  }
+}
+
+/**
+ * The turn protocol the stages share: a validator that left its file missing is
+ * re-sent the task exactly once (whatever the chat reply was rescued from), and a
+ * validator that still produced nothing fails loudly rather than leaving a hole
+ * in the report the grader is about to read.
+ */
+async function scenarioChunkedTurnProtocol() {
+  // (a) The reply is rescued onto disk, and the agent is asked to write it itself.
+  {
+    const v = makeVolumeDir();
+    const { cfg, artifact, report, partialFile } = makeChunkedCfg(v, { acceptanceCheck: async () => 80 });
+    try {
+      script = chunkedScript({ artifact, report, partialFile, chatReply: true, writes: true });
+      callLog = [];
+      const result = await runPerChapterQaLoop(cfg);
+      assert.strictEqual(result.accepted, true, "a rescued partial is still a real partial — the loop carried on");
+      assert.strictEqual(agentCalls("chunk-validator-1-ch1").length, 2, "the task was re-sent to the same agent exactly once");
+      assert.ok(fs.readFileSync(partialFile("ch1"), "utf8").includes("FINDING"), "the rescue wrote the reply into the partial");
+    } finally {
+      cleanup(v.root);
+    }
+  }
+  // (b) Nothing to rescue — one re-send, then a hard stop.
+  {
+    const v = makeVolumeDir();
+    const { cfg } = makeChunkedCfg(v);
+    try {
+      script = chunkedScript({ artifact: cfg.feedbackArtifactFiles[0], report: cfg.validationOutputFile, partialFile: () => "", silent: true });
+      callLog = [];
+      await assert.rejects(
+        () => runPerChapterQaLoop(cfg),
+        /never wrote real output/,
+        "a validator that wrote nothing fails instead of leaving a hole in the report"
+      );
+      assert.strictEqual(agentCalls("chunk-validator-1-ch1").length, 2, "the task was re-sent to the same agent exactly once");
+      assert.strictEqual(agentCalls("chunk-merge-").length, 0, "the loop never reached the findings merge");
+    } finally {
+      cleanup(v.root);
+    }
+  }
+}
+
 // ─── Entry points ────────────────────────────────────────────────────────────
 
 async function main() {
@@ -794,6 +1026,10 @@ async function main() {
   scenarioPassingConsensusInChild();
   await scenarioFeedbackNoOpStopsLoop();
   await scenarioConfirmExceptionalScore();
+  await scenarioChunkedAcceptsOnRollingWindow();
+  await scenarioChunkedStalledRound();
+  await scenarioChunkedIterationLimit();
+  await scenarioChunkedTurnProtocol();
   console.log("qa-orchestration: all checks passed.");
 }
 

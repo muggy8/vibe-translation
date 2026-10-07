@@ -8,11 +8,10 @@ require("dotenv").config();
 const fs = require("fs").promises;
 require("../types");
 const harness = require("../harness");
-const { transformUserPrompt, parseAcceptanceScore, parseAcceptanceReply, validatorMaxStepsFor, authorMaxStepsFor, findingsMergeMaxStepsFor, writePromptDump, selectSectionsByRelevance } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_WINDOW_SIZE, ACCEPTANCE_PASSING_SCORE, computeRollingAverage, meetsAcceptanceCriteria, isAcceptedState, isSourceStale, saveRollingState, ON_VOLUME_ERROR, ON_MISSING_PREVIOUS, ON_QA_LIMIT, validateRequiredEnv, resolveRunSettings, seriesArtifactFile, judgeTemperature, judgeThinking, isStructuralError, volumeFailureError, readBoolEnv } = require("../configs/shared");
-const { fileExists, assertWroteWithFallback, assertRealOutput, writeProvenanceSidecar, inlineReferenceMessage, isPublishableArtifact, fingerprintFiles } = require("../utils/fs");
-const { emittedToolCallAsText, assertRealToolCalls } = require("../utils/agents");
-const { runSharedQaLoop, confirmExceptionalScore, confirmPassingScore, runVolumeWithModeFallback } = require("../utils/qa-loop");
+const { parseAcceptanceReply, validatorMaxStepsFor } = require("../utils/prompt");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking } = require("../configs/shared");
+const { assertRealToolCalls } = require("../utils/agents");
+const { runSharedQaLoop, runWriteTurn } = require("../utils/qa-loop");
 
 const { maxValidationIterations } = require("./config");
 const { buildFeedbackTurnPrompt, buildValidatorTurnPrompt } = require("./prompts");
@@ -69,20 +68,23 @@ async function runQaLoop(ctx) {
 async function runFeedback(ctx, seg = null, si = null) {
   const { values, volumeDir, fsGate } = ctx;
   const labelSuffix = seg ? `-${seg.id}` : "";
+  const who = `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`;
   const author = await harness.createAgentHandle({ name: `author-style-feedback-${values.INSTALLMENT_NUMBER}${labelSuffix}`, systemPrompt: ctx.feedbackSystemPrompt + AGENT_TOOLS_NOTE, tools: fsGate.tools, approve: fsGate.approve, cwd: volumeDir, maxSteps: await styleAuthorMaxSteps(ctx, seg) });
   try {
-    const feedbackResult = await author.sendTurn(buildFeedbackTurnPrompt(ctx, seg, si), { label: `style-guide-feedback-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
-    assertRealToolCalls(feedbackResult, `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
-    const feedbackFallbackUsed = await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`, feedbackResult?.text);
-    // Recovery turn: ONLY when the file was actually missing after the
-    // fallback — never over a file the agent already wrote correctly.
-    if (feedbackFallbackUsed && process.env.AGENT_RECOVERY_ENABLED !== "false") {
-      const hasContent = feedbackResult?.text && feedbackResult.text.trim().length > 0;
-      const recoveryResult = await author.sendTurn(styleRecoveryPrompt(hasContent, true), { label: `style-guide-feedback-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
-      assertRealToolCalls(recoveryResult, `the author agent (feedback recovery${seg ? `, chapter ${seg.id}` : ""})`, values.INSTALLMENT_NUMBER);
-      await assertWroteWithFallback(ctx.styleOutputFile, `the author agent (feedback recovery${seg ? `, chapter ${seg.id}` : ""})`, recoveryResult?.text);
-    }
-    await assertRealOutput(ctx.styleOutputFile, `the author agent (feedback pass${seg ? `, chapter ${seg.id}` : ""})`);
+    // The shared turn protocol (utils/qa-loop/turn.js): send the turn, refuse a
+    // tool call emitted as text, rescue a missing file from the chat reply, and
+    // only then re-send the task to this same agent.
+    await runWriteTurn(author, {
+      prompt: buildFeedbackTurnPrompt(ctx, seg, si),
+      label: `style-guide-feedback-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      who,
+      writesTo: ctx.styleOutputFile,
+      recoveryLabel: `style-guide-feedback-recovery-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      recoveryWho: `the author agent (feedback recovery${seg ? `, chapter ${seg.id}` : ""})`,
+      recoveryPrompt: (hasContent) => styleRecoveryPrompt(hasContent, true),
+      verifyOutput: true,
+      assertToolCalls: (result, whoLabel) => assertRealToolCalls(result, whoLabel, values.INSTALLMENT_NUMBER),
+    });
     // The cumulative invariant, re-checked after every rewrite: a feedback pass
     // that rewrote the guide from memory is how sections disappear from it.
     await assertStyleCarryForward(ctx, "the feedback pass");
