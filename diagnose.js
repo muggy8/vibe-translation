@@ -132,121 +132,78 @@ function listOpenTickets() {
   return 0;
 }
 
-async function main() {
-  const args = readArgs(process.argv.slice(2));
-  if (args.error) {
-    console.error(args.error);
-    return 2;
-  }
-  if (args.list) return listOpenTickets();
-  if (!args.ticketId) {
+/**
+ * `--answer`: the manager replying to a question the diagnostics team asked.
+ *
+ * No model call — this is the customer answering, and the check is on what the answer cites.
+ *
+ * @param {Object} args - The parsed CLI flags.
+ * @param {Object} ticket - The ticket being answered.
+ * @returns {number} The exit code.
+ */
+function answerQuestion(args, ticket) {
+  const asked = unansweredQuestions(ticket);
+  if (!asked.length) {
     console.error(
-      `Nothing to do. Give a ticket: node diagnose.js --ticket=<id>\n` +
-        `Or list the ones that are waiting: node diagnose.js --open`
+      `ticket ${args.ticketId} has no unanswered question to reply to.` +
+        (ticket.diagnosis
+          ? ` Its questions are all answered, or it asked none.`
+          : ` It has not been diagnosed yet — run: node diagnose.js --ticket=${args.ticketId}`)
     );
     return 2;
   }
-
-  const seriesDir = args.seriesDir || process.env.SERIES_LOCATION || null;
-  if (!seriesDir) {
+  // One question answered without being named; more than one must be named, or the answer lands on
+  // the wrong question and the ticket records something the manager never said.
+  const question = args.question === null ? (asked.length === 1 ? asked[0] : null) : args.question;
+  if (question === null) {
     console.error(
-      `I need to know which series this ticket is about. Pass --series=<dir> or set SERIES_LOCATION.`
+      `this ticket has more than one unanswered question, so say which one you are answering:\n` +
+        asked.map((q) => `  - ${q}`).join("\n") +
+        `\n\n  node diagnose.js --ticket=${args.ticketId} --question="<that question>" --answer="<your answer>"`
     );
     return 2;
   }
-
-  // The manager's reply to a question the diagnostics team asked. No model call: this is the
-  // customer answering, and the check is on what the answer cites.
-  if (args.answer !== null) {
-    const store = readTickets();
-    const ticket = store.tickets.find((t) => t.id === args.ticketId);
-    if (!ticket) {
-      console.error(`no ticket ${args.ticketId}. See: node diagnose.js --open`);
-      return 1;
-    }
-    const asked = unansweredQuestions(ticket);
-    if (!asked.length) {
-      console.error(
-        `ticket ${args.ticketId} has no unanswered question to reply to.` +
-          (ticket.diagnosis
-            ? ` Its questions are all answered, or it asked none.`
-            : ` It has not been diagnosed yet — run: node diagnose.js --ticket=${args.ticketId}`)
-      );
-      return 2;
-    }
-    const question = args.question === null ? (asked.length === 1 ? asked[0] : null) : args.question;
-    if (question === null) {
-      console.error(
-        `this ticket has more than one unanswered question, so say which one you are answering:\n` +
-          asked.map((q) => `  - ${q}`).join("\n") +
-          `\n\n  node diagnose.js --ticket=${args.ticketId} --question="<that question>" --answer="<your answer>"`
-      );
-      return 2;
-    }
-    const cites = [];
-    const result = recordAnswer(args.ticketId, { question, answer: args.answer, cites });
-    if (result.error) {
-      console.error(result.error);
-      return 2;
-    }
-    console.log(`Answered on ${args.ticketId}:`);
-    console.log(`  Q: ${question}`);
-    console.log(`  A: ${args.answer.trim()}`);
-    console.log(`\nWritten to ${ticketPaths().markdown}`);
-    console.log(`Re-ask the team with the new information: node diagnose.js --ticket=${args.ticketId} --reask`);
-    return 0;
-  }
-
-  // Is this askable at all? Asked BEFORE a model container is switched in, because on this machine a
-  // switch means loading a model (gotcha 22) and "already answered" is the common case in a loop that
-  // re-reads the state every iteration. `diagnoseTicket` asks the same question internally, so the
-  // CLI's decision and the module's refusal cannot drift.
-  const ticketsFile = ticketPaths();
-  const askable = diagnosisIsAskable(
-    readTickets(ticketsFile.json).tickets.find((t) => t.id === args.ticketId),
-    { ticketId: args.ticketId, reask: args.reask, jsonPath: ticketsFile.json }
-  );
-  if (!askable.askable) {
-    console.error(`\nRefused: ${askable.error}`);
+  const cites = [];
+  const result = recordAnswer(args.ticketId, { question, answer: args.answer, cites });
+  if (result.error) {
+    console.error(result.error);
     return 2;
   }
+  console.log(`Answered on ${args.ticketId}:`);
+  console.log(`  Q: ${question}`);
+  console.log(`  A: ${args.answer.trim()}`);
+  console.log(`\nWritten to ${ticketPaths().markdown}`);
+  console.log(`Re-ask the team with the new information: node diagnose.js --ticket=${args.ticketId} --reask`);
+  return 0;
+}
 
-  // Read-only, so a live run does not block this — but it changes what the answer means.
-  const running = runInProgress();
-  if (running.inProgress) {
-    console.log(
-      `note: a run is in progress (${describeRunLock(running.lock) || running.note}). ` +
-        `This role only reads, so it will run — but the state it is reading is still moving, ` +
-        `and the diagnosis describes a snapshot.`
-    );
+/**
+ * An answer that did not meet the contract: what failed, what the turn claimed, and what the
+ * read-only gate stopped.
+ *
+ * @param {Object} result - The reply from `diagnoseTicket`.
+ * @returns {void}
+ */
+function printFailedDiagnosis(result) {
+  console.error(`\n${result.error}`);
+  for (const p of result.problems) console.error(`  - ${p.message}`);
+  for (const w of result.warnings) console.error(`  note: ${w.message}`);
+  if (result.writeAttempts.length) {
+    console.error(`  the read-only gate refused ${result.writeAttempts.length} write attempt(s) during that turn.`);
   }
+  console.error(`\nNothing was written to the ticket.`);
+}
 
-  console.log(`Asking the diagnostics team about ${args.ticketId} (${READ_TOOL_NAMES.join(" / ")} only, no write access)…`);
-  // The `pre-manager` / `post-manager` hooks fire INSIDE `diagnoseTicket`, around the agent turn, not
-  // here: this CLI cannot know whether the module is about to reach the model without repeating every
-  // refusal the module makes, and a container switch costs a model load (gotcha 22). The guarantee
-  // belongs to the role that makes the call.
-  const result = await diagnoseTicket({
-    ticketId: args.ticketId,
-    seriesDir,
-    reask: args.reask,
-  });
-
-  if (result.refused) {
-    console.error(`\nRefused: ${result.error}`);
-    return 2;
-  }
-  if (!result.ok) {
-    console.error(`\n${result.error}`);
-    for (const p of result.problems) console.error(`  - ${p.message}`);
-    for (const w of result.warnings) console.error(`  note: ${w.message}`);
-    if (result.writeAttempts.length) {
-      console.error(`  the read-only gate refused ${result.writeAttempts.length} write attempt(s) during that turn.`);
-    }
-    console.error(`\nNothing was written to the ticket.`);
-    return 1;
-  }
-
+/**
+ * The diagnosis as the manager has to read it: the answer, the menu the banned-option filter left,
+ * what the filter refused and where it goes instead, the notes on the answer, what the read-only gate
+ * stopped, and what is still waiting on the manager.
+ *
+ * @param {Object} result - The reply from `diagnoseTicket`.
+ * @param {Object} args - The parsed CLI flags.
+ * @returns {void}
+ */
+function printDiagnosis(result, args) {
   const ticket = result.ticket;
   console.log(`\n${renderDiagnosisMarkdown(ticket)}\n`);
 
@@ -291,6 +248,93 @@ async function main() {
 
   if (args.json) console.log(`\n${JSON.stringify(ticket, null, 2)}`);
   console.log(`\nWritten to ${ticketPaths().markdown}`);
+}
+
+/**
+ * The CLI's whole shape: refuse the request that cannot be honoured, answer the manager's own reply,
+ * then ask the team — but only if asking is legitimate, and only after deciding that on purpose.
+ *
+ * @returns {Promise<number>} The exit code.
+ */
+async function main() {
+  const args = readArgs(process.argv.slice(2));
+  if (args.error) {
+    console.error(args.error);
+    return 2;
+  }
+  if (args.list) return listOpenTickets();
+  if (!args.ticketId) {
+    console.error(
+      `Nothing to do. Give a ticket: node diagnose.js --ticket=<id>\n` +
+        `Or list the ones that are waiting: node diagnose.js --open`
+    );
+    return 2;
+  }
+
+  const seriesDir = args.seriesDir || process.env.SERIES_LOCATION || null;
+  if (!seriesDir) {
+    console.error(
+      `I need to know which series this ticket is about. Pass --series=<dir> or set SERIES_LOCATION.`
+    );
+    return 2;
+  }
+
+  // The manager's reply to a question the diagnostics team asked. No model call: this is the customer
+  // answering, and the check is on what the answer cites.
+  if (args.answer !== null) {
+    const ticket = readTickets().tickets.find((t) => t.id === args.ticketId);
+    if (!ticket) {
+      console.error(`no ticket ${args.ticketId}. See: node diagnose.js --open`);
+      return 1;
+    }
+    return answerQuestion(args, ticket);
+  }
+
+  // Is this askable at all? Asked BEFORE a model container is switched in, because on this machine a
+  // switch means loading a model (gotcha 22) and "already answered" is the common case in a loop that
+  // re-reads the state every iteration. `diagnoseTicket` asks the same question internally, so the
+  // CLI's decision and the module's refusal cannot drift.
+  const ticketsFile = ticketPaths();
+  const askable = diagnosisIsAskable(
+    readTickets(ticketsFile.json).tickets.find((t) => t.id === args.ticketId),
+    { ticketId: args.ticketId, reask: args.reask, jsonPath: ticketsFile.json }
+  );
+  if (!askable.askable) {
+    console.error(`\nRefused: ${askable.error}`);
+    return 2;
+  }
+
+  // Read-only, so a live run does not block this — but it changes what the answer means.
+  const running = runInProgress();
+  if (running.inProgress) {
+    console.log(
+      `note: a run is in progress (${describeRunLock(running.lock) || running.note}). ` +
+        `This role only reads, so it will run — but the state it is reading is still moving, ` +
+        `and the diagnosis describes a snapshot.`
+    );
+  }
+
+  console.log(`Asking the diagnostics team about ${args.ticketId} (${READ_TOOL_NAMES.join(" / ")} only, no write access)…`);
+  // The `pre-manager` / `post-manager` hooks fire INSIDE `diagnoseTicket`, around the agent turn, not
+  // here: this CLI cannot know whether the module is about to reach the model without repeating every
+  // refusal the module makes, and a container switch costs a model load (gotcha 22). The guarantee
+  // belongs to the role that makes the call.
+  const result = await diagnoseTicket({
+    ticketId: args.ticketId,
+    seriesDir,
+    reask: args.reask,
+  });
+
+  if (result.refused) {
+    console.error(`\nRefused: ${result.error}`);
+    return 2;
+  }
+  if (!result.ok) {
+    printFailedDiagnosis(result);
+    return 1;
+  }
+
+  printDiagnosis(result, args);
   return 0;
 }
 
