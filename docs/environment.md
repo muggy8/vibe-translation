@@ -158,7 +158,7 @@ These knobs exist because the cumulative documents stop fitting in one reply (go
 | Var | Default | Meaning |
 |---|---|---|
 | `GLOSSARY_CARRY_FORWARD_GUARD` | `true` | The no-AI gate that fails a volume whose glossary lost a term the previous volume's held (and moves the damaged file to `glossary.md.rejected`). `false` turns the cumulative invariant back into something nothing checks — which is how 457 terms disappeared between two volumes on the live run without a single error |
-| `GLOSSARY_INDEX_MAX_CHARS` | `30000` | How big the inlined "what the glossary already holds" map may get before it truncates. It names the truncation and tells the agent to `grep` instead of guessing (gotcha 43). `0` = no cap |
+| `GLOSSARY_INDEX_MAX_CHARS` | `30000` | How big the inlined "what the glossary already holds" map may get before it truncates. It names the truncation and says what absence from the list does NOT prove (gotcha 43). Two consumers now: the amend agent's map of the file it is about to edit, and the complete term list the truncated extraction window appends so a cut row is still a named term (gotcha 82). `0` = no cap |
 | `VOICE_CARRY_FORWARD_GUARD` | `true` | The same gate for the character voice reference, on the `### Character` section set (damaged file moved to `character-voice.md.rejected`) |
 | `VOICE_INDEX_MAX_CHARS` | `12000` | The cap on the inlined "who is already in the reference" section map |
 | `STYLE_CARRY_FORWARD_GUARD` | `true` | The same gate for the style guide, on the `## ` category set only (a drop in the rule count is reported, not failed). Damaged file moved to `style-guide.md.rejected` |

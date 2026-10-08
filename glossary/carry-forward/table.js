@@ -127,6 +127,39 @@ function glossaryRowText(entry) {
 
 
 /**
+ * The Han (kanji) characters of one spelling, in order, with every kana dropped.
+ *
+ * This is what a source-language term looks like once you stop writing its furigana, and it is the
+ * only form in which two furiganed spellings of ONE term are the same string. Observed live: volume
+ * 14's glossary row is `双ふた花ばの恋物語`; volume 15's chapter 6 prints
+ * `双ふた花ばの恋こい物もの語がたり` — furigana inserted INSIDE the word, so neither string contains
+ * the other as a substring, and any test that compares whole spellings says "this term is not in the
+ * text" about a term the text prints twice. Both spellings have the skeleton `双花恋物語`.
+ *
+ * It is a comparison key, not a claim about reading: it cannot tell 恋 in 恋する from 恋 written with
+ * its furigana, and it is deliberately paired with a minimum length so a one- or two-character
+ * skeleton (which occurs everywhere in real Japanese prose) is never trusted to mean anything.
+ *
+ * @param {string} text - One spelling, or a whole term column.
+ * @returns {string} Its Han characters in order ("" when it has none — a pure-kana term has no skeleton).
+ */
+function glossaryTermSkeleton(text) {
+  if (!text || typeof text !== "string") return "";
+  let out = "";
+  for (const ch of text) {
+    const code = ch.codePointAt(0);
+    if (code >= 0x3400 && code <= 0x4dbf) out += ch; // CJK Extension A
+    else if (code >= 0x4e00 && code <= 0x9fff) out += ch; // CJK Unified Ideographs
+  }
+  return out;
+}
+
+// A skeleton this short is two common kanji sitting next to each other, which happens all over a
+// real page, so the skeleton test only runs on something long enough to be a term.
+const GLOSSARY_SKELETON_MIN_CHARS = 3;
+
+
+/**
  * A rendering compared without Markdown emphasis or spacing, so `*The Twin
  * Flowers' Love Story*` and `The Twin Flowers' Love Story` are the same name.
  *
@@ -194,8 +227,8 @@ function buildGlossaryIndex(markdown) {
       lines.push(
         head +
           `(${remaining} term(s) of this and later sections are not listed here — ` +
-          `the index is capped at ${cap} chars. Search "glossary.md" with grep ` +
-          `before assuming a term is absent.)`
+          `the index is capped at ${cap} chars, so a term missing from this list is not a term ` +
+          `missing from the glossary.)`
       );
       used += head.length;
       break;
@@ -210,6 +243,8 @@ function buildGlossaryIndex(markdown) {
 module.exports = {
   parseGlossaryTableTerms,
   glossaryTermSpans,
+  glossaryTermSkeleton,
+  GLOSSARY_SKELETON_MIN_CHARS,
   glossaryRowText,
   normalizeGlossaryRendering,
   CARRY_FORWARD_MIN_ALIAS_SPAN_CHARS,

@@ -36,6 +36,8 @@ module.exports = {
   reportCarryForwardLoss: gates.reportCarryForwardLoss,
   parseGlossaryTableTerms: table.parseGlossaryTableTerms,
   glossaryTermSpans: table.glossaryTermSpans,
+  glossaryTermSkeleton: table.glossaryTermSkeleton,
+  GLOSSARY_SKELETON_MIN_CHARS: table.GLOSSARY_SKELETON_MIN_CHARS,
   glossaryRowText: table.glossaryRowText,
   normalizeGlossaryRendering: table.normalizeGlossaryRendering,
   CARRY_FORWARD_MIN_ALIAS_SPAN_CHARS: table.CARRY_FORWARD_MIN_ALIAS_SPAN_CHARS,

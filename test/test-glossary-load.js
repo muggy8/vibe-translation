@@ -623,7 +623,10 @@ assert.strictEqual(buildGlossaryIndex("no tables here"), "", "glossary index: no
 process.env.GLOSSARY_INDEX_MAX_CHARS = "40";
 const cappedIndex = buildGlossaryIndex(indexMarkdown);
 assert.ok(cappedIndex.includes("are not listed here"), "capped glossary index SAYS it truncated (gotcha 43)");
-assert.ok(cappedIndex.includes("grep"), "capped glossary index names the way to check anyway");
+assert.ok(
+  cappedIndex.includes("a term missing from this list is not a term missing from the glossary"),
+  "capped glossary index says what its own truncation does NOT prove (gotcha 43)"
+);
 delete process.env.GLOSSARY_INDEX_MAX_CHARS;
 
 // ─── the carry-forward guard (deterministic, no model call) ─────────────────
@@ -820,8 +823,10 @@ assert.ok(truncated.includes("## Terms & Concepts"), "truncateGlossary: a surviv
 // Exactly the newest window survives.
 const keptRows = (truncated.match(/^\| Term\d+ \|/gm) || []).length;
 assert.strictEqual(keptRows, 200, "truncateGlossary: keeps GLOSSARY_TRUNCATION_MAX_ENTRIES (200) rows");
-// A section truncated away entirely loses its heading (no empty section shown).
-assert.ok(!truncated.includes("## Characters"), "truncateGlossary: a fully truncated section loses its heading");
+// A section truncated away entirely loses its heading (no empty section shown) — but its terms are
+// still named in the index at the end, which is the whole point of appending one.
+assert.ok(!/^## Characters$/m.test(truncated), "truncateGlossary: a fully truncated section loses its heading");
+assert.ok(/### Characters \(\d+\)/.test(truncated), "truncateGlossary: the section's terms are still named in the index");
 // Under the entry cap but over the byte threshold: unchanged (nothing to drop).
 const manyColumns = "## Characters\n| Source | Rendering | Notes |\n|---|---|---|\n" + tableRows.slice(0, 150).join("\n") + "\n" + "x".repeat(70 * 1024);
 assert.strictEqual(truncateGlossary(manyColumns), manyColumns, "truncateGlossary: ≤ 200 rows → unchanged even when oversized");
@@ -859,10 +864,20 @@ assert.strictEqual(truncateGlossary(manyColumns), manyColumns, "truncateGlossary
   assert.ok(relevant.includes("## Characters"), "the section a kept row belongs to keeps its heading");
   assert.ok(relevant.includes("## Terms & Concepts"), "cross-section relevance keeps both headings it needs");
   const relevantRows = (relevant.match(/^\| (?:Term\d+|ソラ|黒鋼|鏡) \|/gm) || []).length;
-  assert.strictEqual(relevantRows, 200, "the entry cap is still respected");
+  assert.strictEqual(relevantRows, 200, "the entry cap still bounds how many rows are shown in full");
   assert.ok(
-    relevant.includes("whose source term occurs in the text being translated (3 such row(s)"),
-    "the note says WHY these rows were chosen"
+    relevant.includes("3 row(s) name a term that occurs in the text being translated"),
+    "the note says WHY these rows were chosen, and counts the relevant half separately: " +
+      (relevant.match(/\[TRUNCATED:[^\n]*/) || ["(no note)"])[0]
+  );
+  assert.ok(
+    relevant.includes("with 197 background rows in document order"),
+    "and it counts the background half, so the two halves add up to what it shows: " +
+      (relevant.match(/\[TRUNCATED:[^\n]*/) || ["(no note)"])[0]
+  );
+  assert.ok(
+    relevant.includes("[EVERY TERM THIS GLOSSARY ALREADY HOLDS — all 1203 of them"),
+    "the excerpt ends with the complete name-and-rendering list, so a row the cap cut is still named"
   );
 
   // Without a source text the old newest-window behavior is kept (and the note
@@ -870,6 +885,101 @@ assert.strictEqual(truncateGlossary(manyColumns), manyColumns, "truncateGlossary
   const legacy = truncateGlossary(withCast);
   assert.ok(!legacy.includes("| ソラ | Sora | protagonist |"), "no source text → the old document-order window");
   assert.ok(legacy.includes("Showing the 200 in document order"), "the note is honest about which rule ran");
+}
+
+// The relevance rule reads the SPELLINGS INSIDE a row, not the whole first cell — and it survives
+// furigana, which is what the whole-cell rule could not. Volume 14's row is 双ふた花ばの恋物語;
+// volume 15 chapter 6 prints 双ふた花ばの恋こい物もの語がたり. Neither contains the other, the row was
+// invisible, the term was re-proposed as new, the amend pass reconciled it into the row that already
+// held it, and the gate called that a deletion: a glossary that had GROWN from 445 rows to 460 was
+// quarantined and a 12-hour run ended (gotcha 68).
+{
+  // The three rows under test sit AFTER the 800 filler rows on purpose: the background half of the
+  // window is taken in document order, so a row at the very end is only shown in full when the
+  // relevance rule matched it — which is what makes the third row a test of the rule, not of the window.
+  const furiganed = [
+    "# Glossary — Test",
+    "",
+    "## Terms & Concepts",
+    "| Source | Rendering | Notes |",
+    "|---|---|---|",
+    ...tableRows.slice(0, 800),
+    "| 双ふた花ばの恋物語 | *The Twin Flowers' Love Story* | the coined library book |",
+    "| 三つ編み魔王 / 三つ編み悪魔 | The Braided Demon | one entry, two spellings |",
+    "| 学校 | School | a building the chapter never mentions |",
+  ].join("\n");
+  assert.ok(furiganed.length > 64 * 1024, "fixture is oversized");
+
+  // The book prints the title with furigana INSIDE the word, and it prints one alias of the
+  // slash-separated row, and it says 校舎 / 数学 — never 学校.
+  const chapter =
+    "双ふた花ばの恋こい物もの語がたり』という本。三つ編み悪魔が笑った。校舎の脇で数学の話をした。";
+  const out = truncateGlossary(furiganed, chapter);
+
+  assert.ok(
+    out.includes("| 双ふた花ばの恋物語 |"),
+    "the row survives although the chapter spells the term a different way — the exact row whose " +
+      "invisibility started the volume-15 chain"
+  );
+  assert.ok(
+    out.includes("| 三つ編み魔王 / 三つ編み悪魔 |"),
+    "a row counts when ANY spelling its term column names occurs, not when the whole cell does"
+  );
+  assert.ok(
+    !out.includes("| 学校 | School |"),
+    "and the Han-skeleton test is not trusted below GLOSSARY_SKELETON_MIN_CHARS: 校 and 学 sit all " +
+      "over a real page, so a two-character skeleton matches everything and therefore nothing"
+  );
+  assert.ok(
+    out.includes("学校 → School"),
+    "yet the term is still NAMED in the complete list at the end: the window hides a row's Notes, " +
+      "never the existence of an entry"
+  );
+  assert.ok(
+    out.includes("2 row(s) name a term that occurs in the text being translated"),
+    "the note counts the rows the text mentions: " + (out.match(/\[TRUNCATED:[^\n]*/) || ["(no note)"])[0]
+  );
+}
+
+// When the text mentions MORE terms than the window holds, the cap cuts FULL rows — and nothing is
+// hidden by it, because every term the file holds is still named in the list appended below the tables.
+// That list is the half the extractor needs in order to not call an existing term new, and it is what
+// the volume-15 chain was missing: the extractor re-proposed 双ふた花ばの恋物語 because the row that
+// held it had been cut, and the prompt's "do not re-add a term merely because you cannot see it" asked
+// a one-shot call with no file tools to check something it had no way to check.
+{
+  const mentioned = Array.from({ length: 260 }, (_, i) => `| 用語${i} | Term${i} | a term this chapter uses |`);
+  const capped = [
+    "# Glossary — Test",
+    "",
+    "## Terms & Concepts",
+    "| Source | Rendering | Notes |",
+    "|---|---|---|",
+    ...mentioned,
+    ...tableRows.slice(0, 700),
+  ].join("\n");
+  assert.ok(capped.length > 64 * 1024, "fixture is oversized");
+  const src = mentioned.map((_, i) => `用語${i}について書いた。`).join("");
+
+  const shown = truncateGlossary(capped, src);
+  const keptFull = mentioned.filter((row) => shown.includes(row));
+  assert.strictEqual(keptFull.length, 200, `the cap bounds the rows shown IN FULL: ${keptFull.length}`);
+  const cutNames = mentioned.filter((row) => !shown.includes(row)).map((row) => row.split("|")[1].trim());
+  const unnamed = cutNames.filter((t) => !shown.includes(`${t} → Term`));
+  assert.deepStrictEqual(unnamed, [], `${cutNames.length} rows were cut by the cap; every term they hold must still be named`);
+  assert.ok(!shown.includes("| Term0 | Rendering0 |"), "no room was left for background rows, which is the right trade");
+  assert.ok(
+    shown.includes("260 row(s) name a term that occurs in the text being translated"),
+    (shown.match(/\[TRUNCATED:[^\n]*/) || ["(no note)"])[0]
+  );
+  assert.ok(
+    shown.includes("the 200 most relevant of them are among the rows shown, with 0 background rows in document order"),
+    "the note says which half the cap cut: " + (shown.match(/\[TRUNCATED:[^\n]*/) || ["(no note)"])[0]
+  );
+  assert.ok(
+    shown.includes("[EVERY TERM THIS GLOSSARY ALREADY HOLDS — all 960 of them"),
+    "and the excerpt says out loud that the list at the end is the whole glossary"
+  );
 }
 
 // ─── buildUnusedEntriesNote (the coverage audit feeding back) ────────────────

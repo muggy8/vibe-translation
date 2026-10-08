@@ -9,7 +9,7 @@ Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md
 
 Per volume, in order — each volume's glossary is built on the previous one's:
 
-1. **Extract new terms** — one-shot in both modes: source + previous `glossary.md` → JSON array of `{ term, type, query }`; parsed by `parseTerms` (tolerates markdown fences and surrounding prose).
+1. **Extract new terms** — one-shot in both modes: source + previous `glossary.md` → JSON array of `{ term, type, query }`; parsed by `parseTerms` (tolerates markdown fences and surrounding prose). When the previous glossary is over `GLOSSARY_TRUNCATION_THRESHOLD` the inlined copy goes through `truncateGlossary`: `GLOSSARY_TRUNCATION_MAX_ENTRIES` (200) full rows, chosen by whether the row's term occurs in the text being processed — matched under **any spelling the row names**, verbatim or by its Han-character skeleton, which is the only form in which two furiganed spellings of one term compare equal — and then the **complete term → rendering list of the whole file** (`buildGlossaryIndex`) appended underneath, so the window hides a row's Notes and never the existence of an entry. The extractor has no file tools, so that list is the only way its "do not re-propose what already exists" instruction can be obeyed (gotcha 82).
 2. **Research** the new terms:
    - **Parallel agents**: one agent per term, batched to `STAGE_CONCURRENCY` (env var, default 1 = sequential). Each agent targets exactly one unique line in `glossary-research.md` via `editFile`, so there are no conflicts.
    - Skeleton-first: the workflow pre-writes `glossary-research.md` with a `- (pending)` line under every term; each agent replaces its own placeholder. A crashed run still leaves a usable skeleton.
