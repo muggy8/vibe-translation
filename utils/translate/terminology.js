@@ -221,7 +221,7 @@ function extractStyleRules(markdown, { fallbackMaxChars = 8000 } = {}) {
   return t.length > fallbackMaxChars ? t.slice(0, fallbackMaxChars) + "\n…(truncated)" : t;
 }
 
-// ─── Hy-MT2 prompt construction ─────────────────────────────────────────────
+// ─── instTrans prompt construction (glossary block for the grading stages) ───
 
 
 /**

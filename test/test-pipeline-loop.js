@@ -548,7 +548,7 @@ function runAuditSelfTest() {
         repetitionPenalty: opts.repetitionPenalty ?? 1,
         maxTokens: opts.maxTokens ?? 8192,
         reasoningEffort: opts.reasoningEffort ?? null,
-        chatTemplateKwargs: null,
+        chatTemplateKwargs: opts.chatTemplateKwargs ?? null,
       },
       tools: opts.tools || [],
       messages,
@@ -577,8 +577,12 @@ function runAuditSelfTest() {
   const authorUser = (volume, extra = "") =>
     `# Glossary Amendment\n\n**Volume being processed:** ${volume.installment}\n\n${extra}${workflow.sourceTextOf(volume)}`;
   const translateUser = (volume, tail = "") =>
-    `*[Source Text]*\n${workflow.sourceTextOf(volume)}\n\n*[Translation Tasks]*\n` +
-    `Translate the [Source Text] into ${workflow.SERIES.targetLanguage}. ONLY output the translated result.\n${tail}`;
+    `请将以下日语小说翻译成${workflow.SERIES.targetLanguage}，并且严格遵循所有约束要求。\n\n` +
+    `【源文】\n${workflow.sourceTextOf(volume)}\n\n【约束要求】\n` +
+    `1. 【硬性要求】专名/术语对照 — 以下每个术语在全文中一律按给定译法渲染：\n   鏡→Mirror\n` +
+    `2. 【注意】译文风格必须严格符合以下规则：\n   rules\n${tail}\n\n只输出译文，不要有任何额外说明。`;
+  /** The translator's own thinking switch, as the stage sends it. */
+  const fastMode = { enable_thinking: false };
 
   /** @type {Object[]} */
   const log = [];
@@ -610,7 +614,8 @@ function runAuditSelfTest() {
       stage: "translate",
       model: "stub-translate",
       user: translateUser(vol01),
-      reasoningEffort: "no_think",
+      temperature: 0,
+      chatTemplateKwargs: fastMode,
       answer: { text: workflow.draftTextOf(vol01).split("\n\n").slice(0, 3).join("\n\n") },
     })
   );
@@ -622,7 +627,8 @@ function runAuditSelfTest() {
       stage: "translate",
       model: "stub-translate",
       user: translateUser(vol02),
-      reasoningEffort: "no_think",
+      temperature: 0,
+      chatTemplateKwargs: fastMode,
       answer: { text: workflow.draftTextOf(vol02) },
     })
   );
@@ -631,8 +637,9 @@ function runAuditSelfTest() {
     entry(i++, {
       stage: "retranslate",
       model: "stub-translate",
-      user: `A previous translation of this text had the following problems and MUST fix all of them.\n\n${translateUser(vol01)}`,
-      reasoningEffort: "no_think",
+      user: `1. 【硬性要求】上一版译文存在以下问题，本次译文必须全部修正：\n   fix this\n\n${translateUser(vol01)}`,
+      temperature: 0,
+      chatTemplateKwargs: fastMode,
       answer: { text: workflow.fixedTextOf(vol01) },
     })
   );

@@ -1,5 +1,5 @@
 /**
- * The translator's own settings: the TRANSLATE_* endpoint, the thinking dialect, the official sampling recipe, the continuity tail, and `TRANSLATE_CHUNK_CHARS` — which is a CEILING ONLY when an operator sets it explicitly (translateChunkCap returns null when unset, and the token plan decides). Arithmetic does not overrule a deliberate limit (gotcha 57).
+ * The translator's own settings: the TRANSLATE_* endpoint, the thinking dialect, the model's own decoding recipe, the continuity tail, and `TRANSLATE_CHUNK_CHARS` — which is a CEILING ONLY when an operator sets it explicitly (translateChunkCap returns null when unset, and the token plan decides). Arithmetic does not overrule a deliberate limit (gotcha 57).
  *
  * Part of the translate.js layer (split out of the original single file).
  */
@@ -53,9 +53,12 @@ const continuityChars = translateContinuityChars();
 
 
 /**
- * Hy-MT2 thinking mode. The model's published numbers are for the fast
- * (non-thinking) mode, so the default is "no_think"; "low"/"high" enable
- * the think tag (slower, unproven benefit for translation).
+ * Index-Translate thinking mode. The model's published numbers are for the fast
+ * (non-thinking) mode, so the default is "no_think" — and for this model the ask
+ * is not optional: its chat template opens a think tag whenever the request does
+ * not set `enable_thinking`, so "no_think" is what has to be SENT (see
+ * thinkingExtraBody's "index-mt" dialect). "low"/"high" enable thinking; the
+ * template has no levels, so both mean "think".
  * @returns {"no_think"|"low"|"high"}
  */
 function translateThinkingMode() {
@@ -69,15 +72,20 @@ function translateThinkingMode() {
 
 
 /**
- * Hy-MT2 sampling. Official 30B-A3B recipe: temperature 0.7, top_p 1.0,
- * top_k -1, repetition_penalty 1.0 (temperature is overridable via
- * TRANSLATE_TEMPERATURE).
+ * Index-Translate sampling. The family's published decoding is greedy — the
+ * released client sends `temperature: 0` and the report's numbers are measured
+ * that way — and top_p / top_k / penalties are left at the server's neutral
+ * values (temperature is overridable via TRANSLATE_TEMPERATURE).
+ *
+ * Greedy is also what the stage's idempotency assumes: a chapter re-run against
+ * an identical prompt reproduces an identical draft. Raising the temperature
+ * buys the QA loop a fresh roll at the cost of that (see retranslateRetryBudget).
  * @returns {{temperature: number, topP: number, topK: number, repetitionPenalty: number}}
  */
 function translateSampling() {
-  const t = parseFloat(process.env.TRANSLATE_TEMPERATURE ?? "0.7");
+  const t = parseFloat(process.env.TRANSLATE_TEMPERATURE ?? "0");
   return {
-    temperature: Number.isFinite(t) ? t : 0.7,
+    temperature: Number.isFinite(t) ? t : 0,
     topP: 1.0,
     topK: -1,
     repetitionPenalty: 1.0,

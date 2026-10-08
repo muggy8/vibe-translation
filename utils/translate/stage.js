@@ -114,9 +114,9 @@ function stageThinking(prefix) {
  * (`<PREFIX>_TEMPERATURE`) when set, otherwise the global AI_TEMPERATURE.
  *
  * Used by polish (a rewrite pass — it follows the run's house temperature).
- * `translate` does NOT use this: Hy-MT2's 0.7 is part of the model's official
- * sampling recipe, not a house preference, so TRANSLATE_TEMPERATURE keeps its
- * own default.
+ * `translate` does NOT use this: the translator model's own decoding recipe is
+ * part of its contract, not a house preference, so TRANSLATE_TEMPERATURE keeps
+ * its own default.
  *
  * @param {"EDIT"} prefix - The stage prefix.
  * @param {number} fallback - Used when neither the stage knob nor AI_TEMPERATURE is set.

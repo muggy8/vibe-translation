@@ -106,8 +106,8 @@ function headingForSegment(seg, text, languages = {}) {
 
 /**
  * Defensively strip a full-text markdown code fence some models add around
- * their output (Hy-MT2 is prompted not to, but a stray fence would corrupt
- * the merged volume). Only strips when the WHOLE output is fenced.
+ * their output (the translator is prompted not to, but a stray fence would
+ * corrupt the merged volume). Only strips when the WHOLE output is fenced.
  *
  * @param {string} text
  * @returns {string} The cleaned text.
@@ -117,6 +117,34 @@ function stripMarkdownFence(text) {
   const t = text.trim();
   const m = t.match(/^```[a-zA-Z]*\n([\s\S]*?)\n```$/);
   return (m ? m[1] : t).trim();
+}
+
+
+/**
+ * Defensively drop a `<think>…</think>` block from a translation reply.
+ *
+ * The Index-Translate template is the Qwen3-VL one, and it opens a think tag
+ * whenever the request does not say otherwise — so a model that decides to
+ * reason anyway leaves its reasoning INSIDE the answer, and the pipeline would
+ * publish it as chapter text. The stage asks for the fast mode
+ * (`enable_thinking: false`, which prefills an empty think block); this is the
+ * backstop for the case where the ask did not take, and it mirrors what the
+ * model family's own client does before printing an answer.
+ *
+ * Only drops a block that is OPENED at the very start of the reply, or one that
+ * is closed before any other text: a novel that legitimately contains the
+ * literal string "<think>" in its prose is not what this is for.
+ *
+ * @param {string} text
+ * @returns {string} The text with a leading thinking block removed.
+ */
+function stripThinkBlock(text) {
+  if (typeof text !== "string") return "";
+  const t = text.trim();
+  if (!t.startsWith("<think>")) return t;
+  const close = t.indexOf("</think>");
+  if (close === -1) return t; // an unclosed tag is not a thinking block — leave it visible
+  return t.slice(close + "</think>".length).trim();
 }
 
 
@@ -229,6 +257,7 @@ module.exports = {
   mergeVolumeTranslation,
   headingForSegment,
   stripMarkdownFence,
+  stripThinkBlock,
   tailOf,
   stripContinuityOverlap,
   resolvePublishedChapterTexts,

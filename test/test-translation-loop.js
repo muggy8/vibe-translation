@@ -679,7 +679,7 @@ async function scenarioTargetedRepair() {
     // …with the neighbouring TRANSLATED text as the seam it must match…
     assert.ok(prompt.includes("The laboratory was quiet."), "the preceding draft text is given as context");
     assert.ok(prompt.includes("Sora said calmly."), "and the following draft text too");
-    assert.ok(prompt.includes("ONE passage (1 of 1)"), "and it is told this is a passage correction, not a chapter translation");
+    assert.ok(prompt.includes("第 1 个片段（共 1 个）"), "and it is told this is a passage correction, not a chapter translation");
     // …and only the finding that belongs to this passage, plus the chapter-wide one.
     assert.ok(prompt.includes("the negation is omitted"), "the passage's own finding is injected");
     assert.ok(prompt.includes("register is too formal"), "a finding with no locatable span is not silently dropped");

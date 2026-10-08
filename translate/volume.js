@@ -24,7 +24,6 @@ const harness = require("../harness");
 const { writePromptDump } = require("../utils/prompt");
 const {
   sha256,
-  buildTranslationPrompt,
   checkTranslationQa,
   tailOf,
   loadTranslationState,
@@ -39,6 +38,7 @@ const {
   createChapterPlanner,
   chapterHeartbeat,
   stripMarkdownFence,
+  stripThinkBlock,
   chapterContextHash,
   STATE_FILE,
   QA_REPORT_FILE,
@@ -107,7 +107,7 @@ async function processTranslateVolume(ctx) {
     const existing = await readExistingDraft(ctx, seg);
     if (chapterIsCurrent(ctx, state, seg, chapter, existing)) {
       run.skipped += 1;
-      run.tail = tailFrom(existing, `the previous chapter (${seg.id})`);
+      run.tail = tailFrom(existing, `上一章节 (${seg.id})`);
       run.qaRows.push(await buildQaRow(seg, chapter.sourceText, existing, ctx.refs, "skipped (up to date)", sourceLanguage, targetLanguage));
       continue;
     }
@@ -169,7 +169,7 @@ function createVolumeRun(ctx) {
      *     from the end of the PREVIOUS volume (ctx.incomingTail).
      */
     tail: ctx.incomingTail && ctx.incomingTail.text
-      ? { text: ctx.incomingTail.text, source: `the end of the previous volume (${ctx.incomingTail.fromLabel || "the previous volume"})` }
+      ? { text: ctx.incomingTail.text, source: `上一卷的结尾（${ctx.incomingTail.fromLabel || "上一卷"}）` }
       : { text: "", source: "" },
   };
 }
@@ -338,26 +338,27 @@ function chapterIsCurrent(ctx, state, seg, chapter, existingDraft) {
  * @returns {Promise<void>}
  */
 async function dumpChapterPreview(ctx, run, seg, parts, { terms, roleWindow, outputReserve }) {
-  const { volume, template, endpoint, sampling, thinkingMode, targetLanguage } = ctx;
-  const { tasks } = buildBudgetedTaskLines({
+  const { volume, template, endpoint, sampling, thinkingMode, sourceLanguage, targetLanguage } = ctx;
+  const { prompt } = buildBudgetedTaskLines({
     terminologyLines: terms.lines,
+    disputedTerms: terms.disputed,
     background: ctx.refs.background,
     styleRules: ctx.refs.styleRules,
     voiceNotes: ctx.refs.voiceNotes,
     continuityText: run.tail.text || "(the previous text's ending would go here)",
-    continuitySource: run.tail.source || "the previous chapter",
+    continuitySource: run.tail.source || "上一章节",
     sourceText: parts[0],
     template,
     roleWindow,
     outputReserve,
+    sourceLanguage,
     targetLanguage,
     label: `Volume ${volume.installmentNumber} ${seg.id}`,
   });
-  const prompt = buildTranslationPrompt({ template, sourceText: parts[0], tasks });
   const file = await writePromptDump(
     `translate-${volume.installmentNumber}-${seg.id}`,
     volume.installmentNumber,
-    "one-shot (no system prompt — Hy-MT2 contract)",
+    "one-shot (no system prompt — Index-Translate instTrans contract)",
     [
       {
         title:
@@ -427,34 +428,35 @@ async function translateOneChapter(ctx, state, run, seg, chapter, existingDraft,
  * @returns {Promise<string>}
  */
 async function translateChapterParts(ctx, run, seg, parts, { terms, roleWindow, outputReserve }) {
-  const { volume, template, endpoint, sampling, thinkingMode, targetLanguage } = ctx;
+  const { volume, template, endpoint, sampling, thinkingMode, sourceLanguage, targetLanguage } = ctx;
   const partTexts = [];
   let continuity = run.tail.text;
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
-    const { tasks, dropped: partDrops } = buildBudgetedTaskLines({
+    const { prompt, dropped: partDrops } = buildBudgetedTaskLines({
       terminologyLines: terms.lines,
+      disputedTerms: terms.disputed,
       background: ctx.refs.background,
       styleRules: ctx.refs.styleRules,
       voiceNotes: ctx.refs.voiceNotes,
       continuityText: continuity,
-      continuitySource: i === 0 ? run.tail.source : "the previous part of this chapter",
+      continuitySource: i === 0 ? run.tail.source : "本章的上一段",
       sourceText: part,
       template,
       roleWindow,
       outputReserve,
+      sourceLanguage,
       targetLanguage,
       label: `Volume ${volume.installmentNumber} ${seg.id} part ${i + 1}`,
     });
     if (partDrops.length > 0) run.promptDrops.push({ id: seg.id, part: i + 1, dropped: partDrops });
-    const prompt = buildTranslationPrompt({ template, sourceText: part, tasks });
     console.log(
       `  Volume ${volume.installmentNumber} ${seg.id}: translating part ${i + 1}/${parts.length} ` +
         `(${part.length} chars) with ${endpoint.model}…`
     );
     const result = await harness.runOneShot({
-      // NO system prompt — Hy-MT2's official contract is a single user message (systemPrompt: null
-      // sends none).
+      // NO system prompt — Index-Translate's official request format is a single user message
+      // (systemPrompt: null sends none). The instTrans constraints ride inside that message.
       systemPrompt: null,
       messages: [{ text: prompt }],
       endpoint,
@@ -469,10 +471,10 @@ async function translateChapterParts(ctx, run, seg, parts, { terms, roleWindow, 
         repetitionPenalty: sampling.repetitionPenalty,
       },
       thinking: thinkingMode,
-      thinkingTemplate: "hy-mt",
+      thinkingTemplate: "index-mt",
       label: `translate-v${volume.installmentNumber}-${seg.id}-${parts.length > 1 ? "part" + (i + 1) : "full"}`,
     });
-    const clean = stripMarkdownFence(result);
+    const clean = stripThinkBlock(stripMarkdownFence(result));
     if (!clean) {
       throw new Error(
         `Volume ${volume.installmentNumber} ${seg.id}: the model returned no content for part ${i + 1}. ` +
@@ -506,7 +508,7 @@ async function commitRejectedDraft(ctx, state, run, seg, chapter, existingDraft,
       `  Volume ${volume.installmentNumber} ${seg.id}: new draft REJECTED by deterministic QA ` +
         `(${reason}) — quarantined to ${rejectedFile}; the previous draft is kept.`
     );
-    run.tail = tailFrom(existingDraft, `the last usable chapter draft (${seg.id})`);
+    run.tail = tailFrom(existingDraft, `上一版可用的译文 (${seg.id})`);
     run.qaRows.push(
       buildQaRow(seg, chapter.sourceText, existingDraft, ctx.refs, `new attempt rejected — ${reason} (previous draft kept)`, sourceLanguage, targetLanguage)
     );
@@ -525,7 +527,7 @@ async function commitRejectedDraft(ctx, state, run, seg, chapter, existingDraft,
     `  Volume ${volume.installmentNumber} ${seg.id}: draft FAILED deterministic QA (${reason}) — ` +
       `written and marked for correction by the translate-qa loop (also kept in ${rejectedFile}).`
   );
-  run.tail = tailFrom(draft, `the previous chapter (${seg.id})`);
+  run.tail = tailFrom(draft, `上一章节 (${seg.id})`);
   run.qaRows.push(buildQaRow(seg, chapter.sourceText, draft, ctx.refs, qa.warnings, sourceLanguage, targetLanguage));
 }
 
@@ -545,7 +547,7 @@ async function commitDraft(ctx, state, run, seg, chapter, draft, qa, { draftPath
   await fs.rm(path.join(volumeDir, rejectedFile), { force: true });
   await saveTranslationState(path.join(volumeDir, STATE_FILE), state);
   run.translated += 1;
-  run.tail = tailFrom(draft, `the previous chapter (${seg.id})`);
+  run.tail = tailFrom(draft, `上一章节 (${seg.id})`);
   run.qaRows.push(await buildQaRow(seg, chapter.sourceText, draft, ctx.refs, qa.warnings, sourceLanguage, targetLanguage));
   if (qa.warnings.length > 0) {
     console.warn(`  Volume ${volume.installmentNumber} ${seg.id}: QA warning: ${qa.warnings.join("; ")}`);

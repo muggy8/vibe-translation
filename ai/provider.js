@@ -62,7 +62,7 @@ async function loadEsm() {
  * the OpenAI-standard reasoning_effort parameter (also supported by
  * llama.cpp and Ollama).
  *
- * Two chat-template dialects:
+ * Three chat-template dialects:
  *   - "qwen" (default): Qwen3-style models. thinking=false sends
  *     chat_template_kwargs {thinking:false, enable_thinking:false}; thinking
  *     on sends reasoning_effort (the explicit level or the env default).
@@ -73,8 +73,18 @@ async function loadEsm() {
  *     benchmarked in. Booleans map: false -> "no_think", true -> the level
  *     or "low". The Qwen-style chat_template_kwargs keys do not exist in
  *     that template, so they are never sent for this dialect.
+ *   - "index-mt": the Index-Translate (qwen35moe) translation model. Its
+ *     template is the Qwen3-VL one, and that template has NO reasoning_effort
+ *     variable: it branches on `enable_thinking` alone, and when the variable
+ *     is UNDEFINED it takes the else branch and opens a bare `<think>` — so
+ *     thinking is on unless the request says otherwise. "no_think" therefore
+ *     has to send chat_template_kwargs {enable_thinking:false} (which prefills
+ *     an empty think block); "low"/"high" send {enable_thinking:true}. There
+ *     is no level to distinguish — the two are the same switch — and
+ *     reasoning_effort is never sent, because that key is not in the template
+ *     and a request that relies on it silently gets the thinking default.
  *
- * @param {{thinking?: boolean|string, thinkingLevel?: string, template?: "qwen"|"hy-mt"}} [cfg]
+ * @param {{thinking?: boolean|string, thinkingLevel?: string, template?: "qwen"|"hy-mt"|"index-mt"}} [cfg]
  * @returns {Object|null} The parameters to merge into the request body, or null.
  */
 function thinkingExtraBody({ thinking = true, thinkingLevel, template = "qwen" } = {}) {
@@ -92,6 +102,23 @@ function thinkingExtraBody({ thinking = true, thinkingLevel, template = "qwen" }
       );
     }
     return { reasoning_effort: value };
+  }
+  if (template === "index-mt") {
+    const value =
+      thinking === false
+        ? "no_think"
+        : typeof thinking === "string"
+          ? thinking
+          : thinkingLevel || "no_think";
+    if (!["no_think", "low", "high"].includes(value)) {
+      throw new Error(
+        `Invalid thinking value "${value}" for the index-mt template ` +
+          `(expected "no_think", "low", or "high").`
+      );
+    }
+    // The template's ONLY switch. Omitting it is not "off" — it is the
+    // template's own default, which is thinking ON.
+    return { chat_template_kwargs: { enable_thinking: value !== "no_think" } };
   }
   const extra = {};
   if (thinking === false) {

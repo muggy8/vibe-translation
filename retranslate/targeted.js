@@ -14,9 +14,9 @@
 
 const harness = require("../harness");
 const {
-  buildTranslationPrompt,
   buildBudgetedTaskLines,
   stripMarkdownFence,
+  stripThinkBlock,
   paragraphBlocks,
   stitchParagraphs,
   buildPassageScopeLine,
@@ -37,6 +37,7 @@ const { TARGETED_CONTEXT_BLOCKS } = require("./config");
  *   thinkingMode: string,
  *   roleWindow: number,
  *   outputReserve: number,
+ *   sourceLanguage: string,
  *   targetLanguage: string,
  *   refs: Object,
  *   chapterTerms: {lines: string[]},
@@ -57,6 +58,7 @@ async function runTargetedRepair({
   thinkingMode,
   roleWindow,
   outputReserve,
+  sourceLanguage,
   targetLanguage,
   refs,
   chapterTerms,
@@ -80,7 +82,7 @@ async function runTargetedRepair({
     // rewrites paragraph 2 invites the model to "fix" it in the wrong place.
     const blockFindings = (block.findings || []).filter((t) => t && t.trim()).join("\n\n");
     const findingsText =
-      blockFindings || "(no passage-specific findings — translate the source faithfully)";
+      blockFindings || "（本片段没有具体发现 — 忠实翻译源文即可）";
     const scopeText = buildPassageScopeLine({
       before,
       after,
@@ -88,30 +90,30 @@ async function runTargetedRepair({
       blockCount: plan.blocks.length,
     });
 
-    const { tasks, dropped } = buildBudgetedTaskLines({
+    const { prompt, dropped } = buildBudgetedTaskLines({
       terminologyLines: chapterTerms.lines,
+      disputedTerms: chapterTerms.disputed,
       background: refs.background,
       styleRules: refs.styleRules,
       voiceNotes: refs.voiceNotes,
       continuityText: cue.text || undefined,
-      continuitySource: cue.source || "the previous chapter",
+      continuitySource: cue.source || "上一章节",
       findingsText,
       scopeText,
       sourceText: srcSpan,
       template,
       roleWindow,
       outputReserve,
+      sourceLanguage,
       targetLanguage,
       label: `Volume ${volume.installmentNumber} ${seg.id} passage ${bi + 1}`,
     });
     if (dropped.length > 0) promptDrops.push({ id: seg.id, part: `passage ${bi + 1}`, dropped });
-
-    const prompt = buildTranslationPrompt({ template, sourceText: srcSpan, tasks });
     console.log(
       `  Volume ${volume.installmentNumber} ${seg.id}: repairing passage ${bi + 1}/${plan.blocks.length} ` +
         `(source paragraphs ${block.start + 1}–${block.end + 1}, ${srcSpan.length} chars) with ${endpoint.model}…`
     );
-    const text = stripMarkdownFence(await runPassageModel({ endpoint, sampling, thinkingMode, prompt, volume, seg, bi }));
+    const text = stripThinkBlock(stripMarkdownFence(await runPassageModel({ endpoint, sampling, thinkingMode, prompt, volume, seg, bi })));
     if (!text) {
       console.warn(
         `  Volume ${volume.installmentNumber} ${seg.id}: the passage pass returned no content — ` +
@@ -134,8 +136,9 @@ async function runTargetedRepair({
 }
 
 /**
- * One passage's model call. Hy-MT2's contract is a single user message and no system prompt — the
- * same contract the whole-chapter pass uses, so a shortcut and the pass it replaces cannot drift.
+ * One passage's model call. Index-Translate's request format is a single user message and no system
+ * prompt — the same contract the whole-chapter pass uses, so a shortcut and the pass it replaces
+ * cannot drift.
  * @returns {Promise<string>}
  */
 function runPassageModel({ endpoint, sampling, thinkingMode, prompt, volume, seg, bi }) {
@@ -152,7 +155,7 @@ function runPassageModel({ endpoint, sampling, thinkingMode, prompt, volume, seg
       repetitionPenalty: sampling.repetitionPenalty,
     },
     thinking: thinkingMode,
-    thinkingTemplate: "hy-mt",
+    thinkingTemplate: "index-mt",
     label: `retranslate-v${volume.installmentNumber}-${seg.id}-passage${bi + 1}`,
   });
 }

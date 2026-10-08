@@ -19,9 +19,9 @@ const harness = require("../harness");
 const { writePromptDump } = require("../utils/prompt");
 const {
   sha256,
-  buildTranslationPrompt,
   checkTranslationQa,
   stripMarkdownFence,
+  stripThinkBlock,
   tailOf,
   loadTranslationState,
   saveTranslationState,
@@ -129,17 +129,21 @@ function findingsForRepair(ctx, seg, vEntry, volumeFindings, sEntry, consistency
   const findingsHash = sha256(`${vEntry.findings || ""}\n\u0000${consistency.findingsHash || ""}|${seg.id}`);
   const sameFindings = typeof sEntry.findingsHash === "string" && sEntry.findingsHash === findingsHash;
   // (#6) Retry budget: a chapter may be retranslated up to `retranslateRetryBudget` times against an
-  // IDENTICAL set of verification findings before the stall guard skips it. The extra shots matter
-  // because the translator is stochastic (temp 0.7) — same findings ≠ same outcome. A DIFFERENT
-  // findings set resets the budget. Cross-run re-runs stay cheap: once the budget is spent on these
-  // findings, a plain re-run skips.
+  // IDENTICAL set of verification findings before the stall guard skips it. The extra shots matter only
+  // when the translator is STOCHASTIC — a DIFFERENT findings set resets the budget either way, and so
+  // does a raised TRANSLATE_TEMPERATURE. At the model's own greedy default the prompt is identical and
+  // greedy decoding reproduces an identical draft, so the second shot against the same findings is a
+  // model call that cannot land anywhere new: the budget is spent on the first one. Cross-run re-runs
+  // stay cheap: once the budget is spent on these findings, a plain re-run skips.
+  const deterministicTranslator = ctx.sampling && ctx.sampling.temperature === 0;
+  const retryBudget = deterministicTranslator ? 1 : retranslateRetryBudget;
   const attemptsUsed = sameFindings ? (sEntry.retranslateAttempts ?? 1) : 0;
   const alreadyDone =
     !ctx.force &&
     sEntry.retranslated === true &&
     sEntry.sourceHash === sourceHash &&
     sameFindings &&
-    attemptsUsed >= retranslateRetryBudget;
+    attemptsUsed >= retryBudget;
   return { findings, findingsHash, sameFindings, attemptsUsed, alreadyDone };
 }
 
@@ -191,7 +195,7 @@ async function repairChapter(ctx, run, seg, { vEntry, volumeFindings }, records)
 
   const findingsTask =
     plan.findings ||
-    "(no findings text — the verification score was unparseable; translate the source faithfully)";
+    "（无发现文本 — 校验分数无法解析；忠实翻译源文即可）";
 
   // Same part-by-part shape as the translate stage: oversized chapters are split, each part continues
   // the previous one, and the findings — chapter-wide correction tasks — are injected into every part.
@@ -238,6 +242,7 @@ async function repairChapter(ctx, run, seg, { vEntry, volumeFindings }, records)
         thinkingMode,
         roleWindow: run.roleWindow,
         outputReserve: run.outputReserve,
+        sourceLanguage,
         targetLanguage,
         refs,
         chapterTerms,
@@ -334,35 +339,36 @@ async function publishRepair(ctx, run, seg, { clean, qa, repairKind, sourceText,
  * @returns {Promise<string>}
  */
 async function runWholeChapterPass(ctx, run, seg, parts, { chapterTerms, cue, findingsTask }) {
-  const { volume, refs, template, endpoint, sampling, thinkingMode, targetLanguage } = ctx;
+  const { volume, refs, template, endpoint, sampling, thinkingMode, sourceLanguage, targetLanguage } = ctx;
   const partTexts = [];
   let continuity = cue.text;
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
-    const { tasks, dropped: partDrops } = buildBudgetedTaskLines({
+    const { prompt, dropped: partDrops } = buildBudgetedTaskLines({
       terminologyLines: chapterTerms.lines,
+      disputedTerms: chapterTerms.disputed,
       background: refs.background,
       styleRules: refs.styleRules,
       voiceNotes: refs.voiceNotes,
       continuityText: continuity || undefined,
-      continuitySource: cue.source || "the previous chapter",
+      continuitySource: i === 0 ? cue.source || "上一章节" : "本章的上一段",
       findingsText: findingsTask,
       sourceText: part,
       template,
       roleWindow: run.roleWindow,
       outputReserve: run.outputReserve,
+      sourceLanguage,
       targetLanguage,
       label: `Volume ${volume.installmentNumber} ${seg.id} part ${i + 1}`,
     });
     if (partDrops.length > 0) run.promptDrops.push({ id: seg.id, part: i + 1, dropped: partDrops });
-    const prompt = buildTranslationPrompt({ template, sourceText: part, tasks });
     console.log(
       `  Volume ${volume.installmentNumber} ${seg.id}: retranslating part ${i + 1}/${parts.length} ` +
         `(${part.length} chars) with ${endpoint.model}…`
     );
     const result = await harness.runOneShot({
-      // Hy-MT2: single user message, no system prompt. The role endpoint's own output cap / context
-      // window (harness.js derives them from the global AI_* settings when the role sets neither).
+      // Index-Translate: single user message, no system prompt. The role endpoint's own output cap /
+      // context window (harness.js derives them from the global AI_* settings when the role sets neither).
       systemPrompt: null,
       messages: [{ text: prompt }],
       endpoint,
@@ -375,10 +381,10 @@ async function runWholeChapterPass(ctx, run, seg, parts, { chapterTerms, cue, fi
         repetitionPenalty: sampling.repetitionPenalty,
       },
       thinking: thinkingMode,
-      thinkingTemplate: "hy-mt",
+      thinkingTemplate: "index-mt",
       label: `retranslate-v${volume.installmentNumber}-${seg.id}-${parts.length > 1 ? "part" + (i + 1) : "full"}`,
     });
-    const cleanPart = stripMarkdownFence(result);
+    const cleanPart = stripThinkBlock(stripMarkdownFence(result));
     if (!cleanPart) {
       throw new Error(
         `Volume ${volume.installmentNumber} ${seg.id}: the model returned no content for ` +
@@ -399,27 +405,28 @@ async function runWholeChapterPass(ctx, run, seg, parts, { chapterTerms, cue, fi
  * @returns {Promise<void>}
  */
 async function dumpChapterPreview(ctx, run, seg, vEntry, parts, { chapterTerms, cue, findingsTask }) {
-  const { volume, volumeDir, refs, template, endpoint, thinkingMode, targetLanguage } = ctx;
-  const { tasks } = buildBudgetedTaskLines({
+  const { volume, refs, template, endpoint, thinkingMode, sourceLanguage, targetLanguage } = ctx;
+  const { prompt } = buildBudgetedTaskLines({
     terminologyLines: chapterTerms.lines,
+    disputedTerms: chapterTerms.disputed,
     background: refs.background,
     styleRules: refs.styleRules,
     voiceNotes: refs.voiceNotes,
-    continuityText: cue.text || "(the previous part's ending would go here)",
-    continuitySource: cue.source || "the previous chapter",
+    continuityText: cue.text || "（此处为上一段的结尾）",
+    continuitySource: cue.source || "上一章节",
     findingsText: findingsTask,
     sourceText: parts[0],
     template,
     roleWindow: run.roleWindow,
     outputReserve: run.outputReserve,
+    sourceLanguage,
     targetLanguage,
     label: `Volume ${volume.installmentNumber} ${seg.id}`,
   });
-  const prompt = buildTranslationPrompt({ template, sourceText: parts[0], tasks });
   const file = await writePromptDump(
     `retranslate-${volume.installmentNumber}-${seg.id}`,
     volume.installmentNumber,
-    "one-shot (no system prompt — Hy-MT2 contract)",
+    "one-shot (no system prompt — Index-Translate instTrans contract)",
     [
       {
         title:

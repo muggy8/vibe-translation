@@ -709,13 +709,12 @@ function classify(req) {
   if (kind === "unknown" && !systemText && req.maxTokens === 1) {
     kind = "calibration-probe";
   }
-  // The Hy-MT2 translation contract (translate and retranslate share it — see
-  // translate.js / retranslate.js). The official task line is the signature, NOT
-  // the absence of a system message: a translator call that wrongly carries a
-  // system prompt must still be recognised as a translator call, or the audit
-  // would classify it as unknown and never notice.
-  if (kind === "unknown" && req.userText.includes("Translate the [Source Text]")) {
-    kind = req.userText.includes("MUST fix all of them") ? "retranslate" : "translate";
+  // The Index-Translate translation contract (translate and retranslate share it — see
+  // translate.js / retranslate.js). The instTrans 【源文】 block is the signature, NOT the absence of
+  // a system message: a translator call that wrongly carries a system prompt must still be recognised
+  // as a translator call, or the audit would classify it as unknown and never notice.
+  if (kind === "unknown" && req.userText.includes("【源文】")) {
+    kind = req.userText.includes("本次译文必须全部修正") ? "retranslate" : "translate";
   }
   // Which volume is this request about? Match the SOURCE TEXT it carries first: a
   // translate prompt has no "Volume: NN" header at all (its identity is the book

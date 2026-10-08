@@ -28,9 +28,9 @@
  *   npx gulp style-guide              # build the style guide
  *   npx gulp consistency-audit        # final cross-artifact consistency audit
  *   npx gulp consistency-audit --force  # re-audit even if the report is fresh
- *   npx gulp translate                # translate all volumes (Hy-MT2, per chapter)
+ *   npx gulp translate                # translate all volumes (Index-Translate, per chapter)
  *   npx gulp verify-translate         # source-anchored verification (Qwen, per chapter)
- *   npx gulp retranslate              # retranslate the FAILED chapters (Hy-MT2)
+ *   npx gulp retranslate              # retranslate the FAILED chapters (Index-Translate)
  *   npx gulp translate-qa             # the QA loop: verify batch -> retranslate
  *                                     # batch, repeated until every chapter passes
  *                                     # (or a round retranslates nothing / the
@@ -265,7 +265,7 @@ const PIPELINE_STEPS = [
   { name: "style-guide", run: styleGuideTask },
   { name: "jump-in-wiki", run: jumpInWikiTask },
   { name: "consistency-audit", run: consistencyAuditTask },
-  // Translation stage (multi-model: translate/retranslate on the Hy-MT2
+  // Translation stage (multi-model: translate/retranslate on the Index-Translate
   // endpoint, verify/polish on the Qwen endpoint — see the TRANSLATE_,
   // VERIFY_, and EDIT_ env prefixes).
   { name: "translate", run: translateTask },

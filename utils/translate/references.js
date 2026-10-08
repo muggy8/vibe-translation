@@ -306,23 +306,23 @@ function chapterContextHash(refs, sourceText) {
  * @param {{terms: Array<{term: string, rendering: string, section: string}>}} refs - The volume references (loadVolumeReferences).
  * @param {string} sourceText - The chapter's source text.
  * @param {{maxChars?: number}} [opts]
- * @returns {{lines: string[], terms: Array<{term: string, rendering: string, section: string}>, present: number, dropped: number}}
- *   `lines` feeds the translate/retranslate prompt; `terms` feeds the
- *   verification / polish glossary block; `dropped` is what the caller logs.
+ * @returns {{lines: string[], disputed: string[], terms: Array<{term: string, rendering: string, section: string}>, present: number, dropped: number}}
+ *   `lines` are the canonical instTrans pairs (`term→rendering`, the spelling the
+ *   model's own client builds its terminology constraint from) and feed the
+ *   translate/retranslate prompt; `disputed` names the terms among them whose
+ *   rendering is under review, so the prompt can say so ONCE instead of annotating
+ *   every pair; `terms` feeds the verification / polish glossary block; `dropped`
+ *   is what the caller logs.
  */
 function chapterTerminology(refs, sourceText, { maxChars } = {}) {
   const sel = selectTermsForChapter(refs && refs.terms, sourceText, { maxChars });
   const disputed = refs && refs.disputedTerms instanceof Set ? refs.disputedTerms : null;
   return {
-    lines: sel.terms.map((t) =>
-      disputed && disputed.has(t.term)
-        ? // The rendering is challenged, but it is still the rendering every
-          // chapter must use — a term the translator is told is wrong AND must be
-          // obeyed is a term the QA loop argues about forever.
-          `"${t.term}" translates to "${t.rendering}" (this rendering is DISPUTED and under review: ` +
-          `use it exactly as given — do NOT improvise another one; the correction happens in the glossary)`
-        : `"${t.term}" translates to "${t.rendering}"`
-    ),
+    lines: sel.terms.map((t) => `${t.term}→${t.rendering}`),
+    // The rendering is challenged, but it is still the rendering every chapter
+    // must use — a term the translator is told is wrong AND must be obeyed is a
+    // term the QA loop argues about forever. Named once, not stamped on the pair.
+    disputed: disputed ? sel.terms.filter((t) => disputed.has(t.term)).map((t) => t.term) : [],
     terms: sel.terms,
     present: sel.present,
     dropped: sel.dropped,

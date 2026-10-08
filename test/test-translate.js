@@ -20,6 +20,11 @@ const {
   extractStyleRules,
   buildTranslationTaskLines,
   buildTranslationPrompt,
+  HARD_MARKER,
+  SOFT_MARKER,
+  CONSTRAINTS_BLOCK,
+  languageName,
+  translateGenre,
   cjkRatio,
   countOccurrences,
   checkTranslationQa,
@@ -222,51 +227,106 @@ assert.strictEqual(sha256("a"), sha256("a"));
 // ─── buildTranslationTaskLines / buildTranslationPrompt ──────────────────────
 
 {
-  const minimal = buildTranslationTaskLines({});
-  assert.strictEqual(minimal.length, 2);
-  assert.strictEqual(minimal[1], "Translate the [Source Text] into English.");
+  // No constraints at all: the builder emits none. The plain canonical shape is
+  // the template's fallback, checked at the bottom of this block.
+  assert.deepStrictEqual(buildTranslationTaskLines({}), []);
 
   const full = buildTranslationTaskLines({
-    terminologyLines: ['"ソラ" translates to "Sora"'],
+    terminologyLines: ["ソラ→Sora"],
     background: "The plot.",
     styleRules: "Rule.",
     continuityText: "the ending",
     findingsText: "fix this",
-    targetLanguage: "French",
   });
-  assert.strictEqual(full.length, 7, "terminology, background, style, continuity, findings + 2");
-  assert.ok(full[0].includes('"ソラ" translates to "Sora"'), "terminology line present");
-  assert.ok(full[1].includes("The plot."), "background present");
-  assert.ok(full[2].includes("Rule."), "style rules present");
-  assert.ok(full[3].includes('"the ending"'), "continuity quoted");
-  assert.ok(full[4].includes("fix this"), "findings present");
-  assert.ok(full[5].includes("ONLY output the translated result"));
-  assert.strictEqual(full[full.length - 1], "Translate the [Source Text] into French.");
+  assert.strictEqual(
+    full.length,
+    5,
+    "terminology + findings (hard), then style + background + continuity (soft)"
+  );
+  // instTrans sorts its constraints by kind, not by arrival: a hard constraint
+  // is binary (it holds or the attempt is wrong) and a 注意 is graded. Putting
+  // terminology law first is also what keeps it alive when the budget trims.
+  assert.ok(full[0].startsWith(HARD_MARKER) && full[0].includes("ソラ→Sora"), "terminology law is a hard constraint, and it is first");
+  assert.ok(full[1].startsWith(HARD_MARKER) && full[1].includes("fix this"), "the correction tasks are hard constraints too");
+  assert.ok(full[2].startsWith(SOFT_MARKER) && full[2].includes("Rule."), "house style is a graded constraint");
+  assert.ok(full[3].includes("The plot."), "background present");
+  assert.ok(full[4].startsWith(SOFT_MARKER) && full[4].includes('"the ending"'), "continuity quoted");
+
+  const scoped = buildTranslationTaskLines({ scopeText: "only this passage" });
+  assert.strictEqual(scoped.length, 1);
+  assert.ok(scoped[0].startsWith(HARD_MARKER), "the passage scope is binary — a hard constraint");
+
+  // The glossary is ONE joined line — the exact shape the model's own client
+  // builds and every instTrans benchmark case carries (`【硬性要求】专名/术语对照:
+  // A→B、C→D`). Terminology compliance is a GATE in that benchmark's scoring, so
+  // this is the one block whose shape is pinned rather than approximated.
+  const many = buildTranslationTaskLines({ terminologyLines: ["ソラ→Sora", "黒鋼→Kurogane"] });
+  assert.strictEqual(many.length, 1, "one terminology constraint, not one per term");
+  assert.ok(many[0].startsWith(`${HARD_MARKER}专名/术语对照: `), many[0]);
+  assert.ok(many[0].includes("ソラ→Sora、黒鋼→Kurogane"), "the pairs are 、-joined");
+
+  // A challenged rendering is named ONCE, and it is still mandatory. Stamping the
+  // warning on every pair buries it in the list and makes the gate line noisy.
+  const challenged = buildTranslationTaskLines({ terminologyLines: ["鏡→Mirror"], disputedTerms: ["鏡"] });
+  assert.strictEqual(challenged.length, 2, "the pair line plus one note");
+  assert.ok(!challenged[0].includes("复核"), "the pair line stays clean");
+  assert.ok(challenged[1].includes("正在复核") && challenged[1].includes("不得自行改译"), "still required, correction happens elsewhere");
+  assert.strictEqual(
+    buildTranslationTaskLines({ terminologyLines: ["鏡→Mirror"], disputedTerms: ["鏡", "未出现的术语"] }).length,
+    2,
+    "a disputed term this chapter's list does not carry is not named"
+  );
 
   // The continuity cue must name where the quoted ending actually came from.
   // A chapter whose neighbour FAILED leaves the last GOOD chapter's ending as
   // the cue — calling that "the previous chapter" tells the model to match a
   // text it is not continuing from.
   const defaultCue = buildTranslationTaskLines({ continuityText: "alpha" }).find((l) => l.includes('"alpha"'));
-  assert.ok(defaultCue.includes("the previous chapter"), "default label");
-  assert.ok(!defaultCue.includes("immediately"), "no unqualified 'immediately' claim");
+  assert.ok(defaultCue.includes("上一章节"), "default label");
   const honestCue = buildTranslationTaskLines({
     continuityText: "alpha",
-    continuitySource: "the last usable chapter draft (ch4)",
+    continuitySource: "上一版可用的译文 (ch4)",
   }).find((l) => l.includes('"alpha"'));
-  assert.ok(honestCue.includes("the last usable chapter draft (ch4)"), "the real source is named");
+  assert.ok(honestCue.includes("上一版可用的译文 (ch4)"), "the real source is named");
   const volumeCue = buildTranslationTaskLines({
     continuityText: "alpha",
-    continuitySource: "the end of the previous volume (Volume 03)",
+    continuitySource: "上一卷的结尾（Volume 03）",
   }).find((l) => l.includes('"alpha"'));
   assert.ok(volumeCue.includes("Volume 03"), "a cross-volume cue says which volume");
 
-  const template = "*[Source Text]*\n{{SOURCE_TEXT}}\n\n*[Translation Tasks]*\n{{TASKS}}";
-  const prompt = buildTranslationPrompt({ template, sourceText: "本文", tasks: full });
-  assert.ok(prompt.startsWith("*[Source Text]*\n本文"), "source block first");
-  assert.ok(prompt.includes("*[Translation Tasks]*"));
-  assert.ok(prompt.includes("1. **") && prompt.includes("7. **"), "numbered 1..7");
-  assert.ok(prompt.endsWith("7. **Translate the [Source Text] into French.**"));
+  // The template is the model's own instTrans shape — the file, not a copy of
+  // it written here, so a template edit is caught by this test.
+  const template = fs.readFileSync(path.join(__dirname, "..", "user-prompts", "translate.md"), "utf8");
+  assert.ok(template.includes("【源文】") && template.includes(CONSTRAINTS_BLOCK), "the template carries the instTrans blocks");
+  assert.strictEqual(translateGenre(), "小说", "the header names the genre the family lists for a novel");
+  assert.strictEqual(languageName("Japanese"), "日语", "language names use the trained spelling");
+  assert.strictEqual(languageName("Klingon"), "Klingon", "an unmapped name is passed through, not dropped");
+
+  const prompt = buildTranslationPrompt({
+    template,
+    sourceText: "本文",
+    tasks: full,
+    sourceLanguage: "Japanese",
+    targetLanguage: "French",
+  });
+  assert.ok(prompt.startsWith("请将以下日语小说翻译成法语"), `the header names source language, genre and target: ${prompt.slice(0, 60)}`);
+  assert.ok(prompt.includes("【源文】\n本文"), "source block present");
+  assert.ok(prompt.includes(`${CONSTRAINTS_BLOCK}\n1. ${HARD_MARKER}`), "the constraints are numbered from 1");
+  assert.ok(prompt.includes("5. "), "numbered 1..5");
+  assert.ok(prompt.trimEnd().endsWith("只输出译文，不要有任何额外说明。"), "the output-only suffix closes the prompt");
+
+  // Every constraint got trimmed away: the prompt says the plain thing instead
+  // of promising a constraint list it does not carry.
+  const plain = buildTranslationPrompt({
+    template,
+    sourceText: "本文",
+    tasks: [],
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+  });
+  assert.ok(plain.includes("直接输出翻译结果"), "the plain canonical clause");
+  assert.ok(!plain.includes(CONSTRAINTS_BLOCK), "no empty constraint block");
+  assert.ok(!plain.includes("{{"), "no unfilled placeholder survives");
 }
 
 // ─── previousVolumeTail (cross-volume continuity cue) ────────────────────────
@@ -839,10 +899,10 @@ assert.strictEqual(sha256("a"), sha256("a"));
     blockNumber: 1,
     blockCount: 2,
   });
-  assert.ok(scope.includes("ONE passage (1 of 2)"), scope);
-  assert.ok(scope.includes("do not repeat it"), "the preceding text is context, not output");
-  assert.ok(scope.includes("do not translate it"), "and so is the following text");
-  assert.ok(!buildPassageScopeLine({ blockNumber: 1, blockCount: 1 }).includes("FOLLOWS"), "no neighbours, no neighbour lines");
+  assert.ok(scope.includes("第 1 个片段（共 2 个）"), scope);
+  assert.ok(scope.includes("不得重复它"), "the preceding text is context, not output");
+  assert.ok(scope.includes("不得翻译它"), "and so is the following text");
+  assert.ok(!buildPassageScopeLine({ blockNumber: 1, blockCount: 1 }).includes("紧接在"), "no neighbours, no neighbour lines");
 }
 
 // ─── cjkRatio / countOccurrences ──────────────────────────────────────────────
@@ -901,7 +961,7 @@ assert.strictEqual(sha256("a"), sha256("a"));
 
   // chapterTerminology renders the prompt lines from the same selection.
   const ct = chapterTerminology({ terms: cumulative }, chapter, { maxChars: 100000 });
-  assert.deepStrictEqual(ct.lines, ['"ソラ" translates to "Sora"', '"黒鋼" translates to "Kurogane"']);
+  assert.deepStrictEqual(ct.lines, ["ソラ→Sora", "黒鋼→Kurogane"]);
   assert.deepStrictEqual(chapterTerminology(null, "x").lines, []);
 }
 

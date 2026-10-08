@@ -277,9 +277,16 @@ async function scenarioHappyPath() {
   assert.ok(firstPrompt.includes("rooftop"), "including every term the chapter actually uses");
   assert.ok(
     !translateCalls[0].messages.some((m) => m.role === "system"),
-    "the translate stage sends no system message (the Hy-MT2 contract)"
+    "the translate stage sends no system message (the Index-Translate instTrans contract)"
   );
-  assert.strictEqual(translateCalls[0].reasoningEffort, "no_think", "and it runs in the model's fast mode");
+  assert.deepStrictEqual(
+    translateCalls[0].chatTemplateKwargs,
+    { enable_thinking: false },
+    "and it runs in the model's fast mode — this template's only thinking switch"
+  );
+  assert.strictEqual(translateCalls[0].reasoningEffort, null, "and it never sends reasoning_effort, which this template ignores");
+  assert.ok(firstPrompt.includes("【源文】"), "the prompt uses the instTrans 【源文】 block");
+  assert.strictEqual(translateCalls[0].temperature, 0, "the translator decodes greedily, as the model's own client does");
 
   // 4. Cross-volume continuity: volume 02's first chapter sees volume 01's ending.
   const secondPrompt = translateCalls[1].userText;

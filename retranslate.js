@@ -7,9 +7,10 @@
  *   the current source + draft:
  *     1. Skip it when the state file already shows a retranslate run for the SAME findings
  *        (retranslated=true + matching findingsHash) — idempotency; --force re-runs.
- *     2. Re-translate the chapter with Hy-MT2 (translate endpoint, no system prompt, official
- *        sampling, no_think mode) — the verification FINDINGS are injected as a numbered "fix these
- *        problems" task in the official prompt. The bad draft is deliberately NOT fed back (re-reading
+ *     2. Re-translate the chapter with Index-Translate (translate endpoint, no system prompt, the
+ *        model's own greedy decoding, fast non-thinking mode) — the verification FINDINGS are injected
+ *        as a numbered 【硬性要求】 "fix these problems" constraint in the instTrans prompt. The bad
+ *        draft is deliberately NOT fed back (re-reading
  *        a bad translation anchors the model to its errors). Like the translate stage, oversized
  *        chapters are split and retranslated part by part, each part continuing the previous one.
  *     3. Deterministic QA (hard failures fail the chapter before writing).

@@ -166,7 +166,7 @@ const { runVolumeWithModeFallback } = require("../utils/qa-loop");
   assert.strictEqual(withFlash, "http://localhost:9200/v1|local|Qwen3.8-flash-next", "the container the hooks last started is part of the identity");
   assert.notStrictEqual(withFlash, key, "a machine that switches containers cannot share one entry between them");
 
-  fs.writeFileSync(path.join(switchDir, ".model-switch-state"), "Hy-MT2-30B-A3B", "utf8");
+  fs.writeFileSync(path.join(switchDir, ".model-switch-state"), "index-translate", "utf8");
   const withTranslator = calibrationKey({ baseUrl: "http://localhost:9200/v1", model: "local" });
   assert.notStrictEqual(withTranslator, withFlash, "a container switch mid-process invalidates the measurement taken for the previous one");
 

@@ -13,10 +13,10 @@
  * each names an ENDPOINT, never a model: the stage logic is identical whatever
  * answers, and on local setups the per-machine hooks decide which container
  * serves the port):
- *   - translate / retranslate: the TRANSLATE_* endpoint. The prompt in
- *     translate/prompt.js is the one genuinely model-specific contract in this
- *     stage (the official translation-model single-user-message shape + its
- *     sampling recipe), so swapping this endpoint means swapping that prompt too.
+ *   - translate / retranslate: the TRANSLATE_* endpoint. The prompt built in
+ *     utils/translate/prompt.js is the one genuinely model-specific contract in
+ *     this stage (the Index-Translate instTrans single-user-message shape + its
+ *     decoding recipe), so swapping this endpoint means swapping that prompt too.
  *   - verify-translate / polish: the VERIFY_* / EDIT_* endpoints
  *     (source-anchored checking and final polish — they read the source).
  *   - the cross-checks (verify tiebreak + polish final audit): the AUDIT_*

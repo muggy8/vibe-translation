@@ -164,12 +164,14 @@ stops the current port owner, `docker compose up -d` the target, and polls
 is one machine's opinion, and moving a role to a different container is a hook
 edit and nothing else:
 
-    # hooks/pre-translate.sh        (TRANSLATE_* role)
-    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Hy-MT2
+    # hooks/pre-translate.sh        (TRANSLATE_* role — the one role whose prompt
+    #                                is model-specific: instTrans, see
+    #                                utils/translate/prompt.js)
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/index-translate
     # hooks/pre-verify-translate.sh (VERIFY_* role)
     exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/verify-model
     # hooks/pre-retranslate.sh      (TRANSLATE_* role again)
-    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/Hy-MT2
+    exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/index-translate
     # hooks/pre-polish.sh           (EDIT_* role)
     exec "$(dirname "$0")/model-switch.sh" /path/to/Containers/verify-model
     # hooks/pre-verify-audit.sh     (AUDIT_* role — the tiebreak + cross-chapter audit batch)

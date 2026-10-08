@@ -2,8 +2,9 @@
 # pre-translate.sample — BEFORE the translate task: this machine's container
 # for the TRANSLATE_* role. Copy to hooks/pre-translate.sh, chmod +x, and point
 # it at YOUR translation container's compose dir (the translate prompt follows
-# the official Hy-MT2 contract, so this is the one role tied to a specific
-# model family). The helper (hooks/model-switch.sh) is idempotent: if that
-# container already serves the port it no-ops.
+# the Index-Translate instTrans contract, so this is the one role tied to a
+# specific model family — see utils/translate/prompt.js). The helper
+# (hooks/model-switch.sh) is idempotent: if that container already serves the
+# port it no-ops.
 set -euo pipefail
-exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/Hy-MT2
+exec "$(dirname "$0")/model-switch.sh" /path/to/your/Containers/index-translate

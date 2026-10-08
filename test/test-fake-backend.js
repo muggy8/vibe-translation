@@ -185,7 +185,72 @@ async function scenarioOneShot() {
     assert.strictEqual(hyReq.chatTemplateKwargs, null, "and never the Qwen-style chat_template_kwargs");
     assert.strictEqual(hyReq.temperature, 0.7);
     await backend3.close();
-    ok("the translation stage's wire contract is the official one (no system prompt, no_think, official sampling)");
+    ok("the hy-mt dialect sends reasoning_effort only (kept for a translator whose template uses it)");
+
+    // The Index-Translate contract: NO system message, and `enable_thinking` as the
+    // thinking switch. Its template (Qwen3-VL) has no reasoning_effort variable and
+    // opens a think tag when the variable it DOES read is missing — so the fast mode
+    // has to be asked for, not assumed.
+    const backend4 = await startFakeBackend({ model: "stub", reply: () => ({ text: "ok" }) });
+    await harness.runOneShot({
+      systemPrompt: null,
+      messages: [{ text: "请将以下日语小说翻译成英语，并且严格遵循所有约束要求。\n\n【源文】\n本文" }],
+      endpoint: { baseUrl: backend4.baseUrl, apiKey: "k", model: "stub" },
+      thinking: "no_think",
+      thinkingTemplate: "index-mt",
+      sampling: { topP: 1.0, topK: -1, repetitionPenalty: 1.0 },
+      temperature: 0,
+      label: "index-mt-scenario",
+    });
+    const indexReq = backend4.requests[0];
+    assert.ok(
+      !indexReq.messages.some((m) => m.role === "system"),
+      "the translate stage's contract sends a single user message and no system message"
+    );
+    assert.deepStrictEqual(
+      indexReq.chatTemplateKwargs,
+      { enable_thinking: false },
+      "the index-mt dialect sends chat_template_kwargs {enable_thinking:false} — the template's only switch"
+    );
+    assert.strictEqual(indexReq.reasoningEffort, null, "and never reasoning_effort, which that template does not read");
+    assert.strictEqual(indexReq.temperature, 0, "greedy, the decoding the model's own client and its published numbers use");
+    await backend4.close();
+    ok("the Index-Translate wire contract: no system prompt, enable_thinking=false, greedy sampling");
+
+    // Thinking ON for the same dialect is the same switch flipped the other way —
+    // the template has no levels, so "low" and "high" cannot mean different things.
+    const backend5 = await startFakeBackend({ model: "stub", reply: () => ({ text: "ok" }) });
+    await harness.runOneShot({
+      systemPrompt: null,
+      messages: [{ text: "hi" }],
+      endpoint: { baseUrl: backend5.baseUrl, apiKey: "k", model: "stub" },
+      thinking: "high",
+      thinkingTemplate: "index-mt",
+      label: "index-mt-thinking",
+    });
+    assert.deepStrictEqual(backend5.requests[0].chatTemplateKwargs, { enable_thinking: true });
+    await backend5.close();
+    ok("index-mt thinking on sends enable_thinking:true");
+
+    // A dialect the template cannot honour fails loudly instead of quietly
+    // sending a key the server will ignore.
+    const backend6 = await startFakeBackend({ model: "stub", reply: () => ({ text: "ok" }) });
+    let dialectFailed = null;
+    try {
+      await harness.runOneShot({
+        systemPrompt: null,
+        messages: [{ text: "hi" }],
+        endpoint: { baseUrl: backend6.baseUrl, apiKey: "k", model: "stub" },
+        thinking: "xhigh",
+        thinkingTemplate: "index-mt",
+        label: "index-mt-bad-level",
+      });
+    } catch (e) {
+      dialectFailed = e.message;
+    }
+    await backend6.close();
+    assert.ok(dialectFailed && /index-mt/.test(dialectFailed), dialectFailed);
+    ok("an unsupported thinking level for a dialect fails at the call, not at the model");
 
     await backend.close();
   } catch (e) {

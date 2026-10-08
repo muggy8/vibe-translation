@@ -227,16 +227,26 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount }) {
   if (stageMemoryGaps.length) fail("stage-context-offload", "a stage agent was given the tools that let it put its own reading out of context.", stageMemoryGaps);
   else pass("stage-context-offload", `${identified.filter((i) => AGENT_KINDS.has(i.kind)).length} stage agent turn(s) offered neither memory tool — their reading stays in context.`);
 
-  // ─── 3. The translator's contract (Hy-MT2): one user message, official sampling
+  // ─── 3. The translator's contract (Index-Translate): one user message, its own decoding
   const translator = identified.filter((i) => i.kind === "translate" || i.kind === "retranslate");
   const translatorGaps = [];
   for (const { entry, kind } of translator) {
     const system = entry.messages.filter((m) => m.role === "system");
-    if (system.length > 0) translatorGaps.push(`#${entry.index} ${kind}: carries a system message — Hy-MT2's contract is a single user message`);
-    if (entry.sampling.reasoningEffort !== "no_think") {
-      translatorGaps.push(`#${entry.index} ${kind}: reasoning_effort is ${JSON.stringify(entry.sampling.reasoningEffort)}, expected "no_think"`);
+    if (system.length > 0) translatorGaps.push(`#${entry.index} ${kind}: carries a system message — Index-Translate's request format is a single user message`);
+    if (entry.sampling.reasoningEffort !== null && entry.sampling.reasoningEffort !== undefined) {
+      translatorGaps.push(
+        `#${entry.index} ${kind}: sends reasoning_effort ${JSON.stringify(entry.sampling.reasoningEffort)} — ` +
+          `this model's chat template has no such variable, so the request would silently get the template's own default (thinking ON)`
+      );
     }
-    const expected = { temperature: 0.7, topP: 1, topK: -1, repetitionPenalty: 1 };
+    const kwargs = entry.sampling.chatTemplateKwargs || {};
+    if (kwargs.enable_thinking !== false) {
+      translatorGaps.push(
+        `#${entry.index} ${kind}: chat_template_kwargs.enable_thinking is ${JSON.stringify(kwargs.enable_thinking)}, ` +
+          `expected false — the template opens a think tag unless the request says otherwise`
+      );
+    }
+    const expected = { temperature: 0, topP: 1, topK: -1, repetitionPenalty: 1 };
     const actual = {
       temperature: entry.sampling.temperature,
       topP: entry.sampling.topP,
@@ -244,17 +254,20 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount }) {
       repetitionPenalty: entry.sampling.repetitionPenalty,
     };
     for (const [key, want] of Object.entries(expected)) {
-      if (actual[key] !== want) translatorGaps.push(`#${entry.index} ${kind}: ${key} is ${JSON.stringify(actual[key])}, the official recipe says ${want}`);
+      if (actual[key] !== want) translatorGaps.push(`#${entry.index} ${kind}: ${key} is ${JSON.stringify(actual[key])}, the model's own decoding says ${want}`);
     }
-    if (!entry.userText.includes("Translate the [Source Text]")) {
-      translatorGaps.push(`#${entry.index} ${kind}: the prompt does not end with the official task line`);
+    if (!entry.userText.includes("【源文】")) {
+      translatorGaps.push(`#${entry.index} ${kind}: the prompt has no 【源文】 block — it is not the instTrans shape`);
     }
-    if (!entry.userText.includes("ONLY output the translated result")) {
-      translatorGaps.push(`#${entry.index} ${kind}: the prompt does not carry the "ONLY output the translated result" guard`);
+    if (!entry.userText.includes("只输出译文，不要有任何额外说明。")) {
+      translatorGaps.push(`#${entry.index} ${kind}: the prompt does not close with the output-only instruction`);
+    }
+    if (!entry.userText.includes("【硬性要求】")) {
+      translatorGaps.push(`#${entry.index} ${kind}: the prompt carries no hard constraint — terminology law is not being asked for`);
     }
   }
   if (translatorGaps.length) fail("translator-contract", "the translation call is not the shape the translator model is configured for.", translatorGaps);
-  else pass("translator-contract", `${translator.length} translation call(s): no system message, no_think, temperature 0.7 / top_p 1.0 / top_k -1 / repetition_penalty 1.0, official task lines present.`);
+  else pass("translator-contract", `${translator.length} translation call(s): no system message, enable_thinking=false, temperature 0 / top_p 1.0 / top_k -1 / repetition_penalty 1.0, instTrans 【源文】 + 【硬性要求】 + output-only suffix present.`);
 
   // ─── 3b. A call that GRADES must not sample like a call that WRITES ─────────
   // Reasoning tokens are billed out of the same reply budget as the answer, so a

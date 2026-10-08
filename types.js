@@ -253,14 +253,14 @@
  * @typedef {Object} RunOneShotCfg
  * Configuration for harness.runOneShot().
  * @property {string|null} [systemPrompt] — The system prompt. null/undefined
- *   sends NO system message (required by the Hy-MT2 translation role, whose
- *   official contract is a single user message).
+ *   sends NO system message (required by the Index-Translate translation role,
+ *   whose official contract is a single user message).
  * @property {Array<IMessage>} messages
  * @property {number} [retry]
- * @property {boolean|string} [thinking] — Thinking mode; for the hy-mt
- *   template dialect also "no_think" | "low" | "high".
+ * @property {boolean|string} [thinking] — Thinking mode; for the hy-mt and
+ *   index-mt template dialects also "no_think" | "low" | "high".
  * @property {string} [thinkingLevel] — reasoning_effort level.
- * @property {"qwen"|"hy-mt"} [thinkingTemplate] — Chat-template dialect for
+ * @property {"qwen"|"hy-mt"|"index-mt"} [thinkingTemplate] — Chat-template dialect for
  *   the thinking parameters (default: "qwen").
  * @property {EndpointOverride} [endpoint] — Per-call endpoint override
  *   (defaults to the global AI_* settings).
@@ -386,7 +386,7 @@
  * (loadVolumeReferences in utils/translate.js).
  * @property {string} glossaryText — Raw glossary.md content ("" when absent).
  * @property {Array<{term: string, rendering: string, section: string}>} terms — Parsed glossary terms.
- * @property {string[]} terminologyLines — `"term" translates to "rendering"` lines for the Hy-MT2 prompt.
+ * @property {string[]} terminologyLines — `term→rendering` lines, the instTrans pair spelling the translator's own client uses, injected as one joined hard terminology constraint.
  * @property {string} styleRules — The style guide's Policy Summary (or truncated fallback).
  * @property {string} background — Volume wiki + POV map (truncated) — plot context.
  * @property {string} voiceNotes — Character voice reference (truncated) — for the polish pass.

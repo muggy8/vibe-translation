@@ -31,16 +31,16 @@ const { tagSizeOverflowError } = require("./endpoint");
  *
  * @param {RunOneShotCfg} cfg
  * @param {string|null} [cfg.systemPrompt] - The system prompt. `null`/
- *   `undefined` sends NO system message at all (required by the Hy-MT2
+ *   `undefined` sends NO system message at all (required by the Index-Translate
  *   translation role — its official prompt contract is a single user
  *   message; the model has no system prompt).
  * @param {Array<IMessage>} cfg.messages - IMessages ({ text } | { file, name }).
  * @param {number} [cfg.retry] - Extra attempts on empty/error (default: AI_RETRY).
  * @param {boolean|string} [cfg.thinking] - Thinking mode (default: AI_THINKING env, on).
- *   For the hy-mt template dialect also accepts "no_think" | "low" | "high".
+ *   For the hy-mt and index-mt template dialects also accepts "no_think" | "low" | "high".
  * @param {string} [cfg.thinkingLevel] - reasoning_effort level (default: AI_THINKING_LEVEL env / "xhigh").
- * @param {"qwen"|"hy-mt"} [cfg.thinkingTemplate] - Chat-template dialect for the
- *   thinking parameters (default: "qwen"; "hy-mt" for the Hy-MT2 translation
+ * @param {"qwen"|"hy-mt"|"index-mt"} [cfg.thinkingTemplate] - Chat-template dialect for the
+ *   thinking parameters (default: "qwen"; "index-mt" for the Index-Translate translation
  *   model — see thinkingExtraBody).
  * @param {{baseUrl?: string, apiKey?: string, model?: string}} [cfg.endpoint] -
  *   Per-call endpoint override (a role's own model; defaults to the global

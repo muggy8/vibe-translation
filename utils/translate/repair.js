@@ -239,19 +239,17 @@ function stitchParagraphs(draftBlocks, blocks, replacements) {
  */
 function buildPassageScopeLine({ before = "", after = "", blockNumber, blockCount }) {
   const parts = [
-    `You are correcting ONE passage (${blockNumber} of ${blockCount}) of a longer chapter that is ` +
-      `already translated. Translate ONLY the [Source Text] below.`,
+    `本次只修正整章中的第 ${blockNumber} 个片段（共 ${blockCount} 个），该章节的其余部分已有译文。` +
+      `只翻译【源文】里的内容，不要翻译其它内容。`,
   ];
   if (before.trim()) {
     parts.push(
-      `Your text FOLLOWS this already-translated ending — keep names, tense, register and voice identical ` +
-        `and do not repeat it:\n   …${before.trim()}`
+      `你的译文紧接在以下已有译文之后 —— 人名、时态、语域与语气必须与其完全一致，且不得重复它：\n   …${before.trim()}`
     );
   }
   if (after.trim()) {
     parts.push(
-      `Your text is FOLLOWED by this already-translated opening — keep names, tense, register and voice ` +
-        `identical and do not translate it:\n   ${after.trim()}…`
+      `你的译文之后紧跟着以下已有译文 —— 人名、时态、语域与语气必须与其完全一致，且不得翻译它：\n   ${after.trim()}…`
     );
   }
   return parts.join("\n");

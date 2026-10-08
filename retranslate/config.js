@@ -29,7 +29,9 @@ const continuityChars = translateContinuityChars();
 /**
  * (#6) How many times a chapter may be retranslated against an IDENTICAL set of verification findings
  * before the stall guard skips it. Default 2 = the single retranslate plus one extra fresh stochastic
- * shot (the translator runs at temp 0.7, so a repeat can succeed). Set 1 to restore retranslate-once.
+ * shot. The extra shot only pays off when the translator is actually SAMPLING — at the model's own
+ * greedy default (TRANSLATE_TEMPERATURE=0) an identical prompt reproduces an identical draft, so
+ * findingsForRepair spends the budget on the first attempt there. Set 1 to restore retranslate-once.
  */
 const retranslateRetryBudget = Math.max(1, parseInt(process.env.TRANSLATE_QA_RETRY_BUDGET, 10) || 2);
 

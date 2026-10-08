@@ -134,7 +134,7 @@ container answers, docs/architecture.md):
 
 | Step | Task | Endpoint (env) | What it does |
 |---|---|---|---|
-| 1 | `translate` | Hy-MT2-30B-A3B (`TRANSLATE_*`) | Fresh translation per chapter, official single-user-message prompt (no system prompt), official sampling (temp 0.7 / top_p 1.0 / top_k -1 / rep-pen 1.0), `no_think` by default |
+| 1 | `translate` | Index-Translate-35B-A3B (`TRANSLATE_*`) | Fresh translation per chapter, the model's canonical instTrans single-user-message prompt (no system prompt): a header naming genre and target language, a `【源文】` block, a numbered `【约束要求】` list of `【硬性要求】` (binary: terminology, correction tasks, passage scope) and `【注意】` (graded: house style, character voice, background, continuity) constraints, and the output-only suffix. Its own decoding (temp 0 / top_p 1.0 / top_k -1 / rep-pen 1.0), fast non-thinking mode by default — sent as `chat_template_kwargs {enable_thinking: false}`, which is the only switch that model's chat template reads |
 | 2 | `translate-qa` (round N) | verify: `VERIFY_*` · retranslate: `TRANSLATE_*` | The batched QA loop (see the design notes below). Each round: a **verify batch** — source-anchored 0–100 score + severity-banded findings per chapter (against source + glossary + style rules + **story background** — shared wiki / volume wiki / POV map; the source outranks the wiki, wiki-only findings cap at MEDIUM); PASS ≥ `PASSING_SCORE`; unparseable = FAIL (fail-closed) — then ONE **batched `AUDIT_*` phase** containing both cross-checks (no extra container switch): the borderline **tiebreak** re-scores every chapter within `±VERIFY_TIEBREAK_BAND` of the passing score and averages the two scores, and the **cross-chapter audit** reads each volume's published chapters TOGETHER for the drift no per-chapter check can see — then a **retranslate batch** — every FAIL chapter, plus any PASSING chapter named by a HIGH cross-chapter finding, the findings injected as a numbered "fix these" task; the bad draft is **not** fed back, and where the findings quote locatable source spans only those passages are re-translated and stitched back (see "Targeted correction" below). Rounds repeat until every chapter passes (round N+1's verify only re-scores the chapters round N retranslated — idempotent skips for the rest) |
 | 3 | `polish` | polish: `EDIT_*` · final audit: `AUDIT_*` | **Two-phase, batched, cross-model.** Phase A (per chapter, the `EDIT_*` endpoint): proofreading pass (thinking on) — **the polisher sees NO source text** — gated by the deterministic regression guard. Phase B (batched, on the second `AUDIT_*` endpoint): the cross-model final audit scores each candidate on the source-aware drift rubric; a FAIL re-polishes on the `EDIT_*` endpoint (findings injected) and is re-audited next round. Up to `POLISH_QA_MAX_ROUNDS` (default 3) rounds; on exhaustion the draft is kept (runs on whatever drafts exist — including round-cap FAILs) |
 
@@ -146,8 +146,8 @@ container answers, docs/architecture.md):
   translation stage mirrors it as `translate` → **N rounds of
   [verify batch → retranslate batch]** → `polish` (N =
   `TRANSLATE_QA_MAX_ROUNDS`, default 3). Batching is forced by the local
-  setup: the Hy-MT2 and Qwen containers share one port (only one serves at
-  a time; switching is expensive), so the loop never interleaves models per
+  setup: the Index-Translate and Qwen containers share one port (only one serves
+  at a time; switching is expensive), so the loop never interleaves models per
   chapter — each half-round is a whole single-model task run, invoked
   through `withHooks()` so the per-batch model-switch hooks fire at every
   boundary. The hash-keyed idempotency (verification sidecar +
@@ -413,8 +413,10 @@ container answers, docs/architecture.md):
   evidence never overwrites one that has it), and read by the glossary task's amend
   pass, which must settle each one — correct the entry, or record the evidence that
   makes the canonical rendering stand. Meanwhile the translator is TOLD the term is
-  disputed while still being required to use it ("the correction happens in the
-  glossary"), so the loop cannot argue with itself, and the dispute is part of the
+  disputed while still being required to use it — the challenged terms are named in their
+  own `【硬性要求】` line saying the rendering is under review, must still be used
+  exactly as given, and is corrected in the glossary — so the loop cannot argue with
+  itself, and the dispute is part of the
   chapter's invalidation key — only the chapters that actually use the term
   re-translate once it is settled.
 - **Merge** — after every step, `mergeVolumeTranslationFiles` rewrites the

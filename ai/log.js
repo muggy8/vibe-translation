@@ -177,7 +177,8 @@ function oneShotLogFile(oneShotDir, safeLabel) {
  *
  * @param {string} label - The label for this call (used in filename).
  * @param {string|null} systemPrompt - The full system prompt (null/empty when
- *   the call intentionally sends none — e.g. the Hy-MT2 translation role).
+ *   the call intentionally sends none — e.g. the translation role's
+ *   single-user-message contract).
  * @param {Array} messages - The messages sent.
  * @param {string} response - The model's response text.
  * @param {Object} result - The consumeEvents result (usage, timing, etc.).

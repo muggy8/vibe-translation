@@ -50,6 +50,8 @@ const {
   loadVolumeReferences,
   chapterTerminology,
   chapterContextHash,
+  buildTranslationTaskLines,
+  HARD_MARKER,
 } = require("../utils/translate");
 
 // ─── 1. Parsing the verifier's dispute blocks ────────────────────────────────
@@ -271,9 +273,16 @@ async function scenarioDisputesFlowBackwards() {
     const refs2 = await loadVolumeReferences(volumeDir, source);
     assert.ok(refs2.disputedTerms.has("鏡"), "the term is marked disputed for this volume");
     const term = chapterTerminology(refs2, source);
-    assert.ok(term.lines[0].includes("DISPUTED"), term.lines[0]);
-    assert.ok(term.lines[0].includes("do NOT improvise another one"), "the instruction is still: use the canonical form");
-    assert.ok(term.lines[0].includes("correction happens in the glossary"), "and names where the fix belongs");
+    assert.deepStrictEqual(term.lines, ["鏡→Mirror"], "the pair line itself carries no annotation");
+    assert.deepStrictEqual(term.disputed, ["鏡"], "the challenged term is named separately");
+    const termLines = buildTranslationTaskLines({
+      terminologyLines: term.lines,
+      disputedTerms: term.disputed,
+    });
+    assert.strictEqual(termLines.length, 2, "the glossary line plus one note");
+    assert.ok(termLines[1].startsWith(HARD_MARKER), "the note is a hard constraint too");
+    assert.ok(termLines[1].includes("不得自行改译"), "the instruction is still: use the canonical form");
+    assert.ok(termLines[1].includes("修正在术语表中完成"), "and names where the fix belongs");
 
     // Invalidation stays per-chapter: a dispute on a term this chapter never
     // says must not throw away its draft.

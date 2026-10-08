@@ -4,7 +4,7 @@
  *
  * The pre-production pipeline loops "translate → validate → apply
  * validation → re-validate …" until the validator is happy with the
- * accuracy. Locally the Hy-MT2 (translate) and Qwen (verify) containers
+ * accuracy. Locally the Index-Translate (translate) and Qwen (verify) containers
  * share one port, so only one can serve at a time and switching between
  * them is expensive — the loop therefore runs in BATCHES, not per chapter:
  * each round is two whole single-model task runs, never interleaved.
@@ -15,9 +15,9 @@
  *        new; drafts unchanged since the last verification are idempotent
  *        skips (the sidecar is keyed on source + draft hashes), so round
  *        N+1 only re-scores what round N retranslated.
- *     2. retranslate batch (Hy-MT2): retranslates every FAIL chapter with
- *        the verification findings injected as a "fix these problems" task
- *        (this is the "apply validation" half — the bad draft is
+ *     2. retranslate batch (Index-Translate): retranslates every FAIL chapter with
+ *        the verification findings injected as a 【硬性要求】 "fix these problems"
+ *        constraint (this is the "apply validation" half — the bad draft is
  *        deliberately NOT fed back).
  *
  *   The loop stops when (checked in this order):
