@@ -141,7 +141,10 @@ function claimsFromInvocation({ step, argv, exitCode }) {
     const accept = flagValue(argv, "--accept-patch");
     const reject = flagValue(argv, "--reject-patch");
     const ticketId = flagValue(argv, "--ticket");
-    const verb = choose || accept || reject || hasFlag(argv, "--open-ticket");
+    // `--stop-run` is a verb on the same footing as the others: it answers one question about the
+    // machine and legitimately writes no plan of record. Leaving it out here would make the audit
+    // claim a plan the command never promised.
+    const verb = choose || accept || reject || hasFlag(argv, "--open-ticket") || hasFlag(argv, "--stop-run");
 
     // The normal path only: a verb answers one thing and legitimately writes no plan.
     claims.planRecordClaimed = succeeded && !verb && !hasFlag(argv, "--no-write");
@@ -591,7 +594,16 @@ function runLockFindings(step) {
         `and act mode refuses to start. If that run is not actually running, delete ${displayPath(runLockPath())}.`),
     ];
   }
-  return []; // a live run holds it. That is the lock working.
+  if (state.stalled) {
+    return [
+      finding("MEDIUM", "run-lock-stalled", step, null, displayPath(runLockPath()),
+        `${describeRunLock(state.lock)}. The process is alive but has made no model call or tool call for ` +
+        `${state.idleMinutes} minute(s), which is what separates a stuck run from a long one. It is not ` +
+        `stale — a second run must not start on top of it — but it is the one kind of run this layer can ` +
+        `end: \`npm run delivery -- --stop-run\`.`),
+    ];
+  }
+  return []; // a live run holds it, and it is making progress. That is the lock working.
 }
 
 // ─── The claims, checked against the records ──────────────────────────────────

@@ -12,6 +12,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const { gulpCommand, stepTimeoutMs, structuralMarkerPath } = require("./settings");
+const { trackChild } = require("../utils/shutdown");
 
 const projectRoot = path.join(__dirname, ".."); // the runner's ROOT
 
@@ -44,6 +45,9 @@ function runStep(stepName, gulpArgs) {
       cwd: projectRoot,
       env: process.env,
     });
+    // Registered so a stop signal aimed at the runner reaches this step too, instead of leaving it
+    // working alone after its parent is gone (utils/shutdown.js).
+    trackChild(child, `gulp ${stepName}`);
 
     let output = "";
     let killed = false;

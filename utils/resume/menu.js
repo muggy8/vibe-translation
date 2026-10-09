@@ -140,6 +140,13 @@ const DELIVERY_ACTIONS = [
     countsAsIntervention: true,
   },
   {
+    name: "stop-stalled-run",
+    tier: "B",
+    what: "End a run that is alive but has stopped making progress, and hand the claim back so the next run can start. The only move in this layer that stops a process, and it is refused for a run that is still making model calls or tool calls.",
+    primitive: "delivery.js --stop-run (utils/runlock.js)",
+    countsAsIntervention: false,
+  },
+  {
     name: "stop-and-report",
     tier: "B",
     what: "Stop, write the human-facing report, and leave the run where it is.",

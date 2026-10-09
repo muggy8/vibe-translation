@@ -250,11 +250,13 @@ function testTheTwoMenus() {
   const noPrimitive = manager.MANAGER_ACTIONS.filter((a) => !manager.ACTION_MENU_ENTRIES[a.name].length);
   assert.deepStrictEqual(noPrimitive.map((a) => a.name), ["end"], "only `end` runs no command, and it is proved instead");
 
-  // The vocabulary of decisions is closed the same way the vocabulary of primitives is.
+  // The vocabulary of decisions is closed the same way the vocabulary of primitives is. Adding a name
+  // here is adding a move the loop can carry out, so it is written out one at a time rather than
+  // derived — a move nobody thought about is a move nobody approved.
   assert.deepStrictEqual(
     manager.MANAGER_ACTIONS.map((a) => a.name).sort(),
-    ["answer", "choose", "diagnose", "end", "escalate", "fix", "judge", "run"],
-    "the manager's moves are exactly the eight this module names"
+    ["answer", "choose", "diagnose", "end", "escalate", "fix", "judge", "run", "stop-run"],
+    "the manager's moves are exactly the nine this module names"
   );
 
   console.log("  menus: every decision the manager may make has a command behind it, and only `end` runs nothing");

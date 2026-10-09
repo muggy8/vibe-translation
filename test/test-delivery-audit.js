@@ -415,6 +415,26 @@ const DEFECT_CASES = [
     severity: "HIGH",
   },
   {
+    label: "a run lock whose holder is alive but has stopped making progress",
+    async plant(dir) {
+      await fsp.writeFile(
+        path.join(dir, "run.lock"),
+        JSON.stringify({
+          runId: "a-run-that-wedged",
+          pid: process.pid,
+          host: "here",
+          by: "gulp glossary",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          heartbeatAt: new Date(Date.now() - 3 * 3600000).toISOString(),
+          beats: 88,
+        }),
+        "utf8"
+      );
+    },
+    expect: "run-lock-stalled",
+    severity: "MEDIUM",
+  },
+  {
     label: "the run lock does not parse",
     async plant(dir) {
       await fsp.writeFile(path.join(dir, "run.lock"), '{"runId": ', "utf8");
@@ -648,7 +668,9 @@ async function scenarioLiveLockIsNotAFinding() {
   );
   const r = await auditDeliveryRun({ step: "delivery", argv: ["--mode=report"], exitCode: 0, quiet: true });
   assert.ok(
-    !kinds(r.report).has("run-lock-stale") && !kinds(r.report).has("run-lock-unverifiable"),
+    !kinds(r.report).has("run-lock-stale") &&
+      !kinds(r.report).has("run-lock-unverifiable") &&
+      !kinds(r.report).has("run-lock-stalled"),
     `a live run's lock was reported as a defect:\n${r.report.markdown}`
   );
   assert.strictEqual(r.report.findings.length, 0, r.report.markdown);

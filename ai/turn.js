@@ -22,6 +22,27 @@ const { logFilePath, logLine, runDir, numberedLogFile } = require("./log");
 const { agentTextGuardChars } = require("./env");
 const { tagStructuredOutputError } = require("./endpoint");
 
+/** The run-lock module, resolved on first use rather than at load time. */
+let runlockModule = null;
+
+/**
+ * Stamp the run lock: the endpoint is still answering.
+ *
+ * Reached lazily, and that is not a style choice. `ai/` is part of the `harness.js` barrel;
+ * `utils/runlock` needs `utils/postmortem`; `utils/postmortem` needs `get-translation-target`; the
+ * intake modules behind that barrel need `harness` back. A load-time import here closes the ring and
+ * hands `intake/deterministic.js` a half-built harness — gotcha 85, caught by `test/test-intake.js`
+ * rather than by reading. Resolved on first use, when every module in the ring has finished loading.
+ *
+ * @param {boolean} [force] - True at the START of a turn: "a model call is happening" is worth one
+ *   write however recently the previous one landed. Inside the turn it is throttled.
+ * @returns {void}
+ */
+function beatTheRunLock(force = false) {
+  if (!runlockModule) runlockModule = require("../utils/runlock");
+  runlockModule.beatRunLock({ force });
+}
+
 /**
  * Add two AI SDK usage objects together.
  * @param {Object|null} a - First usage (may be null).
@@ -196,11 +217,19 @@ async function consumeEvents(
     }, idleDeadlineMs);
   };
   armIdleDeadline();
+  // A turn starting is a beat in itself, whatever the throttle has recently absorbed.
+  beatTheRunLock(true);
 
   try {
     for await (const event of events) {
       if (guardTripped) break;
       armIdleDeadline();
+      // The same fact the idle timer is measuring — the endpoint is still answering — is what the
+      // run lock's heartbeat records. Stamped here rather than in the task modules because this is
+      // the one place that can tell "working through a long chapter" from "sitting on a dead
+      // connection", and a stalled run is the only kind the delivery manager may end
+      // (utils/runlock.js decision 4). Throttled to one small write per 10s, and it never throws.
+      beatTheRunLock();
       switch (event.type) {
         case "text.delta":
           result.text += event.text;

@@ -11,6 +11,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const { unansweredQuestions, sameQuestion } = require("../utils/tickets");
+const { trackChild } = require("../utils/shutdown");
 
 const projectRoot = path.join(__dirname, ".."); // the runner's ROOT
 
@@ -36,6 +37,10 @@ function runCommand(args, { seriesDir }) {
       cwd: projectRoot,
       env: { ...process.env, SERIES_LOCATION: seriesDir },
     });
+    // The loop's every move is a child process. Stopping the loop must stop the move it is
+    // waiting on, or the loop ends and the step it started keeps running with nobody in charge
+    // (utils/shutdown.js).
+    trackChild(child, path.basename(args[0]));
     child.stdout.on("data", (chunk) => process.stdout.write(chunk));
     child.stderr.on("data", (chunk) => process.stderr.write(chunk));
     child.on("error", (err) => resolve({ code: 127, error: err.message }));
@@ -89,6 +94,10 @@ function commandFor(action, context = {}) {
         `${action.outcome === "accept" ? "--accept-patch" : "--reject-patch"}=${action.patch}`,
         `--reason=${action.reason}`,
       ];
+    // The loop's only move that acts on a process rather than on a file, so it goes through the same
+    // gated CLI the account owner would type — and act mode is not optional: report mode reports.
+    case "stop-run":
+      return [path.join(projectRoot, "delivery.js"), "--mode=act", "--stop-run"];
     default:
       return [];
   }

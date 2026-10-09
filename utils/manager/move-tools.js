@@ -75,6 +75,13 @@ const MOVE_ARGUMENTS = {
     fields: { note: "the decision the account owner has to make, in one sentence they can act on" },
     what: "Stop, and name the move that belongs to the account owner. This is not a failure state.",
   },
+  "stop-run": {
+    fields: { reason: "which run you are ending, and what it has been doing for how long" },
+    what:
+      "End the run that is holding the pipeline and has stopped making progress. It is offered only when " +
+      "the records say the holder is stalled, and it is refused again by the machine if that run is " +
+      "actually working.",
+  },
   end: {
     fields: { reason: "which records prove the run is finished" },
     what: "The run is finished. The machine checks this against the records before it accepts it: nothing missing, no ticket open, no patch unjudged, the deliverable clean.",

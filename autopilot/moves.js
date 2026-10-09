@@ -35,9 +35,11 @@ const patches = require("../utils/patches");
  * @param {import("./utils/resume").ResumePlan} args.plan
  * @param {Object[]} args.tickets - The tickets still open with the teams.
  * @param {Object[]} args.patches - The patches waiting for a judgment.
+ * @param {{present: boolean, stalled: boolean, idleMinutes: number|null}} [args.runLock] - Who is
+ *   holding the pipeline, from the state snapshot. Only a `stalled` holder puts `stop-run` on the menu.
  * @returns {import("./utils/manager").ManagerMove[]}
  */
-function offerMoves({ plan, tickets, patches: pending }) {
+function offerMoves({ plan, tickets, patches: pending, runLock = null }) {
   const moves = [];
 
   const sequence = delivery.executableSteps(plan);
@@ -114,11 +116,27 @@ function offerMoves({ plan, tickets, patches: pending }) {
     }
   }
 
+  // A run that is alive but has stopped making progress blocks every move on this menu, because the
+  // claim it holds is what refuses the next step. The move is offered ONLY when the state says the
+  // holder is stalled: `offered: true` in the manager's action table means the manager may not reach
+  // for it from its own reading of the situation, and `delivery/stop-run.js` refuses it a second time
+  // for a run that is still making model calls. Two independent refusals, because this is the one move
+  // in this layer that stops a process.
+  if (runLock && runLock.stalled) {
+    moves.push({
+      kind: "stop-run",
+      idleMinutes: runLock.idleMinutes,
+      label:
+        `stop-run — the run in progress has made no model call or tool call for ` +
+        `${runLock.idleMinutes === null ? "an unknown time" : runLock.idleMinutes + " minute(s)"}. ` +
+        `Nothing else can start until it ends. A run that IS working is refused.`,
+    });
+  }
+
   moves.push({
     kind: "escalate",
     label: "escalate — stop, and name in one sentence the decision that belongs to the account owner.",
   });
-
   // `end` is on the menu because the menu is now the tool list, and a manager with no way to say
   // "the run is finished" is a manager that escalates instead. It is the one move here that is not
   // offered *because it is legal* — it is offered so it can be refused: `endIsProvable` checks it

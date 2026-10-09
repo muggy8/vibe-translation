@@ -12,6 +12,7 @@ const { runPostMortem } = require("../postmortem");
 const { readLedger, recurringFindings } = require("../ledger");
 const { readTickets } = require("../tickets");
 const { readPatches } = require("../patches");
+const { runInProgress } = require("../runlock");
 const { validateManifest } = require("../../get-translation-target");
 const { readTranslationReport, summarizeReportRows } = require("../translation-report");
 
@@ -369,6 +370,28 @@ async function readWorkingState({ seriesDir, manifest } = {}) {
   const tickets = readTickets();
   const patches = readPatches();
 
+  // Who is holding the pipeline right now, and whether it is doing anything. This belongs in the
+  // snapshot for the same reason the ledger does: `planResume` is a pure function of the snapshot,
+  // and a triage that reached for `run.lock` by itself would make a hand-built test state read the
+  // real series' lock (gotcha 71's trap again). A snapshot without this field reads as "nothing is
+  // running", which is the safe default for a hand-built one.
+  let runLock = { present: false, stalled: false, idleMinutes: null, beats: 0, note: null, error: null };
+  try {
+    const running = runInProgress();
+    if (running.lock || running.error) {
+      runLock = {
+        present: true,
+        stalled: running.stalled === true,
+        idleMinutes: running.idleMinutes,
+        beats: running.beats,
+        note: running.note,
+        error: running.error,
+      };
+    }
+  } catch (err) {
+    runLock.error = err.message;
+  }
+
   return {
     seriesDir: dir,
     manifest: plan.manifest,
@@ -385,6 +408,7 @@ async function readWorkingState({ seriesDir, manifest } = {}) {
     ticketsError: tickets.error || null,
     patches: patches.patches,
     patchesError: patches.error || null,
+    runLock,
     deliverable: await readDeliverable(dir),
   };
 }

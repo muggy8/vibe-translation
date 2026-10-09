@@ -26,6 +26,7 @@ const {
 const { wipeAttemptOutputs } = require("../utils/fs");
 const { appendLedgerEntry } = require("../utils/ledger");
 const { acquireRunLock, releaseRunLock, runLockPath } = require("../utils/runlock");
+const { installShutdownWatch, trackChild, isStopping, stoppingSignal } = require("../utils/shutdown");
 const patches = require("../utils/patches");
 const projectRoot = path.resolve(__dirname, "..");
 
@@ -70,6 +71,9 @@ function runPipelineStep({ step, flags = [], run, seriesDir }) {
       cwd: ROOT,
       env: { ...process.env, INDEX_RUN_ID: run, SERIES_LOCATION: seriesDir },
     });
+    // The manager's step is a child process, and Node leaves children running when the process
+    // that spawned them is stopped. Registered so stopping the manager stops the step (utils/shutdown.js).
+    trackChild(child, `index.js --stages=${step}`);
 
     let output = "";
     const capture = (chunk) => {
@@ -175,12 +179,22 @@ async function runActPlan({ plan, state, runStep = runPipelineStep }) {
   }
   if (lock.note) log(lock.note);
 
+  // Same rule as the runner: a manager that is stopped must not leave its step running. The orphan
+  // is what makes every later run refuse — the lock is held by a LIVE pid that nobody can tell to
+  // stop, and only a human can clear it (utils/shutdown.js).
+  installShutdownWatch({ label: "delivery.js act", onStop: () => releaseRunLock() });
+
   const execution = [];
   let current = state;
   let stopped = null;
 
   try {
     for (const step of targets) {
+      if (isStopping()) {
+        log(`this manager was asked to stop (${stoppingSignal()}). ${targets.length - execution.length} step(s) were not started.`);
+        stopped = "stopped";
+        break;
+      }
       log(`── ${step.step}: ${step.actionName}${step.fromVolume ? ` from volume ${step.fromVolume}` : ""} ──`);
 
       const menu = gateMenu(step);

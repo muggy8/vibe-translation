@@ -8,6 +8,7 @@
 const { PIPELINE_STEPS } = require("../gulpfile");
 const { runId } = require("../utils/ledger");
 const { acquireRunLock, releaseRunLock, runLockPath } = require("../utils/runlock");
+const { installShutdownWatch } = require("../utils/shutdown");
 const { parseArgs } = require("./args");
 const { runPipelineSteps } = require("./steps");
 
@@ -52,6 +53,13 @@ async function main() {
   } else if (lock.note) {
     console.log(`[index] ${lock.note}`);
   }
+
+  // A stopped run stops COMPLETELY. Node ends the process that received the signal and leaves its
+  // children running, so `kill <pid>` / a container stop / an OOM kill of this runner used to leave
+  // a gulp task working alone — still writing volume files, still holding the lock under a LIVE pid,
+  // which makes every later run refuse until a human deletes a file. The watch stops the children,
+  // waits for them, and hands the lock back on the way out (utils/shutdown.js).
+  installShutdownWatch({ label: "index.js", onStop: () => releaseRunLock() });
 
   try {
     return await runPipelineSteps(parsed);

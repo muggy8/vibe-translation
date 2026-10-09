@@ -193,6 +193,50 @@ function testOfferMoves() {
   assert.ok(runs[0].label.includes("counts against this step's allowance"), runs[0].label);
   assert.ok(moves.some((m) => m.kind === "escalate"), "escalate is always on the menu: it is the correct end of a run");
 
+  // A stalled run is the only move on this menu that acts on a process rather than on a file, so it
+  // appears only when the records say the holder has gone quiet — never from the manager's own
+  // reading of the situation. Two independent refusals, because ending a healthy run costs the work
+  // it already bought (utils/runlock.js decision 4, delivery/stop-run.js).
+  assert.strictEqual(
+    autopilot.offerMoves({ plan, tickets: [], patches: [] }).filter((m) => m.kind === "stop-run").length,
+    0,
+    "no run in progress, no stop-run move"
+  );
+  const working = autopilot.offerMoves({
+    plan,
+    tickets: [],
+    patches: [],
+    runLock: { present: true, stalled: false, idleMinutes: 3 },
+  });
+  assert.strictEqual(
+    working.filter((m) => m.kind === "stop-run").length,
+    0,
+    "a run that is making progress is not offered for stopping"
+  );
+  const stuck = autopilot.offerMoves({
+    plan,
+    tickets: [],
+    patches: [],
+    runLock: { present: true, stalled: true, idleMinutes: 140 },
+  });
+  const stopMove = stuck.find((m) => m.kind === "stop-run");
+  assert.ok(stopMove, "a stalled holder puts the move on the menu: nothing else can start while it holds the claim");
+  assert.ok(stopMove.label.includes("140 minute"), `the label carries the fact it was offered from: ${stopMove.label}`);
+  assert.ok(stopMove.label.includes("A run that IS working is refused"), stopMove.label);
+  const stopSpec = manager.MANAGER_ACTIONS.find((a) => a.name === "stop-run");
+  assert.ok(stopSpec, "the move is on the manager's action table");
+  assert.strictEqual(stopSpec.offered, true, "and only as a move the caller offered — the manager may not invent it");
+  assert.deepStrictEqual(
+    manager.validateManagerAction({ action: "stop-run", reason: "the run has been quiet for 140 minutes" }, { moves: working, tickets: [], patches: [] }).kind,
+    "not-offered",
+    "reaching for it when the records do not support it is refused"
+  );
+  assert.strictEqual(
+    manager.validateManagerAction({ action: "stop-run", reason: "the run has been quiet for 140 minutes" }, { moves: stuck, tickets: [], patches: [] }).allowed,
+    true,
+    "and accepted when they do"
+  );
+
   // A plan whose answer is a question offers no run move at all.
   const ticketPlan = { verdict: "resume", steps: [{ step: "glossary", action: "ticket", actionName: "open-ticket", fromVolume: "02" }] };
   const askOnly = autopilot.offerMoves({ plan: ticketPlan, tickets: [], patches: [] });

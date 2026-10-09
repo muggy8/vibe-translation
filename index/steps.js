@@ -11,6 +11,7 @@ const path = require("path");
 
 const { readLedger, recurringFindings, renderLedgerMarkdown, runId, ledgerPath } = require("../utils/ledger");
 const { postMortemDir } = require("../utils/postmortem");
+const { isStopping, stoppingSignal } = require("../utils/shutdown");
 const { runStep, digestOf } = require("./run-step");
 const {
   reportPriorRuns,
@@ -202,6 +203,17 @@ async function runPipelineSteps(parsed) {
   };
 
   for (const step of parsed.steps) {
+    // A stopped child is not a failed step. Without this the runner treats the interruption as one
+    // step going badly and cheerfully starts the next one while the account owner is trying to stop
+    // the run (utils/shutdown.js).
+    if (isStopping()) {
+      console.log(
+        `[index] this run was asked to stop (${stoppingSignal()}). ` +
+          `${parsed.steps.length - results.length} step(s) were not started.`
+      );
+      stopped = true;
+      break;
+    }
     const { entry, stop } = await runOneStep(step, ctx);
     results.push(entry);
     if (stop) {

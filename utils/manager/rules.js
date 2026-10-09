@@ -1,5 +1,11 @@
 /**
- * The closed vocabulary of DECISIONS (run / diagnose / answer / choose / fix / judge / escalate / end) — different from DELIVERY_ACTIONS, which is the vocabulary of pipeline PRIMITIVES — plus ACTION_MENU_ENTRIES mapping each decision to the entry that gives it a command, so a decision the loop cannot carry out is caught by a test instead of discovered by a run. MANAGER_RULES is the standing contract, restated once per call so every decision in a run is made under one contract; MANAGER_TOOLS_NOTE is the tool-shaped half of it, appended in code (AGENTS.md rule 6), and MANAGER_MAX_STEPS is the cap on a turn whose whole job is to call one tool.
+ * The closed vocabulary of DECISIONS (run / diagnose / answer / choose / fix / judge / escalate /
+ * stop-run / end) — different from DELIVERY_ACTIONS, which is the vocabulary of pipeline PRIMITIVES —
+ * plus ACTION_MENU_ENTRIES mapping each decision to the entry that gives it a command, so a decision
+ * the loop cannot carry out is caught by a test instead of discovered by a run. MANAGER_RULES is the
+ * standing contract, restated once per call so every decision in a run is made under one contract;
+ * MANAGER_TOOLS_NOTE is the tool-shaped half of it, appended in code (AGENTS.md rule 6), and
+ * MANAGER_MAX_STEPS is the cap on a turn whose whole job is to call one tool.
  *
  * Part of the manager.js layer (split out of the original single file).
  */
@@ -24,7 +30,7 @@ function managerMaxTokens() {
 
 // ─── The closed decision menu ─────────────────────────────────────────────────
 /**
- * The eight moves the manager may name. `DELIVERY_ACTIONS` (in `utils/resume.js`) is the menu of
+ * The nine moves the manager may name. `DELIVERY_ACTIONS` (in `utils/resume.js`) is the menu of
  * pipeline *primitives*; this is the menu of *decisions*, and the two are different because most of
  * what the manager does is not running the pipeline: it is asking, answering, choosing, judging, and
  * stopping.
@@ -90,6 +96,15 @@ const MANAGER_ACTIONS = [
     offered: false,
   },
   {
+    name: "stop-run",
+    what:
+      "End the run that is holding the pipeline and has gone quiet. It is on the menu only when the records " +
+      "say the holder has made no model call or tool call for longer than the stall threshold, and the " +
+      "machine refuses it again if that run is still working. Nothing on disk is touched.",
+    needs: [],
+    offered: true,
+  },
+  {
     name: "escalate",
     what:
       "Stop, and name the move that belongs to the account owner. This is not a failure state: a Tier C " +
@@ -137,6 +152,7 @@ const ACTION_MENU_ENTRIES = {
   fix: ["dev-team-patch"],
   judge: ["judge-patch"],
   escalate: ["stop-and-report"],
+  "stop-run": ["stop-stalled-run"],
   end: [],
 };
 
@@ -164,7 +180,7 @@ const ACTION_MENU_ENTRIES = {
  * (`offerMoves`), so the menu is a fact about the state rather than a guess by the model.
  *
  * @typedef {Object} ManagerMove
- * @property {("run"|"diagnose"|"answer"|"choose"|"fix"|"judge"|"escalate"|"end")} kind
+ * @property {("run"|"diagnose"|"answer"|"choose"|"fix"|"judge"|"escalate"|"stop-run"|"end")} kind
  * @property {string} label - The line the manager reads, e.g. `run glossary (re-run-step, free)`.
  * @property {string} [step] - For `run`.
  * @property {string} [actionName] - The `DELIVERY_ACTIONS` entry this run maps to.

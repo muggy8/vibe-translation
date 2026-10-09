@@ -12,12 +12,14 @@ require("../types"); // JSDoc type definitions
 const fs = require("fs");
 const path = require("path");
 const { readWorkingState, planResume, actionIsAvailable } = require("../utils/resume");
+const { readLedger } = require("../utils/ledger");
 const { postMortemDir } = require("../utils/postmortem");
 
 const { readArgs, resolveMode } = require("./cli");
 const { renderConsole, renderExecution } = require("./report");
 const { chooseOption, judgePatch, openTicketFromPlan } = require("./tickets");
 const { runActPlan, runIdFor } = require("./act");
+const { stopStalledRun } = require("./stop-run");
 
 const PLAN_MD = "delivery-plan.md";
 
@@ -88,6 +90,29 @@ function chooseVerb(args) {
   }
   if (args.json) console.log(JSON.stringify(chosen, null, 2));
   return chosen.exitCode;
+}
+
+/**
+ * `--stop-run`: end a run that is alive but has stopped making progress.
+ *
+ * Needs no triage — the lock and its heartbeat are the whole question — so it is answered before the
+ * series is read, the same way a patch judgement is. It is the one verb in this layer that acts on a
+ * process rather than on a file, which is why every refusal path in it says what it refused and why
+ * (delivery/stop-run.js).
+ *
+ * @param {Object} args - The parsed CLI arguments.
+ * @param {string} mode - "report" or "act".
+ * @param {string|null} run - The run the record belongs to.
+ * @returns {Promise<number>} The exit code.
+ */
+async function stopRunVerb(args, mode, run) {
+  const result = await stopStalledRun({ mode, run });
+  const line = `[delivery] ${result.note}`;
+  if (result.exitCode === 2) console.error(line);
+  else console.log(line);
+  for (const d of result.detail) console.log(`  ${d}`);
+  if (args.json) console.log(JSON.stringify(result, null, 2));
+  return result.exitCode;
 }
 
 /**
@@ -237,8 +262,25 @@ async function main() {
     return;
   }
 
+  // The same rule `runIdFor` uses — continue the newest recorded run so the anti-spin gate sees the
+  // whole story — but read straight from the ledger, because a decision about a process does not
+  // need to walk 17 volumes first.
+  if (args.stopRun) {
+    const ledger = readLedger();
+    const entries = ledger.entries || [];
+    process.exitCode = await stopRunVerb(args, mode, entries.length ? entries[entries.length - 1].run : null);
+    return;
+  }
+
   const state = await readWorkingState({ seriesDir: args.seriesDir || undefined });
   const plan = planResume(state);
+
+  // Who is holding the pipeline, said out loud before the plan is printed. Without this line the
+  // report proposes "run character-voice" and act mode then refuses it because a live process holds
+  // the claim, and the reader has no way to know the two sentences came from different facts.
+  if (state.runLock && state.runLock.present) {
+    console.log(`[delivery] run lock: ${state.runLock.note}`);
+  }
 
   const unapproved = planActionIsUnapproved(plan);
   if (unapproved) {

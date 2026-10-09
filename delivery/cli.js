@@ -22,6 +22,7 @@ function readArgs(argv) {
     acceptPatch: null,
     rejectPatch: null,
     openTicket: false,
+    stopRun: false,
     choose: null,
     ticket: null,
     reason: null,
@@ -31,6 +32,7 @@ function readArgs(argv) {
     if (arg === "--json") out.json = true;
     else if (arg === "--no-write") out.write = false;
     else if (arg === "--open-ticket") out.openTicket = true;
+    else if (arg === "--stop-run") out.stopRun = true;
     else if (arg.startsWith("--mode=")) out.mode = arg.slice("--mode=".length).trim().toLowerCase();
     else if (arg.startsWith("--series=")) out.seriesDir = arg.slice("--series=".length).trim();
     else if (arg.startsWith("--accept-patch=")) out.acceptPatch = arg.slice("--accept-patch=".length).trim();
@@ -41,7 +43,7 @@ function readArgs(argv) {
     else {
       out.error =
         `unknown flag "${arg}". Known flags: --mode=report|act, --series=<dir>, --json, --no-write, ` +
-        `--open-ticket, --choose=<optionId> --ticket=<id> --reason="<text>", ` +
+        `--open-ticket, --stop-run, --choose=<optionId> --ticket=<id> --reason="<text>", ` +
         `--accept-patch=<id> --reason="<text>", --reject-patch=<id> --reason="<text>"`;
       break;
     }
@@ -49,11 +51,11 @@ function readArgs(argv) {
   if (out.acceptPatch && out.rejectPatch) {
     out.error = `--accept-patch and --reject-patch are one decision. Choose one.`;
   }
-  const verbs = [out.openTicket, !!out.choose, !!(out.acceptPatch || out.rejectPatch)].filter(Boolean).length;
+  const verbs = [out.openTicket, out.stopRun, !!out.choose, !!(out.acceptPatch || out.rejectPatch)].filter(Boolean).length;
   if (verbs > 1) {
     out.error =
-      "one act at a time: --open-ticket, --choose, --accept-patch and --reject-patch are each a decision " +
-      "with its own record. Run them as separate commands.";
+      "one act at a time: --open-ticket, --stop-run, --choose, --accept-patch and --reject-patch are each " +
+      "a decision with its own record. Run them as separate commands.";
   }
   return out;
 }

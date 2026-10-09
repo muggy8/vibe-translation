@@ -86,6 +86,7 @@ const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
 const { isStructuralError } = require("./configs/shared");
 const { postMortemDir } = require("./utils/postmortem");
 const { acquireRunLock, releaseRunLock, runLockPath } = require("./utils/runlock");
+const { installShutdownWatch } = require("./utils/shutdown");
 
 /**
  * Record a structural failure where a separate process can read it.
@@ -175,6 +176,10 @@ function withRunLock(name, taskFn) {
     }
     if (!lock.acquired) console.error(`[gulp] warning: ${lock.note}`);
     else if (lock.note) console.log(`[gulp] ${lock.note}`);
+    // A gulp task run on its own holds the lock, and Node does not run a `finally` when a signal
+    // ends the process. Without this, `kill <pid>` / a container stop leaves the claim held by a
+    // pid that no longer exists only after the task's own writes stop mid-file (utils/shutdown.js).
+    installShutdownWatch({ label: `gulp ${name}`, onStop: () => releaseRunLock() });
     try {
       return await taskFn(...args);
     } finally {

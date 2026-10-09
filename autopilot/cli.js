@@ -19,6 +19,7 @@ const { finding } = require("../utils/postmortem");
 const { ledgerPath } = require("../utils/ledger");
 const { readArgs, resolveMode, maxIterations } = require("./settings");
 const { runLoop } = require("./loop");
+const { installShutdownWatch } = require("../utils/shutdown");
 
 // ─── What the loop's refusals become ──────────────────────────────────────────
 
@@ -83,6 +84,12 @@ async function main() {
     process.exitCode = 2;
     return;
   }
+
+  // The loop holds no run lock of its own — every move is a child command that takes its own. But
+  // the loop is the process the account owner stops, so stopping it has to stop the move it is
+  // waiting on rather than leaving an hour-long step running with nobody in charge
+  // (utils/shutdown.js).
+  installShutdownWatch({ label: "autopilot.js" });
 
   const seriesDir = args.seriesDir || chosenSeriesLocation() || null;
   if (!seriesDir) {

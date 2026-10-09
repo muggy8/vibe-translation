@@ -330,7 +330,7 @@ async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.
       }
     }
 
-    const offered = offerMoves({ plan, tickets, patches: pending });
+    const offered = offerMoves({ plan, tickets, patches: pending, runLock: snapshot.state.runLock });
     const { moves, removed } = movesAfterFailures({ moves: offered, failedSteps });
     if (removed.length) {
       log(
