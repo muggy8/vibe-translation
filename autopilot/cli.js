@@ -14,6 +14,7 @@ const fs = require("fs");
 const { chosenSeriesLocation } = require("../configs/env-defaults");
 
 const { runTurnWithHooks, AUTOPILOT_TASK } = require("../utils/hooks");
+const { auditDeliveryRun } = require("../utils/delivery-audit");
 const { readArgs, resolveMode, maxIterations } = require("./settings");
 const { runLoop } = require("./loop");
 
@@ -62,6 +63,17 @@ async function main() {
   console.log(`[autopilot] ${result.why}`);
   if (args.json) console.log(JSON.stringify({ mode, seriesDir, ...result }, null, 2));
   process.exitCode = result.exitCode;
+
+  // The loop's own after-run check. It is brief because every move the loop made was a child process
+  // that ran this same audit and printed its own findings; what the LOOP has to say is whether the
+  // channel it drove is consistent afterwards, and that is the one thing no child could see.
+  await auditDeliveryRun({
+    step: "autopilot",
+    argv: process.argv.slice(2),
+    exitCode: Number(result.exitCode || 0),
+    seriesDir,
+    brief: true,
+  });
 }
 
 module.exports = { main };

@@ -70,6 +70,7 @@ const devteam = require("./utils/devteam");
 const patches = require("./utils/patches");
 const { readTickets, ticketPaths } = require("./utils/tickets");
 const { runInProgress, describeRunLock } = require("./utils/runlock");
+const { auditDeliveryRun } = require("./utils/delivery-audit");
 
 /**
  * Read the CLI flags this command owns. Unknown flags are refused: a mistyped flag on a command that
@@ -450,4 +451,20 @@ async function main() {
   }
 }
 
-main();
+main()
+  .catch((err) => {
+    console.error(`✗ fix failed: ${err && err.message ? err.message : err}`);
+    process.exitCode = 1;
+  })
+  // The layer's own after-run check. For this command it is the sharpest of the four: a patch record
+  // is the only evidence of code that changed on the pipeline's authority, so "the dev turn exited 0"
+  // is checked against a proposal that exists, declares files, and — for --commit — actually reached
+  // `committed`.
+  .then(() =>
+    auditDeliveryRun({
+      step: "fix",
+      argv: process.argv.slice(2),
+      exitCode: Number(process.exitCode || 0),
+      seriesDir: process.env.SERIES_LOCATION || undefined,
+    })
+  );

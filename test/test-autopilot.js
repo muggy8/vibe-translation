@@ -486,7 +486,19 @@ async function testActModeOpensTheTicket() {
       JSON.stringify(result.decisions[0].offered)
     );
     assert.ok(log.includes("the account owner's decision"), log);
-    assert.strictEqual(fs.existsSync(path.join(fx.ledgerDir, "ledger.json")), false, "an escalation records nothing in the ledger");
+    // An escalation is not an attempt. The ledger is what the anti-spin gate counts, and opening the
+    // plan's question is idempotent — the loop may run it every iteration — so it must not be recorded
+    // as a move spent. (The after-run audit writes an `assessment` entry here, which is a different
+    // kind and is not counted: `attemptCount` and `isSpinning` select on `intervention`.)
+    const ledgerFile = path.join(fx.ledgerDir, "ledger.json");
+    const entries = fs.existsSync(ledgerFile)
+      ? JSON.parse(fs.readFileSync(ledgerFile, "utf8")).entries
+      : [];
+    assert.deepStrictEqual(
+      entries.filter((e) => e.kind === "intervention"),
+      [],
+      `an escalation recorded a spent move in the ledger: ${JSON.stringify(entries)}`
+    );
   } finally {
     stub.restore();
   }
@@ -605,6 +617,11 @@ async function testIterationCap() {
           read: ["utils/prompt.js"],
           at: new Date().toISOString(),
         },
+        // What `recordDiagnosis` actually writes when the team offered nothing: the menu is the ticket's
+        // own `options`, and an answered ticket with an empty one says so plainly rather than leaving
+        // the next reader waiting for a move that does not exist.
+        options: [],
+        noUsableOptions: true,
         answers: [],
       },
     ],
@@ -632,7 +649,18 @@ async function testIterationCap() {
 
     const ticket = JSON.parse(fs.readFileSync(path.join(fx.ledgerDir, "tickets.json"), "utf8")).tickets[0];
     assert.strictEqual(ticket.answers.length, 2, "the answers it made were real records, not printed intentions");
-    assert.strictEqual(fs.existsSync(path.join(fx.ledgerDir, "ledger.json")), false, "answering is not an intervention");
+    // Answering a question the diagnostics team asked is not a move spent on the corpus, so it is not
+    // counted as an intervention. (The after-run audit's `assessment` entry is a different kind, and
+    // `attemptCount` / `isSpinning` select only on `intervention`.)
+    const cappedLedger = path.join(fx.ledgerDir, "ledger.json");
+    const cappedEntries = fs.existsSync(cappedLedger)
+      ? JSON.parse(fs.readFileSync(cappedLedger, "utf8")).entries
+      : [];
+    assert.deepStrictEqual(
+      cappedEntries.filter((e) => e.kind === "intervention"),
+      [],
+      `answering a question was recorded as a spent move: ${JSON.stringify(cappedEntries)}`
+    );
   } finally {
     stub.restore();
   }

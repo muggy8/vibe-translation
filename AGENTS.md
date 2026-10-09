@@ -65,7 +65,7 @@ Each map doc ends with a table of the **implementation folders** its module was 
 
 Code comments cite `AGENTS.md gotcha N`. The numbers are unchanged from when the gotchas were
 one file: the list now lives in the five `docs/gotchas-*.md` slices (1–20, 21–45, 46–63,
-64–69, 70–84), and each slice says which part of the list it holds.
+64–69, 70–85), and each slice says which part of the list it holds.
 
 ## 3. The implementation folders
 
@@ -101,6 +101,11 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
 | `utils/source/epub.js`, `glossary/carry-forward.js` | `utils/source/epub/`, `glossary/carry-forward/` — a submodule that outgrew itself splits the same way, inside its own folder |
 | `configs/shared.js` | `configs/shared/` (4 files) |
 | `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js`, `utils/qa-loop.js`, `utils/series-run.js`, `utils/fs.js`, `utils/ledger.js`, `utils/postmortem.js`, `utils/tokens.js`, `utils/artifacts.js`, `utils/devteam.js`, `utils/delivery-verify.js` | the matching folder under `utils/` |
+
+`utils/delivery-audit.js` is deliberately **not** split into a folder and is deliberately a **leaf**:
+nothing under `utils/` requires it. `utils/tickets`, `utils/patches`, `utils/ledger` and `utils/runlock`
+each resolve their own folder through `utils/postmortem`, so a module inside `utils/postmortem/` that
+reached back for them would close a require cycle and hand them a half-built barrel. → gotcha 85
 
 `test/module-layer.js` is the helper that lets a test which scans source text follow a module
 into its folder (`readModuleLayer(rootDir, "utils/translate.js")`).

@@ -67,6 +67,7 @@ const {
   unansweredQuestions,
 } = require("./utils/tickets");
 const { runInProgress, describeRunLock } = require("./utils/runlock");
+const { auditDeliveryRun } = require("./utils/delivery-audit");
 
 /**
  * Read the CLI flags this command owns. Unknown flags are refused: a mistyped flag on a tool that
@@ -344,10 +345,26 @@ async function main() {
   return 0;
 }
 
+/**
+ * Run the layer's own after-run check, then leave with the code the command chose.
+ *
+ * The audit is what turns "the ticket was answered" from a sentence printed on a console into a
+ * record the next run can read: it compares the exit code's claim against the ticket on disk, and it
+ * asks whether the ticket channel is readable at all — which is the question `--open` is otherwise
+ * unable to answer, because a corrupt ticket file reads to this command as "nothing is waiting".
+ *
+ * @param {number} code - The exit code `main` chose.
+ * @returns {Promise<void>}
+ */
+async function finish(code) {
+  await auditDeliveryRun({ step: "diagnose", argv: process.argv.slice(2), exitCode: code });
+  process.exit(code);
+}
+
 main()
-  .then((code) => process.exit(code))
+  .then((code) => finish(code))
   .catch((err) => {
     console.error(`\ndiagnose failed: ${err.message}`);
     if (err.stack) console.error(err.stack.split("\n").slice(1, 4).join("\n"));
-    process.exit(1);
+    return finish(1);
   });

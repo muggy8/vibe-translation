@@ -21,7 +21,12 @@
  *   7. an acceptance state that was never actually accepted is named (the
  *      `ON_QA_LIMIT=accept` path publishes output no grader signed off);
  *   8. a chapter the handoff listed has no draft;
- *   9. the consistency audit's own verdict is carried into the finding list.
+ *   9. the consistency audit's own verdict is carried into the finding list;
+ *   10. for a delivery command, the records it claims it wrote are in the run folder
+ *       and have the shape their renderer always gives them (utils/postmortem/scope.js).
+ *       The questions about those records agreeing with EACH OTHER — a patch naming a
+ *       ticket that does not exist, a lock left by a process that is gone — are asked
+ *       by utils/delivery-audit.js, which sits on top of this layer rather than inside it.
  *
  * What it deliberately does NOT do: decide whether an artifact is GOOD. That is
  * the scored gates' job, and moving it here would put a second, weaker version
@@ -33,9 +38,9 @@
  *
  * The code lives in utils/postmortem/: rules.js (what a finding is, and what a shape means),
  * file.js (one file, one verdict), volume.js (one volume folder against what its step owed),
- * series.js (the series-root copies and the audit's verdict), run.js (the assessment itself),
- * render.js (the report a human reads). This file is the public surface, and the two shapes
- * the delivery layer names in its JSDoc.
+ * series.js (the series-root copies and the audit's verdict), scope.js (the run folder, where the
+ * delivery layer's records live), run.js (the assessment itself), render.js (the report a human
+ * reads). This file is the public surface, and the two shapes the delivery layer names in its JSDoc.
  *
  * @module utils/postmortem
  */
@@ -74,6 +79,7 @@
 const rules = require("./postmortem/rules");
 const volume = require("./postmortem/volume");
 const series = require("./postmortem/series");
+const scope = require("./postmortem/scope");
 const run = require("./postmortem/run");
 const render = require("./postmortem/render");
 
@@ -86,4 +92,7 @@ module.exports = {
   hasTableShape: rules.hasTableShape,
   matchesShape: rules.matchesShape,
   readConsistencyVerdict: series.readConsistencyVerdict,
+  finding: rules.finding,
+  assessRunScope: scope.assessRunScope,
+  declaresRunScope: scope.declaresRunScope,
 };

@@ -12,7 +12,8 @@
  *
  * What is pinned here:
  *   1. The three step lists cannot drift: utils/hooks.js TASKS, gulpfile.js
- *      PIPELINE_STEPS, and utils/artifacts.js declarations. A step the pipeline can
+ *      PIPELINE_STEPS, and utils/artifacts.js declarations — plus the delivery commands, which are
+ *      not gulp tasks and are declared against package.json instead. A step the pipeline can
  *      run but nobody declared is itself a HIGH finding — the test catches it earlier.
  *   2. A healthy volume reports nothing. That is the false-positive half, and it is
  *      the half that makes people ignore a checker (gotcha 65's lesson: a guard that
@@ -44,7 +45,7 @@ const path = require("path");
 const os = require("os");
 
 const { TASKS } = require("../utils/hooks");
-const { declaredSteps, isKnownVolumeFile } = require("../utils/artifacts");
+const { declaredSteps, isKnownVolumeFile, DELIVERY_COMMANDS } = require("../utils/artifacts");
 const {
   runPostMortem,
   renderPostMortemMarkdown,
@@ -55,6 +56,9 @@ const {
 } = require("../utils/postmortem");
 
 const GULPFILE = require("../gulpfile");
+
+/** package.json is the other vocabulary of real runnable things: `npm run delivery` and friends. */
+const GULPFILE_PACKAGE_JSON = require("../package.json");
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
@@ -162,6 +166,7 @@ async function scenarioStepListsAgree() {
   const declared = new Set(declaredSteps());
   const hookNames = new Set(TASKS);
   const stepNames = GULPFILE.PIPELINE_STEPS.map((s) => s.name);
+  const deliveryNames = new Set(DELIVERY_COMMANDS);
 
   // Every step the default run can execute must be declared in the artifact manifest.
   for (const name of stepNames) {
@@ -172,9 +177,25 @@ async function scenarioStepListsAgree() {
   for (const name of hookNames) {
     assert.ok(declared.has(name), `hook name "${name}" has no artifact spec`);
   }
-  // And nothing may be declared for a step that does not exist.
+  // And nothing may be declared for a step that does not exist. The delivery commands are the other
+  // half of the vocabulary: not gulp tasks, not in TASKS on purpose (utils/hooks.js says why), but
+  // real commands with real records, exposed by package.json. A spec for a command nobody can run is
+  // as much a drift as a command nobody declared.
+  const npmCommands = new Set(
+    Object.entries(GULPFILE_PACKAGE_JSON.scripts)
+      .filter(([, cmd]) => /^node [\w-]+\.js$/.test(cmd.trim()))
+      .map(([name]) => name)
+  );
   for (const name of declared) {
-    assert.ok(hookNames.has(name), `artifact spec "${name}" is not a real step name`);
+    assert.ok(
+      hookNames.has(name) || npmCommands.has(name),
+      `artifact spec "${name}" is not a real step name and not a real command`
+    );
+  }
+  // The two vocabularies are disjoint: a delivery command is never a `--stages=` value.
+  for (const name of deliveryNames) {
+    assert.ok(!hookNames.has(name), `"${name}" is a delivery command, not a gulp task`);
+    assert.ok(!stepNames.includes(name), `"${name}" is not a pipeline step`);
   }
 
   // The mistake exporting PIPELINE_STEPS exists to prevent: gulpfile's default

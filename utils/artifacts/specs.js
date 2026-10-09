@@ -1,17 +1,22 @@
 /**
  * utils/artifacts/specs.js — the one table, and the two questions asked of it.
  *
- * The two halves joined, so a step is declared exactly once and the post-mortem looks one place
+ * The three halves joined, so a step is declared exactly once and the post-mortem looks one place
  * up. `specForStep` returning null rather than an empty spec is deliberate: an undeclared step
  * must be visible as a gap, not silently pass.
+ *
+ * The third half is the delivery layer. It is in the same table for the same reason: the point of
+ * one table is that "is anything unchecked?" has one answer. Its expectations resolve against the
+ * run folder instead of the corpus, so `run` is a scope only those four steps declare.
  */
 
 const { PREPRODUCTION_SPECS } = require("./preproduction");
 const { TRANSLATION_SPECS } = require("./translation");
+const { DELIVERY_SPECS } = require("./delivery");
 
 /** @typedef {import("../artifacts").StepArtifactSpec} StepArtifactSpec */
 
-const STEP_ARTIFACT_SPECS = { ...PREPRODUCTION_SPECS, ...TRANSLATION_SPECS };
+const STEP_ARTIFACT_SPECS = { ...PREPRODUCTION_SPECS, ...TRANSLATION_SPECS, ...DELIVERY_SPECS };
 
 // ─── Lookups ──────────────────────────────────────────────────────────────────
 

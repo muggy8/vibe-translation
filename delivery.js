@@ -23,6 +23,7 @@ const __gates = require("./delivery/gates");
 const __tickets = require("./delivery/tickets");
 const __act = require("./delivery/act");
 const __main = require("./delivery/main");
+const { auditDeliveryRun } = require("./utils/delivery-audit");
 
 module.exports = {
   ...__cli,
@@ -36,8 +37,19 @@ module.exports = {
 const { main } = __main;
 
 if (require.main === module) {
-  main().catch((err) => {
-    console.error(`[delivery] failed: ${err.stack || err.message}`);
-    process.exitCode = 1;
-  });
+  main()
+    .catch((err) => {
+      console.error(`[delivery] failed: ${err.stack || err.message}`);
+      process.exitCode = 1;
+    })
+    // The layer's own after-run check: what this command claimed, against what it left in the run
+    // folder. It reports and records; it never changes the exit code the command already chose.
+    .then(() =>
+      auditDeliveryRun({
+        step: "delivery",
+        argv: process.argv.slice(2),
+        exitCode: Number(process.exitCode || 0),
+        seriesDir: process.env.SERIES_LOCATION || undefined,
+      })
+    );
 }

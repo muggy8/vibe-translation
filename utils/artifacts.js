@@ -18,16 +18,24 @@
  * This module is that question, written down as data. It declares, per step:
  *   - `volume`      — files the step must leave in each volume folder it ran on
  *   - `series`      — files the step must leave at the series root
+ *   - `run`         — files a delivery command must leave in the folder a run remembers
+ *                     itself in (`<POSTMORTEM_DIR>/`): the plan of record, the ticket
+ *                     channel, the patch channel
  *   - `quarantines` — files whose PRESENCE is itself a finding (a `.rejected`
  *     file means a gate fired; the pipeline kept it as evidence, and an
  *     un-monitored run never looks at it)
- * The assessment itself (what to do with this data) lives in utils/postmortem.js.
+ * The assessment itself (what to do with this data) lives in utils/postmortem.js, and the
+ * delivery layer's cross-record questions in utils/delivery-audit.js.
  *
  * Two rules this file deliberately keeps:
  *   1. `required` is only used where the pipeline writes the file on EVERY path
  *      it can reach. Over-declaring is worse than under-declaring: gotcha 65's
  *      carry-forward guard called an improvement a loss and threw away good work.
  *      A check that fires on healthy output trains everyone to ignore the check.
+ *      For the delivery commands, which legitimately write nothing on several of
+ *      their paths, the `when` predicate carries the same guarantee: the expectation
+ *      applies when the command claims it wrote the record, and `required` then
+ *      means the claim is not backed by the disk.
  *   2. Shape is checked the way the existing gates check it — a Markdown heading
  *      or a table (`hasDocumentShape` in utils/fs.js), because every prompt in
  *      this pipeline that writes one of these documents specifies that shape.
@@ -49,10 +57,10 @@ require("../types"); // JSDoc type definitions
  * What one file a step is supposed to produce.
  *
  * @typedef {Object} ArtifactExpectation
- * @property {string} name - File name, relative to the volume folder (or to the
- *   series root for a `series` expectation). `{installment}` is replaced with the
- *   volume's two-digit installment number, for the per-volume reports whose names
- *   carry it (`jump-in-wiki-validation-{installment}.md`).
+ * @property {string} name - File name, relative to the volume folder (to the series root for a
+ *   `series` expectation, or to the run folder for a `run` expectation). `{installment}` is
+ *   replaced with the volume's two-digit installment number, for the per-volume reports whose
+ *   names carry it (`jump-in-wiki-validation-{installment}.md`).
  * @property {"required"|"expected"} level - `required`: its absence means the step
  *   did not finish this volume (HIGH). `expected`: its absence is a gap worth
  *   reporting, not a failure (MEDIUM).
@@ -73,6 +81,11 @@ require("../types"); // JSDoc type definitions
  * @property {boolean} volumeConsistencyEnabled - `VOLUME_CONSISTENCY_ENABLED` (the cross-chapter audit)
  * @property {boolean} polishVerifyEnabled - `POLISH_VERIFY_ENABLED` (the polish drift audit)
  * @property {string} installment - The volume's two-digit installment number, when per-volume
+ * @property {boolean} [planRecordClaimed] - The delivery command reported it wrote the plan of record
+ * @property {boolean} [ticketRecordClaimed] - It reported it wrote the ticket channel
+ * @property {boolean} [patchRecordClaimed] - It reported it wrote the patch channel
+ * @property {boolean} [acting] - The command ran in the mode that touches the run (act), not the
+ *   mode that only reports (report / watch)
  */
 
 /**
@@ -94,22 +107,27 @@ require("../types"); // JSDoc type definitions
  * Everything one step is expected to leave.
  *
  * @typedef {Object} StepArtifactSpec
- * @property {string} step - The gulp task name (a `TASKS` entry in utils/hooks.js).
+ * @property {string} step - The gulp task name (a `TASKS` entry in utils/hooks.js), or a delivery
+ *   command name (a `DELIVERY_COMMANDS` entry in utils/artifacts/delivery.js).
  * @property {boolean} perVolume - Whether the step writes per-volume artifacts at all.
  *   `discover` and `consistency-audit` work at the series level only.
  * @property {ArtifactExpectation[]} volume
  * @property {ArtifactExpectation[]} series
+ * @property {ArtifactExpectation[]} [run] - Expectations resolved against the run folder
+ *   (`POSTMORTEM_DIR`). Only the delivery commands declare it.
  * @property {QuarantineExpectation[]} quarantines
  */
 
 const rules = require("./artifacts/rules");
 const specs = require("./artifacts/specs");
+const delivery = require("./artifacts/delivery");
 
-// The public surface, unchanged from the single file.
+// The public surface, unchanged from the single file, plus the delivery layer's names.
 module.exports = {
   STEP_ARTIFACT_SPECS: specs.STEP_ARTIFACT_SPECS,
   specForStep: specs.specForStep,
   declaredSteps: specs.declaredSteps,
+  DELIVERY_COMMANDS: delivery.DELIVERY_COMMANDS,
   isKnownVolumeFile: rules.isKnownVolumeFile,
   KNOWN_VOLUME_FILE_PATTERNS: rules.KNOWN_VOLUME_FILE_PATTERNS,
 };

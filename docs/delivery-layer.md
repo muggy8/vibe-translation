@@ -422,3 +422,74 @@ out by spawning the account owner's own command in its own process.
 There is deliberately no `--dry-run`: it is a pipeline flag that also suppresses hooks, and on a
 machine where the hooks decide which model container answers, that would make the manager's model
 switch silently optional (gotcha 22). See gotcha 76.
+
+### 3.7 The delivery layer's own after-run check (`utils/delivery-audit.js`)
+
+Everything above is supervised. A pipeline step finishes, `utils/postmortem.js` asks what it left
+behind, the finding reaches the ledger, and the next run knows whether re-running is worth paying for.
+The four delivery commands — `npm run delivery`, `npm run diagnose`, `npm run fix`,
+`npm run autopilot` — had never been asked that question, and they are the layer that decides whether
+a failed run gets repaired, escalated, or left alone.
+
+That asymmetry is worth naming precisely, because these commands do not write reports. They write the
+**inputs** everything else in the layer is built on: the plan of record is what the next run reads to
+find out what was already tried; a ticket is the only door to the diagnostics team and to a code
+change; a patch record is the only evidence of code that changed on the pipeline's authority; the
+ledger is the anti-spin gate; and a run lock left behind by a process that has exited makes every
+later act-mode command refuse to start, which looks like rigor and is a run that cannot be started.
+A corrupt one of those is not a missing report — it is the layer quietly losing the ability to
+remember, decide, or start.
+
+**The three questions, in increasing ambition.**
+
+1. **Are the records there, and are they shaped right?** Declared in `utils/artifacts/delivery.js` as a
+   third scope beside `volume` and `series` — `run`, resolved against `POSTMORTEM_DIR` — and assessed
+   by `utils/postmortem/scope.js` with the same `assessFile` that assesses a glossary. The expectations
+   are gated by `when` predicates that read what the command *claims* it wrote, because `--no-write`,
+   `--open` and `--status` legitimately write nothing; `required` then means "you said you wrote it and
+   the disk says you did not". `autopilot` declares an empty list on purpose: it writes nothing itself,
+   every move being a child command that files its own record.
+2. **Do the records agree with each other?** A file-presence check cannot ask these, which is why they
+   are in `utils/delivery-audit.js` rather than in the spec table. A channel that does not parse is
+   `record-unreadable` HIGH — and note the direction: `readTickets` / `readPatches` / `readLedger`
+   already refuse to report a corrupt file as an empty one (gotcha 33), so the audit is carrying an
+   honesty rule that the readers had no way to announce. A patch answering a ticket that is not in the
+   ticket file is `record-orphan`: code changed whose justification has gone. A ticket marked
+   `answered` with no diagnosis behind it is a menu the manager picks from without being able to read
+   it. A ticket `closed` with no measured outcome is HIGH, because the ledger will count it as a move
+   that was tried. A duplicate id is named, because every lookup takes the first and half the record is
+   unreachable. A plan naming a step nothing declares, or claiming an act pass with no execution list,
+   is the run forgetting from the other direction. A lock left by a process that is gone is
+   `run-lock-stale` HIGH.
+3. **Did the command do what its exit code says it did?** An exit 0 is a claim. `claimsFromInvocation`
+   reads the claims off the command line and the exit code rather than taking them from the command
+   being audited — a value a command threads down its own call stack is the command grading its own
+   homework, and the failure this exists for is the command being wrong about what it did. `diagnose`
+   exiting 0 with no diagnosis on the ticket, `fix --commit` leaving a patch `proposed`, `delivery
+   --accept-patch` leaving it unjudged, `--choose` recording a different option: each is
+   `claim-unsupported` HIGH. This is the delivery layer's version of "never let a stage persist empty
+   output" (gotcha 2) — the stage finished, and what it finished with is not there.
+
+**A live run lock is not a finding.** While a run is going on the lock is the gate, and the audit has
+nothing to say about it. Asked afterwards it is evidence. Reporting the lock working as a defect is
+how a check gets switched off, and the same rule keeps `--no-write`, `--open` and `--status` clean.
+
+**What it deliberately does not do.** It never changes the command's exit code and never refuses the
+command: it runs *after* the work, and by then the work is done — turning a completed run into a failed
+one would teach the operator to run the command with the audit disabled. It prints, writes
+`<step>.md` + `<step>.json` beside the other post-mortems, and appends an `assessment` entry to the
+ledger, which is how a delivery finding reaches the next run's triage instead of ending as a line on a
+console. That entry is not counted as a move: `attemptCount` and `isSpinning` select only on
+`intervention`, so an audit can never spend an intervention or launder a spin.
+
+**Why it is a leaf module.** `utils/tickets`, `utils/patches`, `utils/ledger` and `utils/runlock` each
+resolve their own folder through `utils/postmortem`. A module *inside* the postmortem layer that
+reached back for them would close a require cycle and hand them a half-built barrel — the failure would
+appear as `postMortemDir is not a function` at the first path call, far from the cause. So the
+cross-record questions live in a module nothing else requires, and `utils/postmortem/scope.js` is kept
+free of any knowledge of what a ticket is.
+
+**The first thing it found** was in this repository's own `.postmortem/`: a `run.lock` left behind by a
+`delivery.js act` run whose process was gone. Nothing had noticed, and every later act-mode command
+would have refused to start against it. See `test/test-delivery-audit.js`, which seeds a healthy run,
+asserts the audit reports nothing, and then plants one defect per finding class.

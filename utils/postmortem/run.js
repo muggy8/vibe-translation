@@ -13,7 +13,8 @@ const path = require("path");
 const { finding } = require("./rules");
 const { assessVolume } = require("./volume");
 const { assessSeries } = require("./series");
-const { renderPostMortemMarkdown } = require("./render");
+const { renderPostMortemMarkdown, postMortemDir } = require("./render");
+const { assessRunScope, countRunExpectations, declaresRunScope } = require("./scope");
 const { specForStep } = require("../artifacts");
 const { filterVolumesByInstallment } = require("../manifest");
 
@@ -23,15 +24,26 @@ const { filterVolumesByInstallment } = require("../manifest");
 
 /**
  * Resolve the `when` predicates' inputs once per assessment.
- * @returns {import("./artifacts").ArtifactContext}
+ *
+ * `claims` is the delivery layer's half: what the command reports it wrote. A pipeline step writes
+ * its output on every path it can reach, so its expectations need no claim; a delivery command has
+ * paths that legitimately write nothing, and the only way to tell "did not need to" from "said it
+ * did and did not" is to ask the command what it claims.
+ *
+ * @param {Partial<import("../artifacts").ArtifactContext>} [claims]
+ * @returns {import("../artifacts").ArtifactContext}
  */
-function artifactContext() {
+function artifactContext(claims) {
   return {
     researchEnabled: process.env.RESEARCH_ENABLED !== "false",
     verifyEnabled: process.env.VERIFY_TRANSLATE_ENABLED !== "false",
     volumeConsistencyEnabled: process.env.VOLUME_CONSISTENCY_ENABLED !== "false",
     polishVerifyEnabled: process.env.POLISH_VERIFY_ENABLED !== "false",
     installment: "",
+    planRecordClaimed: Boolean(claims && claims.planRecordClaimed),
+    ticketRecordClaimed: Boolean(claims && claims.ticketRecordClaimed),
+    patchRecordClaimed: Boolean(claims && claims.patchRecordClaimed),
+    acting: Boolean(claims && claims.acting),
   };
 }
 
@@ -45,15 +57,18 @@ function artifactContext() {
  *
  * @param {Object} opts
  * @param {string} opts.step - The gulp task name that just ran.
- * @param {string} opts.seriesDir - The live series folder (`SERIES_LOCATION`).
+ * @param {string} [opts.seriesDir] - The live series folder (`SERIES_LOCATION`). Only needed when
+ *   the step declares corpus output; a delivery command's records live in the run folder.
  * @param {import("../types").TranslationTargetManifest|null} [opts.manifest] - The plan of
  *   record. Omit it and the post-mortem reads it from disk.
  * @param {string|null} [opts.volumeArg] - The `--volume` filter, when the step ran on one volume.
  *   Series-root expectations are skipped for a single-volume run, because the tasks
  *   deliberately do not publish a stale series copy for one volume.
+ * @param {Partial<import("../artifacts").ArtifactContext>} [opts.claims] - What a delivery command
+ *   claims it wrote, which is what its `required` run expectations are gated on.
  * @returns {Promise<PostMortemReport>}
  */
-async function runPostMortem({ step, seriesDir, manifest, volumeArg }) {
+async function runPostMortem({ step, seriesDir, manifest, volumeArg, claims }) {
   /** @type {PostMortemFinding[]} */
   const findings = [];
   const spec = specForStep(step);
@@ -80,8 +95,15 @@ async function runPostMortem({ step, seriesDir, manifest, volumeArg }) {
     return report;
   }
 
+  const ctx = artifactContext(claims);
+  // A delivery command's records are not in the corpus, so a step that declares no corpus output is
+  // not assessed against a plan of record it never read — and `diagnose`/`fix` can be pointed at a
+  // ticket without a readable series folder. Requiring the plan there would report a gap that is
+  // not this command's to fill.
+  const needsCorpus = Boolean(spec.perVolume || (spec.series && spec.series.length));
+
   let plan = manifest;
-  if (plan === undefined) {
+  if (needsCorpus && plan === undefined) {
     try {
       const raw = await fs.promises.readFile(path.join(seriesDir, "translation-target.json"), "utf8");
       plan = JSON.parse(raw);
@@ -100,9 +122,8 @@ async function runPostMortem({ step, seriesDir, manifest, volumeArg }) {
     }
   }
 
-  const ctx = artifactContext();
-  let volumeEntries = plan.volumes || [];
-  if (volumeArg) {
+  let volumeEntries = plan ? plan.volumes || [] : [];
+  if (volumeArg && plan) {
     const wanted = new Set(filterVolumesByInstallment(plan, volumeArg));
     volumeEntries = volumeEntries.filter((v) => wanted.has(v.folder));
   }
@@ -119,6 +140,11 @@ async function runPostMortem({ step, seriesDir, manifest, volumeArg }) {
     const seriesFindings = await assessSeries({ spec, step, seriesDir });
     findings.push(...seriesFindings);
     checked += spec.series.length;
+  }
+  if (declaresRunScope(spec)) {
+    const runFindings = await assessRunScope({ spec, step, runDir: postMortemDir(), ctx });
+    findings.push(...runFindings);
+    checked += countRunExpectations({ spec, ctx });
   }
 
   const counts = {
