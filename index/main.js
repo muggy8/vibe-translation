@@ -40,9 +40,11 @@ async function main() {
   if (!lock.acquired && lock.lock) {
     console.error(
       `[index] refusing to start: ${lock.note || "a pipeline run is already in progress"}. ` +
-        `If that run is not actually running, remove ${runLockPath()}. To run two series at ` +
-        `once, give each its own POSTMORTEM_DIR — the reports and the lock live there, so ` +
-        `they describe one run at a time.`
+        `If that run is not actually running, remove ${runLockPath()}. Two DIFFERENT series no ` +
+        `longer collide — the reports and the lock now live in each series' own records folder ` +
+        `(<SERIES_LOCATION>/.run/), so one series' run cannot see another's — but two runs of ` +
+        `the SAME series still write the same volume folders, and that is what this refusal is ` +
+        `for. Run them one after the other, or point one at a copy of the series.`
     );
     return 1;
   }

@@ -33,14 +33,13 @@ RUN npm ci
 COPY . .
 
 # The folders the pipeline writes: the default source folder (SERIES_LOCATION when unset),
-# the run transcripts (.logs/), the step runner's machine state (.postmortem/), the prompt
-# dumps (--dry-run), and the token-calibration cache. Created here so a fresh clone works
-# before anything is mounted, owned by the unprivileged user the container runs as, and left
-# open to any user so that running the container as YOUR uid (what docker-compose.yml does)
-# can still write them.
-RUN mkdir -p epub_source .logs .postmortem .dry-run .cache \
+# which also holds the run's own records under its `.run/`, and the token-calibration cache.
+# Created here so a fresh clone works before anything is mounted, owned by the unprivileged
+# user the container runs as, and left open to any user so that running the container as YOUR
+# uid (what docker-compose.yml does) can still write them.
+RUN mkdir -p epub_source .cache \
     && chown -R node:node /app/ai-client \
-    && chmod 0777 epub_source .logs .postmortem .dry-run .cache
+    && chmod 0777 epub_source .cache
 
 USER node
 

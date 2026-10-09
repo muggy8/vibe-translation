@@ -31,6 +31,7 @@
  * (docs/architecture.md "Pipeline hooks"). A test must not be able to do that.
  */
 
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");

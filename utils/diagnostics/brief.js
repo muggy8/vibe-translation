@@ -8,6 +8,7 @@ const fs = require("fs");
 const path = require("path");
 const tickets = require("../tickets");
 const { readTickets, ticketPaths, recordDiagnosis } = tickets;
+const { logsDir } = require("../../configs/run-state");
 
 const { SYSTEM_PROMPT_FILE } = require("./contract");
 
@@ -70,7 +71,7 @@ function renderTicketForDiagnosis(ticket, { seriesDir, root }) {
     `**Where to look:**`,
     `- the series folder: \`${seriesDir}\``,
     `- the step reports and the run ledger: \`${path.relative(root, ticketPaths().json).replace(/[\\/]+$/, "")}\`'s folder`,
-    `- the run transcripts (full chat histories, tool calls and their results, streaming dumps): \`.logs/\``,
+    `- the run transcripts (full chat histories, tool calls and their results, streaming dumps): \`${logsDir()}\``,
     `- the code and the prompts: \`ai-client/\` (this project's root is \`${root}\`)`,
     ``,
     `Answer with the JSON object described in your brief. Every option must name what it touches,`,

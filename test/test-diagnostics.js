@@ -32,6 +32,7 @@
  * are the production ones. Every fixture is a throwaway series with its own `POSTMORTEM_DIR`, so
  * nothing here can read or write the live 17 volumes (gotcha 69).
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs").promises;
 const fsSync = require("fs");

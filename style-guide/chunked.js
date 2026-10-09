@@ -49,7 +49,7 @@ async function runChunkedVolume(ctx) {
     try {
       extractionOutput = await runExtract(ctx, segment, si);
     } catch (err) {
-      console.error(`Volume ${values.INSTALLMENT_NUMBER}: extraction failed for chapter ${segment.id}: ${err.message}. Check .logs/ for details.`);
+      console.error(`Volume ${values.INSTALLMENT_NUMBER}: extraction failed for chapter ${segment.id}: ${err.message}. Check the run's log folder for details.`);
       throw err;
     }
     // Accumulate the parsed entries so the whole volume's "new" results are
@@ -66,7 +66,7 @@ async function runChunkedVolume(ctx) {
     try {
       await runCompile(ctx, extractionOutput, segment, si);
     } catch (err) {
-      console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed for chapter ${segment.id}: ${err.message}. Check .logs/ for details.`);
+      console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed for chapter ${segment.id}: ${err.message}. Check the run's log folder for details.`);
       throw err;
     }
     if (chapterBaseline !== null) {
@@ -125,7 +125,7 @@ async function runChunkedQaLoop(ctx) {
       `Volume ${n}: the per-chapter feedback round changed NOTHING — ` +
       `style-guide.md is byte-identical to what it was before it. Stopping the QA loop here rather ` +
       `than paying for another round of per-chapter validators over an unchanged document. Check the ` +
-      `feedback agents' turn logs in .logs/ for turns that only read (the usual shape: step cap ` +
+      `feedback agents' turn logs in the run's log folder for turns that only read (the usual shape: step cap ` +
       `reached before anything was written).`,
     limitReachedLogLine: () =>
       `Volume ${n}: reached the validation iteration limit (${maxValidationIterations}) without a ` +

@@ -24,7 +24,7 @@ function parseProposalReply(text) {
           kind: "empty-reply",
           message:
             "the dev turn produced no proposal. The turn's tool calls and any files it wrote are still " +
-            "in the working tree and in .logs/ — read them before re-running, because a turn stopped for " +
+            "in the working tree and in the run's log folder — read them before re-running, because a turn stopped for " +
             "repeating itself or for running past the turn clock is a different problem from a turn that " +
             "answered nothing, and this turn has no step limit to blame.",
         },

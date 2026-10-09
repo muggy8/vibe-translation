@@ -24,6 +24,7 @@ const {
 } = require("../utils/manifest");
 const { fileExists } = require("../utils/fs");
 const { assertRealToolCalls } = require("../utils/agents");
+const { isRunStateFolderName } = require("../configs/run-state");
 
 const { validateManifest } = require("./validate");
 const { DISCOVERY_BASE_STEPS, DISCOVERY_STEPS_PER_CANDIDATE, DRAFT_MANIFEST_FILE_NAME, MANIFEST_FILE_NAME, PLAN_FILE_NAME, discoverSampleChars } = require("./config");
@@ -175,7 +176,7 @@ async function runDiscoveryAgent(seriesDir, { overrides, committed, maxSteps, ex
   // source files) — the same lesson as validatorMaxStepsFor.
   const entries = await fs.readdir(seriesDir, { withFileTypes: true });
   const candidates = entries.filter(
-    (e) => e.isDirectory() || isSourceEntry(e)
+    (e) => (e.isDirectory() && !isRunStateFolderName(e.name)) || isSourceEntry(e)
   ).length;
   const stepCap =
     maxSteps ?? Math.max(DISCOVERY_BASE_STEPS, DISCOVERY_STEPS_PER_CANDIDATE * candidates + 20);
@@ -238,7 +239,7 @@ async function runDiscoveryAgent(seriesDir, { overrides, committed, maxSteps, ex
     if (!manifest) {
       throw new Error(
         `The intake agent did not produce a usable ${MANIFEST_FILE_NAME}. Check the ` +
-          `run log under .logs/ to see what it did, then re-run with --force.`
+          `run log in the run's log folder to see what it did, then re-run with --force.`
       );
     }
     if (!(await fileExists(planPath))) {

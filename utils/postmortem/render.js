@@ -8,11 +8,7 @@
 const fs = require("fs");
 const path = require("path");
 
-// __dirname here is utils/postmortem, so the repo root is two levels up (AGENTS.md §3).
-// postMortemDir() used to sit in utils/postmortem.js, where one ".." was enough; when the
-// file moved into the folder the same expression started naming utils/.postmortem, and the
-// whole run's machine state — reports, ledger, tickets, run lock — silently moved folder.
-const projectRoot = path.resolve(__dirname, "..", "..");
+const { postMortemDir: resolvePostMortemDir, ensureRunStateGitignore } = require("../../configs/run-state");
 
 /** @typedef {import("../postmortem").PostMortemFinding} PostMortemFinding */
 
@@ -70,11 +66,12 @@ function renderPostMortemMarkdown(report) {
  * that did not happen.
  *
  * @param {PostMortemReport} report
- * @param {string} outDir - Absolute directory (`.postmortem/` by default).
+ * @param {string} outDir - Absolute directory (postMortemDir() — `<SERIES_LOCATION>/.run/postmortem`).
  * @returns {Promise<{markdown: string, json: string}>} The paths written.
  */
 async function writePostMortemReport(report, outDir) {
   await fs.promises.mkdir(outDir, { recursive: true });
+  ensureRunStateGitignore();
   const mdPath = path.join(outDir, `${report.step}.md`);
   const jsonPath = path.join(outDir, `${report.step}.json`);
   await fs.promises.writeFile(mdPath, report.markdown, "utf8");
@@ -98,13 +95,18 @@ async function writePostMortemReport(report, outDir) {
 }
 
 /**
- * The post-mortem output directory (`POSTMORTEM_DIR`, default `<repo>/.postmortem`).
- * Machine state, gitignored — like `.logs/` and `.dry-run/`.
- * @returns {string}
+ * The run's records directory: `POSTMORTEM_DIR`, else `<series>/.run/postmortem`.
+ *
+ * The step reports, the ledger, the ticket channel, the patch channel, the delivery plan and
+ * the run lock all resolve their home through this one function, which is why moving the
+ * run's memory next to the series is one change and not four. The resolution itself lives in
+ * configs/run-state.js — this file is a split module, and a machine-state path built from its
+ * own `__dirname` is how gotcha 80 happened.
+ *
+ * @returns {string} Absolute path.
  */
 function postMortemDir() {
-  const dir = (process.env.POSTMORTEM_DIR || "").trim();
-  return dir ? path.resolve(dir) : path.join(projectRoot, ".postmortem");
+  return resolvePostMortemDir();
 }
 
 module.exports = { renderPostMortemMarkdown, writePostMortemReport, postMortemDir };

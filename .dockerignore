@@ -3,8 +3,10 @@
 # Two principles: (1) your data and your secrets are mounted in at run time, never
 # baked into a layer; (2) this machine's run history is not the pipeline.
 
-# Git, and the machine state the pipeline writes as it runs
+# Git, and the run's records left in the repo folder (the fallback home, used only when no
+# series was chosen, plus the names from before the records moved next to the series).
 .git/
+.run/
 .logs/
 .postmortem/
 .dry-run/

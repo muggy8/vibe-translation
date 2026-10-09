@@ -9,7 +9,7 @@
 
 const fs = require("fs").promises;
 const path = require("path");
-const utilsDir = path.resolve(__dirname, "..");
+const { logsDir } = require("../../configs/run-state");
 
 /**
  * Check the published `chapters.json` against the chapter list this run actually
@@ -73,7 +73,7 @@ async function checkChapterListConsistency(volumeDir, bundle) {
  * @returns {Promise<{genTokPerSec: number, calls: number, logFile: string}|null>}
  */
 async function previousRunThroughput() {
-  const logsRoot = path.join(utilsDir, "..", ".logs");
+  const logsRoot = logsDir();
   let entries;
   try {
     entries = await fs.readdir(logsRoot);
@@ -142,7 +142,7 @@ async function logRunEstimate({ stage, volumes, chapters, callsPerChapter = 1, e
 }
 
 
-/** A log line that survives into .logs/ (the harness's own summary log). */
+/** A log line that survives into the run's log folder (the harness's own summary log). */
 let harnessLogLine = (line) => console.error(line);
 try {
   const h = require("../../harness");

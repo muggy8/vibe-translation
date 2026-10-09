@@ -2,7 +2,7 @@
  * utils/diagnostics.js — the read-only support team: the role that CAN see the code,
  * answering a ticket the delivery manager wrote, one model call per ticket.
  *
- * It is the mirror image of the manager's: it reads the code, the prompts and the .logs/
+ * It is the mirror image of the manager's: it reads the code, the prompts and the run's transcripts
  * transcripts — the three things the manager may never see — and it may not write anywhere at
  * all. That guarantee is built TWICE: the tool set hands over only readFile / listFiles /
  * grep, and the composed approve gate denies every mutating call AND records each refusal.

@@ -15,6 +15,7 @@
  * (gotcha 69).
  */
 
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs").promises;
 const path = require("path");

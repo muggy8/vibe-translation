@@ -307,7 +307,7 @@ async function getTranslationTarget({ forceIntake = false, dryRun = false } = {}
     throw structuralError(
       `Series intake failed after ${attempts} attempt(s): ` +
         `${lastError ? lastError.message : "unknown error"} Inspect ${manifestPath}, ` +
-        `${planPath}, and the run log under .logs/, then re-run with --force.`
+        `${planPath}, and the run log in the run's log folder, then re-run with --force.`
     );
   }
 

@@ -40,6 +40,7 @@
  * is fingerprinted against (gotcha 69).
  */
 
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 "use strict";
 
 const assert = require("assert");

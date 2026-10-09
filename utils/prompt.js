@@ -8,6 +8,7 @@
 const fs = require("fs");
 const path = require("path");
 const { extractJsonObject } = require("./manifest");
+const { dryRunDir, ensureRunStateGitignore } = require("../configs/run-state");
 
 function transformUserPrompt(template, values) {
   let result = template;
@@ -166,9 +167,9 @@ function parseAcceptanceReply(output) {
 }
 
 async function writePromptDump(task, installmentNumber, mode, sections) {
-  const clientDir = path.resolve(__dirname, "..");
-  const dir = path.join(clientDir, ".dry-run");
+  const dir = dryRunDir();
   await fs.promises.mkdir(dir, { recursive: true });
+  ensureRunStateGitignore();
   const file = path.join(dir, `${task}-${installmentNumber}.md`);
   const body = `# ${task} - volume ${installmentNumber} prompt dump (--dry-run)\n\nMode: ${mode}\n\n` + sections.map((s) => `## ${s.title}\n\n${s.prompt}\n`).join("");
   await fs.promises.writeFile(file, body, "utf-8");

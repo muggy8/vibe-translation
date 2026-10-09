@@ -46,9 +46,13 @@ const os = require("os");
 const path = require("path");
 const { postMortemDir } = require("./postmortem");
 const { runId } = require("./ledger");
+const { ensureRunStateGitignore } = require("../configs/run-state");
 
 /**
- * `<POSTMORTEM_DIR>/run.lock` — machine state, gitignored like the reports beside it.
+ * `<POSTMORTEM_DIR>/run.lock` — the run's claim on the series' folders. It sits with the
+ * records beside it and is the one of them the run's own `.gitignore` refuses to let be
+ * committed: a lock names a process on one machine, and checked in it claims a run is in
+ * progress on a machine that has no such process (configs/run-state.js).
  * @returns {string} Absolute path.
  */
 function runLockPath() {
@@ -381,6 +385,9 @@ function acquireRunLock({ by, run, filePath } = {}) {
   };
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    // The lock is the one record in the run's folder that must never be committed, and the rule
+    // that keeps it out travels with the folder (configs/run-state.js).
+    ensureRunStateGitignore();
     fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + "\n", "utf8");
   } catch (err) {
     // A pipeline must not die because a bookkeeping file could not be written. The manager

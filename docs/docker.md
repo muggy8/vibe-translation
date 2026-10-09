@@ -13,14 +13,18 @@ OpenAI-compatible endpoint, the same one you would use on your own machine. So t
 carries no model and needs no GPU, and the one thing that has to be reachable from inside
 it is `AI_BASE_URL`.
 
-Four folders are shared between your machine and the container:
+Two things are shared between your machine and the container: your settings, and the series
+folder — which is where the pipeline writes **everything**, including its own records.
 
 | On your machine | Inside the container | What it holds |
 |---|---|---|
-| `epub_source/` | `/app/ai-client/epub_source` | Your books, and everything the pipeline writes next to them |
-| `.logs/` | `/app/ai-client/.logs` | The transcript of every model call (what was asked, what came back) |
-| `.postmortem/` | `/app/ai-client/.postmortem` | What each step left behind, the run ledger, the tickets |
-| `.dry-run/` | `/app/ai-client/.dry-run` | The prompts a `--dry-run` would have sent (no model calls were made) |
+| `epub_source/` | `/app/ai-client/epub_source` | Your books, everything the pipeline writes next to them, and the run's own records under `epub_source/.run/` — its step reports, the ledger, the tickets, the transcripts of every model call, the `--dry-run` prompt dumps |
+| *(a Docker volume)* | `/app/ai-client/.cache` | The token-calibration cache: a measurement of the model server *this container* talks to, so it stays with the container and not with the series |
+
+The run's records follow `SERIES_LOCATION` (configs/run-state.js, `docs/environment.md`), so
+mounting the series folder is enough to keep them. If you point `POSTMORTEM_DIR` / `LOGS_DIR` /
+`DRY_RUN_DIR` at some other path, mount that path too — a container can only write where you
+gave it a folder.
 
 Everything else in the image is the pipeline's own code. Your `.env` is **not** copied into
 the image — it is handed to the container as its environment, so the keys never end up in a
@@ -32,14 +36,14 @@ layer of the image.
 
 ```bash
 cp .env.example .env          # then edit it: AI_BASE_URL, AI_API_KEY, AI_MODEL
-mkdir -p epub_source .logs .postmortem .dry-run   # once, so they are yours and not root's
+mkdir -p epub_source          # once, so it is yours and not root's
 # put your books (.epub files, one per volume) in epub_source/
 docker compose up --build
 ```
 
 (The `mkdir` matters: Docker creates a mounted folder that does not exist yet as root, and
 then the pipeline — which runs as an ordinary user — cannot write into it. `epub_source/`
-already ships with the repo; the other three are where the run's own records go.)
+already ships with the repo, so this is only needed if you deleted it.)
 
 That runs the whole pipeline — intake, glossary, character voice, style guide, wiki, the
 consistency audit, translation, its QA loop, and polish — one step at a time, each step
@@ -131,9 +135,11 @@ it, is the one setting that cannot work in a container — the folder simply is 
   account owner's machine. They shell out to host tools that do not exist in this image, so
   they are not mounted in. A container run uses the endpoints in `.env` directly, which is
   the simpler and more predictable setup.
-- **Run history** — `.logs/`, `.postmortem/`, `.dry-run/`, the token-calibration cache. The
-  first two are mounted so you keep them; the calibration cache lives in a Docker volume so
-  it survives between runs without landing in the repo.
+- **Run history** — the run's records live in the series folder, which is already mounted, so
+  they come out on your machine with the rest of it: `epub_source/.run/postmortem/` (reports,
+  ledger, tickets) and `epub_source/.run/logs/` (the transcripts). The token-calibration cache
+  is the one thing kept in a Docker volume: it measures this container's endpoint, so it
+  survives between runs without travelling with the series.
 
 The container runs as an unprivileged user (or as *your* user id, which is what
 `docker-compose.yml` asks for), so the files it writes into `epub_source/` come out owned by
@@ -151,7 +157,7 @@ you.
 | `connect ECONNREFUSED` / the run hangs at the first model call | `AI_BASE_URL` is not reachable from inside the container (§3). |
 | Files in `epub_source/` owned by root | Your Docker is running the container as root; `docker-compose.yml` asks it not to (`user: "${UID}:${GID}"`). |
 | The run finished and nothing appeared on your machine | It was started with `docker run` and no `-v` mount: what the container wrote lives inside it and goes when it is removed. `docker compose` mounts `./epub_source` for you. |
-| A step failed and you want to know why | Read `.postmortem/<step>.md` (what the step claims it did vs. what it left) and the transcripts in `.logs/`. |
+| A step failed and you want to know why | Read `epub_source/.run/postmortem/<step>.md` (what the step claims it did vs. what it left) and the transcripts in `epub_source/.run/logs/`. |
 
 The pipeline's own explanation of what each step does, and what each setting means, is in
 [AGENTS.md](../AGENTS.md) → `docs/architecture.md`, `docs/pipelines.md` and

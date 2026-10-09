@@ -1,5 +1,5 @@
 /**
- * What the manager is allowed to have looked at. The boundary is checked on the ANSWER, not the question: the diagnostics team may ask anything it needs to, but a reply that cites `.logs/**`, a `.js`, a prompt or `hooks/` is refused at the point where the boundary would actually leak.
+ * What the manager is allowed to have looked at. The boundary is checked on the ANSWER, not the question: the diagnostics team may ask anything it needs to, but a reply that cites the run's logs, a `.js`, a prompt or `hooks/` is refused at the point where the boundary would actually leak.
  *
  * Part of the tickets.js layer (split out of the original single file).
  */
@@ -21,7 +21,11 @@
 const MANAGER_EYES = [
   {
     id: "run-transcripts",
-    pattern: /(^|[\\/])\.logs([\\/]|$)/,
+    // The transcripts moved next to the series (`<SERIES_LOCATION>/.run/logs/`); the old repo-root
+    // name is kept in the pattern because a reply quoting a folder from before the move is quoting
+    // the same kind of thing. The run's RECORDS (`.run/postmortem/`) are NOT here on purpose: the
+    // manager reads the step reports, the ledger and the tickets.
+    pattern: /(^|[\\/])(?:\.logs|\.run[\\/]logs)([\\/]|$)/,
     because:
       "the run transcripts are the diagnostics team's own material. A manager quoting a chat " +
       "history is quoting something it was not allowed to read.",

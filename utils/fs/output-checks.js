@@ -27,7 +27,7 @@ async function assertWrote(filePaths, who) {
       throw new Error(
         `${who} did not produce ${filePath}` +
           (content !== null ? " (the file is empty or still holds its scaffold stub)" : ".") +
-          ` Check the run log in .logs/ for the agent transcript.`
+          ` Check the run's log folder for the agent transcript.`
       );
     }
   }
@@ -104,7 +104,7 @@ async function assertRealOutput(filePaths, who) {
   if (bad.length > 0) {
     throw new Error(
       `${who} never wrote real output for: ${bad.join(", ")} ` +
-        `(missing, empty, or still a scaffold stub). Check the agent transcript in .logs/.`
+        `(missing, empty, or still a scaffold stub). Check the agent transcript in the run's log folder.`
     );
   }
 }

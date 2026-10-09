@@ -221,7 +221,7 @@ async function runChunkedQaLoop(ctx) {
       `Volume ${n}: the per-chapter feedback round changed NOTHING — ` +
       `wiki.md and shared-wiki.md are byte-identical to what they were before it. Stopping the QA ` +
       `loop here rather than paying for another round of per-chapter validators over an unchanged ` +
-      `wiki. Check the feedback agents' turn logs in .logs/ for turns that only read (the usual ` +
+      `wiki. Check the feedback agents' turn logs in the run's log folder for turns that only read (the usual ` +
       `shape: step cap reached before anything was written).`,
     limitReachedLogLine: () =>
       `Volume ${n}: reached the validation iteration limit ` +

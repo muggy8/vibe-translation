@@ -24,8 +24,8 @@ function parseDiagnosisReply(text) {
         {
           kind: "empty-reply",
           message:
-            "the diagnostics turn produced no answer. The turn's tool calls are still in the run " +
-            "log under .logs/ — read them before re-asking, because a turn that ran out of steps " +
+            "the diagnostics turn produced no answer. The turn's tool calls are still in the run's " +
+            "log folder — read them before re-asking, because a turn that ran out of steps " +
             "while reading is a different problem from a turn that answered nothing.",
         },
       ],

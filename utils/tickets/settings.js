@@ -18,7 +18,7 @@ function ticketsEnabled() {
 
 /**
  * Where tickets live: beside the post-mortem reports and the ledger, because a ticket is the
- * same kind of thing — machine state describing a decision, gitignored like `.logs/`.
+ * same kind of thing — a record of a decision, kept with the series it describes.
  * @returns {{json: string, markdown: string}}
  */
 function ticketPaths() {

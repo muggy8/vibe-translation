@@ -291,7 +291,7 @@ async function runVolume(ctx) {
     return;
   }
   let extractionOutput = "";
-  try { extractionOutput = await runExtract(ctx); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: extraction failed: ${err.message}. Check .logs/ for details.`); throw err; }
+  try { extractionOutput = await runExtract(ctx); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: extraction failed: ${err.message}. Check the run's log folder for details.`); throw err; }
   // Persist the volume's extraction results (the new style constructs) so the translation handoff
   // (utils/handoff.js) can render a "what's new in this volume" section without re-calling the AI.
   try {
@@ -307,7 +307,7 @@ async function runVolume(ctx) {
   // amends a real file instead of reproducing a document too large for one reply (see
   // seedStyleGuideFromPrevious).
   await seedStyleGuideFromPrevious(ctx);
-  try { await runCompile(ctx, extractionOutput); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed: ${err.message}. Check .logs/ for details.`); throw err; }
+  try { await runCompile(ctx, extractionOutput); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed: ${err.message}. Check the run's log folder for details.`); throw err; }
   await assertStyleCarryForward(ctx, "the compile pass");
   await runQaLoop(ctx);
 }

@@ -134,11 +134,13 @@ const BANNED_PATCH_PATHS = [
   },
   {
     id: "edit-machine-state",
-    pattern: /^(?:\.postmortem|\.logs|\.dry-run|node_modules)\//,
+    pattern: /(?:^|\/)(?:\.run|\.postmortem|\.logs|\.dry-run|node_modules)\//,
     because:
-      "these are the run's own records and generated state. The ledger, the tickets, the post-mortem " +
-      "reports and the transcripts are the before-side of every acceptance comparison — editing them " +
-      "edits the evidence a decision was made from (Tier C: delete-evidence).",
+      "these are the run's own records and generated state — the reports, the ledger, the " +
+      "tickets, the patch channel, the transcripts and the prompt dumps, wherever the run keeps " +
+      "them (they now sit next to the series, in <SERIES_LOCATION>/.run/). They are the " +
+      "before-side of every acceptance comparison: editing them edits the evidence a decision " +
+      "was made from (Tier C: delete-evidence).",
     escalateTo: "the account owner. Nothing downstream of a run is a patch target.",
   },
   {

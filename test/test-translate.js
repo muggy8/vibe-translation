@@ -4,6 +4,7 @@
  * QA, state load/save). Run with `npm test`. No AI, no network; the state
  * tests use a temporary directory.
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");

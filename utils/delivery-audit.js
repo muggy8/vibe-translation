@@ -63,7 +63,7 @@ const { runInProgress, describeRunLock, runLockPath } = require("./runlock");
 const { specForStep } = require("./artifacts");
 
 // This file lives in <root>/utils/, so the repo root is one level up. Getting this wrong is
-// gotcha 80 exactly: displayPath() would print `../.postmortem/tickets.json` and nothing would fail.
+// gotcha 80 exactly: displayPath() would print `../.run/postmortem/tickets.json` and nothing would fail.
 const projectRoot = path.resolve(__dirname, "..");
 
 /** @typedef {import("./postmortem").PostMortemFinding} PostMortemFinding */

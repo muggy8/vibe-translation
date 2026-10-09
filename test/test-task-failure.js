@@ -21,6 +21,7 @@
  * The live scenarios run in a spawned child because the run policies
  * (ON_VOLUME_ERROR) are read at module load.
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const path = require("path");
 const fs = require("fs");

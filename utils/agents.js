@@ -51,7 +51,7 @@ function assertRealToolCalls(result, who, volumeLabel) {
       `${who} emitted tool-call syntax as plain text ` +
       `("tool_call" / <function=…>) instead of using the tool-calling API, so no ` +
       `file tools ran — nothing was read or written. See the agent transcript in ` +
-      `.logs/ for the exact turn. This is an intermittent model/endpoint issue ` +
+      `the run's log folder for the exact turn. This is an intermittent model/endpoint issue ` +
       `with OpenAI tool_calls (the smoke test 'npm run smoke fs' can pass even ` +
       `when it happens). Re-run the task; if it persists, check the endpoint.`
   );

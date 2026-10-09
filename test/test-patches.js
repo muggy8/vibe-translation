@@ -33,6 +33,7 @@
  * real repository — and the real repository is the one holding the corpus they must not touch
  * (gotcha 69). Every fixture has its own `POSTMORTEM_DIR`.
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs").promises;
 const fsSync = require("fs");

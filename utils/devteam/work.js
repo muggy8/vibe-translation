@@ -178,7 +178,7 @@ async function workTicket({ ticketId, seriesDir, root = projectRoot, patchPaths 
       // "unknown", not a row of zeroes that reads like the turn made no tool calls.
       turnShape: null,
       error: unfinished(`the dev turn did not finish (${turnError.message}).`) +
-        " The turn's own record is in .logs/ — read it before re-running, because a turn stopped for " +
+        " The turn's own record is in the run's log folder — read it before re-running, because a turn stopped for " +
         "repeating itself or for running past the turn clock is a different problem from a turn that " +
         "answered nothing, and this turn has no step limit to blame.",
     };

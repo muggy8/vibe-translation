@@ -120,7 +120,7 @@ async function runRePolish({ volume, volumeDir, bundle, refs, systemPrompt, temp
     if (!attemptText) {
       throw new Error(
         `Volume ${volume.installmentNumber} ${id}: the model returned no content for the audit re-polish. ` +
-          `Check .logs/ and re-run.`
+          `Check the run's log folder and re-run.`
       );
     }
     await fs.writeFile(path.join(volumeDir, polishedFile), attemptText + "\n", "utf8");

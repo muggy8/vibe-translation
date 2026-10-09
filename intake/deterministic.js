@@ -26,6 +26,7 @@ const {
   filterVolumesByInstallment,
 } = require("../utils/manifest");
 const { fileExists, stageSourceFile } = require("../utils/fs");
+const { isRunStateFolderName } = require("../configs/run-state");
 
 const { MANIFEST_SCHEMA, isVolumeArtifact } = require("./config");
 
@@ -130,8 +131,11 @@ async function buildDeterministicManifest(seriesDir, { sourceLanguage, targetLan
   const volumes = [];
 
   // 1. Volume folders that already exist.
+  // `images` is extracted art, and the run's own folder is the run's records: neither is a
+  // volume, and a scan that did not say so read `.run/postmortem/tickets.md` as a staged
+  // book and invented a volume out of the pipeline's own notebook.
   const folderNames = entries
-    .filter((entry) => entry.isDirectory() && entry.name !== "images")
+    .filter((entry) => entry.isDirectory() && entry.name !== "images" && !isRunStateFolderName(entry.name))
     .map((entry) => entry.name);
   // Prefer the folders that carry the series name (the legacy convention); when
   // the name is unknown or the agent chose other names, take every folder that

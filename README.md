@@ -12,7 +12,7 @@ you run yourself). It does not include a model.
 
 ```bash
 cp .env.example .env          # your model endpoint: AI_BASE_URL, AI_API_KEY, AI_MODEL
-mkdir -p epub_source .logs .postmortem .dry-run
+mkdir -p epub_source
 # drop your books in epub_source/  (.epub files, one per volume — nothing else to arrange)
 docker compose up --build     # the whole pipeline, in a container
 ```
@@ -35,6 +35,13 @@ next to them — a folder per volume, holding that volume's glossary, voice refe
 guide, wiki, translation and the reports that checked it. The four series-level references
 and the plan of record land at the top of the same folder.
 
+So does everything the run remembers about itself, under **`.run/`** in that same folder:
+its step reports, the ledger of what it already tried, the ticket channel, the transcripts of
+every model call. It lives with the books rather than with the code because it is memory
+*about a series* — point `.env` at a different series and the next run gets its own memory
+instead of inheriting another series' — and because it is the half you can commit, so another
+machine that pulls the series can pick the run up where this one stopped.
+
 You do not have to name the volumes, order them, or say what the series is called. The first
 step reads the folder, works that out, and writes down what it decided in
 `translation-plan.md` before anything else runs. If it is not sure of the order, it stops
@@ -45,10 +52,14 @@ rather than guessing.
 | Where to look | What it tells you |
 |---|---|
 | `translation-plan.md` | Which files it decided are volumes, in what order, and what it left out |
-| `.postmortem/<step>.md` | What a step claimed to have done, against what it actually left behind |
-| `.logs/` | The transcript of every model call in the run |
+| `.run/postmortem/<step>.md` | What a step claimed to have done, against what it actually left behind |
+| `.run/logs/` | The transcript of every model call in the run |
+| `.run/postmortem/tickets.md` | The questions a failed step opened, what the diagnostics team answered, and what was decided |
 | `npm run delivery` | Where a stopped run stopped, and what the options are |
 | `npm run autopilot` | What the manager would do about it — decided and printed, touching nothing |
+
+Both `.run/` paths are inside your series folder (`SERIES_LOCATION`), not inside this repo.
+The run prints the exact folder it is writing to on its first line.
 
 ## The rest of the documentation
 

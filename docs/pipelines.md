@@ -352,7 +352,7 @@ container answers, docs/architecture.md):
   window and where each came from (`describeEndpoint`).
 - **Run estimate and heartbeats** (`previousRunThroughput` / `logRunEstimate` /
   `progressCounter`) — each stage reads the generation rate (`gen=<n> tok/s`)
-  from the newest `.logs/*/summary.log`, prints an estimate before its chapter
+  from the newest `<series>/.run/logs/*/summary.log`, prints an estimate before its chapter
   loop, and ticks a heartbeat through it. An un-monitored run must be able to
   tell "working slowly" from "hung".
 - **Chapter-list consistency** (`checkChapterListConsistency`) — `bundle.segments`

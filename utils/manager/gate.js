@@ -22,7 +22,7 @@ const { ACTION_BY_NAME } = require("./rules");
  * Used to check a manager's ANSWER against `customerMayRead` (gotcha 74): the diagnostics team may
  * ask about anything it needs to, but a reply may only cite what a customer is allowed to have seen.
  * Two shapes are picked up — anything with a separator in it (`utils/prompt.js`, `hooks/pre-glossary.sh`,
- * `.logs/summary.log`), and any bare word with a code or document extension (`index.js`, `glossary.md`).
+ * a transcript path like `.run/logs/<run>/summary.log`), and any bare word with a code or document extension (`index.js`, `glossary.md`).
  *
  * Deliberately loose on the false-positive side: `1.5/2.5` and `01-03` come back as "paths" and pass
  * the check, because a refusal that accuses an honest answer is a check the next incident routes

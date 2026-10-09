@@ -98,7 +98,7 @@ function defaultStalledLogLine(volumeLabel, files) {
     `${volumeLabel}: the per-chapter feedback round changed NOTHING — ${named} ` +
     `${files.length > 1 ? "are byte-identical to what they were" : "is byte-identical to what it was"} ` +
     `before it. Stopping the QA loop here rather than paying for another round of per-chapter ` +
-    `validators over an unchanged document. Check the feedback agents' turn logs in .logs/ for turns ` +
+    `validators over an unchanged document. Check the feedback agents' turn logs in the run's log folder for turns ` +
     `that only read (the usual shape: step cap reached before anything was written).`
   );
 }

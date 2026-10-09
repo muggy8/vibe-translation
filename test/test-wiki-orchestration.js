@@ -26,6 +26,7 @@
  *
  * No network, no real endpoint. Run with `npm test`.
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");

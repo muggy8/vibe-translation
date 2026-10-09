@@ -7,6 +7,7 @@
 const fs = require("fs");
 const path = require("path");
 const { readLedger } = require("../ledger");
+const { ensureRunStateGitignore } = require("../../configs/run-state");
 
 const { ticketPaths, ticketsEnabled } = require("./settings");
 const { renderTicketsMarkdown } = require("./render");
@@ -55,6 +56,7 @@ function readTickets(filePath = ticketPaths().json) {
 function writeTickets(tickets, paths = ticketPaths()) {
   try {
     fs.mkdirSync(path.dirname(paths.json), { recursive: true });
+    ensureRunStateGitignore();
     fs.writeFileSync(
       paths.json,
       JSON.stringify({ schema: 1, updatedAt: new Date().toISOString(), tickets }, null, 2) + "\n",
@@ -329,7 +331,7 @@ function recordAnswer(ticketId, reply, paths = ticketPaths()) {
       error:
         `the answer cites something a delivery manager may not read:\n  - ${refusedCites.join("\n  - ")}\n` +
         `What the manager CAN cite: the plan of record (translation-target.json), what each volume ` +
-        `folder holds, the step reports in .postmortem/, the ledger, the tickets, and ` +
+        `folder holds, the step reports in the run's records, the ledger, the tickets, and ` +
         `translation-report.md. Answer from those, or say that the manager cannot tell and the ` +
         `diagnostics team should read it itself.`,
     };

@@ -18,6 +18,7 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
 const { transformUserPrompt } = require("../utils/prompt");
+const { RUN_DIR_NAME } = require("../configs/run-state");
 const projectRoot = path.resolve(__dirname, "..");
 
 const { DRAFT_MANIFEST_FILE_NAME, PLAN_FILE_NAME, discoverSampleChars } = require("./config");
@@ -95,8 +96,11 @@ function fixedValuesBlock({ seriesName, sourceLanguage, targetLanguage }) {
 function committedLayoutBlock(committed) {
   const worked = committed.filter((c) => c.hasPipelineOutput);
   const plain = committed.filter((c) => !c.hasPipelineOutput && c.sources.length > 0);
+  const runFolderNote =
+    `\`${RUN_DIR_NAME}/\` is the pipeline's own records (its reports, its ledger, its tickets). ` +
+    `It is not a volume, not a book, and not a folder to plan or rename.`;
   if (worked.length === 0 && plain.length === 0) {
-    return "## Existing folders\n\nNone — this folder holds no pipeline output yet.";
+    return `## Existing folders\n\nNone — this folder holds no pipeline output yet.\n\n${runFolderNote}`;
   }
   const lines = [];
   if (worked.length > 0) {
@@ -111,6 +115,7 @@ function committedLayoutBlock(committed) {
     lines.push("These folders exist but hold no pipeline output yet (you may rename or replace them):");
     for (const c of plain) lines.push(`- ${c.folder}/ (${c.sources.map((s) => s.file).join(", ")})`);
   }
+  lines.push(runFolderNote);
   return `## Existing folders\n\n${lines.join("\n")}`;
 }
 

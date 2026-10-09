@@ -63,7 +63,7 @@ function validateManifest(manifest) {
   if (!Array.isArray(manifest.volumes) || manifest.volumes.length === 0) {
     throw new Error(
       `manifest has no volumes — the intake agent found nothing to translate ` +
-        `(check the folder contents and the run log under .logs/).`
+        `(check the folder contents and the run's log folder).`
     );
   }
 

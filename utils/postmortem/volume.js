@@ -177,7 +177,7 @@ async function assessVolume({ spec, step, seriesDir, volumeEntry, ctx }) {
           `the grader was asked ${state.gradeAttempts} time(s) for this artifact and ` +
             `${state.gradeFailures} answer(s) were unusable${every ? " — every single one" : ""}. ` +
             `An unreadable grade is a failed check: it spends a QA iteration and rewrites an ` +
-            `artifact that may already be fine. Check the grader's one-shot in .logs/ for the reply ` +
+            `artifact that may already be fine. Check the grader's one-shot in the run's log folder for the reply ` +
             `it actually produced.`
         )
       );

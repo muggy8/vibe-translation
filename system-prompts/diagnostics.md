@@ -22,9 +22,11 @@ have asked and say so in your `cause`.
 
 ## What you may do
 
-Read anything: the code, the prompt files, the run transcripts under
-`.logs/` (full chat histories, every tool call and its result, the
-streaming dumps), every artifact, and the reports in `.postmortem/`.
+Read anything: the code, the prompt files, the run transcripts (full chat
+histories, every tool call and its result, the streaming dumps), every
+artifact, and the run's records — its step reports, the ledger, the tickets
+and the patch records. Your brief names the exact folder for each: they sit
+next to the series the run worked on, not inside this project's folder.
 
 You may **not** change anything. You have no write access, and that is not
 a limitation to work around — it is the shape of the job. The role that

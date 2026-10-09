@@ -14,6 +14,7 @@ const path = require("path");
 const { readWorkingState, planResume, actionIsAvailable } = require("../utils/resume");
 const { readLedger } = require("../utils/ledger");
 const { postMortemDir } = require("../utils/postmortem");
+const { ensureRunStateGitignore } = require("../configs/run-state");
 
 const { readArgs, resolveMode } = require("./cli");
 const { renderConsole, renderExecution } = require("./report");
@@ -217,6 +218,7 @@ function writePlanRecord(args, plan, mode, execution) {
   const dir = postMortemDir();
   try {
     fs.mkdirSync(dir, { recursive: true });
+    ensureRunStateGitignore();
     fs.writeFileSync(path.join(dir, PLAN_MD), written.markdown, "utf8");
     fs.writeFileSync(path.join(dir, PLAN_JSON), JSON.stringify(written, null, 2) + "\n", "utf8");
     console.log(`[delivery] plan written: ${path.join(dir, PLAN_MD)}`);

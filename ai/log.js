@@ -1,5 +1,6 @@
 /**
- * Per-run logging: one directory per process under .logs/, holding the greppable
+ * Per-run logging: one directory per process under the run's `logs/` folder (which sits
+ * inside the series folder — configs/run-state.js), holding the greppable
  * summary log and the full chat histories (one-shot prompts and responses, agent
  * turns with their tool calls AND their results).
  *
@@ -15,14 +16,14 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 require("../types"); // JSDoc type definitions
-const projectRoot = path.resolve(__dirname, "..");
+
+const { logsDir, ensureRunStateGitignore } = require("../configs/run-state");
 
 const { envMaxTokens } = require("./env");
 
 // ─── Run logging ────────────────────────────────────────────────────────────
 // Every call's diagnostic output is also written to a per-run log directory
-// under .logs/ (one directory per process) so runs can be inspected after
-// the fact. The directory contains:
+// (one directory per process) so runs can be inspected after the fact. The directory contains:
 //   - summary.log        (CALL / RESULT / WARNING lines — greppable)
 //   - one-shot/<label>[-N].md  (full system prompt + messages + response for
 //                          each tool-less runOneShot call; a role called twice
@@ -33,7 +34,12 @@ const { envMaxTokens } = require("./env");
 //                          reasoning, tool calls + results)
 // The log line prefix ("[call-ai]") is kept from the previous implementation
 // so old and new run logs stay greppable side by side.
-const logsDir = path.join(projectRoot, ".logs");
+//
+// The transcripts live next to the series they describe (configs/run-state.js), and they are
+// resolved LAZILY — at the first log write, not at require time. This module is required by
+// the harness, which is required by nearly everything, long before a task has decided which
+// series it is working on; a folder frozen here at load time would be the repo fallback on
+// every run. → AGENTS.md gotcha 79.
 
 let logStream = null;
 
@@ -49,8 +55,14 @@ let runDir = null;
  */
 function getLogStream() {
   if (!logStream) {
+    const home = logsDir();
+    // The transcripts are the one part of the run's folder that is never a record: the ignore
+    // rule is written by the run itself, so it travels with the folder into whatever
+    // repository the series lives in (configs/run-state.js).
+    const ignored = ensureRunStateGitignore();
+    if (ignored.error) console.error(`[harness] could not write ${ignored.file}: ${ignored.error}`);
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    runDir = path.join(logsDir, stamp);
+    runDir = path.join(home, stamp);
     fs.mkdirSync(runDir, { recursive: true });
     logFilePath = path.join(runDir, "summary.log");
     logStream = fs.createWriteStream(logFilePath, { flags: "a" });

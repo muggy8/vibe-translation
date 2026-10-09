@@ -50,6 +50,7 @@
  * Plain `assert`, no framework, CommonJS — like the rest of the project.
  */
 
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");

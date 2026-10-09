@@ -161,8 +161,10 @@ the sandbox refuses the attempt rather than ignoring it — an attempt is record
   \`glob\` as a filename ENDING (\`".md"\`, not \`"*.md"\` — a wildcard matches nothing).
 - \`readFile\` takes a file. A cumulative artifact may be long: read the part you need, or grep for
   the span, instead of paging through a whole document.
-- You may read anywhere in the project: the code, the prompts, the run transcripts under \`.logs/\`,
-  every artifact, and the reports in \`.postmortem/\`.
+- You may read anywhere in the project: the code, the prompts, the run transcripts, every artifact,
+  and the run's records (its step reports, the ledger, the tickets, the patch records). The brief
+  names the exact folder for each — the records and the transcripts sit next to the series they
+  describe, not inside this project's folder.
 
 ## How you answer
 

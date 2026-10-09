@@ -187,7 +187,7 @@ async function polishChapterAttempts({ volume, seg, ctx, draft, sourceText, find
     if (!text) {
       throw new Error(
         `Volume ${volume.installmentNumber} ${seg.id}: the model returned no content for the polish pass. ` +
-          `Check .logs/ and re-run.`
+          `Check the run's log folder and re-run.`
       );
     }
 

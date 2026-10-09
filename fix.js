@@ -446,7 +446,7 @@ async function main() {
     process.exitCode = await runDevTurn(args.ticketId, { seriesDir, json: args.json });
   } catch (err) {
     console.error(`✗ the dev turn failed: ${err && err.message ? err.message : err}`);
-    console.error(`  The turn's tool calls and any files it wrote are in .logs/ and in the working tree.`);
+    console.error(`  The turn's tool calls and any files it wrote are in the run's log folder and in the working tree.`);
     process.exitCode = 1;
   }
 }

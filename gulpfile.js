@@ -98,8 +98,9 @@ const { installShutdownWatch } = require("./utils/shutdown");
  * from error text. Guessing from text is the pattern gotcha 55 exists to prevent.
  *
  * So the wrapper writes the marker before rethrowing, and index.js reads it. The
- * marker is machine state under `.postmortem/` (gitignored, like `.logs/`), and
- * index.js deletes it before each step so a step can only report its own outcome.
+ * marker is one of the run's own records, under its records folder next to the series
+ * (`<SERIES_LOCATION>/.run/postmortem/` — configs/run-state.js), and index.js deletes it
+ * before each step so a step can only report its own outcome.
  *
  * @param {string} name - The step name.
  * @param {Function} taskFn - The original (async) gulp task function.
@@ -171,7 +172,8 @@ function withRunLock(name, taskFn) {
         `refusing to run ${name}: ${lock.note || "a pipeline run is already in progress"}. ` +
           `Two processes writing the same volume folder is how an artifact ends half-built by ` +
           `one and half by the other. If that run is not actually running, remove ` +
-          `${runLockPath()}. To run two series at once, give each its own POSTMORTEM_DIR.`
+          `${runLockPath()}. Two DIFFERENT series no longer collide — the lock lives in each ` +
+          `series' own records folder — so this refusal means two runs of the SAME series.`
       );
     }
     if (!lock.acquired) console.error(`[gulp] warning: ${lock.note}`);
@@ -323,7 +325,7 @@ async function runPipeline() {
       .join("; ");
     throw new Error(
       `Pipeline finished with ${failures.length} failed step(s): ${summary}. ` +
-        `See .logs/ for details; re-run the pipeline (idempotent) to pick up ` +
+        `See the run's log folder for details; re-run the pipeline (idempotent) to pick up ` +
         `the failed steps.`
     );
   }

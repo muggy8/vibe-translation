@@ -40,6 +40,7 @@
  * `node test/test-delivery-audit.js`.
  */
 
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs");
 const fsp = require("fs").promises;
@@ -826,25 +827,45 @@ async function scenarioExtraFindingsAreRecorded() {
  * `utils/delivery-audit.js` lives in `utils/`, so its own `__dirname` is the folder, not the repo.
  * A report that names its findings `../.postmortem/tickets.json` is not wrong in a way anything
  * breaks — it is wrong in a way a reader follows to the wrong folder. Checked as a pure function,
- * because checking it by running the audit would mean writing into the repository's own machine state.
+ * because checking it by running the audit would mean writing into a run's records.
+ *
+ * The records now live next to the series, which is usually OUTSIDE this repository, so the
+ * guarantee being pinned is not "relative to the repo" — it is "shown as the path it actually is".
+ * Inside the repo: relative, so a reader can open it. Outside: absolute, because a relative path
+ * that walks out of the repo is the one a reader follows to a folder that does not exist.
  */
-function scenarioReportPathsResolveToTheRoot() {
-  const saved = process.env.POSTMORTEM_DIR;
-  delete process.env.POSTMORTEM_DIR;
+function scenarioReportPathsAreHonest() {
+  const saved = { POSTMORTEM_DIR: process.env.POSTMORTEM_DIR, RUN_DIR: process.env.RUN_DIR, SERIES_LOCATION: process.env.SERIES_LOCATION };
+  const RECORDS = ["tickets.json", "patches.json", "ledger.json", "run.lock", "delivery-plan.json"];
   try {
-    const dir = postMortemDir();
-    assert.strictEqual(dir, path.join(ROOT, ".postmortem"), `postMortemDir() resolves to ${dir}`);
-    for (const name of ["tickets.json", "patches.json", "ledger.json", "run.lock", "delivery-plan.json"]) {
-      const shown = displayPath(path.join(dir, name));
-      assert.strictEqual(shown, path.join(".postmortem", name), `the report would print ${name} as ${shown}`);
+    // Inside the repository: relative, and never a path that climbs out of it.
+    process.env.RUN_DIR = path.join(ROOT, ".run");
+    delete process.env.POSTMORTEM_DIR;
+    const inside = postMortemDir();
+    assert.strictEqual(inside, path.join(ROOT, ".run", "postmortem"), `postMortemDir() resolves to ${inside}`);
+    for (const name of RECORDS) {
+      const shown = displayPath(path.join(inside, name));
+      assert.strictEqual(shown, path.join(".run", "postmortem", name), `the report would print ${name} as ${shown}`);
       assert.ok(!shown.startsWith(".."), `${name} resolves outside the repository: ${shown}`);
     }
+
+    // Next to a series that is not in this repository: the absolute path, which is the only
+    // thing a reader can actually follow.
+    process.env.RUN_DIR = "/elsewhere/my-series/.run";
+    const outside = postMortemDir();
+    for (const name of RECORDS) {
+      const shown = displayPath(path.join(outside, name));
+      assert.strictEqual(shown, path.join("/elsewhere/my-series/.run/postmortem", name), `a record outside the repo was shown as ${shown}`);
+    }
+
     // A record the operator moved out of the repo is shown as the absolute path it actually is,
     // rather than as a relative path that points nowhere.
     assert.strictEqual(displayPath("/elsewhere/.postmortem/tickets.json"), "/elsewhere/.postmortem/tickets.json");
   } finally {
-    if (saved === undefined) delete process.env.POSTMORTEM_DIR;
-    else process.env.POSTMORTEM_DIR = saved;
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   }
 }
 
@@ -896,8 +917,8 @@ async function scenarioEntryPointsAreWired() {
     await scenarioExtraFindingsAreRecorded();
     console.log("delivery audit: a fact the command knows and no file check can see still reaches the ledger");
 
-    await scenarioReportPathsResolveToTheRoot();
-    console.log("delivery audit: the report's paths resolve to the repo's own .postmortem (gotcha 80)");
+    await scenarioReportPathsAreHonest();
+    console.log("delivery audit: the report's paths name the records as the paths they actually are (gotcha 80)");
 
     await scenarioEntryPointsAreWired();
     console.log("delivery audit: all four commands run it");

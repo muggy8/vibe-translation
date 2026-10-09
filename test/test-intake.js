@@ -18,6 +18,7 @@
  * Run: node test/test-intake.js
  */
 
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");

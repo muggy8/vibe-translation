@@ -21,6 +21,7 @@
  * No network, no real endpoint. Run with `npm test` (or standalone:
  * `node test/test-translation-loop.js`).
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs").promises;
 const fsSync = require("fs");

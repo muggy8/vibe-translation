@@ -48,8 +48,8 @@ catches most of them, for free.
 `LOW`, each with a stable `kind`), and `index.js` decides what to do with it.
 `POSTMORTEM_FAIL_ON` (default `high`) sets which levels fail the run; `never` reports
 everything and exits 0 — use it while the check is new and you are learning which
-findings are real. Reports go to `.postmortem/<step>.md` (for a human) and
-`.postmortem/<step>.json` (for whatever reads them next).
+findings are real. Reports go to `<SERIES_LOCATION>/.run/postmortem/<step>.md` (for a human)
+and `<step>.json` beside it (for whatever reads them next). → `docs/environment.md`, gotcha 94.
 
 **One finding reads the QA loop's own channel rather than its output.** Each volume's
 rolling-state file now carries a tally: how many grades the loop asked for, and how many
@@ -71,7 +71,8 @@ retry loop. Assessment is deterministic, free, and safe on every step of every r
 deciding to rewrite code is none of those, and the two stay separate.
 
 **The run ledger (`utils/ledger.js`) — the memory the delivery stage needs.** Every
-assessed step appends one entry to `.postmortem/ledger.json`: what the step left behind
+assessed step appends one entry to `.run/postmortem/ledger.json` (in the series folder): what
+the step left behind
 (counts + the distinct finding kinds), and later what was decided about it and what
 happened after. This exists because the pipeline remembers *artifacts* and has never
 remembered a *decision*, and a runner with the authority to re-run steps fails in a
@@ -145,7 +146,8 @@ The record of such a turn is its **shape**, not a limit: `turnShapeOf(result)` (
 
 **The diagnostics team (`utils/diagnostics.js`, `diagnose.js`) — the role that CAN see the code.** A ticket is
 only useful if somebody on the other end can open the files. That role is deliberately the mirror image of the
-manager's: it reads the code, the prompts and the `.logs/` transcripts — the three things the manager may never
+manager's: it reads the code, the prompts and the run's transcripts (`.run/logs/`, in the series
+folder) — the three things the manager may never
 see — and it may not write anywhere at all. `readOnlyFsTools` hands it only `readFile` / `listFiles` / `grep`, and
 the composed approve gate denies every mutating call and records each refusal, so the guarantee has two layers
 and a write attempt is reported whichever one stopped it (gotcha 74). It answers in a fixed shape — cause, options
@@ -393,7 +395,7 @@ from cheerfully starting the next step after the current one was killed. See got
 **The structural-failure marker.** `isStructuralError` is an in-process flag
 (`err.structural === true`), and a child process cannot hand its error object back.
 `withStructuralMarker` in `gulpfile.js` writes
-`.postmortem/last-structural-failure.json` before rethrowing, and `index.js` reads it
+`.run/postmortem/last-structural-failure.json` (in the series folder) before rethrowing, and `index.js` reads it
 (deleting it before each step, so a step can only report its own outcome). Without
 it, the "a structural failure is never continued past" rule would have to be guessed
 from an exit code or from error text — and guessing from text is the pattern gotcha
@@ -574,7 +576,8 @@ free of any knowledge of what a ticket is.
 
 **The findings the run itself produces, and no record shows.** `auditDeliveryRun({ extraFindings })` is the door a caller contributes findings through, and it exists for one fact that is otherwise invisible: a manager decision the layer refused. The loop prints it, the plan stops, and nothing on disk says why — the ticket is unchanged, no patch was opened, no intervention was recorded, so the next run's triage reads a run that simply did not finish. `autopilot/cli.js`'s `refusalFindings()` writes it: `manager-refused` HIGH when the loop stopped because the manager's own answer was refused (a guard it may not rephrase its way around), `manager-corrected` LOW when the naming slip was repaired and re-asked, and `loop-crashed` when the loop threw. It is written by the CLI and not inside `runLoop` on purpose: `test/test-autopilot.js` pins the loop's watch-mode promise that it writes nothing, and a guarantee a test drives directly is the one worth keeping. The ledger entry stays `kind: "assessment"`, which is what stops a refusal from spending an intervention or laundering a spin (gotcha 85).
 
-**The first thing it found** was in this repository's own `.postmortem/`: a `run.lock` left behind by a
+**The first thing it found** was in a `.postmortem/` folder (this repository's own, before the
+run's records moved next to the series): a `run.lock` left behind by a
 `delivery.js act` run whose process was gone. Nothing had noticed, and every later act-mode command
 would have refused to start against it. See `test/test-delivery-audit.js`, which seeds a healthy run,
 asserts the audit reports nothing, and then plants one defect per finding class.

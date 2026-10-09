@@ -16,6 +16,7 @@
  * that does not.
  */
 
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 require("dotenv").config();
 const assert = require("assert");
 const fs = require("fs");

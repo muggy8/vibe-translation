@@ -16,6 +16,7 @@ const path = require("path");
 
 const { postMortemDir } = require("../postmortem");
 const { readBoolEnv } = require("../../configs/shared");
+const { ensureRunStateGitignore } = require("../../configs/run-state");
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ function ledgerEnabled() {
 
 /**
  * Where the ledger lives: beside the post-mortem reports, because it is the same kind
- * of thing — machine state describing what a run did, gitignored like `.logs/`.
+ * of thing — a record of what a run did, kept with the series it describes.
  * @returns {string} Absolute path.
  */
 function ledgerPath() {
@@ -206,6 +207,7 @@ function appendLedgerEntry(input, filePath = ledgerPath()) {
 
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    ensureRunStateGitignore();
     fs.writeFileSync(
       filePath,
       JSON.stringify(

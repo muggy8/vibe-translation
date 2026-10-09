@@ -50,6 +50,7 @@
  * stage can rebuild one — that is `test/test-pipeline-loop.js`'s job.
  */
 
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");

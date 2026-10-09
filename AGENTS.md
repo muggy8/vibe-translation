@@ -21,6 +21,14 @@ diagnostics role, a code-changing dev team, a delivery manager and a loop that d
 (`index.js`, `delivery.js`, `diagnose.js`, `fix.js`, `autopilot.js`). See
 `docs/delivery-layer.md`.
 
+**Everything the pipeline writes — the deliverable and the run's own memory — lands in the
+series folder**, not in this repo. The artifacts sit in the volume folders; the run's records
+(its step reports, the ledger, the tickets, the patch records, the transcripts, the run lock)
+sit in `<SERIES_LOCATION>/.run/`, which writes its own ignore rule so the records can be
+committed with the books while the transcripts and the lock stay out. Change `SERIES_LOCATION`
+and the next run gets its own memory instead of inheriting another series'. →
+`configs/run-state.js`, `docs/environment.md`, gotcha 94.
+
 ### Quickstart
 
 The books go in **`epub_source/`** (that folder *is* the default `SERIES_LOCATION` — unset
@@ -66,7 +74,7 @@ Each map doc ends with a table of the **implementation folders** its module was 
 
 Code comments cite `AGENTS.md gotcha N`. The numbers are unchanged from when the gotchas were
 one file: the list now lives in the five `docs/gotchas-*.md` slices (1–20, 21–45, 46–63,
-64–69, 70–93), and each slice says which part of the list it holds.
+64–69, 70–94), and each slice says which part of the list it holds.
 
 ## 3. The implementation folders
 
@@ -88,8 +96,12 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
   the ban covers;
 - `__dirname` in a subfolder is the subfolder: a root-level task module needs a
   `projectRoot` alias passed down, a `utils/` module needs a `utilsDir` alias — and a
-  **machine-state path built from it** (`.postmortem`, `.token-calibration.json`) moves folder
-  with the file, so re-derive it and pin the *default* in a test. → gotcha 80
+  **machine-state path built from it** moves folder with the file, so re-derive it and pin the
+  *default* in a test. → gotcha 80. Today the only machine-state path still built from a
+  module's own location is `TOKEN_CALIBRATION_FILE` (deliberately repo-local — it measures this
+  machine's endpoint); the run's records are resolved by `configs/run-state.js` from
+  `SERIES_LOCATION` at **call** time instead, which is what gotcha 79's require-time trap would
+  otherwise repeat. → gotcha 94
 
 | Barrel | Folder |
 |---|---|

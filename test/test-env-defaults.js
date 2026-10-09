@@ -20,6 +20,7 @@
  * No network, no endpoint, no model call. Run with `npm test` (or standalone:
  * `node test/test-env-defaults.js`).
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const path = require("path");
 const fs = require("fs");

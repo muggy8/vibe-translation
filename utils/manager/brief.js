@@ -171,7 +171,7 @@ function renderPatchForManager(patch) {
  *
  * Bounded by construction: every section here is a record this layer already wrote for a human
  * reader. Nothing is read from the disk, and nothing that matches `customerMayRead`'s refusals
- * (.logs/, a .js, a prompt, hooks/, utils/) appears in it — the one exception is a patch's declared
+ * (the run's transcripts, a .js, a prompt, hooks/, utils/) appears in it — the one exception is a patch's declared
  * file list, which is the change the manager is being asked to judge and is the only place a file
  * name reaches this role at all.
  *

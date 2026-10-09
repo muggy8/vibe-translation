@@ -8,6 +8,7 @@ const fs = require("fs");
 const path = require("path");
 const { postMortemDir } = require("../postmortem");
 const { readTickets, ticketPaths } = require("../tickets");
+const { ensureRunStateGitignore } = require("../../configs/run-state");
 
 const { renderPatchesMarkdown } = require("./render");
 const { UNJUDGED_STATUSES } = require("./rules");
@@ -61,6 +62,7 @@ function readPatches(filePath = patchPaths().json) {
 function writePatches(patches, paths = patchPaths()) {
   try {
     fs.mkdirSync(path.dirname(paths.json), { recursive: true });
+    ensureRunStateGitignore();
     fs.writeFileSync(paths.json, JSON.stringify({ patches, writtenAt: new Date().toISOString() }, null, 2) + "\n", "utf8");
     fs.writeFileSync(paths.markdown, renderPatchesMarkdown(patches), "utf8");
     return { written: true, error: null };

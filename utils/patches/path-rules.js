@@ -53,7 +53,7 @@ function patchPathIsBanned(filePath, root = ROOT) {
  * Which folders and root files are the project's own source, as opposed to what the pipeline produced.
  *
  * Written as a whitelist rather than a blacklist on purpose: `ai-client/` also holds generated output
- * (`test-series/`, `.postmortem/`, `.logs/`), and a patch channel whose default is "allowed unless
+ * (`test-series/`, a series' `.run/` records folder), and a patch channel whose default is "allowed unless
  * listed" would default to editing the run's own evidence.
  *
  * @param {string} rel - A normalized, project-relative path.

@@ -15,6 +15,7 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
 const { sha256OfFile } = require("../utils/source");
+const { isRunStateFolderName } = require("../configs/run-state");
 
 const { isVolumeArtifact } = require("./config");
 
@@ -34,7 +35,10 @@ async function readCommittedLayout(seriesDir) {
   const out = [];
   const entries = await fs.readdir(seriesDir, { withFileTypes: true });
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name === "images") continue;
+    // `images` is extracted art and the run's own folder is the run's records: a snapshot that
+    // counted either as a volume folder would tell the intake agent to "reuse the name" of the
+    // pipeline's own notebook, and would hash its tickets as if they were a staged book.
+    if (!entry.isDirectory() || entry.name === "images" || isRunStateFolderName(entry.name)) continue;
     const dir = path.join(seriesDir, entry.name);
     let names;
     try {

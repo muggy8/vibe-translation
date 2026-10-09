@@ -33,6 +33,7 @@
  *  10. a ticket closes on this comparison, and `finding-gone` is still refused.
  */
 
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");

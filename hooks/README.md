@@ -105,7 +105,7 @@ never enter the repo.
 - **`--dry-run` runs no hooks** (dry-run is side-effect-free).
 
 Hook stdout/stderr and start/finish lines are written to the run log
-(`.logs/<timestamp>/summary.log`) and stderr in real time.
+(the run's log folder, `<run>/summary.log`) and stderr in real time.
 
 ## Example 1 — git-manage the series, one branch per step (per-step model)
 

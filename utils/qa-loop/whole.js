@@ -178,7 +178,7 @@ async function feedbackAppliedNothing(cfg, iteration, scores, tally) {
     `${cfg.volumeLabel}: the feedback pass changed NOTHING — ${watched.length} ` +
       `artifact(s) are byte-identical to what they were before it. Stopping the QA loop here ` +
       `rather than paying for another validator turn and another grade over an unchanged ` +
-      `document. Check the agent's turn log in .logs/ for a turn that only read (the usual ` +
+      `document. Check the agent's turn log in the run's log folder for a turn that only read (the usual ` +
       `shape: step cap reached before it wrote anything).`
   );
   await saveRollingState(cfg.stateFile, scores, {

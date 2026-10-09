@@ -11,7 +11,7 @@
 
 /**
  * @typedef {Object} RunArgs
- * @property {boolean} dryRun - `--dry-run`: no model calls, prompts dumped to `.dry-run/`.
+ * @property {boolean} dryRun - `--dry-run`: no model calls, prompts dumped to the run's `dry-run/` folder.
  * @property {boolean} force - `--force`: regenerate even when the outputs already pass.
  * @property {boolean} chunked - `--chunked`: force the chapter-by-chapter path.
  * @property {string|null} volumeArg - The `--volume NN` value, or null for a whole-series run.

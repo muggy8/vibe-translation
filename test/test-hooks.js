@@ -3,6 +3,7 @@
  * utils/hooks.js. Run with `npm test`. No AI, no network; the executable-hook
  * tests use trivial shell scripts in a temporary directory.
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");

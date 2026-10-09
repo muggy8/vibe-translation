@@ -478,7 +478,7 @@ async function translateChapterParts(ctx, run, seg, parts, { terms, roleWindow, 
     if (!clean) {
       throw new Error(
         `Volume ${volume.installmentNumber} ${seg.id}: the model returned no content for part ${i + 1}. ` +
-          `Check the run log: .logs/`
+          `Check the run's log folder`
       );
     }
     // Continuity dedup: when the model repeats the previous part's ending (the continuity tail it was

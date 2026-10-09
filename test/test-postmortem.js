@@ -31,21 +31,29 @@
  *   7. index.js reads the step list from gulpfile and runs each step as its own
  *      process — checked without calling a model.
  *   8. The folder a run remembers itself in: the post-mortem reports, the ledger, the tickets
- *      and the run lock all resolve to the repo's own `.postmortem`, and the token-calibration
- *      cache to the repo's own file — not into the folder a split module lives in. Every other
- *      suite passes those paths explicitly, so only this one can catch the default moving.
+ *      and the run lock all resolve to `<SERIES_LOCATION>/.run/postmortem`, the transcripts and
+ *      the prompt dumps to the same container, and the token-calibration cache to the repo's own
+ *      file — the memory follows the series, the measurement of this machine's endpoint does not.
+ *      Not into the folder a split module lives in. Every other suite passes those paths
+ *      explicitly, so only this one can catch the default moving.
+ *   9. The run's folder writes its own ignore rule next to the records, so the split between
+ *      "commit this so another machine can continue the run" and "this is one machine's
+ *      transcripts" travels with the folder — and the folder is not mistaken for a volume.
  *
  * No network, no endpoint, no model call. Run with `npm test` (or standalone:
  * `node test/test-postmortem.js`).
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs").promises;
+const nodeFs = require("fs");
 const { spawnSync } = require("child_process");
 const path = require("path");
 const os = require("os");
 
 const { TASKS } = require("../utils/hooks");
 const { declaredSteps, isKnownVolumeFile, DELIVERY_COMMANDS } = require("../utils/artifacts");
+const runState = require("../configs/run-state");
 const {
   runPostMortem,
   renderPostMortemMarkdown,
@@ -635,36 +643,65 @@ async function scenarioRendering() {
   assert.ok(md.includes("glossary.md"), "a finding must name the file");
 }
 
-// ─── 11. The run's machine state has one home ─────────────────────────────────
+// ─── 11. The run's records have one home, and it is the series' home ──────────
 
 /**
- * The post-mortem folder is where a run remembers itself: the step reports, the anti-spin
- * ledger, the tickets, the run lock. All four paths come out of postMortemDir(), so a wrong
- * default moves the whole memory of a run into a different folder — and every suite that
- * passes POSTMORTEM_DIR explicitly is unable to notice.
+ * A run remembers itself in one place: the step reports, the anti-spin ledger, the tickets, the
+ * patch records and the run lock all come out of postMortemDir(), and the transcripts and the
+ * prompt dumps come out of the same resolver. A wrong default moves the whole memory of a run
+ * into a different folder — and every suite that passes POSTMORTEM_DIR explicitly is unable to
+ * notice.
  *
- * That happened for real. utils/postmortem.js split into utils/postmortem/, the one function
- * that built the path kept its `path.resolve(__dirname, "..")`, and ".." from inside the
- * folder is utils/ — so tickets written at the repo root became invisible to
- * `node diagnose.js --open`, which reported "nothing is waiting" about a ticket that was
- * sitting there open. The default is pinned here so the next split cannot repeat it.
+ * That happened for real, twice over. utils/postmortem.js split into utils/postmortem/, the one
+ * function that built the path kept its `path.resolve(__dirname, "..")`, and ".." from inside the
+ * folder is utils/ — so tickets written at the repo root became invisible to `node diagnose.js
+ * --open`, which reported "nothing is waiting" about a ticket that was sitting there open. The
+ * default is pinned here so the next split cannot repeat it.
+ *
+ * And the default itself moved: the records now sit next to the series they describe
+ * (`<SERIES_LOCATION>/.run/`), because memory about a series must change when the series does,
+ * and because the tickets and the ledger are the half you commit so another machine can continue
+ * the run. Both halves are pinned: the series-derived default, the repo fallback when no series
+ * was chosen, and the fact that the token calibration deliberately did NOT move — it measures
+ * this machine's model server, and a machine that has never met the endpoint must not inherit a
+ * measurement taken against someone else's.
  */
 function scenarioMachineStateHome() {
   const root = path.resolve(__dirname, "..");
-  const saved = process.env.POSTMORTEM_DIR;
-  delete process.env.POSTMORTEM_DIR;
+  const saved = {
+    POSTMORTEM_DIR: process.env.POSTMORTEM_DIR,
+    RUN_DIR: process.env.RUN_DIR,
+    SERIES_LOCATION: process.env.SERIES_LOCATION,
+  };
+  const seriesDir = nodeFs.mkdtempSync(path.join(os.tmpdir(), "ai-client-run-state-"));
   try {
+    delete process.env.POSTMORTEM_DIR;
+    delete process.env.RUN_DIR;
+    process.env.SERIES_LOCATION = seriesDir;
+
+    const home = runState.runHomeDir();
+    assert.strictEqual(
+      home,
+      path.join(seriesDir, runState.RUN_DIR_NAME),
+      `the run's records resolve to ${home}, not a folder inside the series they are about`
+    );
+
     const dir = postMortemDir();
     assert.strictEqual(
       dir,
-      path.join(root, ".postmortem"),
-      `postMortemDir() resolves to ${dir}, not the repo's own .postmortem`
+      path.join(home, "postmortem"),
+      `postMortemDir() resolves to ${dir}, not the records folder beside the series`
     );
-    // The exact shape of the bug: a split module's __dirname is the folder, so a
+    // The exact shape of the original bug: a split module's __dirname is the folder, so a
     // machine-state path that lands inside utils/ means the alias is one level short.
     assert.ok(
       !dir.startsWith(path.join(root, "utils") + path.sep),
       `machine state moved inside utils/ — a split module resolved the repo root from its own folder: ${dir}`
+    );
+    assert.ok(
+      !dir.startsWith(path.join(root) + path.sep),
+      `the records of a run are inside the CODE's folder, not the series' (${dir}) — the memory of one ` +
+        `series would be read by a run of another`
     );
 
     const { ticketPaths } = require("../utils/tickets");
@@ -682,7 +719,12 @@ function scenarioMachineStateHome() {
       );
     }
 
-    // The token calibration is machine state too, and it moved for the same reason.
+    // The transcripts and the rehearsal dumps are the same move, and they are the two folders
+    // the run's own ignore rule keeps out of git.
+    assert.strictEqual(runState.logsDir(), path.join(home, "logs"), "the transcripts follow the series");
+    assert.strictEqual(runState.dryRunDir(), path.join(home, "dry-run"), "the prompt dumps follow the series");
+
+    // The token calibration is machine state too — and it deliberately stayed with the machine.
     const { calibrationFile } = require("../utils/tokens");
     const savedCalibration = process.env.TOKEN_CALIBRATION_FILE;
     delete process.env.TOKEN_CALIBRATION_FILE;
@@ -690,23 +732,108 @@ function scenarioMachineStateHome() {
       assert.strictEqual(
         calibrationFile(),
         path.join(root, ".token-calibration.json"),
-        `calibrationFile() resolves to ${calibrationFile()}, not the repo's own cache file`
+        `calibrationFile() resolves to ${calibrationFile()}: it measures this machine's endpoint, so it ` +
+          `must not travel with the series to a machine that has never met that endpoint`
       );
     } finally {
       if (savedCalibration === undefined) delete process.env.TOKEN_CALIBRATION_FILE;
       else process.env.TOKEN_CALIBRATION_FILE = savedCalibration;
     }
 
-    // An explicit POSTMORTEM_DIR still wins: two series at once each need their own history.
+    // An explicit folder still wins, in both orders: POSTMORTEM_DIR over RUN_DIR, RUN_DIR over
+    // the series. Two series at once and a disk you would rather keep the transcripts on are
+    // both real setups.
     process.env.POSTMORTEM_DIR = path.join(root, ".postmortem-other");
+    assert.strictEqual(postMortemDir(), path.join(root, ".postmortem-other"), "POSTMORTEM_DIR must override the default");
+    delete process.env.POSTMORTEM_DIR;
+    process.env.RUN_DIR = path.join(seriesDir, "elsewhere");
+    assert.strictEqual(postMortemDir(), path.join(seriesDir, "elsewhere", "postmortem"), "RUN_DIR must override the series default");
+
+    // No series chosen at all: the repo folder, as a last resort rather than a home.
+    delete process.env.RUN_DIR;
+    delete process.env.SERIES_LOCATION;
     assert.strictEqual(
       postMortemDir(),
-      path.join(root, ".postmortem-other"),
-      "POSTMORTEM_DIR must override the default"
+      path.join(root, runState.RUN_DIR_NAME, "postmortem"),
+      "with no series chosen, the records fall back to the repo's own run folder"
     );
   } finally {
-    if (saved === undefined) delete process.env.POSTMORTEM_DIR;
-    else process.env.POSTMORTEM_DIR = saved;
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    nodeFs.rmSync(seriesDir, { recursive: true, force: true });
+  }
+}
+
+// ─── 12. The run's folder says what of it is a record ─────────────────────────
+
+/**
+ * The records live in whatever repository the series happens to be in, so the rule about which
+ * of them is committable is written by the run itself, next to them — a machine that pulls the
+ * series gets the rule with it, and no repository's own ignore file has to know this tool exists.
+ *
+ * The split is the thing being pinned: the tickets, the ledger and the patch records are what
+ * another machine needs to continue the run, and the transcripts are gigabytes of model chatter
+ * specific to the machine that made them. A lock file is in the never-commit half for a subtler
+ * reason: it names a process, and checked in it claims a run is in progress on a machine that
+ * has no such process.
+ */
+async function scenarioRunFolderDeclaresItself() {
+  const seriesDir = nodeFs.mkdtempSync(path.join(os.tmpdir(), "ai-client-run-ignore-"));
+  const saved = { RUN_DIR: process.env.RUN_DIR, SERIES_LOCATION: process.env.SERIES_LOCATION };
+  try {
+    process.env.SERIES_LOCATION = seriesDir;
+    delete process.env.RUN_DIR;
+    const home = runState.runHomeDir();
+
+    const first = runState.ensureRunStateGitignore();
+    assert.ok(first.written, `the run's folder did not write its own ignore rule: ${first.error}`);
+    const text = nodeFs.readFileSync(first.file, "utf8");
+    for (const never of ["logs/", "dry-run/", "postmortem/run.lock"]) {
+      assert.ok(
+        text.split("\n").some((line) => line.trim() === never),
+        `${never} must be excluded from the run's records, and the rule does not list it`
+      );
+    }
+    // The records themselves are the point of the folder: nothing may exclude them.
+    for (const record of ["tickets.json", "ledger.json", "patches.json", "delivery-plan.json"]) {
+      assert.ok(
+        !text.split("\n").some((line) => line.trim() === record || line.trim() === "postmortem/" || line.trim() === "postmortem/*"),
+        `the run's records must be committable, and ${record} is excluded`
+      );
+    }
+
+    // Written once: an operator who edited the rule is deciding about their own repository.
+    nodeFs.writeFileSync(first.file, "# mine\nlogs/\n", "utf8");
+    const second = runState.ensureRunStateGitignore();
+    assert.strictEqual(second.written, false, "the run rewrote an ignore rule the operator edited");
+    assert.strictEqual(nodeFs.readFileSync(first.file, "utf8"), "# mine\nlogs/\n", "the operator's rule was overwritten");
+
+    // And the folder is not a volume: the series scan treats every directory as a candidate, and
+    // `.run/postmortem/tickets.md` is exactly the shape of a staged book to that scan.
+    const volDir = path.join(seriesDir, "Series(01)");
+    await fs.mkdir(volDir, { recursive: true });
+    await fs.writeFile(path.join(volDir, "Series(01).md"), "# a book\n\nText.", "utf8");
+    await fs.mkdir(path.join(home, "postmortem"), { recursive: true });
+    await fs.writeFile(path.join(home, "postmortem", "tickets.md"), "# Tickets\n\n- TCK-1\n", "utf8");
+    const { buildDeterministicManifest } = require("../intake/deterministic");
+    const manifest = await buildDeterministicManifest(seriesDir, {
+      sourceLanguage: "Japanese",
+      targetLanguage: "English",
+      seriesName: "Series",
+    });
+    assert.deepStrictEqual(
+      manifest.volumes.map((v) => v.folder),
+      ["Series(01)"],
+      `the run's own records were read as a volume: ${manifest.volumes.map((v) => v.folder).join(", ")}`
+    );
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await fs.rm(seriesDir, { recursive: true, force: true });
   }
 }
 
@@ -747,7 +874,10 @@ function scenarioMachineStateHome() {
   console.log("postmortem: report rendering names severity, volume and file");
 
   scenarioMachineStateHome();
-  console.log("postmortem: the run's machine state resolves to the repo's own .postmortem");
+  console.log("postmortem: the run's records resolve to the series' own .run folder, and the calibration stays with the machine");
+
+  await scenarioRunFolderDeclaresItself();
+  console.log("postmortem: the run's folder declares which of it is a record, and is not read as a volume");
 
   console.log("postmortem: all checks passed.");
 })();

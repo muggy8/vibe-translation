@@ -33,6 +33,7 @@
  * No network, no endpoint. Run with `npm test` (or standalone:
  * `node test/test-artifact-integrity.js`).
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");

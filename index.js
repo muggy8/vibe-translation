@@ -28,7 +28,7 @@
  *
  * Scope, honestly stated. This file ORCHESTRATES and ASSESSES. It does not fix
  * anything: there is no diagnosis agent here, no patching, no retry loop. The
- * findings it writes to `.postmortem/<step>.json` are the input a later diagnosis
+ * findings it writes to `<SERIES_LOCATION>/.run/postmortem/<step>.json` are the input a later diagnosis
  * stage consumes. Keeping the two separate is deliberate — assessment is
  * deterministic, free, and safe to run on every step of every run; deciding to
  * rewrite code is neither.
@@ -45,7 +45,7 @@
  *   node index.js --list               # print the step list and exit
  *
  * It also REMEMBERS. Every assessed step appends one entry to
- * `.postmortem/ledger.json` (see `utils/ledger.js`): what the step left behind, and
+ * `.run/postmortem/ledger.json` (see `utils/ledger.js`): what the step left behind, and
  * later what was decided about it. Nothing else in the pipeline records a DECISION —
  * the state files record artifacts — and without that record the delivery stage cannot
  * tell a repair from a repeat of a repair that already failed.

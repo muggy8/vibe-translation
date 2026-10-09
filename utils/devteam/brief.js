@@ -86,8 +86,9 @@ are refused even if you try:
 - \`test/test-tickets.js\`, \`test/test-resume.js\`, \`test/test-delivery-verify.js\`,
   \`test/test-ledger.js\`, \`test/test-delivery-act.js\`, \`test/test-diagnostics.js\`,
   \`test/test-patches.js\` — the tests that prove those rules work.
-- \`hooks/\` (per-machine scripts), \`.env\` and \`.env.example\` (the settings), \`.postmortem/\`,
-  \`.logs/\`, \`.dry-run/\`, \`node_modules/\`.
+- \`hooks/\` (per-machine scripts), \`.env\` and \`.env.example\` (the settings), the run's own records
+  folder — \`.run/\`, \`.postmortem/\`, \`.logs/\`, \`.dry-run/\`, wherever a series keeps them —
+  and \`node_modules/\`.
 - Anything that is generated pipeline output: a volume folder's artifacts, \`test-series/\`, any
   \`.rejected\` file, any \`*-rolling-state.json\`, any \`.provenance.json\`.
 - Anything outside this project.

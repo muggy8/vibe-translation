@@ -281,7 +281,7 @@ async function repairChapter(ctx, run, seg, { vEntry, volumeFindings }, records)
     throw new Error(
       `Volume ${volume.installmentNumber} ${seg.id}: retranslation QA failed: ${qa.errors.join("; ")}. ` +
         `The correction was quarantined to ${rejectedFile} and the previous draft is kept — ` +
-        `check .logs/ and re-run.`
+        `check the run's log folder and re-run.`
     );
   }
 
@@ -388,7 +388,7 @@ async function runWholeChapterPass(ctx, run, seg, parts, { chapterTerms, cue, fi
     if (!cleanPart) {
       throw new Error(
         `Volume ${volume.installmentNumber} ${seg.id}: the model returned no content for ` +
-          `part ${i + 1}. Check .logs/ and re-run.`
+          `part ${i + 1}. Check the run's log folder and re-run.`
       );
     }
     // Continuity dedup (same backstop as the translate stage): when the model repeats the previous

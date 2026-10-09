@@ -1,11 +1,13 @@
 # docker-compose.yml — the pipeline as a one-shot job.
 #
 #   cp .env.example .env                 # point it at your model server (AI_BASE_URL, AI_API_KEY, AI_MODEL)
-#   mkdir -p epub_source .logs .postmortem .dry-run   # once: Docker creates a missing mounted folder as root
+#   mkdir -p epub_source                 # once: Docker creates a missing mounted folder as root
 #   # put your books in epub_source/
 #   docker compose up --build            # the whole pipeline, one step at a time
 #
-# Everything the pipeline writes lands in ./epub_source on your machine.
+# Everything the pipeline writes lands in ./epub_source on your machine — the books, the
+# artifacts, and the run's own records (its reports, the ledger, the tickets, the transcripts)
+# under epub_source/.run/. There is one mount because there is one place the run writes.
 # The long version, including how to reach a model server running on your own computer,
 # is docs/docker.md.
 
@@ -22,18 +24,19 @@ services:
     # `epub_source` (the value .env.example ships with) is this same folder, mounted
     # below, so the default works unchanged. An absolute host path in .env does not work
     # unless you mount it at that same path.
+    #
+    # The run's records follow SERIES_LOCATION (configs/run-state.js), so mounting the
+    # series folder is enough to keep them. If you point POSTMORTEM_DIR / LOGS_DIR /
+    # DRY_RUN_DIR somewhere else, mount THAT folder too — a container only writes where
+    # you have given it a folder.
     env_file: .env
 
     volumes:
-      # Your books, and everything the pipeline builds next to them.
+      # Your books, everything the pipeline builds next to them, and everything the run
+      # remembers about them (epub_source/.run/).
       - ./epub_source:/app/ai-client/epub_source
-      # The run transcripts (what every model call was asked and answered) and the step
-      # runner's machine state (post-mortems, the ledger, tickets). Both are gitignored.
-      - ./.logs:/app/ai-client/.logs
-      - ./.postmortem:/app/ai-client/.postmortem
-      # --dry-run writes the prompts it WOULD have sent here.
-      - ./.dry-run:/app/ai-client/.dry-run
-      # The token-calibration cache: machine state, kept out of the repo.
+      # The token-calibration cache: a measurement of THIS container's model server, so it
+      # stays with the container and not with the series.
       - ai-client-cache:/app/ai-client/.cache
 
     environment:

@@ -79,7 +79,7 @@ async function runVolumeWithModeFallback({
       throw new Error(
         `${label}: the whole-installment pass did not fit (${err.message}) and the chapter-by-chapter ` +
           `fallback also failed (${retryErr.message}). Both attempts are recorded; check ` +
-          `.logs/ for the two attempts.`
+          `the run's log folder for the two attempts.`
       );
     }
   }

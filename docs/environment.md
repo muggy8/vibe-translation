@@ -203,6 +203,42 @@ style-guide / shared-wiki) also gets a `<file>.provenance.json` next to it
 `utils/fs.js`), so it is always visible WHICH volume snapshot a root artifact
 was copied from.
 
+### Where the run keeps its own records (`configs/run-state.js` — `RUN_DIR`, `LOGS_DIR`, `DRY_RUN_DIR`)
+
+Everything the run writes that is *not* the deliverable — its reports, its memory of what it
+already tried, its transcripts — lives in one container **inside the series folder**:
+
+```
+<SERIES_LOCATION>/.run/
+  postmortem/   <step>.md + <step>.json, ledger.json, tickets.json + .md,
+                patches.json + .md, delivery-plan.md + .json,
+                last-structural-failure.json, run.lock
+  logs/         one folder per process: summary.log, one-shot dumps, agent turn logs,
+                the context-offload store
+  dry-run/      the prompts --dry-run would have sent
+  .gitignore    written by the run itself, the first time it creates the folder
+```
+
+| Var | Default | Meaning |
+|---|---|---|
+| `RUN_DIR` | `<SERIES_LOCATION>/.run` | The container. It follows the series on purpose: these are records ABOUT a series, so changing `SERIES_LOCATION` must change which run's memory you are reading — two series sharing one ledger means the anti-spin gate and the resume triage are answering about the wrong run. With no series chosen at all it falls back to `<repo>/.run` |
+| `POSTMORTEM_DIR` | `<RUN_DIR>/postmortem` | The records themselves. Wins over `RUN_DIR` |
+| `LOGS_DIR` | `<RUN_DIR>/logs` | The transcripts. Wins over `RUN_DIR` |
+| `DRY_RUN_DIR` | `<RUN_DIR>/dry-run` | The `--dry-run` prompt dumps. Wins over `RUN_DIR` |
+
+**The run writes the folder's `.gitignore` for you**, and never rewrites one you edited. The
+split it encodes is the point of the whole arrangement: `logs/`, `dry-run/` and `run.lock` are
+kept out of git (transcripts are gigabytes specific to one machine, and a lock names a process
+— checked in, it claims a run is in progress on a machine that has no such process), and
+everything else in `postmortem/` is meant to be **committed**, because that is what lets another
+machine pull the series and continue the run instead of re-deriving what was already tried. The
+rule travels with the folder, so it works in whichever repository the series lives in.
+
+**What deliberately did not move: `TOKEN_CALIBRATION_FILE`.** It measures the tokenizer of the
+model server *this machine* is pointed at (`AI_BASE_URL`), not anything about the books. In the
+series folder it would let a machine that has never met the endpoint trust a measurement taken
+against someone else's server. It stays in the repo. → gotcha 94
+
 ### Step-by-step runner and post-mortem (`index.js` — `POSTMORTEM_*`, `INDEX_*`)
 
 Only used by `npm run pipeline` (`node index.js`). `npx gulp` is unaffected.
@@ -211,7 +247,7 @@ Only used by `npm run pipeline` (`node index.js`). `npx gulp` is unaffected.
 |---|---|---|
 | `POSTMORTEM_ENABLED` | `true` | `false` runs the steps without assessing any of them (orchestration only). `--post-mortem=off` is the same switch on the command line |
 | `POSTMORTEM_FAIL_ON` | `high` | Which finding levels make `index.js` exit non-zero: `high` (the step did not finish what it claims to have), `medium` (also gaps), `never` (report everything, exit 0). **Start at `never`** while the check is new, and read which findings are real before letting any of them fail a run |
-| `POSTMORTEM_DIR` | `<repo>/.postmortem` | Where `<step>.md` / `<step>.json` reports, the ledger, the tickets, the delivery plan, the structural-failure marker and the run lock are written. Gitignored machine state, like `.logs/`. It is also what makes a run lock mean something: the lock is per `POSTMORTEM_DIR`, not per series, so running two series at once needs a separate one each |
+| `POSTMORTEM_DIR` | `<SERIES_LOCATION>/.run/postmortem` | Where `<step>.md` / `<step>.json` reports, the ledger, the tickets, the patch records, the delivery plan, the structural-failure marker and the run lock are written. Override it to put the reports somewhere other than next to the series. → `RUN_DIR`, and gotcha 94 |
 | `INDEX_STEP_TIMEOUT_MS` | `0` (no bound) | Wall-clock ceiling for one step. The default is deliberately unbounded: a 17-volume run legitimately takes days, and a single model call is already bounded by `AI_CALL_DEADLINE_MS` (an IDLE timeout — gotcha 26). A step-level clock would false-positive on a healthy long stage |
 | `RUN_SHUTDOWN_GRACE_MS` | `20000` | How long a step process gets to stop itself before it is forced (`utils/shutdown.js`, gotcha 92). Long enough for a gulp task to finish the file it is mid-way through writing, short enough that a wedged child cannot hold the run lock forever. `0` means "force immediately". A half-written file is re-run from a wiped folder; a run that can never be stopped is not recoverable at all |
 | `RUN_STALL_MINUTES` | `90` | How long a live run-lock holder may make no model call and no tool call before it counts as **stalled** (`utils/runlock.js` decision 4, gotcha 93) — the only kind of run `delivery.js --stop-run` may end. It must stay longer than `AI_CALL_DEADLINE_MS`: a false "stalled" lets the manager end a run that was working and destroys the work it already bought, and a false "still fine" only costs an hour of detection latency |

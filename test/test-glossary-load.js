@@ -3,6 +3,7 @@
  * agent-mode prompt builders, and the agent safety nets in glossary.js and
  * jump-in-wiki.js. Run with `npm test`.
  */
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
 const path = require("path");
 const { execFileSync } = require("child_process");

@@ -10,6 +10,7 @@ const { execFileSync } = require("child_process");
 const { ROOT } = require("./rules");
 const { normalizeProjectPath, patchTouchesBanned } = require("./path-rules");
 const { patchPaths, readPatches, writePatches } = require("./record");
+const { isRunStatePath } = require("../../configs/run-state");
 
 /**
  * The working tree inside `ai-client/`, as git reports it.
@@ -44,7 +45,12 @@ function workingTreeChanges(root = ROOT) {
     .map((line) => line.replace(/\r$/, ""))
     .filter((line) => line.trim())
     .map((line) => ({ status: line.slice(0, 2).trim(), path: normalizeProjectPath(line.slice(3).trim()) }))
-    .filter((f) => f.path);
+    // The run's own records are not a change a patch made. Writing a ticket, appending a ledger
+    // row and recording a patch are what the delivery layer does on the way to a decision, and a
+    // fingerprint that counted them would report the machinery's own bookkeeping as somebody's
+    // undeclared edit — which blocks commitPatch on a tree that is in fact clean. (A patch that
+    // NAMES one of these files is refused earlier, by `edit-machine-state`.)
+    .filter((f) => f.path && !isRunStatePath(f.path, root));
   return { files, error: null, repoRoot: repo.root };
 }
 
