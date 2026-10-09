@@ -51,6 +51,18 @@ everything and exits 0 — use it while the check is new and you are learning wh
 findings are real. Reports go to `.postmortem/<step>.md` (for a human) and
 `.postmortem/<step>.json` (for whatever reads them next).
 
+**One finding reads the QA loop's own channel rather than its output.** Each volume's
+rolling-state file now carries a tally: how many grades the loop asked for, and how many
+came back in a shape nothing could read. `grade-failures` is HIGH when every grade was
+unusable and MEDIUM when some were. The reason it is a finding and not a log line is that
+the alternative evidence for that failure is indistinguishable from success: an
+unparseable grade is refused, the loop keeps iterating, and the run ends having spent
+hours and accepted nothing — with no file that says so. The tally is absolute (it carries
+across runs of the same volume, and is re-seeded from the previous state at the start of a
+volume), it is written on every save so the several saves one iteration makes cannot
+double-count it, and wiping a volume deletes the state file and with it the tally, which
+is the correct reset. See `newGradeTally` / `tallyGrade` in `configs/shared/acceptance.js`.
+
 **What it deliberately does not do.** It does not judge whether an artifact is
 *good* — that is the scored gates' job (`PASSING_SCORE`, the rubrics, the acceptance
 window). Putting a second, weaker grader next to the real one creates two answers to
@@ -403,6 +415,22 @@ out by spawning the account owner's own command in its own process.
   is a tool that is not there. The first call records the decision and a second call in the same turn is
   refused by the tool, because the loop re-reads the run after one move and a second move in the same
   turn is a move no gate has assessed.
+- **The other two delivery answers take the same shape, in its second form.** The manager had a menu to
+  turn into tools; the diagnostics team and the dev team write their answer from scratch, so the answer
+  itself became the tool: `submit_diagnosis(cause, options, recommend?, questions?, read?, ownerNote?)`
+  and `submit_proposal(files, summary, why, couldBreak, expected, verify, questions?, ownerNote?)`. The
+  provider checks the fields before this code ever sees them, so a `verify` the role forgot is a tool
+  error it can answer again inside the same turn rather than a parse failure that ends an uncapped turn;
+  the answer is on the record at the moment it is given, so a turn that dies afterwards still has one;
+  and a second call in the same turn is refused by the tool. The dev team's version matters most, because
+  by the time it answers it has already edited files — an unreadable proposal used to leave a changed
+  working tree with no record of what the team believed it had done. Neither role is *forced* to use the
+  button: `parseDiagnosisReply` and `parseProposalReply` stay, fail-closed, and the record says which
+  half carried the answer (`answeredBy: "tool"` on the ticket's diagnosis, on the patch record). The
+  button writes nothing, so the read-only guarantee and the banned-path table still cover exactly the
+  file tools they were written against. Both prompt files describe the fields without naming a mechanism,
+  because a prompt that says "answer with one fenced JSON object" beside a note that says "call the
+  answer tool" gets the fenced block. See gotcha 87.
 - **A name written wrong gets one correction; a guard gets none.** The text path is kept — a local
   endpoint on this machine sometimes answers in prose instead of calling a tool (gotcha 18) — and there
   the old failures still happen, so the gate repairs the two where the state already holds the name
@@ -488,6 +516,8 @@ reached back for them would close a require cycle and hand them a half-built bar
 appear as `postMortemDir is not a function` at the first path call, far from the cause. So the
 cross-record questions live in a module nothing else requires, and `utils/postmortem/scope.js` is kept
 free of any knowledge of what a ticket is.
+
+**The findings the run itself produces, and no record shows.** `auditDeliveryRun({ extraFindings })` is the door a caller contributes findings through, and it exists for one fact that is otherwise invisible: a manager decision the layer refused. The loop prints it, the plan stops, and nothing on disk says why — the ticket is unchanged, no patch was opened, no intervention was recorded, so the next run's triage reads a run that simply did not finish. `autopilot/cli.js`'s `refusalFindings()` writes it: `manager-refused` HIGH when the loop stopped because the manager's own answer was refused (a guard it may not rephrase its way around), `manager-corrected` LOW when the naming slip was repaired and re-asked, and `loop-crashed` when the loop threw. It is written by the CLI and not inside `runLoop` on purpose: `test/test-autopilot.js` pins the loop's watch-mode promise that it writes nothing, and a guarantee a test drives directly is the one worth keeping. The ledger entry stays `kind: "assessment"`, which is what stops a refusal from spending an intervention or laundering a spin (gotcha 85).
 
 **The first thing it found** was in this repository's own `.postmortem/`: a `run.lock` left behind by a
 `delivery.js act` run whose process was gone. Nothing had noticed, and every later act-mode command

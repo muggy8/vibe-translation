@@ -65,7 +65,7 @@ Each map doc ends with a table of the **implementation folders** its module was 
 
 Code comments cite `AGENTS.md gotcha N`. The numbers are unchanged from when the gotchas were
 one file: the list now lives in the five `docs/gotchas-*.md` slices (1–20, 21–45, 46–63,
-64–69, 70–85), and each slice says which part of the list it holds.
+64–69, 70–87), and each slice says which part of the list it holds.
 
 ## 3. The implementation folders
 

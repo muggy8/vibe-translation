@@ -175,6 +175,7 @@ These knobs exist because the cumulative documents stop fitting in one reply (go
 | `ACCEPTANCE_SCORE_TOLERANCE` | `3` | How far a confirmation grade may fall before the exceptional grade is judged a fluke and the normal loop continues |
 | `ACCEPTANCE_CONFIRMATION_CHECKS` | `2` | How many extra grades the exceptional-consensus path runs |
 | `ACCEPTANCE_CONFIRM_ON_PASSING` | `true` | Let a grade that ALREADY passes earn the window's remaining samples by re-grading the same artifact, instead of buying them with a feedback rewrite plus a full re-audit (see docs/architecture.md "QA loop" and gotcha 65). `false` restores the old route exactly |
+| `ACCEPTANCE_STRUCTURED_OUTPUT` | `true` | Ask the four pre-production acceptance graders for their answer as a **shape** rather than as text to interpret: the request carries `response_format` = `{score: 0–100, band: one of the four rubric bands, note}`, which the endpoint enforces, so a grader that cannot fill it answers with a named refusal instead of a plausible-looking paragraph. `false` sends no shape and the parser does the same fail-closed job it always did. This is a **capability** setting, not a guard: the parser, the band table and the refusal handling are identical either way, which is what makes a knob here acceptable under gotcha 70. It is never applied to a tool-using agent or to the writing roles — see gotcha 87 and `test/prompt-audit.js`'s `grade-answer-shape` rule |
 
 ### Un-monitored run policies (`ON_*`, `DISCOVER_*`)
 
