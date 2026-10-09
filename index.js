@@ -53,7 +53,8 @@
  * The code lives in index/: settings.js (the runner's knobs), args.js (what the operator asked
  * for), run-step.js (one step, in its own process), assess.js (what a step left behind),
  * steps.js (the walk and the summary), main.js (the step list and the run lock). This file is
- * the entry point and the public surface.
+ * the barrel: it re-exports all of them, and it is the package's `main` — the name this project
+ * is known by from the outside. The run itself only starts when the file is LAUNCHED.
  *
  * @module index
  */
@@ -64,11 +65,34 @@
 // gulpfile.js reads the task modules only after this point (AGENTS.md gotcha 79).
 require("./configs/env-defaults").bootstrapEnv();
 
-const { main } = require("./index/main");
+const __args = require("./index/args");
+const __settings = require("./index/settings");
+const __run_step = require("./index/run-step");
+const __assess = require("./index/assess");
+const __steps = require("./index/steps");
+const __main = require("./index/main");
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err) => {
-    console.error(`[index] ${err.message}`);
-    process.exit(1);
-  });
+module.exports = {
+  ...__args,
+  ...__settings,
+  ...__run_step,
+  ...__assess,
+  ...__steps,
+  ...__main,
+};
+
+const { main } = __main;
+
+// The run starts when this file is LAUNCHED, not when it is read. Without the guard,
+// `require("ai-client")` — which is what the package's `main` field makes possible —
+// would take the run lock and start a pipeline against whatever `SERIES_LOCATION` says.
+// `delivery.js` and `autopilot.js` already guard theirs; this was the last entry point
+// that did not.
+if (require.main === module) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      console.error(`[index] ${err.message}`);
+      process.exit(1);
+    });
+}

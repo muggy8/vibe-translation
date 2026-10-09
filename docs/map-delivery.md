@@ -39,7 +39,13 @@ every test that monkey-patches the harness keeps working unchanged — but the l
 the folder, so open the module that owns the behaviour you are changing instead of reading
 the whole layer.
 
-### `index/` — the implementation of `index.js` (73 lines of face)
+### `index/` — the implementation of `index.js` (98 lines of face)
+
+`index.js` is the package's `main` — the name this project is known by from the outside — so it
+re-exports the whole folder AND guards its own launch (`if (require.main === module)`). Without
+that guard, `require("ai-client")` would take the run lock and start a pipeline against whatever
+`SERIES_LOCATION` says. `delivery.js` and `autopilot.js` have always had the guard; `index.js` was
+the last entry point missing it.
 
 | File | Lines | What it owns |
 | --- | --- | --- |

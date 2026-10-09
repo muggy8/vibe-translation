@@ -1,10 +1,10 @@
 {
   "name": "ai-client",
   "version": "2.0.0",
-  "description": "Agentic AI client (OpenHarness) for the glossary, character-voice, style-guide, jump-in-wiki and consistency-audit pre-translation workflows",
-  "main": "harness.js",
+  "description": "Agentic AI client (OpenHarness) that works a light-novel series volume by volume: the pre-production references (glossary, character voice, style guide, wiki, consistency audit), the translation chain (translate → verify → retranslate → polish), and the delivery layer that assesses each step and repairs what it finds",
+  "main": "index.js",
   "scripts": {
-    "start": "node harness.js",
+    "start": "node autopilot.js --mode=act",
     "pipeline": "node index.js",
     "delivery": "node delivery.js",
     "diagnose": "node diagnose.js",

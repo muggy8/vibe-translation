@@ -21,8 +21,14 @@ Or without Docker, if you have Node 22.19+ installed:
 
 ```bash
 npm ci
-npm run pipeline
+npm start
 ```
+
+`npm start` runs the pipeline **and** watches it: a manager reads what each step left behind,
+and if a step fails it writes down the question, gets an answer from a read-only diagnostics
+pass, and picks up the run from where it stopped. If you would rather run the pipeline plainly
+and read the reports yourself, that is `npm run pipeline`. To see each decision the manager
+would make without executing any of it, run `npm run autopilot`.
 
 Either way: the books go in **`epub_source/`**, and everything the pipeline produces lands
 next to them — a folder per volume, holding that volume's glossary, voice reference, style
@@ -42,6 +48,7 @@ rather than guessing.
 | `.postmortem/<step>.md` | What a step claimed to have done, against what it actually left behind |
 | `.logs/` | The transcript of every model call in the run |
 | `npm run delivery` | Where a stopped run stopped, and what the options are |
+| `npm run autopilot` | What the manager would do about it — decided and printed, touching nothing |
 
 ## The rest of the documentation
 

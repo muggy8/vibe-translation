@@ -36,6 +36,7 @@ index for working on it.
 | `npx gulp consistency-audit` | The cross-artifact sign-off (writes `consistency-report.md`) |
 | `npx gulp translate` / `translate-qa` / `polish` | The translation stage (`--allow-fail` / `--allow-no-glossary` override the entry gate) |
 | `npx gulp` (default) | All nine in order |
+| `npm start` | **The front door**: the manager driving the whole run (`node autopilot.js --mode=act`). It starts the pipeline through `delivery.js --mode=act`, and when a step fails it opens a ticket, gets a diagnosis, and retries. The rehearsal — decide and print, execute nothing — is `npm run autopilot` |
 | `npm run pipeline` | **The pipeline one step at a time** (`node index.js`): each step in its own process, each assessed, each recorded. `--stages=a,b`, `--post-mortem=off`, `--ledger=off`, `--fail-on=high\|medium\|never`, `--list` |
 | `npm run delivery` | **Where the run stopped, and what to do about it.** `--mode=report` (default) proposes nothing; `--mode=act` executes the plan through the gated step runner |
 | `npm run diagnose -- --ticket=<id>` | Answer a ticket with a **read-only** agent (it may open the code and the logs; it may not write) |
@@ -65,7 +66,7 @@ Each map doc ends with a table of the **implementation folders** its module was 
 
 Code comments cite `AGENTS.md gotcha N`. The numbers are unchanged from when the gotchas were
 one file: the list now lives in the five `docs/gotchas-*.md` slices (1–20, 21–45, 46–63,
-64–69, 70–87), and each slice says which part of the list it holds.
+64–69, 70–88), and each slice says which part of the list it holds.
 
 ## 3. The implementation folders
 
@@ -98,6 +99,7 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
 | `translate.js`, `verify-translate.js`, `polish.js`, `retranslate.js` | `translate/`, `verify-translate/`, `polish/`, `retranslate/` |
 | `delivery.js` | `delivery/` |
 | `autopilot.js` | `autopilot/` |
+| `index.js` | `index/` — and `index.js` is the package's `main`, because the pipeline is what this package *is*. It re-exports the folder and guards its own launch, so importing the package does not start a run. `harness.js` is no longer `main`; its ad-hoc one-shot CLI block is still there, but `npm run smoke` is the way to probe the endpoint |
 | `utils/source/epub.js`, `glossary/carry-forward.js` | `utils/source/epub/`, `glossary/carry-forward/` — a submodule that outgrew itself splits the same way, inside its own folder |
 | `configs/shared.js` | `configs/shared/` (4 files) |
 | `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js`, `utils/qa-loop.js`, `utils/series-run.js`, `utils/fs.js`, `utils/ledger.js`, `utils/postmortem.js`, `utils/tokens.js`, `utils/artifacts.js`, `utils/devteam.js`, `utils/delivery-verify.js` | the matching folder under `utils/` |
