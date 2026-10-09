@@ -243,7 +243,8 @@ async function amendGlossaryForChapter(ctx, segment, si, terms) {
   } catch {
     chapterBaseline = null; // No glossary yet — this chapter creates it.
   }
-  if (chapterBaseline !== null) ctx.glossaryIndex = buildGlossaryIndex(chapterBaseline);
+  // The index and the write instruction are set inside `generateGlossary`, from this same file, so
+  // the instruction the author is handed and the baseline the gate compares against cannot drift.
 
   await generateGlossary(ctx, terms, researchEnabled && terms.length > 0, segment, si);
 

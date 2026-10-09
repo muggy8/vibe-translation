@@ -8,10 +8,12 @@ require("dotenv").config();
 require("../types"); // JSDoc type definitions
 const { AGENT_TOOLS_NOTE } = require("../configs/shared");
 const { assertRealToolCalls } = require("../utils/agents");
+const { readArtifactToAmend } = require("../utils/fs");
 const { runAuthorStage } = require("../utils/qa-loop");
 
 const { buildGlossaryAuthorTurnPrompt } = require("./prompts");
 const { glossaryAuthorMaxSteps, glossaryRecoveryPrompt } = require("./authoring");
+const { buildGlossaryIndex } = require("./carry-forward");
 
 /**
  * Generate (or regenerate) the glossary using a standalone author agent.
@@ -29,6 +31,13 @@ const { glossaryAuthorMaxSteps, glossaryRecoveryPrompt } = require("./authoring"
 async function generateGlossary(ctx, terms, researchNotesAvailable, seg = null, si = null) {
   const { values, volumeDir, glossaryOutputFile } = ctx;
   const labelSuffix = seg ? `-${seg.id}` : "";
+  // The write instruction and the term map follow the FILE, not the cross-volume seed: from chapter 2
+  // of the first volume onward the glossary is here, and it is what this pass amends.
+  // See utils/fs/current-artifact.js and the character-voice case that showed what the alternative
+  // costs.
+  const current = await readArtifactToAmend(glossaryOutputFile);
+  ctx.glossarySeeded = current.present;
+  ctx.glossaryIndex = current.present ? buildGlossaryIndex(current.text) : "";
 
   await runAuthorStage(
     {

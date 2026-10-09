@@ -104,20 +104,31 @@ const FLOWS = [
     extractPayload: '[{"type": "quirk", "character": "如月雨露", "note": "clipped sentence ends"}]',
     // "the compile pass (chapter ch2) dropped character section(s) that … held"
     guardMessage: /the compile pass \(chapter ch2\) dropped character section\(s\)/,
-    isCompileAgent: (name) => /^author-voice-06-ch\d+$/.test(name),
+    isCompileAgent: (name) => /^author-voice-\d+-ch\d+$/.test(name),
     isFeedbackAgent: (name) => /^feedback-author-/.test(name),
     /** The second document the author passes owe, which the seed does not copy in. */
     companion: (volDir) => ({ file: path.join(volDir, "pov-map.md"), content: POV_MAP }),
     load: () => require("../character-voice"),
     compare: (prev, current) => require("../character-voice").compareVoiceCarryForward(prev, current),
+    /** What a chapter's compile pass adds to the reference it was handed. */
+    append: "\n### 秋野桜（通称コスモス）\n- Register: warm, oblique, answers a question with a question.\n",
+    /** The document the FIRST chapter's pass produces, because there is nothing to amend yet. */
+    firstDraft:
+      "# Character Voice Reference — Series, volume 01\n\n## Characters\n\n" +
+      "### 如月雨露（ジョーロ）\n- Register: blunt, clipped sentence ends.\n",
+    /** The line the section map must contain before a later pass is told where to put a character. */
+    indexLine: "如月雨露（ジョーロ）",
+    indexHeading: 'What "character-voice.md" already holds',
+    createInstruction: "neither file exists yet",
+    amendInstruction: "ALREADY holds the reference",
     buildCtx: (p) => ({
       values: {
-        INSTALLMENT_NUMBER: "06",
+        INSTALLMENT_NUMBER: p.installment,
         SOURCE_NAME: "Series",
         SOURCE_LANGUAGE: "Japanese",
         TARGET_LANGUAGE: "English",
       },
-      folderName: "Series(06)",
+      folderName: p.folderName,
       volumeDir: p.volDir,
       sourceFile: path.join(p.volDir, SEGMENTS[0].file),
       bundle: {
@@ -127,9 +138,9 @@ const FLOWS = [
         wholePath: path.join(p.volDir, SEGMENTS[0].file),
         sourceFingerprint: "fixture-fingerprint",
       },
-      isFirst: false,
-      previousFolderName: "Series(05)",
-      previousVoiceRefFile: path.join(p.prevDir, "character-voice.md"),
+      isFirst: p.isFirst,
+      previousFolderName: p.previousFolderName,
+      previousVoiceRefFile: p.previousArtifactFile,
       voiceOutputFile: p.artifactFile,
       povOutputFile: path.join(p.volDir, "pov-map.md"),
       validationOutputFile: p.validationFile,
@@ -161,19 +172,30 @@ const FLOWS = [
     extractPayload: '[{"category": "Narration", "rule": "Keep the distance."}]',
     // "the compile pass (chapter ch2) dropped style-guide section(s) that … held"
     guardMessage: /the compile pass \(chapter ch2\) dropped style-guide section\(s\)/,
-    isCompileAgent: (name) => /^author-style-06-ch\d+$/.test(name),
+    isCompileAgent: (name) => /^author-style-\d+-ch\d+$/.test(name),
     isFeedbackAgent: (name) => /^author-style-feedback-/.test(name),
     companion: null,
     load: () => require("../style-guide"),
     compare: (prev, current) => require("../style-guide").compareStyleCarryForward(prev, current),
+    /** What a chapter's compile pass adds to the guide it was handed. */
+    append: "\n- Keep the narrator's distance from 如月雨露; do not warm the prose up.\n",
+    /** The document the FIRST chapter's pass produces, because there is nothing to amend yet. */
+    firstDraft:
+      "# Style Guide — Series, volume 01\n\n## Address & Honorifics\n" +
+      "- `-san` is kept as `-san`; never expanded to \"Mr.\" or \"Ms.\".\n",
+    /** The heading the category map must list before a later pass is told where a rule belongs. */
+    indexLine: "Address & Honorifics",
+    indexHeading: 'What "style-guide.md" already holds, by section',
+    createInstruction: "does not exist yet",
+    amendInstruction: "ALREADY holds the guide",
     buildCtx: (p) => ({
       values: {
-        INSTALLMENT_NUMBER: "06",
+        INSTALLMENT_NUMBER: p.installment,
         SOURCE_NAME: "Series",
         SOURCE_LANGUAGE: "Japanese",
         TARGET_LANGUAGE: "English",
       },
-      folderName: "Series(06)",
+      folderName: p.folderName,
       volumeDir: p.volDir,
       sourceFile: path.join(p.volDir, SEGMENTS[0].file),
       bundle: {
@@ -183,9 +205,9 @@ const FLOWS = [
         wholePath: path.join(p.volDir, SEGMENTS[0].file),
         sourceFingerprint: "fixture-fingerprint",
       },
-      isFirst: false,
-      previousFolderName: "Series(05)",
-      previousStyleGuideFile: path.join(p.prevDir, "style-guide.md"),
+      isFirst: p.isFirst,
+      previousFolderName: p.previousFolderName,
+      previousStyleGuideFile: p.previousArtifactFile,
       styleOutputFile: p.artifactFile,
       validationOutputFile: p.validationFile,
       extractPrompt: "Extract the style observations.",
@@ -276,7 +298,16 @@ async function runFlow(flow) {
     });
 
     const runChunkedVolume = flow.load().runChunkedVolume;
-    const ctx = flow.buildCtx({ prevDir, volDir, artifactFile, validationFile });
+    const ctx = flow.buildCtx({
+      installment: "06",
+      folderName: "Series(06)",
+      isFirst: false,
+      previousFolderName: "Series(05)",
+      previousArtifactFile: path.join(prevDir, flow.artifactName),
+      volDir,
+      artifactFile,
+      validationFile,
+    });
 
     // 1. The happy path: the volume starts from the previous volume's copy, every
     //    chapter amends it, and the QA loop validates the result chapter by chapter.
@@ -333,10 +364,149 @@ async function runFlow(flow) {
   }
 }
 
+// ─── 3: the FIRST volume's chapters are told to amend, not to recreate ─────────
+
+/**
+ * The flag that decides HOW an agent is told to write a cumulative document used to answer a
+ * different question from the one the instruction asks. It was set by "did the workflow copy the
+ * previous volume's file in?" — and on the first volume there is no previous volume, so it stayed
+ * false for chapter 8 as well, while the document the agent was told to create had been in the
+ * folder since chapter 1.
+ *
+ * That is the shape the live run hit on volume 01: seven chapter passes, each one told to
+ * `writeFile (complete contents)` a reference that grows every chapter, and the last of them shipped
+ * a document missing a character the between-chapter gate then caught. The gate is the only thing
+ * that can see it, and by then eight chapters of work are built on the damaged copy.
+ *
+ * So the instruction is read off the FILE, at the moment the pass is built: chapter 1 creates it,
+ * every chapter after that amends it and is handed the map of what the earlier chapters put there.
+ *
+ * @param {Object} flow - One entry from FLOWS.
+ */
+async function testFirstVolumeIsToldToAmend(flow) {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `chunked-first-${flow.label}-`));
+  const volDir = path.join(tmpDir, "Series(01)");
+  const artifactFile = path.join(volDir, flow.artifactName);
+  const validationFile = path.join(volDir, flow.validationName);
+  /** The compile passes' prompts, in the order the chapters ran. */
+  const compilePrompts = [];
+
+  const real = {
+    createGatedFsTools: harness.createGatedFsTools,
+    createAgentHandle: harness.createAgentHandle,
+    runOneShot: harness.runOneShot,
+  };
+
+  try {
+    await fs.mkdir(volDir);
+    for (const s of SEGMENTS) {
+      await fs.writeFile(path.join(volDir, s.file), `${s.title}\n\n本文。\n`, "utf8");
+    }
+
+    harness.createGatedFsTools = async () => ({ tools: {}, approve: async () => true });
+    harness.runOneShot = async ({ label }) =>
+      label.includes("extract") ? flow.extractPayload : PASSING_SCORE;
+    harness.createAgentHandle = async ({ name }) => ({
+      name,
+      sendTurn: async (prompt) => {
+        if (flow.isCompileAgent(name)) {
+          compilePrompts.push(prompt);
+          // The agent does what it was told: the first pass writes the document, the ones after it
+          // add to the copy that is already there.
+          const prior = await fs.readFile(artifactFile, "utf8").catch(() => null);
+          await fs.writeFile(artifactFile, prior === null ? flow.firstDraft : prior + flow.append, "utf8");
+          if (flow.companion) {
+            const c = flow.companion(volDir);
+            await fs.writeFile(c.file, c.content, "utf8");
+          }
+        } else if (name.startsWith("validator-merge-")) {
+          await fs.writeFile(validationFile, VALIDATION_REPORT, "utf8");
+        } else if (name.startsWith("validator-")) {
+          const id = name.split("-").pop();
+          await fs.writeFile(path.join(volDir, `${flow.partialPrefix}${id}.md`), VALIDATION_REPORT, "utf8");
+        } else if (flow.isFeedbackAgent(name)) {
+          await fs.writeFile(artifactFile, await fs.readFile(artifactFile, "utf8"), "utf8");
+          if (flow.companion) {
+            const c = flow.companion(volDir);
+            await fs.writeFile(c.file, c.content, "utf8");
+          }
+        }
+        return { text: "", toolCalls: [{ toolCallId: "1", toolName: "readFile", input: {} }] };
+      },
+      close: async () => {},
+    });
+
+    const ctx = flow.buildCtx({
+      installment: "01",
+      folderName: "Series(01)",
+      isFirst: true,
+      previousFolderName: null,
+      previousArtifactFile: null,
+      volDir,
+      artifactFile,
+      validationFile,
+    });
+    await flow.load().runChunkedVolume(ctx);
+
+    assert.strictEqual(
+      compilePrompts.length,
+      SEGMENTS.length,
+      `${flow.label}: every chapter of the first volume got its own compile pass`
+    );
+
+    // Chapter 1: there is nothing there yet, and saying so is correct.
+    assert.ok(
+      compilePrompts[0].includes(flow.createInstruction),
+      `${flow.label}: chapter 1 is told to create ${flow.artifactName}: ${compilePrompts[0].slice(0, 400)}`
+    );
+    assert.ok(
+      !compilePrompts[0].includes(flow.amendInstruction),
+      `${flow.label}: chapter 1 is not told to amend a document that does not exist`
+    );
+    assert.ok(
+      !compilePrompts[0].includes(flow.indexHeading),
+      `${flow.label}: chapter 1 is not handed a map of a document that does not exist`
+    );
+
+    // Chapter 2: the document IS there, it was put there by chapter 1, and the agent is told both
+    // that it must edit it in place and what is already in it.
+    const second = compilePrompts[1];
+    assert.ok(
+      second.includes(flow.amendInstruction),
+      `${flow.label}: chapter 2 is told to amend ${flow.artifactName} in place: ${second.slice(0, 400)}`
+    );
+    assert.ok(
+      !second.includes(flow.createInstruction),
+      `${flow.label}: chapter 2 is not told to write a document that is already there whole — that is ` +
+        `the instruction that destroys the part of it a cut-off reply did not reach`
+    );
+    assert.ok(
+      !second.includes("writeFile (complete contents), in the exact"),
+      `${flow.label}: no whole-file write of the cumulative document is offered to chapter 2`
+    );
+    assert.ok(
+      second.includes(flow.indexHeading) && second.includes(flow.indexLine),
+      `${flow.label}: chapter 2 is handed the map of what chapter 1 wrote (${flow.indexLine}): ` +
+        `${second.slice(0, 400)}`
+    );
+
+    // And the volume's copy is the sum of the chapters, not the last chapter's recollection of it.
+    const written = await fs.readFile(artifactFile, "utf8");
+    assert.ok(written.includes(flow.firstDraft.trimEnd()), `${flow.label}: chapter 1's section survived chapter 2`);
+    assert.ok(written.includes(flow.append.trim()), `${flow.label}: chapter 2's addition is in the document`);
+  } finally {
+    Object.assign(harness, real);
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
+
 async function main() {
   for (const flow of FLOWS) {
     await runFlow(flow);
     console.log(`${flow.label}: the chapter-by-chapter path seeds, amends, guards, and quarantines`);
+    await testFirstVolumeIsToldToAmend(flow);
+    console.log(`${flow.label}: the first volume's later chapters are told to amend, and are given the map of what came before`);
   }
 }
 

@@ -25,7 +25,7 @@ every test that monkey-patches the harness keeps working unchanged — but the l
 the folder, so open the module that owns the behaviour you are changing instead of reading
 the whole layer.
 
-### `utils/fs/` — the implementation of `utils/fs.js` (41 lines of face)
+### `utils/fs/` — the implementation of `utils/fs.js` (44 lines of face)
 
 | File | Lines | What it owns |
 | --- | --- | --- |
@@ -34,6 +34,7 @@ the whole layer.
 | `utils/fs/provenance.js` | 123 | `writeProvenanceSidecar` (which volume snapshot a series-root copy was taken from, and the hash of the source at that moment), `inlineReferenceMessage` (what to inject into a prompt when a reference is read inline instead of managed), `fingerprintFiles` (the content hash of a set of files — a content check, not a timestamp check, so a restored file with an old mtime never passes as fresh). |
 | `utils/fs/stage.js` | 200 | `stageSourceFile` — put a source archive into a volume folder without ever holding two copies of the book: link it, prove it is the file the scan found (the hash it was reported with), and refuse the shapes that would silently change what the pipeline reads (gotcha 76). |
 | `utils/fs/wipe.js` | 65 | `wipeAttemptOutputs` — delete what one processing attempt wrote so a different attempt starts from a clean folder, and nothing else: the accepted work of earlier volumes and the quarantine evidence a gate produced stay where they are. |
+| `utils/fs/current-artifact.js` | 49 | `readArtifactToAmend` — the one question the write instruction turns on: **is the cumulative artifact already in this folder?** Read off the disk at the moment the pass is built, because the alternative is answering it from how the file got there ("did the workflow copy the previous volume's in?"), which is a different question and the wrong one on the chapter-by-chapter path of the first volume: nothing to copy from, the file present since chapter 1, and every later chapter told to `writeFile (complete contents)` a document bigger than one reply (gotcha 89). An empty or whitespace-only file counts as absent, so the instruction for an empty file is the instruction for a missing one. Used by all three cumulative stages' author pass. |
 
 
 ### `utils/source/` — the implementation of `utils/source.js` (50 lines of face)

@@ -9,7 +9,7 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types");
 const harness = require("../harness");
-const { inlineReferenceMessage } = require("../utils/fs");
+const { inlineReferenceMessage, readArtifactToAmend } = require("../utils/fs");
 const { assertRealToolCalls } = require("../utils/agents");
 const { runAuthorStage } = require("../utils/qa-loop");
 const {
@@ -22,6 +22,7 @@ const {
 
 const { truncateStyleGuide } = require("./config");
 const { parseStyleObservations, styleAuthorMaxSteps, styleRecoveryPrompt } = require("./amend");
+const { buildStyleIndex } = require("./reference-index");
 const { buildAuthorSystemPrompt, buildAuthorTurnPrompt } = require("./prompts");
 
 /**
@@ -85,6 +86,13 @@ async function runExtract(ctx, seg = null, si = null) {
 async function runCompile(ctx, extractionOutput, seg = null, si = null) {
   const { values, authorSystemPrompt } = ctx;
   const labelSuffix = seg ? `-${seg.id}` : "";
+  // The write instruction and the category map follow the FILE, not the cross-volume seed: from
+  // chapter 2 of the first volume onward the guide is here, and it is what this pass amends.
+  // See utils/fs/current-artifact.js and the character-voice case that showed what the alternative
+  // costs.
+  const current = await readArtifactToAmend(ctx.styleOutputFile);
+  ctx.styleSeeded = current.present;
+  ctx.styleIndex = current.present ? buildStyleIndex(current.text) : "";
   let parsed = [];
   let extractionResults = "";
   try {

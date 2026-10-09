@@ -26,8 +26,8 @@ function buildStyleIndex(markdown) {
 
 /**
  * The "what the guide already holds" block for a style-guide agent turn.
- * @param {StyleGuideVolumeCtx} ctx - The volume context; `styleIndex` is set by
- *   seedStyleGuideFromPrevious.
+ * @param {StyleGuideVolumeCtx} ctx - The volume context; `styleIndex` is set from the guide this pass
+ *   is about to amend (see utils/fs/current-artifact.js and runCompile).
  * @returns {string} The block, or "" when there is no index. Ends with a blank line.
  */
 function styleIndexBlock(ctx) {

@@ -23,7 +23,9 @@ const { VOICE_REF_TRUNCATION_MAX_ENTRIES, VOICE_REF_TRUNCATION_THRESHOLD } = req
  * turn, so a pass that ran out of steps produced nothing at all.
  *
  * @param {boolean} hasExistingFile - Whether "character-voice.md" already holds the
- *   document to change (see seedVoiceReferenceFromPrevious).
+ *   document to change. Read it off the FILE (utils/fs/current-artifact.js), not off whether the
+ *   cross-volume seed ran: on the per-chapter path of the first volume there is nothing to seed
+ *   from, and the file has been there since chapter 1.
  * @param {"amend"|"correct"} [mode] - "amend" adds entries; "correct" applies a
  *   validation report. Only the wording differs.
  * @returns {string} The instruction block, ending with a blank line.

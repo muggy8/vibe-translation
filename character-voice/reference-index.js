@@ -14,8 +14,8 @@ require("../types");
  * read whole from the middle volumes on, and a `grep` hunt for "is ひまわり
  * already here?" is what eats a capped step budget.
  *
- * @param {CharacterVoiceVolumeCtx} ctx - The volume context; `voiceIndex` is set by
- *   seedVoiceReferenceFromPrevious.
+ * @param {CharacterVoiceVolumeCtx} ctx - The volume context; `voiceIndex` is set from the reference
+ *   this pass is about to amend (see utils/fs/current-artifact.js and runCompile).
  * @returns {string} The block, or "" when there is no index. Ends with a blank line.
  */
 function voiceIndexBlock(ctx) {

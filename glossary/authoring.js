@@ -21,8 +21,8 @@ const { authorMaxStepsFor } = require("../utils/prompt");
  * whole, and a `grep` hunt is what eats a capped step budget (see
  * buildGlossaryIndex).
  *
- * @param {GlossaryVolumeCtx} ctx - The volume context; `glossaryIndex` is set by
- *   seedGlossaryFromPrevious.
+ * @param {GlossaryVolumeCtx} ctx - The volume context; `glossaryIndex` is set from the glossary the
+ *   pass is about to amend (see utils/fs/current-artifact.js and generateGlossary).
  * @returns {string} The block, or "" when there is no index. Ends with a blank line.
  */
 function glossaryIndexBlock(ctx) {
@@ -58,8 +58,9 @@ function glossaryIndexBlock(ctx) {
  * see.
  *
  * @param {boolean} hasExistingFile - Whether `glossary.md` already holds the
- *   document to change (see seedGlossaryFromPrevious). False means the agent
- *   must create it, which is the only case a whole-file write is correct.
+ *   document to change. Read it off the FILE (utils/fs/current-artifact.js), not off whether the
+ *   cross-volume seed ran — False means the agent must create it, which is the only case a
+ *   whole-file write is correct.
  * @param {"amend"|"correct"} [mode] - "amend" adds terms; "correct" applies a
  *   validation report. Only the wording differs.
  * @returns {string} The instruction block, ending with a blank line.

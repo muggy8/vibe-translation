@@ -9,7 +9,7 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types");
 const harness = require("../harness");
-const { inlineReferenceMessage } = require("../utils/fs");
+const { inlineReferenceMessage, readArtifactToAmend } = require("../utils/fs");
 const { assertRealToolCalls } = require("../utils/agents");
 const { runAuthorStage } = require("../utils/qa-loop");
 const {
@@ -21,6 +21,7 @@ const {
 } = require("../utils/source");
 
 const { parseVoiceQuirks, truncateVoiceRef, voiceAuthorMaxSteps, voiceRecoveryPrompt } = require("./amend");
+const { buildVoiceIndex } = require("./reference-index");
 const { buildAuthorSystemPrompt, buildAuthorTurnPrompt } = require("./prompts");
 
 /**
@@ -84,6 +85,14 @@ async function runExtract(ctx, seg = null, si = null) {
 async function runCompile(ctx, extractionOutput, seg = null, si = null) {
   const { values, authorSystemPrompt } = ctx;
   const labelSuffix = seg ? `-${seg.id}` : "";
+  // The write instruction and the section map follow the FILE, not the cross-volume seed: from
+  // chapter 2 of the first volume onward this artifact is here, and it is the document this pass has
+  // to amend. Answering the question from the seed instead is what told a chapter-8 agent to
+  // `writeFile (complete contents)` a 470 KB reference — and the reference it produced was missing a
+  // character the gate then found. See utils/fs/current-artifact.js.
+  const current = await readArtifactToAmend(ctx.voiceOutputFile);
+  ctx.voiceSeeded = current.present;
+  ctx.voiceIndex = current.present ? buildVoiceIndex(current.text) : "";
   let parsed = [];
   let extractionResults = "";
   try {

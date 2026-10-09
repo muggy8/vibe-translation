@@ -5,8 +5,9 @@
  * it), output-checks.js (never let a stage persist nothing), provenance.js (what a
  * published copy came from, and what a set of files currently is), stage.js (put a source
  * file into a volume folder without duplicating the book), wipe.js (remove what a failed
- * attempt left, and only that). This file is the public surface: every consumer requires
- * "utils/fs" and gets the same names it always did.
+ * attempt left, and only that), current-artifact.js (is the cumulative artifact already in
+ * this folder — the question the write instruction turns on). This file is the public
+ * surface: every consumer requires "utils/fs" and gets the same names it always did.
  *
  * @example
  * const { fileExists, assertWrote } = require("../utils/fs");
@@ -17,6 +18,7 @@ const outputChecks = require("./fs/output-checks");
 const provenance = require("./fs/provenance");
 const stage = require("./fs/stage");
 const wipe = require("./fs/wipe");
+const currentArtifact = require("./fs/current-artifact");
 
 // The public surface, unchanged from the single file.
 module.exports = {
@@ -38,4 +40,5 @@ module.exports = {
   fingerprintFiles: provenance.fingerprintFiles,
   stageSourceFile: stage.stageSourceFile,
   wipeAttemptOutputs: wipe.wipeAttemptOutputs,
+  readArtifactToAmend: currentArtifact.readArtifactToAmend,
 };

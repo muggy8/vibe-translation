@@ -1904,6 +1904,7 @@ assert.ok(!wikiAuthorTurn.includes("The canonical glossary"), "wiki author turn 
     await fsAsync.rm(tmpDir, { recursive: true, force: true });
   }
   await chunkedGlossaryFlowTest();
+  await chunkedGlossaryFirstVolumeTest();
   console.log("All tests passed.");
 })().catch((err) => {
   console.error(err);
@@ -2046,6 +2047,134 @@ async function chunkedGlossaryFlowTest() {
     );
   } finally {
     restore();
+    await fsAsync.rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
+// ─── the chunked glossary flow on the FIRST volume ─────────────────────────────
+// The write instruction used to be decided by "did the workflow copy the previous volume's glossary
+// in?", and on volume 01 there is nothing to copy — so every chapter, including the last, was told to
+// write the whole document with writeFile. See utils/fs/current-artifact.js and the character-voice
+// case in test-chunked-preproduction.js that this mirrors.
+async function chunkedGlossaryFirstVolumeTest() {
+  const fsAsync = require("fs").promises;
+  const os = require("os");
+  const harness = require("../harness");
+  const { runChunkedVolumeAgent } = require("../glossary");
+
+  const tmpDir = await fsAsync.mkdtemp(path.join(os.tmpdir(), "chunked-glossary-first-"));
+  const volDir = path.join(tmpDir, "Series(01)");
+  const outFile = path.join(volDir, "glossary.md");
+  const VALIDATION_REPORT =
+    "# Glossary validation — Series, volume 01\n\n" +
+    "The glossary covers the chapter sources. No HIGH findings.\n\n" +
+    "FINDING [LOW] chapters=ch1 — one Notes cell is longer than a gloss.\n";
+  const firstDraft =
+    "## Characters\n| Src | Tgt | Notes |\n|---|---|---|\n| A | Alpha | first volume, chapter 1 |\n";
+  const addedRow = "| B | Beta | first volume, chapter 2 |\n";
+
+  const real = {
+    createGatedFsTools: harness.createGatedFsTools,
+    createWikiTools: harness.createWikiTools,
+    createAgentHandle: harness.createAgentHandle,
+    runOneShot: harness.runOneShot,
+  };
+
+  try {
+    await fsAsync.mkdir(volDir);
+    const segments = [
+      { id: "ch1", file: "book-ch1.md", title: "第一章", bodyChars: 100 },
+      { id: "ch2", file: "book-ch2.md", title: "第二章", bodyChars: 100 },
+    ];
+    for (const s of segments) {
+      await fsAsync.writeFile(path.join(volDir, s.file), `${s.title}\n\n本文。\n`, "utf8");
+    }
+
+    const ctx = {
+      values: { INSTALLMENT_NUMBER: "01", SOURCE_NAME: "Series", SOURCE_LANGUAGE: "Japanese", TARGET_LANGUAGE: "English" },
+      folderName: "Series(01)",
+      volumeDir: volDir,
+      sourceFile: path.join(volDir, segments[0].file),
+      glossaryOutputFile: outFile,
+      researchNotesFile: path.join(volDir, "glossary-research.md"),
+      validationOutputFile: path.join(volDir, "glossary-validation.md"),
+      isFirst: true,
+      previousGlossaryFile: null,
+      previousFolderName: null,
+      chunked: true,
+      bundle: { format: "epub", segments, wholeChars: 200, wholePath: path.join(volDir, segments[0].file) },
+      termsPrompt: "Extract the new terms.",
+      termsSystemPrompt: "You extract terms.",
+      glossarySystemPrompt: "You maintain the glossary.",
+      validatorSystemPrompt: "You audit the glossary.",
+      glossaryTemplate: "Amend the glossary for {{SOURCE_NAME}}.\n{{TERMS_LIST}}\n{{RESEARCH_NOTES}}\n{{DISPUTES}}",
+      feedbackPrompt: "Apply the findings.",
+      disputesText: "",
+    };
+
+    /** The per-chapter amend passes' prompts, in reading order. */
+    const amendPrompts = [];
+    harness.createGatedFsTools = async () => ({ tools: {}, approve: async () => true });
+    harness.createWikiTools = () => ({});
+    harness.runOneShot = async ({ label }) =>
+      label.startsWith("glossary-terms")
+        ? "[]"
+        : '{"score": 80, "band": "Pass with minor edits", "note": "Carries the previous terms."}';
+    harness.createAgentHandle = async ({ name }) => ({
+      name,
+      sendTurn: async (prompt) => {
+        if (/^author-01-ch\d+$/.test(name)) {
+          amendPrompts.push(prompt);
+          // The agent does what it is told: chapter 1 creates the file, chapter 2 adds a row to the
+          // one that is already there.
+          const prior = await fsAsync.readFile(outFile, "utf8").catch(() => null);
+          await fsAsync.writeFile(outFile, prior === null ? firstDraft : prior + addedRow, "utf8");
+        } else if (name.startsWith("validator-merge-")) {
+          await fsAsync.writeFile(path.join(volDir, "glossary-validation.md"), VALIDATION_REPORT, "utf8");
+        } else if (name.startsWith("validator-")) {
+          const id = name.split("-").pop();
+          await fsAsync.writeFile(path.join(volDir, `glossary-validation-${id}.md`), VALIDATION_REPORT, "utf8");
+        } else if (name.startsWith("feedback-author-")) {
+          await fsAsync.writeFile(outFile, await fsAsync.readFile(outFile, "utf8"), "utf8");
+        }
+        return { text: "", toolCalls: [{ toolCallId: "1", toolName: "readFile", input: {} }] };
+      },
+      close: async () => {},
+    });
+
+    await runChunkedVolumeAgent(ctx);
+
+    assert.strictEqual(amendPrompts.length, segments.length, "chunked volume 01: every chapter got its own amend pass");
+    assert.ok(
+      amendPrompts[0].includes("does not exist yet"),
+      `chunked volume 01: chapter 1 is told to create glossary.md: ${amendPrompts[0].slice(0, 400)}`
+    );
+    assert.ok(
+      !amendPrompts[0].includes("ALREADY holds the"),
+      "chunked volume 01: chapter 1 is not told to amend a glossary that does not exist"
+    );
+    assert.ok(
+      !amendPrompts[0].includes('What "glossary.md" already holds'),
+      "chunked volume 01: chapter 1 is not handed a map of a glossary that does not exist"
+    );
+    assert.ok(
+      amendPrompts[1].includes("ALREADY holds the"),
+      `chunked volume 01: chapter 2 is told to amend glossary.md in place: ${amendPrompts[1].slice(0, 400)}`
+    );
+    assert.ok(
+      !amendPrompts[1].includes("does not exist yet"),
+      "chunked volume 01: chapter 2 is not told to write a glossary that is already there whole"
+    );
+    assert.ok(
+      amendPrompts[1].includes('What "glossary.md" already holds') && amendPrompts[1].includes("A → Alpha"),
+      `chunked volume 01: chapter 2 is handed the map of what chapter 1 wrote: ${amendPrompts[1].slice(0, 400)}`
+    );
+
+    const written = await fsAsync.readFile(outFile, "utf8");
+    assert.ok(written.includes("| A | Alpha |"), "chunked volume 01: chapter 1's term survived chapter 2");
+    assert.ok(written.includes("| B | Beta |"), "chunked volume 01: chapter 2's term is in the glossary");
+  } finally {
+    Object.assign(harness, real);
     await fsAsync.rm(tmpDir, { recursive: true, force: true });
   }
 }
