@@ -355,9 +355,14 @@ it. Two directions matter: the lock is **advisory to the pipeline** (a lock file
 a warning, never a reason a 12-hour run dies) and **binding to the manager** (for the manager, "I cannot
 tell" is "no" — deciding whether it is safe to act is its whole job). Liveness is the pid; a pid this
 machine cannot check — a lock written on another host — is treated as in progress, with the file to delete
-named out loud. The lock lives in `POSTMORTEM_DIR`, not per series, so two concurrent runs of two
-different series collide; the answer is a separate `POSTMORTEM_DIR` per series, and the refusal says so.
-See gotcha 72.
+named out loud. **And "the same run" is only half of what makes a lock ours: it also needs a live
+holder.** Act mode continues under the newest recorded run id so the ledger's memory of what that run
+already tried stays legible, which means a lock left by a process that died mid-run carries the *same*
+id the next attempt will use. Matching on the id alone made that ghost lock "ours": the new process
+joined a lock it was not allowed to delete, and left it there — for every later run too, because each
+one reuses the id (gotcha 91). The lock lives in `POSTMORTEM_DIR`, not per series, so two concurrent
+runs of two different series collide; the answer is a separate `POSTMORTEM_DIR` per series, and the
+refusal says so. See gotcha 72.
 
 **The structural-failure marker.** `isStructuralError` is an in-process flag
 (`err.structural === true`), and a child process cannot hand its error object back.

@@ -22,10 +22,13 @@
  *      started on one is not visible to the other) names a pid that means nothing here.
  *      That is reported as *in progress*, with the file to delete named out loud.
  *      Refusing is recoverable; a half-written volume is not.
- *   3. **A lock held by the same run is not a conflict.** `index.js` holds the lock and
+ *   3. **A lock held by the same LIVE run is not a conflict.** `index.js` holds the lock and
  *      spawns one gulp process per step; each child inherits `INDEX_RUN_ID`, sees its own
  *      run id in the file, and carries on. Nesting inside one process is counted, so only
- *      the outermost holder removes the file.
+ *      the outermost holder removes the file. "Same run" is not enough on its own: act mode
+ *      reuses the newest recorded run id, so a lock left by a process that died carries that id
+ *      too, and a lock whose holder is gone is stale whoever reads it — replacing it is the
+ *      only way the stale lock ever ends.
  *
  * @module utils/runlock
  */
@@ -138,12 +141,40 @@ let held = null;
 /**
  * Is this lock the run we are part of?
  *
+ * The run id is half the answer. The other half is whether the process that wrote the file is still
+ * there to hand it over.
+ *
+ * Why the id alone is not enough, and why it is the half that broke: act mode deliberately continues
+ * under the newest recorded run id, so the ledger's memory of what that run already tried stays
+ * legible to the next attempt (docs/delivery-layer.md). A lock left behind by a process that died
+ * mid-run therefore carries OUR run id. Matching on the id alone made that lock "ours": the new
+ * process joined a lock whose holder no longer exists, was not the process allowed to delete it, and
+ * left it there — and so did every later run, because each one reuses the same id and joins the same
+ * ghost. The after-run audit reported the same HIGH finding forever, and the sentence that tells a
+ * human which file to delete was never reached, because the code had already decided the lock
+ * belonged to it.
+ *
+ * Liveness is also what makes the nesting case correct rather than merely tolerated: `index.js`
+ * holds the lock and spawns one gulp process per step, and each child joins it because the parent is
+ * a LIVE process in the same run. When the parent is gone, a child is not holding anything — it is
+ * standing in a dead process's shoes.
+ *
+ * A pid this machine cannot check is not a green light (decision 2 of this module), so it does not
+ * make the lock ours either; the caller reads that as "still running".
+ *
+ * The limit worth naming out loud: a pid can be recycled. If a dead holder's pid is later reused by
+ * an unrelated process AND the run id still matches, this reads the lock as live and refuses to
+ * start. That is the safe direction — refusing is recoverable by deleting one file, a volume
+ * half-written by two processes is not — and it is the same limit decision 2 already accepts for a
+ * pid from another machine.
+ *
  * @param {RunLock} lock
  * @param {string} run - Our run id.
  * @returns {boolean}
  */
 function lockIsOurs(lock, run) {
-  return Boolean(lock) && String(lock.runId) === String(run);
+  if (!lock || String(lock.runId) !== String(run)) return false;
+  return pidIsAlive(lock.pid) === true;
 }
 
 /**
@@ -166,6 +197,8 @@ function runInProgress(opts = {}) {
     return { inProgress: false, ours: false, stale: false, unverifiable: false, lock: null, error: null, note: null };
   }
   if (lockIsOurs(lock, run)) {
+    // Same run AND a live holder: the nesting case (decision 3). `ours` can no longer mean "the id
+    // matches", so a lock reaching this branch really was handed to us by something still running.
     return { inProgress: false, ours: true, stale: false, unverifiable: false, lock, error: null, note: null };
   }
 
@@ -229,7 +262,7 @@ function acquireRunLock({ by, run, filePath } = {}) {
   }
   if (state.ours) {
     held = { depth: 1, wrote: false, lock: state.lock };
-    return { acquired: true, ours: false, reentrant: true, lock: state.lock, error: null, note: state.stale ? state.note : null };
+    return { acquired: true, ours: false, reentrant: true, lock: state.lock, error: null, note: null };
   }
 
   const lock = {

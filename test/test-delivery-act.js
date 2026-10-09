@@ -17,6 +17,9 @@
  *      is wiped — the menu check is not only a property of how the plan was written;
  *   2. a run already in progress: act mode refuses to start anything, leaves the lock alone,
  *      and deletes nothing (gotcha 66);
+ *   2b. a lock left by a process that died is replaced even when it carries THIS run's id —
+ *      act mode continues under the newest recorded run id, so a ghost lock matches by id, and
+ *      joining it meant never being the process allowed to delete it (gotcha 91);
  *   3. a step that has spent its per-step intervention budget is refused, and the refusal opens
  *      a ticket and is written to the ledger rather than passing silently;
  *   4. the third identical attempt is refused by the anti-spin gate and becomes a ticket — the
@@ -51,6 +54,7 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { spawn } = require("child_process");
 
 const { STEP_ARTIFACT_SPECS } = require("../utils/artifacts");
 const { PIPELINE_STEPS } = require("../gulpfile");
@@ -59,7 +63,7 @@ const delivery = require("../delivery");
 const { appendLedgerEntry, readLedger } = require("../utils/ledger");
 const { createTicket, closeTicket, readTickets } = require("../utils/tickets");
 const { measureDeliverable } = require("../utils/delivery-verify");
-const { runLockPath } = require("../utils/runlock");
+const { runLockPath, runInProgress, acquireRunLock, releaseRunLock, pidIsAlive } = require("../utils/runlock");
 
 const FIXTURES = path.resolve("/tmp/opencode/delivery-act-tests");
 const RUN = "run-act";
@@ -340,6 +344,92 @@ async function testRefusesWhileAnotherRunIsGoing() {
   );
 
   console.log("  run in progress: refused, the other run's lock untouched, nothing deleted");
+}
+
+// ─── 2b: a stale lock that carries OUR run id is replaced, not joined ──────────
+
+/** A pid that is certainly gone: a child that exits at once, reaped before it is read back. */
+async function aDeadPid() {
+  const child = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+  const pid = child.pid;
+  await new Promise((resolve) => child.on("close", resolve));
+  assert.strictEqual(pidIsAlive(pid), false, `the fixture needs a pid that is really gone (${pid})`);
+  return pid;
+}
+
+/**
+ * The shape a killed run leaves behind, and the one the lock used to read as its own.
+ *
+ * Act mode continues under the newest recorded run id, so the ledger's memory of what that run
+ * already tried stays legible to the next attempt. A lock left by a process that died mid-run
+ * therefore carries the SAME id the next attempt will use — and matching on the id alone made it
+ * "ours": the new process joined a lock whose holder no longer existed, was not the process allowed
+ * to delete it, and left it there. Every later run did the same, because every later run reuses the
+ * id, so the stale lock never ended and the after-run audit reported the same HIGH finding forever.
+ *
+ * @returns {Promise<void>}
+ */
+async function testStaleLockFromTheSameRunIsReplaced() {
+  const fx = await completeSeries("stale-lock");
+  await breakGlossaryAt02(fx);
+  const { state, plan } = await planFor(fx);
+  const run = state.run || RUN;
+  process.env.INDEX_RUN_ID = run;
+
+  const lockPath = runLockPath();
+  const ghost = await aDeadPid();
+  const ghostLock = () =>
+    JSON.stringify(
+      { runId: run, pid: ghost, host: os.hostname(), by: "npm run pipeline", startedAt: new Date().toISOString() },
+      null,
+      2
+    ) + "\n";
+
+  try {
+    await fs.promises.mkdir(path.dirname(lockPath), { recursive: true });
+    await fs.promises.writeFile(lockPath, ghostLock(), "utf8");
+
+    // A. The reading. The run id matches, and that used to be the whole test.
+    const seen = runInProgress({ run });
+    assert.strictEqual(seen.ours, false, "a lock whose holder is gone is not ours just because the run id matches");
+    assert.strictEqual(seen.stale, true, `and it is named as stale: ${seen.note}`);
+    assert.strictEqual(seen.inProgress, false, "it does not block the run either — replacing it is the answer");
+
+    // B. Taking it. The new process WRITES the file, which is what makes it the one allowed to
+    //    delete it. Joining a ghost is what left the lock behind in the first place.
+    const acq = acquireRunLock({ by: "test", run });
+    assert.strictEqual(acq.acquired, true, acq.note);
+    assert.strictEqual(acq.ours, true, "it wrote the lock, so it may remove it");
+    assert.strictEqual(acq.reentrant, false, "it replaced a dead process's lock rather than joining it");
+    assert.ok(/stale and is being replaced/.test(acq.note || ""), `and it says so: ${acq.note}`);
+    const rewritten = JSON.parse(await fs.promises.readFile(lockPath, "utf8"));
+    assert.strictEqual(rewritten.pid, process.pid, "the lock now names a process that exists");
+    assert.strictEqual(rewritten.runId, run, "and it still names the same run, so the ledger's memory survives");
+
+    assert.strictEqual(releaseRunLock(), true, "the process that wrote it removes it");
+    assert.strictEqual(
+      await fs.promises.stat(lockPath).then(() => true, () => false),
+      false,
+      "the ghost is gone, and the next run does not inherit it"
+    );
+
+    // C. Through act mode, which is where the live run actually hit this.
+    await fs.promises.writeFile(lockPath, ghostLock(), "utf8");
+    const calls = [];
+    const res = await delivery.runActPlan({ plan, state, runStep: forbiddenRunner(calls) });
+    assert.ok(calls.length > 0, `act mode started the step instead of joining the ghost: ${JSON.stringify(res)}`);
+    assert.strictEqual(
+      await fs.promises.stat(lockPath).then(() => true, () => false),
+      false,
+      "and it released the lock it wrote, rather than leaving a dead process's file for the next run to trip over"
+    );
+  } finally {
+    releaseRunLock();
+    await fs.promises.rm(lockPath, { force: true });
+    delete process.env.INDEX_RUN_ID;
+  }
+
+  console.log("  stale lock: a dead process's lock is replaced even when it carries this run's id");
 }
 
 // ─── 3: the step has spent its intervention budget ─────────────────────────────
@@ -714,6 +804,7 @@ async function testTicketClosesOnTheSameMeasurement() {
   fs.mkdirSync(FIXTURES, { recursive: true });
   await testTierCRefusedAtExecution();
   await testRefusesWhileAnotherRunIsGoing();
+  await testStaleLockFromTheSameRunIsReplaced();
   await testBudgetRefusalOpensATicket();
   await testThirdIdenticalAttemptIsRefused();
   await testTicketedResumeStepRunsNothing();
