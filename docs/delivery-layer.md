@@ -364,6 +364,32 @@ one reuses the id (gotcha 91). The lock lives in `POSTMORTEM_DIR`, not per serie
 runs of two different series collide; the answer is a separate `POSTMORTEM_DIR` per series, and the
 refusal says so. See gotcha 72.
 
+**The heartbeat, and the one move that ends a stuck run.** "A process exists" and "a process is making
+progress" are different questions, and for a layer meant to recover on its own the second one is the
+one that matters: a run wedged on a dead request and a run working through a long chapter both hold the
+lock under a live pid, and both used to produce the same refusal forever. So the lock carries
+`heartbeatAt` and `beats`, stamped by `ai/turn.js` at the start of every model turn and every ten
+seconds inside it — the only place that can tell *the endpoint is still answering* from *sitting on a
+dead connection*. A live holder quiet for `RUN_STALL_MINUTES` (90, deliberately longer than
+`AI_CALL_DEADLINE_MS`'s 60 minutes of silence, because a false "stalled" ends a healthy run and a false
+"still fine" only costs an hour) is reported as **stalled**: still a run in progress, still no second
+run on top of it, but the one kind this layer may end. `delivery.js --stop-run` is that move — the only
+one in the layer that acts on a process rather than on a file. It refuses a holder that is still making
+model calls, a pid this machine cannot check, and a holder that is already gone; report mode rehearses
+and signals nothing; act mode signals, waits, forces, confirms the pid is dead, and only then clears the
+claim. The manager is offered it only when the records say stalled, and `delivery/stop-run.js` refuses
+it again. It is recorded in the ledger as an intervention that does not spend the per-step repair
+budget. See gotcha 93.
+
+**Why a stopped run now stops completely.** Every runner here works in a child process, and Node ends
+the process that received a signal while leaving its children running. A terminal Ctrl-C reaches the
+whole process group and stops both, but `docker stop`, `kill <pid>`, a process manager, an OOM kill or a
+crash in the parent leaves the step working alone — still writing volume files, still holding the lock
+under a live pid, which every later run must refuse until a human deletes a file. `utils/shutdown.js`
+installs the watch in `index.js`, `delivery.js --mode=act`, `autopilot.js` and every gulp task: stop the
+children, wait for them, hand the claim back, exit 130/143. `isStopping()` is what keeps the step loops
+from cheerfully starting the next step after the current one was killed. See gotcha 92.
+
 **The structural-failure marker.** `isStructuralError` is an in-process flag
 (`err.structural === true`), and a child process cannot hand its error object back.
 `withStructuralMarker` in `gulpfile.js` writes
@@ -516,7 +542,8 @@ remember, decide, or start.
    that was tried. A duplicate id is named, because every lookup takes the first and half the record is
    unreachable. A plan naming a step nothing declares, or claiming an act pass with no execution list,
    is the run forgetting from the other direction. A lock left by a process that is gone is
-   `run-lock-stale` HIGH.
+   `run-lock-stale` HIGH; a lock whose holder is alive but has made no model call or tool call for
+   `RUN_STALL_MINUTES` is `run-lock-stalled` MEDIUM, and its message names the move that can end it.
 3. **Did the command do what its exit code says it did?** An exit 0 is a claim. `claimsFromInvocation`
    reads the claims off the command line and the exit code rather than taking them from the command
    being audited — a value a command threads down its own call stack is the command grading its own

@@ -38,7 +38,7 @@ index for working on it.
 | `npx gulp` (default) | All nine in order |
 | `npm start` | **The front door**: the manager driving the whole run (`node autopilot.js --mode=act`). It starts the pipeline through `delivery.js --mode=act`, and when a step fails it opens a ticket, gets a diagnosis, and retries. The rehearsal — decide and print, execute nothing — is `npm run autopilot` |
 | `npm run pipeline` | **The pipeline one step at a time** (`node index.js`): each step in its own process, each assessed, each recorded. `--stages=a,b`, `--post-mortem=off`, `--ledger=off`, `--fail-on=high\|medium\|never`, `--list` |
-| `npm run delivery` | **Where the run stopped, and what to do about it.** `--mode=report` (default) proposes nothing; `--mode=act` executes the plan through the gated step runner |
+| `npm run delivery` | **Where the run stopped, and what to do about it.** `--mode=report` (default) proposes nothing; `--mode=act` executes the plan through the gated step runner; `--mode=act --stop-run` ends a run that is alive but has stopped making progress, which is the only move that touches a process |
 | `npm run diagnose -- --ticket=<id>` | Answer a ticket with a **read-only** agent (it may open the code and the logs; it may not write) |
 | `npm run fix -- --ticket=<id>` | Answer a ticket with a **code change**, inside a boundary; the machine runs the pinned checks |
 | `npm run autopilot` | The manager driving the loop. Default `--mode=watch`: decide, print, write nothing |
@@ -66,7 +66,7 @@ Each map doc ends with a table of the **implementation folders** its module was 
 
 Code comments cite `AGENTS.md gotcha N`. The numbers are unchanged from when the gotchas were
 one file: the list now lives in the five `docs/gotchas-*.md` slices (1–20, 21–45, 46–63,
-64–69, 70–91), and each slice says which part of the list it holds.
+64–69, 70–93), and each slice says which part of the list it holds.
 
 ## 3. The implementation folders
 
