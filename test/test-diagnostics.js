@@ -245,10 +245,11 @@ async function scenarioOnlyReadToolsAreAdvertised() {
   // The tool note must promise the same three READ tools, for the same reason AGENTS.md gotcha 8
   // exists: a tool the sandbox will not honour is a step spent discovering that. The two memory
   // tools are named too, because the harness adds them to this role's set (utils/context.js) and a
-  // note that does not mention them leaves the agent to guess what they are for.
+  // note that does not mention them leaves the agent to guess what they are for. The answer button is
+  // named third because it is the fourth thing in the set and the only one that carries the answer.
   assert.ok(
-    /three senses and two memory tools/.test(diagnostics.DIAGNOSIS_TOOLS_NOTE),
-    "the note says how many tools there are, and separates the senses from the memory tools"
+    /three senses, two memory tools and one answer button/.test(diagnostics.DIAGNOSIS_TOOLS_NOTE),
+    "the note says how many tools there are, and separates the senses from the memory tools and the answer"
   );
   assert.ok(
     /no writeFile, no editFile, no deleteFile/.test(diagnostics.DIAGNOSIS_TOOLS_NOTE),
@@ -257,6 +258,80 @@ async function scenarioOnlyReadToolsAreAdvertised() {
   assert.ok(
     !diagnostics.DIAGNOSIS_TOOLS_NOTE.includes("writeFile(filePath)"),
     "the note does not describe a write tool as if the role had it"
+  );
+
+  // The answer arrives as a tool call, not as a block to scrape out of prose — and the note is the
+  // only place the role learns that. A role told to write JSON and given a button does the old,
+  // fragile thing; a role given the button and no JSON instruction does the new one.
+  assert.ok(
+    diagnostics.DIAGNOSIS_TOOLS_NOTE.includes(diagnostics.DIAGNOSIS_ANSWER_TOOL),
+    "the note names the answer button by the name the tool set actually registers"
+  );
+  assert.ok(
+    !/Answer with one fenced/.test(diagnostics.DIAGNOSIS_TOOLS_NOTE),
+    "the note does not also ask for the prose shape — two instructions, one followed"
+  );
+  assert.ok(
+    !/fenced ```json/.test(fsSync.readFileSync(path.join(__dirname, "..", "system-prompts", "diagnostics.md"), "utf8")),
+    "the system prompt does not ask for a fenced JSON block either (the prompt and the tools note cannot give two shapes)"
+  );
+
+  // The button's own shape: the five things every option must say are enforced by the provider, so a
+  // missing one is a tool error the role can answer again inside the same turn instead of a diagnosis
+  // that reaches a ticket half-written.
+  const answer = diagnostics.diagnosisAnswerTool();
+  assert.strictEqual(answer.name, "submit_diagnosis");
+  assert.strictEqual(answer.state.answer, null, "nothing is recorded until the role calls it");
+
+  const missingVerify = answer.tool.inputSchema.safeParse({
+    cause: "The gate compares the artifact with the copy before it.",
+    options: [{ label: "Re-run the step", touches: ["volume 02/glossary.md"], cost: "cheap", risk: "Nothing." }],
+  });
+  assert.strictEqual(missingVerify.success, false, "an option with no `verify` is refused before this code ever sees it");
+  assert.ok(
+    missingVerify.error.issues.some((issue) => issue.path.join(".") === "options.0.verify"),
+    `the refusal names the missing field: ${JSON.stringify(missingVerify.error.issues.map((i) => i.path.join(".")))}`
+  );
+  const inventedCost = answer.tool.inputSchema.safeParse({
+    cause: "The gate compares the artifact with the copy before it.",
+    options: [{ label: "Re-run the step", touches: ["volume 02/glossary.md"], cost: "moderate", risk: "Nothing.", verify: "The term count." }],
+  });
+  assert.strictEqual(inventedCost.success, false, "a cost word the channel does not use is refused (free / cheap / expensive)");
+  const noOptions = answer.tool.inputSchema.safeParse({ cause: "The gate compares the artifact with the copy before it.", options: [] });
+  assert.strictEqual(noOptions.success, false, "a diagnosis that offers nothing is refused at the call, not at the ticket");
+  const noCause = answer.tool.inputSchema.safeParse({
+    cause: "",
+    options: [{ label: "Re-run the step", touches: ["volume 02/glossary.md"], cost: "cheap", risk: "Nothing.", verify: "The term count." }],
+  });
+  assert.strictEqual(noCause.success, false, "an empty cause is refused: the role's whole job is the explanation");
+  const recorded = await answer.tool.execute(
+    {
+      cause: "The gate compares the artifact to the copy before it, and the copy was missing.",
+      options: [
+        {
+          label: "Re-run the step with the previous volume's artifact in place",
+          touches: ["volume 02/glossary.md"],
+          cost: "cheap",
+          risk: "Nothing: it re-does work that already ran.",
+          verify: "The term count in the volume 02 report goes up.",
+        },
+      ],
+      read: ["volume-02/glossary-validation.md"],
+    },
+    { toolCallId: "t1", messages: [] }
+  );
+  assert.match(recorded, /^RECORDED/, "the tool says plainly what happened to the answer");
+  assert.ok(answer.state.answer, "the answer is recorded at the moment it is given");
+  const second = await answer.tool.execute(
+    { cause: "again", options: [{ label: "x", touches: ["y"], cost: "free", risk: "z", verify: "w" }] },
+    { toolCallId: "t2", messages: [] }
+  );
+  assert.match(second, /^REFUSED/, "one answer per turn, enforced by the tool itself");
+  assert.strictEqual(answer.state.repeats, 1);
+  assert.strictEqual(answer.state.refusals.length, 1);
+  assert.ok(
+    answer.state.answer.options.length === 1 && answer.state.answer.cause.startsWith("The gate"),
+    "the first answer is the one kept"
   );
 
   // The role is uncapped now, so the working window is the size limit it actually has — and the note
@@ -780,15 +855,17 @@ async function scenarioRealTurnStaysReadOnly() {
 
     assert.ok(result.ok, `${result.error}\n${result.problems.map((p) => p.message).join("\n")}`);
 
-    // The advertised tool set on the wire: the three read tools plus the two memory tools the harness
-    // adds to a managed role. The prompt audit's rule that a tool the sandbox would always refuse
-    // must not be advertised (AGENTS.md gotcha 8) — asserted at the request, where the model actually
-    // sees it. `writeFile` / `editFile` / `deleteFile` are absent because `readOnlyFsTools` never
-    // hands them over, not because the gate is expected to catch them.
+    // The advertised tool set on the wire: the three read tools, the two memory tools the harness adds
+    // to a managed role, and the one answer button. The prompt audit's rule that a tool the sandbox
+    // would always refuse must not be advertised (AGENTS.md gotcha 8) — asserted at the request, where
+    // the model actually sees it. `writeFile` / `editFile` / `deleteFile` are absent because
+    // `readOnlyFsTools` never hands them over, not because the gate is expected to catch them. The
+    // answer button is the fourth entry and the only one that carries the diagnosis; it writes nothing
+    // to disk, which the byte-identical tree below is what actually proves.
     const advertised = (backend.requests[0].tools || []).map((t) => t.name ?? t.function?.name).filter(Boolean).sort();
     assert.deepStrictEqual(
       advertised,
-      ["grep", "listFiles", "manage_context", "readFile", "recall_memory"],
+      ["grep", "listFiles", "manage_context", "readFile", "recall_memory", "submit_diagnosis"],
       JSON.stringify(advertised)
     );
     assert.ok(backend.requests.length >= 3, "the turn really ran: reads, the refused write, then the answer");
@@ -833,6 +910,11 @@ async function scenarioRealTurnStaysReadOnly() {
     assert.ok(result.warnings.some((w) => w.kind === "outcome-only-verification"));
     assert.strictEqual(ticket.diagnosis.stateMovedDuringDiagnosis, false, "nothing else was writing this fixture");
     assert.strictEqual(ticket.diagnosis.attempts, 1);
+    // This scripted role answers in prose, and the backstop found it. The point of recording which
+    // half carried the answer is that both halves still work — the button is the door, the parser is
+    // the net under it, and a reader can tell which one was needed.
+    assert.strictEqual(ticket.diagnosis.answeredBy, "prose", "the prose backstop still catches an answer given the old way");
+    assert.deepStrictEqual(ticket.diagnosis.answerToolRefusals, [], "nothing was refused by the button on this turn");
     // The record of how the turn ran replaced the record of the cap it ran under. A turn that ran
     // under a cap this role no longer has would state a limit that does not exist.
     const shape = ticket.diagnosis.turnShape;
@@ -899,6 +981,90 @@ async function scenarioAnUnparseableAnswerIsAFailureNotAnEmptyDiagnosis() {
     const ticket = tickets.readTickets(paths.json).tickets[0];
     assert.strictEqual(ticket.diagnosis, undefined, "nothing was written to the ticket");
     assert.strictEqual(ticket.status, "open", "and it is still waiting for an answer");
+  } finally {
+    await backend.close();
+  }
+}
+
+// ─── 11c. The answer arrives through the button, not out of the prose ─────────
+
+/**
+ * The role calls `submit_diagnosis` and the ticket keeps what it passed. This is the path that
+ * replaces the scrape: the provider checks the fields before this code ever sees them, the answer is
+ * on the record before the turn's closing sentence exists, and a second call is refused by the tool
+ * rather than becoming a second diagnosis nobody assessed.
+ */
+async function scenarioTheAnswerArrivesAsAToolCall() {
+  const { root, seriesDir } = await fixtureRoot("answer-tool");
+  const paths = { json: path.join(root, "tickets.json"), markdown: path.join(root, "tickets.md") };
+  const created = tickets.createTicket(fixtureTicket(), paths);
+
+  const submitted = {
+    cause:
+      "The carry-forward gate compares the new glossary with the copy from the volume before it, and " +
+      "for this volume that copy was never written, so the comparison had nothing to compare against.",
+    options: [
+      {
+        label: "Re-run the glossary step with the previous volume's glossary in place",
+        touches: ["Test Story(15)/glossary.md"],
+        cost: "cheap",
+        risk: "Nothing: it repeats work that already ran.",
+        verify: "The term count in the volume 15 glossary report goes up.",
+      },
+    ],
+    recommend: "Re-run the glossary step with the previous volume's glossary in place",
+    questions: ["Was volume 15 meant to be in the series at all?"],
+    read: ["glossary.js"],
+    ownerNote: "",
+  };
+
+  const backend = await startFakeBackend({
+    model: "stub",
+    reply: (req) => {
+      const toolSteps = req.messages.filter((m) => m.role === "tool").length;
+      if (toolSteps === 0) return { text: "", toolCalls: [{ name: "readFile", arguments: { filePath: "glossary.js" } }] };
+      if (toolSteps === 1) return { text: "", toolCalls: [{ name: "submit_diagnosis", arguments: submitted }] };
+      if (toolSteps === 2) {
+        // The role tries to answer again, with a tidier cause. The tool refuses it.
+        return {
+          text: "",
+          toolCalls: [
+            { name: "submit_diagnosis", arguments: { ...submitted, cause: "A neater cause, written after the answer was already given." } },
+          ],
+        };
+      }
+      return { text: "That is the diagnosis." };
+    },
+  });
+  backend.pointEnvAt();
+  try {
+    const result = await diagnostics.diagnoseTicket({ ticketId: created.ticket.id, seriesDir, root, paths });
+    assert.ok(result.ok, `${result.error}\n${result.problems.map((p) => p.message).join("\n")}`);
+
+    const diagnosis = result.ticket.diagnosis;
+    assert.strictEqual(diagnosis.answeredBy, "tool", "the record says which half of the channel carried the answer");
+    assert.strictEqual(
+      diagnosis.cause,
+      submitted.cause,
+      "the answer is what was passed, not what a parser found in the reply"
+    );
+    const options = result.ticket.options;
+    assert.strictEqual(options.length, 1, JSON.stringify(options));
+    assert.strictEqual(options[0].verify, submitted.options[0].verify, "the five fields arrive intact");
+    assert.strictEqual(options[0].cost, "cheap");
+    assert.deepStrictEqual(diagnosis.questions, submitted.questions);
+    assert.deepStrictEqual(diagnosis.read, ["glossary.js"]);
+
+    // The second call is refused by the tool, and the refusal is recorded rather than swallowed.
+    assert.strictEqual(diagnosis.answerToolRefusals.length, 1, JSON.stringify(diagnosis.answerToolRefusals));
+    assert.strictEqual(diagnosis.answerToolRefusals[0].kind, "second-answer");
+    assert.ok(
+      !diagnosis.cause.includes("after the fact"),
+      "the first answer is the one the ticket keeps — a second one would be a diagnosis nobody assessed"
+    );
+
+    // And the ticket still went through the only door: the banned-option filter ran on the way in.
+    assert.ok(options[0].label, "the option is the one the manager is offered");
   } finally {
     await backend.close();
   }
@@ -985,6 +1151,7 @@ const scenarios = [
   ["a real turn leaves the fixture byte-identical", scenarioRealTurnStaysReadOnly],
   ["one diagnosis per ticket unless --reask", scenarioReaskingIsRefusedWithoutTheFlag],
   ["an unparseable answer is a failed check, not an empty diagnosis", scenarioAnUnparseableAnswerIsAFailureNotAnEmptyDiagnosis],
+  ["the answer arrives as a tool call, and a second one is refused", scenarioTheAnswerArrivesAsAToolCall],
   ["the CLI: exit codes and refusals", scenarioCli],
 ];
 

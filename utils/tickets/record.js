@@ -239,6 +239,12 @@ function recordDiagnosis(ticketId, reply, paths = ticketPaths()) {
     // limit that does not exist; the shape says how many pieces the turn needed and how it ended.
     turnShape: (reply && reply.turnShape) || null,
     usage: (reply && reply.usage) || null,
+    // How the answer reached the ticket: "tool" (the role called `submit_diagnosis`) or "prose" (the
+    // parser found the JSON block in its reply). Recorded because the fragile half of this channel is
+    // the prose scrape, and a ticket that keeps reading "prose" is a role not using the button it was
+    // given — which is the fact a reader needs before blaming the answer for being thin.
+    answeredBy: (reply && reply.answeredBy) || null,
+    answerToolRefusals: (reply && reply.answerToolRefusals) || [],
     stateMovedDuringDiagnosis: Boolean(reply && reply.stateMovedDuringDiagnosis),
     attempts: (prior && prior.attempts ? prior.attempts : 0) + 1,
     askedAgain: Boolean(prior),

@@ -334,6 +334,12 @@ function recordProposal(patchId, reply, paths = patchPaths()) {
   patch.problems = [];
   patch.usage = reply.usage || null;
   patch.turnShape = reply.turnShape || null;
+  // Which half of the channel carried the answer: "tool" (the team called `submit_proposal`) or
+  // "prose" (the parser found the JSON block in its reply). The second is the fragile one — it is the
+  // half that can lose a proposal after the working tree has already been changed — so a patch record
+  // that keeps reading "prose" is a team not using the button it was given.
+  patch.answeredBy = reply.answeredBy || null;
+  patch.answerToolRefusals = reply.answerToolRefusals || [];
   // The test chain as it stood before and after the turn, kept on the record. `validateProposalShape`
   // already refuses a chain that lost a suite, but the numbers behind that judgment belong next to the
   // proposal: a reader deciding whether to accept the patch is entitled to see what the pinned checks

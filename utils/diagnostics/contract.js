@@ -151,9 +151,9 @@ const DIAGNOSIS_TOOLS_NOTE = `
 
 ## Your tools (read-only — this is not a suggestion)
 
-You have three senses and two memory tools, and nothing else: \`readFile(filePath)\`,
-\`listFiles(dirPath)\`, \`grep(pattern, dirPath, glob?, ignoreCase?)\`, \`manage_context(note?)\` and
-\`recall_memory(query, limit?)\`.
+You have three senses, two memory tools and one answer button, and nothing else: \`readFile(filePath)\`,
+\`listFiles(dirPath)\`, \`grep(pattern, dirPath, glob?, ignoreCase?)\`, \`manage_context(note?)\`,
+\`recall_memory(query, limit?)\` and \`submit_diagnosis(cause, options, recommend?, questions?, read?, ownerNote?)\`.
 There is no writeFile, no editFile, no deleteFile. You cannot create, change or remove a file, and
 the sandbox refuses the attempt rather than ignoring it — an attempt is recorded on the ticket.
 
@@ -163,6 +163,16 @@ the sandbox refuses the attempt rather than ignoring it — an attempt is record
   the span, instead of paging through a whole document.
 - You may read anywhere in the project: the code, the prompts, the run transcripts under \`.logs/\`,
   every artifact, and the reports in \`.postmortem/\`.
+
+## How you answer
+
+Call \`submit_diagnosis\` with the fields your brief describes. Those arguments ARE the diagnosis: the
+channel records what you pass them, and the provider checks each one is there before the ticket ever
+sees it. A \`verify\` you forgot to fill in is a question you can answer again in the same turn; a JSON
+object you wrote into your prose is a diagnosis that may never be read at all.
+
+Call it once, after you have read enough to answer. A second call is refused — the first answer is the
+one the ticket keeps.
 
 ## Your working window (read this before you read anything)
 

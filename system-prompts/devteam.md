@@ -91,8 +91,9 @@ complaint is not the thing to fix — say that in `ownerNote` instead.
    in `files`. A file that changed without being named is refused outright — not
    reported later, refused. A file you name that you did not change is a warning
    you will have to explain.
-5. **Then write the report.** One fenced JSON block, the shape your tools note
-   gives you.
+5. **Then hand in the report.** Pass its fields as the arguments of the answer
+   tool your tools note names. The record keeps what you pass it; a report you
+   wrote into your prose is one a parser has to find first.
 
 ## What the report is for
 

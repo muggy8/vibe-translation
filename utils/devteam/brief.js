@@ -116,21 +116,26 @@ ends with a line saying how full that is:
 ## How to finish
 
 Work in one pass: grep to locate, read what you located, change it, then answer. Do not re-read a file
-you have already read — if you cannot recall what it said, search what you set aside. Then write the
-proposal as ONE fenced \`\`\`json block, exactly this shape:
+you have already read — if you cannot recall what it said, search what you set aside.
 
-\`\`\`json
-{
-  "files": ["glossary.js", "utils/prompt.js"],
-  "summary": "what changed, in language the manager can repeat",
-  "why": "the mechanism the patch fixes, not the finding it removes",
-  "couldBreak": "what this change could damage",
-  "expected": [{ "signal": "glossaryTerms", "direction": "up", "why": "why that number moves" }],
-  "verify": "how the manager checks it worked, using something a reader with no code access can look at",
-  "questions": ["what you need from the manager before this is committed"],
-  "ownerNote": "for the account owner alone, or an empty string"
-}
+Then hand in the proposal by calling \`submit_proposal\` with these arguments. They ARE the proposal:
+the record keeps what you pass them, and the provider checks each one is present before the patch file
+ever sees it. A proposal you wrote into your prose is one a parser has to find — after you have already
+edited files, which is how a changed working tree ends up with no record of what the team believed it
+had done.
+
 \`\`\`
+files       ["glossary.js", "utils/prompt.js"]  — every file the patch touched
+summary     what changed, in language the manager can repeat
+why         the mechanism the patch fixes, not the finding it removes
+couldBreak  what this change could damage
+expected    [{ signal, direction, why }] — what the patch expects to move in the deliverable
+verify      how the manager checks it worked, using something a reader with no code access can look at
+questions   what you need from the manager before this is committed
+ownerNote   for the account owner alone, or empty
+\`\`\`
+
+Call it once, after the change is made. A second call is refused — the record keeps the first.
 
 \`signal\` must be one of the names the acceptance test measures: ${patches.SIGNAL_NAMES.join(
   ", "

@@ -19,7 +19,7 @@ const patches = require("../patches");
 const tickets = require("../tickets");
 const { runTurnWithHooks, MANAGER_TASK } = require("../hooks");
 const { DEVTEAM_TOOLS_NOTE, loadSystemPrompt } = require("./brief");
-const { patchFsTools, collectPatchWriteAttempts } = require("./tools");
+const { patchFsTools, collectPatchWriteAttempts, proposalAnswerTool } = require("./tools");
 const { parseProposalReply } = require("./proposal");
 const { renderTicketForDev, evidenceFootprint } = require("./briefing");
 
@@ -103,6 +103,13 @@ async function workTicket({ ticketId, seriesDir, root = projectRoot, patchPaths 
 
   const gate = await patchFsTools({ cwd: root, allowedDirs: [root] });
 
+  // The proposal button, alongside the five file tools. It writes nothing, so the write boundary is
+  // still exactly the five tools the banned-path table is written against; what it changes is how the
+  // team's answer reaches the patch record — as arguments the provider checked, instead of a JSON
+  // block to find in prose after the files have already been edited.
+  const answer = proposalAnswerTool();
+  const toolSet = { ...gate.tools, [answer.name]: answer.tool };
+
   // `pre-manager` / `post-manager` fire HERE, around the turn, not in the CLI that typed the command.
   // Every refusal this module makes (unknown ticket, a tree somebody else already edited, a ticket
   // with no chosen option, a second team on one ticket) happens first, so a request that never reaches
@@ -117,15 +124,16 @@ async function workTicket({ ticketId, seriesDir, root = projectRoot, patchPaths 
       const agent = await harness.createAgentHandle({
         name: "devteam",
         systemPrompt: loadSystemPrompt() + DEVTEAM_TOOLS_NOTE,
-        tools: gate.tools,
+        tools: toolSet,
         approve: gate.approve,
         cwd: root,
         // The delivery-layer context management: no step cap, the working window is reported on every
         // tool answer, and old read answers are set aside on disk where they stay recallable
         // (`utils/context.js`). The harness adds `manage_context` / `recall_memory` to the tool set for
         // a managed role — this module does not add them itself, so the write gate still judges exactly
-        // the five file tools the banned-path table is written against (gotcha 75), and the two memory
-        // tools come in through the harness rather than as paths the sandbox was asked to approve.
+        // the five file tools the banned-path table is written against (gotcha 75), the two memory
+        // tools come in through the harness rather than as paths the sandbox was asked to approve, and
+        // the one extra tool in the set writes nothing.
         contextManagement: true,
       });
       try {
@@ -176,7 +184,11 @@ async function workTicket({ ticketId, seriesDir, root = projectRoot, patchPaths 
     };
   }
 
-  const parsed = parseProposalReply(result.text);
+  // The proposal arrives one of two ways, and the record says which one. The button is the door; the
+  // prose parser is the backstop that used to be the only door, and it stays fail-closed.
+  const submitted = answer.state.answer;
+  const parsed = submitted ? { proposal: submitted, problems: [] } : parseProposalReply(result.text);
+  const answeredBy = submitted ? "tool" : parsed.proposal ? "prose" : null;
   if (!parsed.proposal) {
     // No proposal, but the tree may already be changed. Say so, and say what is sitting in it.
     return {
@@ -209,6 +221,11 @@ async function workTicket({ ticketId, seriesDir, root = projectRoot, patchPaths 
       chain: { before: chainBefore.script, after: chainAfter.script },
       usage: result.usage || null,
       turnShape: turnShapeOf(result),
+      // "tool" or "prose": which half of the channel carried the answer. A patch record that keeps
+      // saying "prose" is a team not using the button it was given, and the prose scrape is the half
+      // that can lose a proposal after the files have already been changed.
+      answeredBy,
+      answerToolRefusals: answer.state.refusals,
     },
     patchPaths
   );

@@ -13,7 +13,7 @@ const { runTurnWithHooks, MANAGER_TASK } = require("../hooks");
 const { readTickets, ticketPaths, recordDiagnosis } = tickets;
 
 const { DIAGNOSIS_TOOLS_NOTE, ROOT } = require("./contract");
-const { readOnlyFsTools } = require("./tools");
+const { readOnlyFsTools, diagnosisAnswerTool } = require("./tools");
 const { loadSystemPrompt, renderTicketForDiagnosis } = require("./brief");
 const { parseDiagnosisReply, validateDiagnosisShape } = require("./shape");
 const { collectWriteAttempts, crossCheckReads, evidenceFootprint } = require("./reading");
@@ -114,6 +114,12 @@ async function diagnoseTicket({ ticketId, seriesDir, root = ROOT, reask = false,
 
   const gate = await readOnlyFsTools({ cwd: root, allowedDirs: [root] });
 
+  // The answer button, alongside the three senses. It is not a fourth sense and it is not a hand: it
+  // writes nothing to disk. It is the door the diagnosis comes through, so that the turn's answer is
+  // recorded as arguments the provider checked rather than as a JSON block to find in prose.
+  const answer = diagnosisAnswerTool();
+  const toolSet = { ...gate.tools, [answer.name]: answer.tool };
+
   // The role's read-only promise, checked against the disk rather than asserted: hash what the
   // ticket points at before the turn and again after it. `fingerprintFiles` is the same rule the QA
   // loop uses to tell a rewrite from a no-op (gotcha 65) — here it is the difference between
@@ -133,15 +139,16 @@ async function diagnoseTicket({ ticketId, seriesDir, root = ROOT, reask = false,
     const agent = await harness.createAgentHandle({
       name: "diagnostics",
       systemPrompt: loadSystemPrompt() + DIAGNOSIS_TOOLS_NOTE,
-      tools: gate.tools,
+      tools: toolSet,
       approve: gate.approve,
       cwd: root,
       // The delivery-layer context management: no step cap, the working window is reported on every
       // tool answer, and old read answers are set aside on disk where they stay recallable
       // (`utils/context.js`). The harness adds `manage_context` / `recall_memory` to the tool set for
       // a managed role — this module does not add them itself, so the read-only tool SET stays the
-      // three senses the contract pins (gotcha 74) and the two memory tools come in through the
-      // harness, which is also what keeps `collectWriteAttempts`' "not advertised" layer honest.
+      // three senses the contract pins (gotcha 74) plus the one answer button, and the two memory
+      // tools come in through the harness, which is also what keeps `collectWriteAttempts`'
+      // "not advertised" layer honest.
       contextManagement: true,
     });
     try {
@@ -166,7 +173,12 @@ async function diagnoseTicket({ ticketId, seriesDir, root = ROOT, reask = false,
   // data while it was being asked to explain it" is information the account owner should see.
   const attempts = collectWriteAttempts(gate.refusals, result.toolCalls);
 
-  const parsed = parseDiagnosisReply(result.text);
+  // The answer arrives one of two ways, and the record says which one. The button is the door; the
+  // prose parser is the backstop that used to be the only door, and it stays fail-closed: no call and
+  // no readable JSON is a refused answer, not a thin one.
+  const submitted = answer.state.answer;
+  const parsed = submitted ? { diagnosis: submitted, problems: [] } : parseDiagnosisReply(result.text);
+  const answeredBy = submitted ? "tool" : parsed.diagnosis ? "prose" : null;
   if (!parsed.diagnosis) {
     return {
       ok: false,
@@ -242,6 +254,12 @@ async function diagnoseTicket({ ticketId, seriesDir, root = ROOT, reask = false,
       // to set aside on disk, and how it ended.
       turnShape: turnShapeOf(result),
       usage: result.usage || null,
+      // "tool" when the role called `submit_diagnosis`, "prose" when it wrote the answer into its
+      // reply and the parser found it. Both are valid answers; the difference is which half of the
+      // channel did the work, and a ticket that keeps saying "prose" is a role that is not using the
+      // button it was given.
+      answeredBy,
+      answerToolRefusals: answer.state.refusals,
       stateMovedDuringDiagnosis: moved,
     },
     paths

@@ -295,8 +295,10 @@ function judgeProposal(proposal) {
  * @param {Object} [opts]
  * @param {Object} [opts.proposal] what the final answer proposes (null = answer with prose only)
  * @param {string[]} [opts.extraWrites] project-relative files the turn writes that it does not declare
+ * @param {"prose"|"tool"} [opts.via] which half of the channel carries the answer: the fenced JSON block
+ *   in the reply, or the `submit_proposal` call. Both are real paths; the record says which one ran.
  */
-function devTeamReply({ proposal = goodProposal(), extraWrites = [] } = {}) {
+function devTeamReply({ proposal = goodProposal(), extraWrites = [], via = "prose" } = {}) {
   return (req) => {
     const steps = req.messages.filter((m) => m.role === "assistant").length;
 
@@ -341,6 +343,17 @@ function devTeamReply({ proposal = goodProposal(), extraWrites = [] } = {}) {
 
     if (!proposal) {
       return { text: "I read the mechanism and ran out of room before writing the report." };
+    }
+    if (via === "tool") {
+      if (steps === 3) {
+        return {
+          text: "The change is made. Handing in the report.",
+          toolCalls: [{ name: devteam.PROPOSAL_ANSWER_TOOL, arguments: proposal }],
+        };
+      }
+      // The button answered. The turn says one sentence and stops — a scripted reply that kept
+      // calling the tool would be the repeat detector's problem, not the channel's.
+      return { text: "The report is in the record. Nothing further to change." };
     }
     return { text: proposalText(proposal) };
   };
@@ -601,6 +614,87 @@ async function scenarioTheToolNoteSaysWhatTheRoleHas() {
   );
   assert.ok(note.includes("## How to finish"), "the work-in-one-pass instruction survived the rewrite");
 
+  // The proposal is handed over by calling a tool, and the note is the only place the role learns
+  // that. A note that asks for a fenced JSON block AND offers a button gets the block.
+  assert.ok(
+    note.includes(devteam.PROPOSAL_ANSWER_TOOL),
+    "the note names the answer button by the name the tool set actually registers"
+  );
+  assert.ok(
+    !/ONE fenced/.test(note),
+    "the note does not also ask for the prose shape — two instructions, one followed"
+  );
+  assert.ok(
+    !/One fenced JSON block/.test(fs.readFileSync(path.join(__dirname, "..", "system-prompts", "devteam.md"), "utf8")),
+    "the system prompt does not ask for a fenced JSON block either"
+  );
+
+  // The button's own contract: `signal` is an enum of the names the acceptance test measures, so an
+  // invented scoreboard is refused at the call, and the fields the patch record needs are required
+  // before the record is ever reached.
+  const answer = devteam.proposalAnswerTool();
+  assert.strictEqual(answer.name, "submit_proposal");
+  assert.strictEqual(answer.state.answer, null, "nothing is recorded until the team calls it");
+  const inventedSignal = answer.tool.inputSchema.safeParse({
+    files: ["glossary.js"],
+    summary: "The gate now compares each cell instead of the whole row.",
+    why: "The comparison used one column where the finding was in another.",
+    couldBreak: "A glossary whose first column is a heading would stop being compared.",
+    expected: [{ signal: "aliasCount", direction: "up", why: "Because the comparison now sees aliases." }],
+    verify: "The alias line in the volume 15 glossary report.",
+  });
+  assert.strictEqual(inventedSignal.success, false, "a signal nobody measures is refused at the call (gotcha 73)");
+  assert.ok(
+    inventedSignal.error.issues.some((issue) => issue.path.join(".") === "expected.0.signal"),
+    `the refusal names the invented field: ${JSON.stringify(inventedSignal.error.issues.map((i) => i.path.join(".")))}`
+  );
+  const noFiles = answer.tool.inputSchema.safeParse({
+    summary: "Something changed.",
+    why: "The mechanism was wrong.",
+    couldBreak: "Nothing.",
+    expected: [{ signal: "glossaryTerms", direction: "up", why: "More terms survive." }],
+    verify: "The term count.",
+  });
+  assert.strictEqual(noFiles.success, false, "a proposal that names no file is refused: the tree is cross-checked against the names");
+  const noCouldBreak = answer.tool.inputSchema.safeParse({
+    files: ["glossary.js"],
+    summary: "Something changed.",
+    why: "The mechanism was wrong.",
+    couldBreak: "",
+    expected: [{ signal: "glossaryTerms", direction: "up", why: "More terms survive." }],
+    verify: "The term count.",
+  });
+  assert.strictEqual(noCouldBreak.success, false, "saying nothing about what it could damage is asking the customer to trust it");
+
+  const accepted = await answer.tool.execute(
+    {
+      files: ["glossary.js"],
+      summary: "The gate now compares each cell instead of the whole row.",
+      why: "The comparison used one column where the finding was in another.",
+      couldBreak: "A glossary whose first column is a heading stops being compared.",
+      expected: [{ signal: "glossaryTerms", direction: "up", why: "Terms that were skipped are now counted." }],
+      verify: "The term count in the volume 15 glossary report goes up.",
+    },
+    { toolCallId: "p1", messages: [] }
+  );
+  assert.match(accepted, /^RECORDED/);
+  assert.ok(answer.state.answer, "the proposal is on the record before the turn's closing sentence exists");
+  const again = await answer.tool.execute(
+    {
+      files: ["glossary.js"],
+      summary: "A tidier summary, written after the record already had one.",
+      why: "Same mechanism.",
+      couldBreak: "Nothing.",
+      expected: [{ signal: "glossaryTerms", direction: "up", why: "Same reason." }],
+      verify: "The term count.",
+    },
+    { toolCallId: "p2", messages: [] }
+  );
+  assert.match(again, /^REFUSED/, "one proposal per turn, enforced by the tool itself");
+  assert.strictEqual(answer.state.repeats, 1);
+  assert.strictEqual(answer.state.refusals[0].kind, "second-proposal");
+  assert.ok(answer.state.answer.summary.startsWith("The gate now compares"), "the first proposal is the one kept");
+
   for (const banned of [
     "utils/tickets.js",
     "utils/resume.js",
@@ -738,22 +832,84 @@ async function scenarioAWholeDevTurnRunsForReal() {
     assert.deepStrictEqual(result.patch.testChain.before, "node checks/green.js");
     assert.deepStrictEqual(result.patch.testChain.after, "node checks/green.js");
 
-    // The wire really advertised the five file tools plus the two memory tools the harness adds for this
-    // role, and nothing else. The memory tools are the harness's, not this module's: the write gate still
-    // judges exactly the five file tools the banned-path table is written against.
+    // The wire really advertised the five file tools, the two memory tools the harness adds for this
+    // role, and the one answer button — and nothing else. The memory tools are the harness's, not this
+    // module's: the write gate still judges exactly the five file tools the banned-path table is written
+    // against, and the answer button is not one of them because it writes nothing.
     const advertisedNames = backend.requests.map((r) =>
       (r.tools || []).map((t) => t.name ?? t.function?.name).filter(Boolean).sort().join(",")
     );
     assert.ok(advertisedNames.length >= 3, "reads, the edit, the refused writes, then the answer");
     for (const names of advertisedNames) {
-      assert.strictEqual(names, "editFile,grep,listFiles,manage_context,readFile,recall_memory,writeFile", names);
+      assert.strictEqual(
+        names,
+        "editFile,grep,listFiles,manage_context,readFile,recall_memory,submit_proposal,writeFile",
+        names
+      );
     }
+    assert.ok(
+      advertisedNames.every((names) => !names.includes("deleteFile")),
+      "the tool that removes a file is never offered (gotcha 8)"
+    );
+    // This scripted team answers in prose, and the backstop caught it. Both halves work; the record
+    // says which one was needed.
+    assert.strictEqual(result.patch.answeredBy, "prose", JSON.stringify(result.patch.answeredBy));
+    assert.deepStrictEqual(result.patch.answerToolRefusals, []);
 
     // And the manager's report says what the team tried.
     const report = fs.readFileSync(fx.patchPaths.markdown, "utf8");
     assert.ok(report.includes(result.patch.id));
     assert.ok(report.includes("utils/tickets.js"), "a refused write is visible to the reader who decides");
     assert.ok(report.includes("the tool set"));
+  } finally {
+    await backend.close();
+  }
+}
+
+// ─── 6b. The proposal arrives through the button, not out of the prose ────────
+
+/**
+ * The same turn, answering the other way: it calls `submit_proposal` and the patch record keeps what it
+ * passed. This matters more here than anywhere else in the delivery layer, because by the time this role
+ * answers it has already edited files. A proposal the parser could not find used to leave a changed
+ * working tree with no record of what the team believed it had done — the exact shape the
+ * declared-versus-actual cross-check exists to catch, arriving from the wrong side.
+ */
+async function scenarioTheProposalArrivesAsAToolCall() {
+  const { fx, ticket, option } = openChannel("answer-tool");
+  const backend = await startFakeBackend({ model: "stub", reply: devTeamReply({ via: "tool" }) });
+  backend.pointEnvAt();
+
+  try {
+    const result = await devteam.workTicket({
+      ticketId: ticket.id,
+      seriesDir: fx.seriesDir,
+      root: fx.root,
+      patchPaths: fx.patchPaths,
+      ticketsFile: fx.ticketPaths.json,
+    });
+
+    assert.ok(result.ok, result.error);
+    assert.strictEqual(result.patch.status, "proposed");
+    assert.strictEqual(result.patch.optionId, option.id);
+    assert.strictEqual(result.patch.answeredBy, "tool", "the record says the button carried the answer");
+    assert.deepStrictEqual(result.patch.answerToolRefusals, []);
+
+    // Nothing about the guarantee changed: the same fields, the same cross-checks, the same refusals,
+    // the same edit on disk. Only the door is different.
+    const proposal = goodProposal();
+    assert.strictEqual(result.patch.summary, proposal.summary);
+    assert.strictEqual(result.patch.why, proposal.why);
+    assert.strictEqual(result.patch.couldBreak, proposal.couldBreak);
+    assert.deepStrictEqual(result.patch.files, ["glossary.js"]);
+    assert.strictEqual(result.patch.expected[0].signal, "glossaryTerms");
+    assert.strictEqual(result.patch.refusedWrites.length, 2, "the write boundary still ran");
+    assert.deepStrictEqual(result.actualChanges, ["glossary.js"]);
+    assert.ok(
+      fs.readFileSync(path.join(fx.root, "glossary.js"), "utf8").includes("termSpans(termCell)"),
+      "the edit is the same edit"
+    );
+    assert.deepStrictEqual(result.warnings, [], "answering by tool is not itself a warning");
   } finally {
     await backend.close();
   }
@@ -1060,6 +1216,7 @@ const scenarios = [
   ["the tool note says what the role actually has", scenarioTheToolNoteSaysWhatTheRoleHas],
   ["the brief carries the ticket and names the tree it will edit", scenarioTheBriefCarriesTheTicketAndNamesTheTree],
   ["a whole dev turn: the edit lands, the banned write is recorded, the proposal is attached", scenarioAWholeDevTurnRunsForReal],
+  ["the proposal arrives as a tool call, and the record says so", scenarioTheProposalArrivesAsAToolCall],
   ["a dev turn may not start from a tree somebody else already edited", scenarioATurnMayNotStartFromSomebodyElsesEdits],
   ["a write the proposal does not name is refused, not discovered later", scenarioAnUndeclaredWriteIsRefused],
   ["a turn that dies part-way is an unfinished patch, not a clean refusal", scenarioATurnThatDiesPartWayIsReportedAsUnfinished],

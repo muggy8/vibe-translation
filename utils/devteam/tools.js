@@ -11,6 +11,8 @@
  */
 
 const path = require("path");
+const { tool } = require("ai");
+const { z } = require("zod");
 
 const harness = require("../../harness");
 const patches = require("../patches");
@@ -112,4 +114,101 @@ function collectPatchWriteAttempts(refusals, toolCalls, advertised = []) {
   return out;
 }
 
-module.exports = { patchFsTools, collectPatchWriteAttempts };
+/**
+ * The name of the button the dev team proposes with.
+ *
+ * Not a file tool: it writes nothing. It is how the proposal reaches the patch record.
+ */
+const PROPOSAL_ANSWER_TOOL = "submit_proposal";
+
+/**
+ * Build the dev team's proposal tool and the holder it records into.
+ *
+ * The same move `utils/manager/move-tools.js` made for the manager and
+ * `utils/diagnostics/tools.js` made for the diagnostics team, applied to the last delivery-layer
+ * answer that still arrived as text to be transcribed: the team wrote a fenced JSON block at the end
+ * of its reply and `parseProposalReply` had to find it.
+ *
+ * That scrape was the expensive one. This turn has already edited files by the time it answers, so a
+ * proposal nobody could read does not just waste the call — it leaves a changed working tree with no
+ * record of what the team believed it had done, which is the exact shape `recordProposal`'s
+ * declared-vs-actual cross-check exists to catch.
+ *
+ * The required fields are required HERE so the model can be told to answer again inside the same turn,
+ * and re-checked by `recordProposal` (utils/patches/proposal.js) before anything reaches the patch
+ * file. `signal` is an enum of the names the acceptance test actually measures: a scoreboard the team
+ * invented is refused at the tool call rather than at the record.
+ *
+ * @returns {{tool: Object, name: string, state: {answer: Object|null, repeats: number, refusals: Object[]}}}
+ *   `state.answer` is the submitted proposal (null when the team answered in prose instead).
+ */
+function proposalAnswerTool() {
+  /** @type {{answer: Object|null, repeats: number, refusals: Array<{kind: string, message: string}>}} */
+  const state = { answer: null, repeats: 0, refusals: [] };
+
+  const answerTool = tool({
+    description:
+      `Hand in your proposal. These arguments ARE the proposal: the fields the brief describes, passed ` +
+      `directly, so nothing has to be transcribed out of your prose.\n` +
+      `Call it once, after you have made the change. Calling it again is refused — the first proposal ` +
+      `is the one the patch record keeps. Name every file you touched: a file that changed without ` +
+      `being named is refused by the record, not by this tool.`,
+    inputSchema: z.object({
+      files: z
+        .array(z.string().min(1))
+        .min(1)
+        .describe("Every file the patch touched, relative to the project root. Cross-checked against the working tree."),
+      summary: z.string().min(1).describe("What changed, in language the manager can repeat. The manager cannot read the diff."),
+      why: z
+        .string()
+        .min(1)
+        .describe("The mechanism the patch fixes, not the finding it removes. A patch that only says what is different cannot be told apart from one that removed a check."),
+      couldBreak: z.string().min(1).describe("What this change could damage. Saying nothing is asking the customer to trust it."),
+      expected: z
+        .array(
+          z.object({
+            signal: z.enum([...patches.SIGNAL_NAMES]).describe(`One of the names the acceptance test measures: ${patches.SIGNAL_NAMES.join(", ")}.`),
+            direction: z.enum([...patches.SIGNAL_DIRECTIONS]).describe("up | down"),
+            why: z.string().min(1).describe("Why that number moves, because of this change."),
+          })
+        )
+        .min(1)
+        .describe("What the patch expects to move in the deliverable. A signal nobody measures is refused."),
+      verify: z
+        .string()
+        .min(1)
+        .describe("How the manager checks it worked afterwards — a folder listing, a term count, a report, the published text."),
+      questions: z.array(z.string().min(1)).optional().describe("What you need from the manager before this is committed."),
+      ownerNote: z
+        .string()
+        .optional()
+        .describe("For the account owner alone: the change you believe is right but may not make yourself."),
+    }),
+    execute: async (input) => {
+      if (state.answer) {
+        state.repeats += 1;
+        const message =
+          `REFUSED: a proposal for this patch is already recorded ("${String(state.answer.summary || "").slice(0, 120)}"). ` +
+          `One proposal per turn — the record keeps the first, and a second one would be a change nobody ` +
+          `assessed. Write your closing sentence and stop.`;
+        state.refusals.push({ kind: "second-proposal", message });
+        harness.logLine(`  [devteam] ${PROPOSAL_ANSWER_TOOL} called a second time — refused.`);
+        return message;
+      }
+      state.answer = input;
+      harness.logLine(
+        `  [devteam] ${PROPOSAL_ANSWER_TOOL}: proposal submitted as tool arguments ` +
+          `(${(input.files || []).length} file(s) named, ${(input.expected || []).length} expected signal(s)).`
+      );
+      return (
+        `RECORDED. The machine now diffs your proposal against the working tree, runs the pinned checks ` +
+        `itself, and writes the patch record. Call nothing else.`
+      );
+    },
+  });
+
+  return { tool: answerTool, name: PROPOSAL_ANSWER_TOOL, state };
+}
+
+module.exports = { patchFsTools, collectPatchWriteAttempts, PROPOSAL_ANSWER_TOOL, proposalAnswerTool };
+

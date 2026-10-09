@@ -72,6 +72,8 @@ module.exports = {
   loadSystemPrompt: brief.loadSystemPrompt,
   patchFsTools: tools.patchFsTools,
   collectPatchWriteAttempts: tools.collectPatchWriteAttempts,
+  PROPOSAL_ANSWER_TOOL: tools.PROPOSAL_ANSWER_TOOL,
+  proposalAnswerTool: tools.proposalAnswerTool,
   parseProposalReply: proposal.parseProposalReply,
   renderTicketForDev: briefing.renderTicketForDev,
   evidenceFootprint: briefing.evidenceFootprint,

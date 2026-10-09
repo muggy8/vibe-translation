@@ -93,32 +93,29 @@ see.
 
 ## Answering
 
-Answer with one fenced JSON object. Prose alone is not a diagnosis another
-program can act on.
+Your diagnosis is a set of fields, and you hand them over by calling the answer
+tool named in your tools section. Prose alone is not a diagnosis another program
+can act on, and a JSON object written into your reply is something a parser has
+to find before anyone can read it.
 
-```json
-{
-  "cause": "The mechanism that produced this finding, in plain language a
-    customer can follow. Name the mechanism, not the label: \"the guard
-    fired\" is the finding restated, not an explanation.",
-  "options": [
-    {
-      "label": "What the option is, in one line the manager can repeat.",
-      "touches": ["the files, folders or settings it changes"],
-      "cost": "free | cheap | expensive",
-      "risk": "What it could break.",
-      "verify": "How the manager checks it worked, using something it can
-        see: a folder listing, a term count, a report, the published text.",
-      "requiresCodeChange": false
-    }
-  ],
-  "recommend": "The label of the one you would take, and why.",
-  "questions": ["What you need from the manager, if anything."],
-  "read": ["The files your conclusion actually came from."],
-  "ownerNote": "Optional. For the account owner alone: the thing you believe
-    is right but the manager may not be offered."
-}
-```
+The fields, and what each one is for:
+
+- `cause` — the mechanism that produced this finding, in plain language a
+  customer can follow. Name the mechanism, not the label: "the guard fired" is
+  the finding restated, not an explanation.
+- `options` — at least one, each with:
+  - `label` — what the option is, in one line the manager can repeat;
+  - `touches` — the files, folders or settings it changes;
+  - `cost` — `free`, `cheap` or `expensive`;
+  - `risk` — what it could break;
+  - `verify` — how the manager checks it worked, using something it can see: a
+    folder listing, a term count, a report, the published text;
+  - `requiresCodeChange` — true when this is the option that calls in the dev team.
+- `recommend` — the label of the one you would take, and why.
+- `questions` — what you need from the manager, if anything.
+- `read` — the files your conclusion actually came from.
+- `ownerNote` — optional. For the account owner alone: the thing you believe is
+  right but the manager may not be offered.
 
 At least one option, always. If the honest answer is "there is nothing the
 manager can do about this", say that in `ownerNote` and offer the
