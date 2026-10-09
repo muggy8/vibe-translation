@@ -255,6 +255,17 @@ Four rules in it are load-bearing, and each one is a mistake this module actuall
   the ledger says already survived a recorded run — all become **`open-ticket`**, not a re-run. The
   plan says out loud that re-running reproduces the quarantine, because a refusal that does not
   name the spin just looks like caution.
+- **An attempt that did not help is read off the ledger, because the disk cannot say it.** A step
+  killed part-way through its work leaves a folder that looks exactly like "the work was never
+  done", and a step that ran to the end and was refused by its own gate leaves a quarantine. Only
+  the ledger distinguishes "nothing has been tried yet" from "something was tried, it cost a real
+  step's worth of model calls, and the deliverable did not move" — so `unhelpfulInterventions`
+  reads this run's `intervention` entries for the resume step that ended `unchanged` or `worse`,
+  and the plan becomes `open-ticket` (`attempt-did-not-help`) rather than a second attempt. An
+  attempt that `improved` is not evidence against anything, and a different step's failed attempt
+  does not spend this one's — the same per-step rule the budget uses. This is what lets the
+  autopilot keep going after a failure without turning that into paying for the same step twice
+  (gotcha 90).
 
 `DELIVERY_ACTIONS` is the closed menu the plan may name, and `countsAsIntervention` on each entry is
 where the account owner's decision of 2026-10-05 lives: **picking up unfinished work is not an
@@ -378,6 +389,18 @@ out by spawning the account owner's own command in its own process.
   separately would let the manager pick one and skip the cascade, and a skipped cascade is worse than
   a re-run: the later volumes stay built on the artifact that was just repaired. The label names the
   steps the sequence then runs, so the manager is choosing a sequence, not a step.
+- **A failed step is re-read, not retried.** A command that exits "it did not finish" does not end
+  the loop: the step ran, the ledger recorded what it produced, and the next reading is where the
+  triage is allowed to say the answer for that step is now a question. Quitting at the failure is
+  what made a real run look unrecoverable — the manager spent its one allowed attempt, the attempt
+  produced the evidence that the answer is a code question, and the loop ended before that evidence
+  could be read, so the diagnostics team was never called and the dev team was never reachable. Two
+  exits ARE a stop, and neither is a step that failed: a command that could not be started, and
+  exit 2, where the request itself was refused — re-asking for an illegal move is a guard with a
+  retry button on it (gotcha 70). `movesAfterFailures` is the matching half: the step this
+  invocation already ran and lost does not get a second `run` move, so the only thing "keep going"
+  can lead to is the ladder that already exists — ticket → diagnostics → a code change, or an
+  escalation that says the account owner has to decide (gotcha 90).
 - **Watch mode is the default, and it writes nothing.** No ticket, no ledger entry, no plan file, no
   run lock — it prints the decision, the whole menu it was offered, and the exact command act mode
   would have run. That is the only safe rehearsal: act mode refuses `--no-write` with `--mode=act`
