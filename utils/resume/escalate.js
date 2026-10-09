@@ -70,7 +70,7 @@ function openChannels(state, step, volume) {
  */
 function escalatorFor({ plan, notes, channelFor }) {
   /**
-   * @param {("gate-removed"|"audit-verdict"|"recurring-finding"|"intervention-budget")} kind - Which
+   * @param {("gate-removed"|"audit-verdict"|"recurring-finding"|"attempt-did-not-help"|"intervention-budget")} kind - Which
    *   check fired. Recorded on the plan so the report can name the reason, not just the no.
    * @param {string} subject - The short clause the headline and the reason both read.
    * @param {string[]} reasons - Why a re-run is the spin here.

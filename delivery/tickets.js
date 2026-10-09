@@ -141,6 +141,12 @@ function questionForEscalation(step) {
         `Why does ${finding} appear again on ${step.step}${vol} when the ledger records that the same finding ` +
         `survived an earlier recorded run? What is different this time, if anything?`
       );
+    case "attempt-did-not-help":
+      return (
+        `${step.step}${vol} was run as the plan proposed, and the ledger records that the deliverable did not ` +
+        `move afterwards. What is making ${step.step} fail in a way that removing ${step.step}'s output and ` +
+        `running the step again does not remove?`
+      );
     case "intervention-budget":
       return (
         `${step.step}${vol} has used the interventions it is allowed on one step in one run, and the deliverable ` +

@@ -7,6 +7,16 @@
  * volume folder (gotcha 66), and the iteration cap is the backstop on the manager, not on the
  * run.
  *
+ * **A failed step is a reason to re-read, not a reason to quit.** When a command the loop ran exits
+ * with "it did not finish", the loop continues to the next iteration: the step ran, the ledger
+ * recorded what it produced, and the re-read is where the triage is allowed to say the answer for
+ * that step is now a question. The loop does not get to try the same step twice in one invocation —
+ * `failedSteps` removes that move from the menu — so the only thing "keep going" can lead to is the
+ * investigation ladder (ticket → diagnostics → a code change, or an escalation to the account owner).
+ * Two exits ARE a stop, and neither is a step that failed: a command that could not be started, and
+ * exit 2, where the request itself was refused. Re-asking for an illegal move is a guard with a
+ * retry button on it (gotcha 70).
+ *
  * **One correction per decision, for a name written wrong rather than a move the state forbids.** The
  * manager decides by calling a tool, and the tool carries the ids — so the answers that used to die on
  * transcription (a 43-character ticket id, a step name copied as the sentence around it) cannot be
@@ -89,7 +99,10 @@ async function readTheRun({ seriesDir }) {
  *   this iteration just opened.
  * @param {string} args.seriesDir
  * @param {(line: string) => void} args.log
- * @returns {Promise<{ok: boolean, stop: boolean, note: string}>}
+ * @returns {Promise<{ok: boolean, stop: boolean, note: string, failedStep?: string|null, failedMove?: string|null}>}
+ *   `stop` is false when the move ran and simply did not finish: the loop re-reads and asks again.
+ *   `failedStep` names the step so the loop can refuse to offer the same run move twice in one
+ *   invocation, which is what keeps "keep going" from becoming "try the same thing again".
  */
 async function execute({ action, snapshot, tickets, seriesDir, log }) {
   const pending = snapshot.patches;
@@ -134,13 +147,48 @@ async function execute({ action, snapshot, tickets, seriesDir, log }) {
 
   const first = await runCommand(args, { seriesDir });
   if (first.code !== 0) {
+    // A command that stopped short is not a reason to end the loop — it is the reason the loop exists.
+    // The state has just changed (the step ran, the ledger recorded what it produced), and the next
+    // iteration reads that state and rebuilds the plan, which is the moment the triage is allowed to
+    // say "the answer for this step is now a question". Stopping here instead is what made a real run
+    // look unrecoverable: the manager had one move, spent it, and the loop quit before the evidence
+    // that move produced could be read.
+    //
+    // Two failures ARE a stop, and neither is a step that failed:
+    //   - the command could not be started at all (127), so there is no new state to read;
+    //   - exit 2, where the request ITSELF was refused — an action not on the closed menu, a
+    //     contradictory flag. Re-asking the manager for an illegal move is a guard with a retry
+    //     button on it (gotcha 70).
+    if (first.code === 127) {
+      return {
+        ok: false,
+        stop: true,
+        failedStep: null,
+        note:
+          `"${path.basename(args[0])}" could not be started${first.error ? ` (${first.error})` : ""}. ` +
+          `Nothing ran, so there is no new state to read and no decision to make on top of it.`,
+      };
+    }
+    if (first.code === 2) {
+      return {
+        ok: false,
+        stop: true,
+        failedStep: null,
+        note:
+          `"${path.basename(args[0])}" refused the request itself (exit 2). That is not a step that ` +
+          `failed; it is a move this state does not allow, and asking again for it is asking the manager ` +
+          `to phrase the same move until a guard flinches.`,
+      };
+    }
     return {
       ok: false,
-      stop: true,
+      stop: false,
+      failedStep: action.step || null,
+      failedMove: action.action,
       note:
-        `"${path.basename(args[0])}" exited ${first.code}${first.error ? ` (${first.error})` : ""}. ` +
-        `The loop stops here rather than spending another decision on a state it cannot describe. ` +
-        `Read what it left behind and run this command again — the loop is resumable.`,
+        `"${path.basename(args[0])}" exited ${first.code}. The loop continues rather than stopping: the ` +
+        `state has just changed, and the next reading decides whether the answer is another attempt or ` +
+        `the team that can see why it failed.`,
     };
   }
 
@@ -194,6 +242,32 @@ async function openTheTicketThePlanProposes({ plan, seriesDir, log }) {
 }
 
 /**
+ * The menu after this invocation has already run a step and lost it.
+ *
+ * `run` is the one move this removes, and only for the steps that just failed. It is not a budget and
+ * it is not a second ledger: it is what makes "the loop keeps going after a failure" mean *go and
+ * find out why* rather than *pay for the same step run again*. The triage reaches the same answer
+ * from the ledger (`attempt-did-not-help`); this is the same rule at the menu, so a plan that somehow
+ * still offered the run cannot spend a second attempt on it.
+ *
+ * Every other move survives untouched: the ticket ladder, the patch judgments, `escalate` and `end`.
+ * Those commands refuse their own repeats (`diagnose` will not re-answer an answered ticket without
+ * `--reask`, `fix` refuses when a patch already exists), so they need no help from here.
+ *
+ * @param {Object} args
+ * @param {import("./utils/manager").ManagerMove[]} args.moves - The menu the state supports.
+ * @param {Set<string>} args.failedSteps - Steps this invocation ran and lost.
+ * @returns {{moves: import("./utils/manager").ManagerMove[], removed: import("./utils/manager").ManagerMove[]}}
+ */
+function movesAfterFailures({ moves, failedSteps }) {
+  if (!failedSteps || !failedSteps.size) return { moves, removed: [] };
+  const removed = moves.filter((m) => m.kind === "run" && failedSteps.has(m.step));
+  if (!removed.length) return { moves, removed: [] };
+  return { moves: moves.filter((m) => !(m.kind === "run" && failedSteps.has(m.step))), removed };
+}
+
+
+/**
  * The loop.
  *
  * @param {Object} opts
@@ -206,6 +280,12 @@ async function openTheTicketThePlanProposes({ plan, seriesDir, log }) {
 async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.log(`[autopilot] ${line}`) }) {
   const decisions = [];
   const acting = mode === "act";
+  // The steps this invocation has already run and lost. It is not a budget and not a memory — it is
+  // the loop's own record of what it just did, and it exists so that "the loop keeps going after a
+  // failure" cannot become "the loop re-runs the step that just failed". The triage reads the ledger
+  // and turns that step into a question; this is the same rule enforced at the menu, so a plan that
+  // somehow still offered the run could not spend a second step run on it.
+  const failedSteps = new Set();
 
   log(`mode ${mode}: ${acting ? "the loop runs the moves it decides" : "the loop decides and prints, and touches nothing"}`);
 
@@ -250,7 +330,14 @@ async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.
       }
     }
 
-    const moves = offerMoves({ plan, tickets, patches: pending });
+    const offered = offerMoves({ plan, tickets, patches: pending });
+    const { moves, removed } = movesAfterFailures({ moves: offered, failedSteps });
+    if (removed.length) {
+      log(
+        `  ${removed.map((m) => m.step).join(", ")} was already run by this loop and did not finish. ` +
+          `Another attempt at it is not on the menu: the move now is the team that can read why it failed.`
+      );
+    }
 
     let decision = await manager.managerDecision({ plan, moves, tickets, patches: pending, log: (line) => log(line) });
 
@@ -347,6 +434,7 @@ async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.
 
     const done = await execute({ action, snapshot, tickets, seriesDir: plan.seriesDir, log: (line) => log(line) });
     if (done.note) log(done.note);
+    if (done.failedStep) failedSteps.add(done.failedStep);
     if (done.stop) {
       return { exitCode: done.ok ? 0 : 1, why: done.ok ? "the loop finished." : "the loop stopped.", decisions };
     }
@@ -362,4 +450,4 @@ async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.
   };
 }
 
-module.exports = { readTheRun, execute, openTheTicketThePlanProposes, runLoop };
+module.exports = { readTheRun, execute, openTheTicketThePlanProposes, movesAfterFailures, runLoop };

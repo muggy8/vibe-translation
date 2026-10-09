@@ -21,6 +21,10 @@
  *   7. a finding that survived an earlier recorded run → the "just re-run" advice is refused;
  *   8. the intervention budget is PER STEP — a step that has spent its attempts gets a ticket,
  *      and another step's exhausted budget does not spend this one's;
+ *   8b. an attempt that ended `unchanged` or `worse` turns the step into a question. The disk cannot
+ *      tell a failed repair from work that was never done — a step killed part-way leaves the same
+ *      folder either way — so this is read off the ledger, and it is what lets the autopilot keep
+ *      going after a failure without spending a second identical attempt;
  *   9. the triage reads its OWN correspondence (`tickets.json` / `patches.json`) — an open ticket
  *      is named rather than duplicated, an accepted/committed patch supersedes the escalation
  *      that was only true of the old code, a closed ticket whose closure measured `unchanged`
@@ -402,6 +406,11 @@ async function testInterventionBudgetIsPerStep() {
   // spend a step's allowance; `countsAsIntervention` on the menu entry is what decides, not the
   // ledger's `kind`, because act mode records everything it does and the budget is a separate
   // question from the audit trail.
+  //
+  // Every one of them `improved` on purpose. An attempt that did not help is a DIFFERENT tell — the
+  // triage turns that step into a question (see `testAttemptThatDidNotHelp`), and leaving an
+  // `unchanged` entry here would test that rule while this test is trying to say something about the
+  // budget being per step.
   for (let i = 0; i < 5; i += 1) {
     await appendLedgerEntry({
       run: "run-budget",
@@ -434,7 +443,7 @@ async function testInterventionBudgetIsPerStep() {
       volume: "02",
       finding: "missing-required",
       action: "re-run-step",
-      outcome: "unchanged",
+      outcome: "improved",
       decidedBy: "manager",
     });
   }
@@ -477,6 +486,94 @@ async function testInterventionBudgetIsPerStep() {
   assert.strictEqual(glossaryAgain.action, "none", "glossary is finished; its exhausted budget changes nothing about that");
 
   console.log("  intervention budget: per step — glossary's spent attempts do not spend character-voice's");
+}
+
+// ─── 8b: an attempt that did not help is read off the ledger, not off the disk ─
+
+async function testAttemptThatDidNotHelp() {
+  const fx = await completeSeries("attempt-did-not-help");
+  const vol2 = path.join(fx.dir, "Test Story(02)");
+  const breakVoice = async () => {
+    for (const e of STEP_ARTIFACT_SPECS["character-voice"].volume) {
+      await fs.promises.rm(path.join(vol2, e.name.replace("{installment}", "02")), { force: true });
+    }
+  };
+  await breakVoice();
+
+  // A. Nothing has been tried yet. The disk says "the work is unfinished", and the honest move is to
+  //    finish it. This is the SAME folder shape the next part uses, which is the point: the disk
+  //    cannot tell an attempt that failed from an attempt that never happened.
+  let plan = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+  let voice = plan.steps.find((s) => s.step === "character-voice");
+  assert.strictEqual(voice.actionName, "wipe-and-cascade", "with no recorded attempt, this is unfinished work, not a question");
+  assert.strictEqual(voice.escalation, null);
+
+  // B. One attempt was made on this step and the deliverable did not move.
+  await appendLedgerEntry({
+    run: "run-attempt",
+    kind: "intervention",
+    step: "character-voice",
+    volume: "02",
+    finding: "missing-required",
+    action: "wipe-and-cascade",
+    outcome: "unchanged",
+    decidedBy: "manager",
+  });
+  plan = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+  voice = plan.steps.find((s) => s.step === "character-voice");
+  assert.strictEqual(voice.action, "ticket", plan.headline);
+  assert.strictEqual(voice.actionName, "open-ticket");
+  assert.strictEqual(voice.escalation, "attempt-did-not-help", "the plan names WHICH check turned the repair into a question");
+  assert.deepStrictEqual(voice.wipeFirst, [], "a question removes nothing");
+  assert.strictEqual(voice.countsAsIntervention, false, "asking is not an intervention");
+  assert.ok(plan.headline.includes("did not move"), plan.headline);
+  assert.ok(
+    voice.reasons.some((r) => r.includes("run-attempt/character-voice/1") && r.includes("unchanged")),
+    `the reason cites the ledger entry it is reading: ${voice.reasons.join(" | ")}`
+  );
+  assert.ok(
+    voice.reasons.some((r) => r.includes("diagnostics team")),
+    `and it names who the next move belongs to: ${voice.reasons.join(" | ")}`
+  );
+  // The run move is gone from the plan, which is what takes it off the manager's menu.
+  assert.ok(!plan.steps.some((s) => s.action === "run" && s.step === "character-voice"), plan.markdown.slice(0, 500));
+
+  // C. An attempt that IMPROVED the deliverable is not evidence against anything. The same step, the
+  //    same finding, the same folder — and the repair stands.
+  await fs.promises.rm(path.join(fx.ledgerDir, "ledger.json"), { force: true });
+  await breakVoice();
+  await appendLedgerEntry({
+    run: "run-attempt-2",
+    kind: "intervention",
+    step: "character-voice",
+    volume: "02",
+    finding: "missing-required",
+    action: "wipe-and-cascade",
+    outcome: "improved",
+    decidedBy: "manager",
+  });
+  plan = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+  voice = plan.steps.find((s) => s.step === "character-voice");
+  assert.strictEqual(voice.actionName, "wipe-and-cascade", "an attempt that helped is not a reason to stop trying");
+  assert.strictEqual(voice.escalation, null);
+
+  // D. A different step's failed attempt does not spend this one's — the same rule the budget uses.
+  await fs.promises.rm(path.join(fx.ledgerDir, "ledger.json"), { force: true });
+  await appendLedgerEntry({
+    run: "run-attempt-3",
+    kind: "intervention",
+    step: "glossary",
+    volume: "02",
+    finding: "missing-required",
+    action: "wipe-and-cascade",
+    outcome: "worse",
+    decidedBy: "manager",
+  });
+  plan = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+  voice = plan.steps.find((s) => s.step === "character-voice");
+  assert.strictEqual(voice.actionName, "wipe-and-cascade", "glossary's failed attempt is not character-voice's history");
+
+  console.log("  attempt that did not help: the ledger is what tells a failed repair from unfinished work");
 }
 
 // ─── 9: the triage reads its own correspondence ───────────────────────────────
@@ -942,6 +1039,7 @@ async function testEscalationVerbs() {
   await testNoPlan();
   await testRecurringFindings();
   await testInterventionBudgetIsPerStep();
+  await testAttemptThatDidNotHelp();
   await testTriageReadsItsOwnCorrespondence();
   testActionMenu();
   delete process.env.POSTMORTEM_DIR;

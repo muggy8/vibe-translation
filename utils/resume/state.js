@@ -237,6 +237,48 @@ function interventionsUsed(entries, run) {
 
 
 /**
+ * The attempts this run already made on each step that did NOT move the deliverable, read out of
+ * the ledger.
+ *
+ * `interventionsUsed` counts attempts, which is the right thing for an allowance and the wrong
+ * thing for a decision: an attempt that `improved` is not evidence against anything, and an attempt
+ * that ended `unchanged` or `worse` is. This is the second question, and it is what lets the triage
+ * see a failed repair rather than only a spent budget.
+ *
+ * The distinction it exists to make: the loop is allowed to keep going after a step fails, and the
+ * thing that decides whether "keep going" means *try again* or *ask somebody who can read why* is
+ * this record. Without it the only way the triage learns an attempt failed is the disk shape that
+ * attempt happened to leave behind — and a step killed part-way through its work leaves a shape that
+ * looks exactly like "the work was never done".
+ *
+ * Only the newest recorded run counts, for the same reason the anti-spin count is per run: a real
+ * fix must not be frozen out of the next one.
+ *
+ * @param {Array<Object>} entries - Ledger entries.
+ * @param {string|null} run - The run to read.
+ * @returns {Object<string, Array<{id: string, action: string|null, finding: string|null, outcome: string}>>}
+ *   Step name -> the attempts that did not help, oldest first.
+ */
+function unhelpfulInterventions(entries, run) {
+  /** @type {Object<string, Array<{id: string, action: string|null, finding: string|null, outcome: string}>>} */
+  const out = {};
+  if (!run) return out;
+  for (const e of entries || []) {
+    if (!e || e.kind !== "intervention" || e.run !== run || !e.step) continue;
+    if (e.outcome !== "unchanged" && e.outcome !== "worse") continue;
+    if (!out[e.step]) out[e.step] = [];
+    out[e.step].push({
+      id: e.id,
+      action: e.action || null,
+      finding: e.finding || null,
+      outcome: e.outcome,
+    });
+  }
+  return out;
+}
+
+
+/**
  * Read everything a resume decision needs. No model call, no network, no writes.
  *
  * @param {Object} [opts]
@@ -245,7 +287,8 @@ function interventionsUsed(entries, run) {
  * @returns {Promise<{seriesDir: string, manifest: Object|null, manifestProblem: string|null,
  *   volumes: VolumeInventory[], stepStates: ResumeStepState[], recurring: Array,
  *   run: string|null, interventionsByStep: Object<string, number>, interventionBudget: number,
- *   ledgerError: string|null, tickets: Array, ticketsError: string|null,
+ *   unhelpfulInterventionsByStep: Object<string, Array>, ledgerError: string|null,
+ *   tickets: Array, ticketsError: string|null,
  *   patches: Array, patchesError: string|null, deliverable: Object|null}>}
  */
 async function readWorkingState({ seriesDir, manifest } = {}) {
@@ -335,6 +378,7 @@ async function readWorkingState({ seriesDir, manifest } = {}) {
     recurring: latestRun ? recurringFindings(entries, latestRun) : [],
     run: latestRun,
     interventionsByStep: interventionsUsed(entries, latestRun),
+    unhelpfulInterventionsByStep: unhelpfulInterventions(entries, latestRun),
     interventionBudget: maxInterventionsPerStep(),
     ledgerError: ledger.error || null,
     tickets: tickets.tickets,
@@ -356,5 +400,6 @@ module.exports = {
   readDeliverable,
   maxInterventionsPerStep,
   interventionsUsed,
+  unhelpfulInterventions,
   readWorkingState,
 };

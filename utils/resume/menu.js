@@ -67,6 +67,7 @@ const ESCALATION_HEADLINES = {
   "gate-removed": "that step's own gate removed this output, and a re-run reproduces the identical quarantine",
   "audit-verdict": "the audit's own verdict is the problem, and re-auditing unchanged artifacts reproduces it",
   "recurring-finding": "the ledger says a re-run of this step has already not cleared it",
+  "attempt-did-not-help": "this run already tried repairing it and the deliverable did not move",
   "intervention-budget": "this step has spent the intervention budget this run allows it",
 };
 

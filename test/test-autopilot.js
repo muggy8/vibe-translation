@@ -21,7 +21,12 @@
  *      guard with a retry button on it.
  *   4. **The loop takes no run lock of its own** — its children take their own — but it refuses to act
  *      beside a run that is already going.
- *   5. **An accept is the one move it will not take on the manager's word.**
+ *   5. **A step that failed is re-read, not retried.** A command that exits "it did not finish" does
+ *      not end the loop: the next iteration reads the state the failure produced, and that is where
+ *      the triage turns the step into a ticket. The step it lost is taken off the menu for the rest of
+ *      the invocation, so keeping going cannot become paying for the same step run twice. Exit 2 —
+ *      the request itself refused — and a command that could not be started ARE stops.
+ *   6. **An accept is the one move it will not take on the manager's word.**
  *
  * The manager's model call is stubbed at `harness.createAgentHandle`, which is the layer the real
  * `managerDecision` sits on: the shaped brief, the menu-as-tools, the tool that records the decision and
@@ -518,6 +523,74 @@ async function testActModeOpensTheTicket() {
   console.log("  act mode: the triage's question is written once, and the loop stops at the decision that belongs to a human");
 }
 
+// ─── 6b: a step that failed is re-read, not retried ───────────────────────────
+
+async function testFailedStepGoesToTheInvestigation() {
+  const fx = await brokenGlossarySeries("act-failed-then-investigate");
+  const snapshot = await autopilot.readTheRun({ seriesDir: fx.dir });
+  assert.strictEqual(snapshot.plan.steps.find((s) => s.step === "glossary").actionName, "open-ticket");
+
+  // A. The move ran and did not finish. The loop does not end: the state has just changed, and the
+  //    next reading is where the answer changes from "run it" to "ask somebody who can read why".
+  const failed = await autopilot.executeMove({
+    action: { action: "run", step: "glossary", reason: "the plan's sequence starts at glossary" },
+    snapshot,
+    tickets: snapshot.tickets,
+    seriesDir: fx.dir,
+    log: () => {},
+  });
+  assert.strictEqual(failed.ok, false, "the move did not finish");
+  assert.strictEqual(failed.stop, false, "and that is not a reason to end the loop");
+  assert.strictEqual(failed.failedStep, "glossary", "the loop records WHICH step it just lost");
+  assert.ok(failed.note.includes("The loop continues rather than stopping"), failed.note);
+  assert.ok(failed.note.includes("the next reading decides"), failed.note);
+
+  // B. That step does not get a second run move. Everything else on the menu survives.
+  const menu = autopilot.offerMoves({
+    plan: snapshot.plan,
+    tickets: [{ id: "TCK-1", status: "open", options: [], answers: [] }],
+    patches: [],
+  });
+  const withRun = [
+    { kind: "run", step: "glossary", label: "run glossary — wipe-and-cascade" },
+    { kind: "diagnose", ticket: "TCK-1", label: "diagnose TCK-1" },
+    { kind: "escalate", label: "escalate" },
+    { kind: "end", label: "end" },
+  ];
+  const filtered = autopilot.movesAfterFailures({ moves: withRun, failedSteps: new Set(["glossary"]) });
+  assert.deepStrictEqual(
+    filtered.removed.map((m) => m.kind),
+    ["run"],
+    "exactly the run move on the step that just failed"
+  );
+  assert.deepStrictEqual(
+    filtered.moves.map((m) => m.kind),
+    ["diagnose", "escalate", "end"],
+    "the investigation ladder, the escalation and the provable end are all still there"
+  );
+  assert.deepStrictEqual(
+    autopilot.movesAfterFailures({ moves: withRun, failedSteps: new Set(["style-guide"]) }).moves,
+    withRun,
+    "a different step's failure does not take this step's move off the menu"
+  );
+  assert.strictEqual(menu.length > 0, true, "the real menu still offers the ticket ladder on this state");
+
+  // C. An exit that refuses the REQUEST is a stop, not a re-read. Re-asking the manager for a move
+  //    the state forbids is a guard with a retry button on it (gotcha 70).
+  const refused = await autopilot.executeMove({
+    action: { action: "choose", ticket: "TCK-DOES-NOT-EXIST", option: "opt-9", reason: "a move that is not there" },
+    snapshot,
+    tickets: snapshot.tickets,
+    seriesDir: fx.dir,
+    log: () => {},
+  });
+  assert.strictEqual(refused.ok, false);
+  assert.strictEqual(refused.stop, true, "exit 2 is the request being refused, and that ends the loop");
+  assert.strictEqual(refused.failedStep, null, "nothing ran, so no step is marked as lost");
+
+  console.log("  failed step: the loop re-reads instead of quitting, and the step it lost is not offered twice");
+}
+
 // ─── 7: an accept is the one move it will not take on the manager's word ──────
 
 async function testUnattendedAcceptIsGated() {
@@ -756,6 +829,7 @@ function testCli() {
   await testIllegalDecisionStops();
   await testProvableEnd();
   await testActModeOpensTheTicket();
+  await testFailedStepGoesToTheInvestigation();
   await testUnattendedAcceptIsGated();
   await testRunLockIsRespected();
   await testIterationCap();

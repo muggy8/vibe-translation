@@ -1,5 +1,5 @@
 /**
- * The decision. The repair shape is computed FIRST, then the three 're-running reproduces the same
+ * The decision. The repair shape is computed FIRST, then the four 're-running reproduces the same
  * result' checks run through one escalate() helper that either overwrites the plan with a ticket or
  * is superseded by an answered ticket or a landed patch — deliberately NOT applied to the
  * intervention budget, because a code change cannot un-spend attempts this run already made.
@@ -8,7 +8,7 @@
  *   planResume            — pick the branch (no plan of record / nothing unfinished / resume here)
  *   resumeHere            — one step: choose its repair, then ask whether the repair is the spin
  *   chooseRepair          — the primitive, before anybody has objected to it
- *   raiseStructuralTells  — the three shapes where a re-run reproduces the same disk state
+ *   raiseStructuralTells  — the shapes where a re-run reproduces the same result
  *   spendInterventions    — the per-step allowance, the one tell a landed patch cannot supersede
  *
  * Where the reading of the state lives: ./triage.js. Where the ticket/patch channel lives: ./escalate.js.
@@ -304,9 +304,15 @@ function chooseRepair(plan, { state, fromVolume }) {
 
 
 /**
- * The three disk shapes where a re-run IS the spin — each one says "re-running this reproduces the
- * same result", and each one is asked THROUGH `escalate`, so a landed patch can supersede it and an
+ * The four shapes where a re-run IS the spin — each one says "re-running this reproduces the same
+ * result", and each one is asked THROUGH `escalate`, so a landed patch can supersede it and an
  * already-written ticket can be named instead of duplicated.
+ *
+ * Three of them are read off the disk (a gate removed the output, the audit's own verdict, a finding
+ * that survived an earlier run). The fourth is read off the ledger: an attempt this run already made
+ * on this step that ended `unchanged` or `worse`. It is the one the disk cannot say, and it is what
+ * lets the autopilot keep going after a failed step without turning that into a second identical
+ * attempt.
  *
  * @param {ResumeStepPlan} plan
  * @param {string[]} notes
@@ -372,6 +378,27 @@ function raiseStructuralTells(plan, notes, { state, resumeState, resumeStep, fro
       `the ledger says ${recurringHere.map((r) => `${r.finding} (${r.runs} runs)`).join(", ")} for this step already`,
       [
         "re-running it has not cleared it before, and the same action against the same finding is refused on the third attempt (utils/ledger.js).",
+      ]
+    );
+    return;
+  }
+
+  // Did an attempt in THIS run already fail on this step? This is the tell the disk cannot carry.
+  // A step killed part-way through its work leaves a folder that looks exactly like "the work was
+  // never done", and a step that ran to the end and was refused by its own gate leaves the quarantine
+  // that `gateRemovedIt` above reads. Only the ledger distinguishes "nothing has been tried yet" from
+  // "something was tried, it cost a real step's worth of model calls, and the deliverable did not
+  // move" — and without this the loop's only reading of a failed attempt is the shape it happened to
+  // leave on disk, which is the shape that invites a second identical attempt.
+  const unhelpful = (state.unhelpfulInterventionsByStep || {})[resumeStep] || [];
+  if (unhelpful.length) {
+    escalate(
+      "attempt-did-not-help",
+      `the ledger records ${unhelpful.length} attempt(s) on ${resumeStep} in this run that did not move the deliverable`,
+      [
+        unhelpful.map((a) => `${a.id} (${a.action || "action not named"} → ${a.outcome})`).join(", ") + ".",
+        "the deliverable is what the acceptance test measures, and it did not move: the attempt spent a step run and left the finding where it was (gotcha 69).",
+        "so the next move is not another attempt on this step. It is somebody who can read WHY the step fails, which is the diagnostics team and not this one.",
       ]
     );
   }

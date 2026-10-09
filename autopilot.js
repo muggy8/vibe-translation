@@ -87,6 +87,8 @@ module.exports = {
   ticketNamed: moves.ticketNamed,
   runCommand: commands.runCommand,
   readTheRun: loop.readTheRun,
+  executeMove: loop.execute,
+  movesAfterFailures: loop.movesAfterFailures,
   runLoop: loop.runLoop,
   main: cli.main,
   refusalFindings: cli.refusalFindings,
