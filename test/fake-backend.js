@@ -153,6 +153,27 @@ const FAILURE_KINDS = {
   serverError: (opts) => ({ status: 500, error: opts.error || "model container died" }),
   /** A server that will not stream (exercises runOneShot's non-streaming fallback). */
   noStreaming: () => ({ refuseStream: true, status: 500, error: "streaming unsupported by this server" }),
+  /**
+   * A server that honours `response_format` and could not fit the answer to it: HTTP 502
+   * with the code the real endpoint uses. `runOneShot` must tag it as a structured-output
+   * failure — not a size failure, and not "the model returned no content".
+   */
+  refusedShape: (opts) => ({
+    status: 502,
+    error: opts.error || "failed to generate structured output: answer does not match the schema",
+    errorCode: opts.errorCode || "structured_output_failed",
+  }),
+  /**
+   * The same refusal on the streaming path: the server answers 200, emits an error FRAME
+   * instead of any content, and closes. Nothing downstream sees it — the provider reads a
+   * stream with no parts in it — which is exactly the hole the SSE tap exists to catch.
+   */
+  refusedShapeStream: (opts) => ({
+    streamError: {
+      message: opts.error || "failed to generate structured output: answer does not match the schema",
+      code: opts.errorCode || "structured_output_failed",
+    },
+  }),
   /** A hung connection (exercises AI_CALL_DEADLINE_MS). */
   hang: () => ({ hang: true }),
   /** A server that reports no token usage (the calibration probe must fail softly). */
@@ -372,6 +393,9 @@ async function startFakeBackend({ model = "stub", reply = null } = {}) {
         temperature: body.temperature,
         reasoningEffort: body.reasoning_effort ?? null,
         chatTemplateKwargs: body.chat_template_kwargs ?? null,
+        // What shape the caller asked the answer to take. A test asserting that a grader
+        // actually asked for one checks this, because nothing else on the wire says so.
+        responseFormat: body.response_format ?? null,
         body,
         ...texts,
         at: Date.now(),
@@ -391,7 +415,14 @@ async function startFakeBackend({ model = "stub", reply = null } = {}) {
       if (answer.status && answer.status >= 400) {
         res.writeHead(answer.status, { "content-type": "application/json" });
         res.end(
-          JSON.stringify({ error: { message: answer.error || `fake-backend: scripted HTTP ${answer.status}` } })
+          JSON.stringify({
+            error: {
+              message: answer.error || `fake-backend: scripted HTTP ${answer.status}`,
+              // The code is the part a real server uses to name its own failure class, and the
+              // part the harness's tagging matches on.
+              ...(answer.errorCode ? { code: answer.errorCode } : {}),
+            },
+          })
         );
         return;
       }
@@ -402,6 +433,22 @@ async function startFakeBackend({ model = "stub", reply = null } = {}) {
       }
 
       const base = { id: `chatcmpl-fake-${answered}`, created: Math.floor(Date.now() / 1000), model: body.model };
+      if (answer.streamError && record.stream) {
+        // HTTP 200, an error FRAME instead of any content, then the stream closes. This is what
+        // a server that honours `response_format` does when the model cannot fit the shape — and
+        // the shape the provider layer cannot see, because a stream with no parts in it is not
+        // an error to it.
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        openResponses.add(res);
+        res.on("close", () => openResponses.delete(res));
+        res.write(`data: ${JSON.stringify({ ...base, error: answer.streamError })}\n\ndata: [DONE]\n\n`);
+        res.end();
+        return;
+      }
       if (record.stream) {
         res.writeHead(200, {
           "content-type": "text/event-stream",

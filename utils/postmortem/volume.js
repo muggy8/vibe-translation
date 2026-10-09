@@ -141,7 +141,7 @@ async function assessVolume({ spec, step, seriesDir, volumeEntry, ctx }) {
     );
   }
 
-  // 7: an acceptance state that was never accepted.
+  // 7: an acceptance state that was never accepted, and the grades that never arrived.
   for (const expectation of spec.volume) {
     if (expectation.shape !== "json" || !expectation.name.endsWith("-rolling-state.json")) continue;
     const name = expectation.name.replace("{installment}", installment);
@@ -157,6 +157,28 @@ async function assessVolume({ spec, step, seriesDir, volumeEntry, ctx }) {
           `${volumeEntry.folder}/${name}`,
           `the rolling window [${scores}] never met the acceptance criterion, and the ` +
             `volume was published anyway (ON_QA_LIMIT=accept). No grader signed this off.`
+        )
+      );
+    }
+    if (state && state.gradeFailures > 0) {
+      // Every grade that came back unusable is a failed check: it is dropped from the window
+      // (fail-closed) and costs the loop a full feedback rewrite of an artifact that may be fine.
+      // The window cannot show this on its own — an empty window looks identical whether the
+      // grader refused to answer or was never called — which is why the count is persisted
+      // beside the scores (see saveRollingState).
+      const every = state.gradeAttempts > 0 && state.gradeFailures >= state.gradeAttempts;
+      findings.push(
+        finding(
+          every ? "HIGH" : "MEDIUM",
+          "grade-failures",
+          step,
+          installment,
+          `${volumeEntry.folder}/${name}`,
+          `the grader was asked ${state.gradeAttempts} time(s) for this artifact and ` +
+            `${state.gradeFailures} answer(s) were unusable${every ? " — every single one" : ""}. ` +
+            `An unreadable grade is a failed check: it spends a QA iteration and rewrites an ` +
+            `artifact that may already be fine. Check the grader's one-shot in .logs/ for the reply ` +
+            `it actually produced.`
         )
       );
     }

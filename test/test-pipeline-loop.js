@@ -57,6 +57,7 @@ const { spawn } = require("child_process");
 const { startFakeBackend } = require("./fake-backend");
 const workflow = require("./fake-workflow");
 const { auditPromptLog, renderAuditReport } = require("./prompt-audit");
+const { acceptanceResponseFormat } = require("../configs/shared");
 
 const ROOT = path.resolve(__dirname, "..");
 const LOOP_DIR = process.env.PIPELINE_LOOP_DIR || "/tmp/opencode/pipeline-loop";
@@ -281,6 +282,9 @@ function buildWireLog(requests, answers, spans) {
         maxTokens: req.maxTokens ?? null,
         reasoningEffort: req.reasoningEffort,
         chatTemplateKwargs: req.chatTemplateKwargs,
+        // The answer shape the request asked for, if any. An audit rule reads this to
+        // check that the grading calls ask for it and the writing calls do not.
+        responseFormat: req.responseFormat ?? null,
       },
       tools: (req.tools || []).map((tool) => ({
         name: tool?.function?.name ?? tool?.name,
@@ -549,6 +553,7 @@ function runAuditSelfTest() {
         maxTokens: opts.maxTokens ?? 8192,
         reasoningEffort: opts.reasoningEffort ?? null,
         chatTemplateKwargs: opts.chatTemplateKwargs ?? null,
+        responseFormat: opts.responseFormat ?? null,
       },
       tools: opts.tools || [],
       messages,
@@ -588,12 +593,16 @@ function runAuditSelfTest() {
   const log = [];
   let i = 0;
 
+  // What a real grading call sends. The synthetic entries below are meant to look like the
+  // real traffic, so the audit's own rules can be checked against them.
+  const gradeShape = acceptanceResponseFormat();
+
   // 1. A tool argument the schema does not have (`text` instead of `content`).
   log.push(entry(i++, { stage: "glossary", system: authorSystem, user: authorUser(vol01), tools: fsTools, toolCalls: [{ name: "writeFile", arguments: { filePath: "glossary.md", text: "…" } }] }));
   // 2. A tool the model reached for that was never advertised.
   log.push(entry(i++, { stage: "glossary", system: authorSystem, user: authorUser(vol01), tools: fsTools, toolCalls: [{ name: "writeGlossary", arguments: { filePath: "glossary.md" } }] }));
   // 3. A tool-less grader handed tool schemas.
-  log.push(entry(i++, { stage: "glossary", system: sys("glossary-acceptance.md"), user: `Volume being processed: 01\n\n${workflow.glossaryMarkdown(vol01)}\n\n**Recommendation:** Pass`, tools: fsTools, answer: { text: '{"score":80,"band":"Pass","note":"ok"}' } }));
+  log.push(entry(i++, { stage: "glossary", system: sys("glossary-acceptance.md"), user: `Volume being processed: 01\n\n${workflow.glossaryMarkdown(vol01)}\n\n**Recommendation:** Pass`, tools: fsTools, responseFormat: gradeShape, answer: { text: '{"score":80,"band":"Pass","note":"ok"}' } }));
   // 4. The translator given a system prompt and the wrong sampling.
   log.push(
     entry(i++, {
@@ -691,7 +700,32 @@ function runAuditSelfTest() {
       user: `Volume being processed: 01\n\n${workflow.glossaryMarkdown(vol01)}\n\n**Recommendation:** Pass`,
       temperature: 0.2,
       reasoningEffort: "xhigh",
+      responseFormat: gradeShape,
       answer: { text: '{"score":80,"band":"Pass","note":"ok"}' },
+    })
+  );
+
+  // 13b. The answer shape in the wrong places: a grader that asks for prose and a
+  //      translator that is forced into an envelope. Both are invisible in the code —
+  //      one is a missing argument, the other is an argument that should not exist.
+  log.push(
+    entry(i++, {
+      stage: "glossary",
+      system: sys("glossary-acceptance.md"),
+      user: `Volume being processed: 01\n\n${workflow.glossaryMarkdown(vol01)}\n\n**Recommendation:** Pass`,
+      temperature: 0.2,
+      answer: { text: '{"score":80,"band":"Pass","note":"ok"}' },
+    })
+  );
+  log.push(
+    entry(i++, {
+      stage: "translate",
+      model: "stub-translate",
+      user: translateUser(vol01),
+      temperature: 0,
+      chatTemplateKwargs: fastMode,
+      responseFormat: gradeShape,
+      answer: { text: workflow.draftTextOf(vol01) },
     })
   );
 
@@ -722,6 +756,7 @@ function runAuditSelfTest() {
     "cross-volume-continuity",
     "translator-context",
     "judging-dialect",
+    "grade-answer-shape",
     "placeholder-leak",
     "stage-ordering",
     "answer-shape",

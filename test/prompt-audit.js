@@ -20,6 +20,8 @@
 const fs = require("fs");
 const path = require("path");
 
+const { acceptanceResponseFormat, ACCEPTANCE_BANDS } = require("../configs/shared");
+
 /** The token-calibration probe is a call of its own shape: one user message, no
  *  system prompt, `max_tokens: 1`, and the server's own usage count is the answer. */
 const CALIBRATION_KIND = "calibration-probe";
@@ -376,6 +378,61 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount }) {
   }
   if (acceptanceGaps.length) fail("acceptance-context", "an acceptance grader scored without the material it is supposed to score.", acceptanceGaps);
   else pass("acceptance-context", `${acceptanceCount} acceptance grade(s), each shown the artifact it judges and the validator's report.`);
+
+  // ─── 6b. The grade's answer shape: asked for on the wire, and still explained ──
+  // The acceptance rubric is now written into the request itself (`response_format`), which
+  // turns a wrong-shaped answer into a named refusal at the endpoint instead of a reply the
+  // parser has to guess at. Two ways that goes wrong, and the audit can see both only from
+  // the wire:
+  //   - the directive REPLACES the rubric. A schema says what shape the answer has; only the
+  //     prompt says what the score MEANS. A grader given the shape and not the rubric produces
+  //     a confident number with nothing behind it.
+  //   - it leaks. `response_format` and `tools` are mutually exclusive on this endpoint, so an
+  //     agent turn carrying it fails at the HTTP layer; and the translation role's deliverable
+  //     is prose, so a shape forced onto it is a contract change wearing a knob.
+  const declaredShape = acceptanceResponseFormat();
+  const answerShapeGaps = [];
+  let shapedGrades = 0;
+  for (const { entry, kind } of identified) {
+    const asked = entry.sampling ? entry.sampling.responseFormat : null;
+    if (kind === "acceptance") {
+      if (!declaredShape) continue; // ACCEPTANCE_STRUCTURED_OUTPUT=off: nothing to compare against
+      shapedGrades += 1;
+      if (!asked) {
+        answerShapeGaps.push(`#${entry.index} ${kind}: the grader asked for no answer shape, while the rubric declares one`);
+      } else if (JSON.stringify(asked) !== JSON.stringify(declaredShape)) {
+        answerShapeGaps.push(
+          `#${entry.index} ${kind}: asked for ${JSON.stringify(asked)}, not the shape the rubric declares ` +
+            `(${JSON.stringify(declaredShape)})`
+        );
+      }
+      // The rubric has to still be there. The schema constrains the envelope; the prompt is
+      // what makes 76 and 74 mean the same thing in two different runs.
+      const system = entry.systemText || "";
+      if (!/\b0 to 100\b/.test(system)) {
+        answerShapeGaps.push(`#${entry.index} ${kind}: its system prompt no longer states the 0–100 scale the schema's bounds come from`);
+      }
+      const missingBands = ACCEPTANCE_BANDS.filter((band) => !system.includes(band));
+      if (missingBands.length) {
+        answerShapeGaps.push(
+          `#${entry.index} ${kind}: the prompt does not name the band(s) the schema forces the answer to ` +
+            `choose between — ${missingBands.map((b) => `"${b}"`).join(", ")}. A band the model is made to ` +
+            `pick but was never told the meaning of is a coin flip with a label on it.`
+        );
+      }
+      continue;
+    }
+    if (asked) {
+      answerShapeGaps.push(
+        `#${entry.index} ${kind}: a ${kind} call sends response_format — it is not a grading call. ` +
+        `An agent turn cannot carry it on this endpoint (asking for it beside tools is an HTTP 400), ` +
+        `and the writing roles answer in prose.`
+      );
+    }
+  }
+  if (answerShapeGaps.length) fail("grade-answer-shape", "the answer shape asked for on the wire does not match the roles that are allowed to ask for it.", answerShapeGaps);
+  else if (!declaredShape) pass("grade-answer-shape", "ACCEPTANCE_STRUCTURED_OUTPUT=off: no call asks for a shape, and no call that must not ask for one does.");
+  else pass("grade-answer-shape", `${shapedGrades} grading call(s) ask for the rubric's own answer shape and still carry the rubric; no writing or agent call sends response_format.`);
 
   // ─── 7. No placeholder reached the model as literal text ────────────────────
   const leaks = [];

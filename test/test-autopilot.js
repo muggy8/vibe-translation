@@ -667,6 +667,50 @@ async function testIterationCap() {
   console.log("  iteration cap: legal and different is not the same as safe, and the cap is the wall for that case");
 }
 
+// ─── 9b: a refusal is a record, not only a line on the console ────────────────
+
+/**
+ * The loop prints a refusal, and the CLI turns it into a finding the after-run audit records.
+ * Checked as a pure function because the recording half lives at the process boundary (the audit),
+ * and the loop itself must keep its watch-mode promise: it writes nothing (gotcha 72).
+ */
+function testRefusalsBecomeFindings() {
+  const refused = {
+    iteration: 1,
+    action: null,
+    refusal: "the manager made no move: it called none of the 3 tool(s) it was offered and wrote nothing.",
+    kind: "no-move",
+    via: "none",
+    refusedFirst: null,
+  };
+  const out = autopilot.refusalFindings([refused]);
+  assert.strictEqual(out.length, 1, "a decision that produced no move is a finding, not a log line");
+  assert.strictEqual(out[0].kind, "manager-refused");
+  assert.strictEqual(out[0].severity, "HIGH", "the deciding role produced nothing usable — that is a defect, not a note");
+  assert.strictEqual(out[0].step, "autopilot", "it is attributed to the loop, so the triage can count it across runs");
+  assert.ok(out[0].message.includes("no-move"), out[0].message);
+  assert.ok(out[0].message.includes("called none of the tools"), "the finding says which half failed: no tool call at all");
+
+  const corrected = {
+    iteration: 1,
+    action: { action: "diagnose", ticket: "TCK-1", reason: "x" },
+    refusal: null,
+    kind: null,
+    via: "tool",
+    refusedFirst: { kind: "unknown-ticket", refusal: "there is no such ticket" },
+  };
+  const fixed = autopilot.refusalFindings([corrected]);
+  assert.strictEqual(fixed.length, 1, "a decision that needed correcting is worth counting");
+  assert.strictEqual(fixed[0].kind, "manager-corrected");
+  assert.strictEqual(fixed[0].severity, "LOW", "one correction is the design working; a run where every decision needs one is not");
+
+  const clean = { iteration: 1, action: { action: "end", reason: "x" }, refusal: null, kind: null, via: "tool", refusedFirst: null };
+  assert.deepStrictEqual(autopilot.refusalFindings([clean]), [], "a decision that made its move leaves nothing to report");
+  assert.deepStrictEqual(autopilot.refusalFindings([]), [], "no decisions, no findings");
+
+  console.log("  refusals: a manager that could not decide becomes a recorded finding, and one that needed correcting becomes a counted note");
+}
+
 // ─── 10: the CLI ──────────────────────────────────────────────────────────────
 
 function testCli() {
@@ -715,6 +759,7 @@ function testCli() {
   await testUnattendedAcceptIsGated();
   await testRunLockIsRespected();
   await testIterationCap();
+  testRefusalsBecomeFindings();
   testCli();
   fs.rmSync(HOOKS_DIR, { recursive: true, force: true });
   console.log("autopilot loop: ok");

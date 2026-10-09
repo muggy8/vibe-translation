@@ -20,7 +20,12 @@
  */
 
 const path = require("path");
-const { saveRollingState } = require("../../configs/shared");
+const {
+  saveRollingState,
+  loadRollingState,
+  newGradeTally,
+  gradeTallyFields,
+} = require("../../configs/shared");
 const { fingerprintFiles } = require("../fs");
 const { runQaAgentStage } = require("./turn");
 const { scoreAndConfirm } = require("./acceptance");
@@ -111,6 +116,10 @@ function defaultStalledLogLine(volumeLabel, files) {
 async function runPerChapterQaLoop(cfg) {
   const recentRollingScores = [];
   const stateFile = cfg.stateFile || cfg.validationOutputFile.replace(".md", "-rolling-state.json");
+  // Seeded from the state file this volume already has, so a grader that keeps failing
+  // to answer is a running count on disk rather than one log line per process (see
+  // utils/qa-loop/acceptance.js).
+  const gradeTally = newGradeTally(await loadRollingState(stateFile));
   const loop = { tools: cfg.tools, approve: cfg.approve, cwd: cfg.cwd, installment: cfg.installment };
 
   for (let iteration = 1; iteration <= cfg.maxIterations; iteration++) {
@@ -136,6 +145,7 @@ async function runPerChapterQaLoop(cfg) {
       stateFile,
       recentRollingScores,
       sourceFingerprint: cfg.sourceFingerprint,
+      tally: gradeTally,
       acceptanceCheck: cfg.acceptanceCheck,
       confirmationCheck: cfg.confirmationCheck,
     });
@@ -167,6 +177,7 @@ async function runPerChapterQaLoop(cfg) {
       await saveRollingState(stateFile, recentRollingScores, {
         sourceFingerprint: cfg.sourceFingerprint,
         stalled: true,
+        ...gradeTallyFields(gradeTally),
       });
       if (cfg.onQaLimit === "fail") {
         throw new Error(`${cfg.volumeLabel}: the feedback round applied nothing (ON_QA_LIMIT=fail).`);

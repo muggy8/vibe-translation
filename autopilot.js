@@ -89,6 +89,7 @@ module.exports = {
   readTheRun: loop.readTheRun,
   runLoop: loop.runLoop,
   main: cli.main,
+  refusalFindings: cli.refusalFindings,
 };
 
 if (require.main === module) {

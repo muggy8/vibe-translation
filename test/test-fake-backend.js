@@ -47,7 +47,7 @@ const harness = require("../harness");
 const ctxm = require("../utils/context");
 const { startFakeBackend } = require("./fake-backend");
 const { assertRealToolCalls } = require("../utils/agents");
-const { isTooBigForOnePassError } = require("../configs/shared");
+const { isTooBigForOnePassError, isStructuredOutputError } = require("../configs/shared");
 
 let passed = 0;
 function ok(name) {
@@ -537,6 +537,141 @@ async function scenarioFailureShapes() {
   }
 }
 
+// ─── 4b. Asking for a shape, and refusing one ─────────────────────────────────
+
+/**
+ * `response_format` is a detector, not a guarantee. What matters is what happens when the
+ * answer does not fit the shape that was asked for: the run has to say "the endpoint could not
+ * answer in the shape it was asked for", tag it as its own class (not a size failure, not an
+ * empty model), spend exactly the number of calls the retry setting promises, and keep the
+ * server's own reason instead of swallowing it.
+ */
+async function scenarioStructuredOutput() {
+  const endpointOf = (backend) => ({ baseUrl: backend.baseUrl, apiKey: "k", model: "stub" });
+  const SHAPE = { type: "json_object" };
+
+  // (a) The requested shape reaches the wire. Nothing else on the request says the caller asked
+  // for JSON, so this is the only place to check the option is not decorative.
+  {
+    const backend = await startFakeBackend({ model: "stub" });
+    backend.queue({ text: '{"score": 80}', finishReason: "stop" });
+    const text = await harness.runOneShot({
+      messages: [{ text: "grade this" }],
+      endpoint: endpointOf(backend),
+      responseFormat: SHAPE,
+      label: "grade-shape",
+    });
+    await backend.close();
+    assert.strictEqual(text, '{"score": 80}', "an answer that fits the shape is returned unchanged");
+    assert.deepStrictEqual(backend.requests[0].responseFormat, SHAPE, "response_format reached the request body");
+    ok("response_format rides in the request body, where the endpoint can actually see it");
+  }
+
+  // (b) A refused shape is its own failure class.
+  {
+    const backend = await startFakeBackend({ model: "stub" });
+    backend.fail("refusedShape");
+    let err = null;
+    try {
+      await harness.runOneShot({
+        messages: [{ text: "grade this" }],
+        endpoint: endpointOf(backend),
+        responseFormat: SHAPE,
+        label: "refused-shape",
+      });
+    } catch (e) {
+      err = e;
+    }
+    await backend.close();
+    assert.ok(err, "a refused shape throws");
+    assert.ok(isStructuredOutputError(err), `tagged as a structured-output failure: ${err.message}`);
+    assert.ok(
+      !isTooBigForOnePassError(err),
+      `and NOT as a size failure — splitting the request cannot fix a refused shape: ${err.message}`
+    );
+    assert.ok(
+      /structured_output_failed/.test(err.message),
+      `the server's own reason survives to the run log: ${err.message}`
+    );
+    ok("a refused answer shape is tagged as itself, not as a size problem or an empty model");
+  }
+
+  // (c) The attempt count means what it says: `retry: 2` is three calls to the endpoint, not
+  // three attempts each hiding a retry layer the harness never counted.
+  {
+    const backend = await startFakeBackend({ model: "stub" });
+    for (let i = 0; i < 3; i++) backend.fail("refusedShape");
+    let err = null;
+    try {
+      await quiet(() =>
+        harness.runOneShot({
+          messages: [{ text: "grade this" }],
+          endpoint: endpointOf(backend),
+          responseFormat: SHAPE,
+          retry: 2,
+          label: "refused-shape-retried",
+        })
+      );
+    } catch (e) {
+      err = e;
+    }
+    await backend.close();
+    assert.ok(isStructuredOutputError(err), err && err.message);
+    assert.strictEqual(
+      backend.requests.length,
+      3,
+      `retry: 2 must mean 3 endpoint calls; the endpoint saw ${backend.requests.length}`
+    );
+    ok("on the structured path the harness's own counter is the only retry");
+  }
+
+  // (d) The same refusal arriving as a frame INSIDE a 200 stream: the provider sees a stream
+  // with no parts in it, so without the fetch tap this is "the model returned no content".
+  {
+    const backend = await startFakeBackend({ model: "stub" });
+    backend.fail("refusedShapeStream");
+    let err = null;
+    try {
+      await quiet(() =>
+        harness.runOneShot({
+          messages: [{ text: "grade this" }],
+          endpoint: endpointOf(backend),
+          responseFormat: SHAPE,
+          label: "refused-shape-stream",
+        })
+      );
+    } catch (e) {
+      err = e;
+    }
+    await backend.close();
+    assert.ok(err, "a stream that carries an error frame and no content fails the call");
+    assert.ok(isStructuredOutputError(err), `tagged from the frame the stream carried: ${err.message}`);
+    assert.ok(
+      !/returned no content/.test(err.message),
+      `the reason survives instead of blaming the model for being empty: ${err.message}`
+    );
+    ok("an error frame inside a 200 stream is surfaced, not mistaken for an empty answer");
+  }
+
+  // (e) A shape is a request, not a licence to pass anything through: a bad option is refused
+  // before the call, because a silently-ignored `response_format` is the failure mode where the
+  // whole mechanism quietly stops existing.
+  {
+    let err = null;
+    try {
+      await harness.runOneShot({
+        messages: [{ text: "hi" }],
+        responseFormat: "json",
+        label: "bad-shape",
+      });
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err && /responseFormat must be a plain object/.test(err.message), err && err.message);
+    ok("a responseFormat that is not a plain object is refused at the call, not at the endpoint");
+  }
+}
+
 // ─── 5. The token-calibration probe runs against the stub ────────────────────
 
 async function scenarioCalibrationProbe() {
@@ -1012,6 +1147,7 @@ async function scenarioStageHandleDoesNotCompact() {
   await scenarioOneShot();
   await scenarioAgentWritesThroughRealTools();
   await scenarioFailureShapes();
+  await scenarioStructuredOutput();
   await scenarioCalibrationProbe();
   await scenarioRoleEndpoints();
   await scenarioModeFallback();

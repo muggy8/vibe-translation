@@ -367,6 +367,30 @@ const DEFECT_CASES = [
     severity: "MEDIUM",
   },
   {
+    label: "the grader never produced a readable grade for this artifact",
+    async plant(dir) {
+      await fs.writeFile(
+        path.join(dir, "Test Story(01)", "glossary-validation-rolling-state.json"),
+        JSON.stringify({ results: [], gradeAttempts: 4, gradeFailures: 4 }),
+        "utf8"
+      );
+    },
+    expect: "grade-failures",
+    severity: "HIGH",
+  },
+  {
+    label: "some grades arrived and one did not",
+    async plant(dir) {
+      await fs.writeFile(
+        path.join(dir, "Test Story(01)", "glossary-validation-rolling-state.json"),
+        JSON.stringify({ results: [78, 82], acceptedBy: "rolling-window", gradeAttempts: 4, gradeFailures: 1 }),
+        "utf8"
+      );
+    },
+    expect: "grade-failures",
+    severity: "MEDIUM",
+  },
+  {
     label: "the series-root copy is missing",
     async plant(dir) {
       await fs.rm(path.join(dir, "glossary.md"));

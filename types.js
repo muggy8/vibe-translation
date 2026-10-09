@@ -300,13 +300,16 @@
 
 /**
  * @typedef {Object} Taps
- * Accumulated SSE event diagnostics.
- * @property {number} startTime
- * @property {number} [firstTokenTime]
- * @property {string} [finishReason]
- * @property {string} text
- * @property {string} reasoning
- * @property {Object} [usage]
+ * The per-attempt diagnostics holder built by createTaps in ai/provider.js and read back
+ * by the event consumer: what the HTTP layer saw that the provider layer did not.
+ * @property {string[]} reasoning
+ * @property {number|null} firstToken
+ * @property {string|null} streamError — the server's own reason when it reported the failure
+ *   inside the response (an SSE `{"error": …}` frame or a non-2xx JSON body) instead of as an
+ *   error the provider would throw.
+ * @property {Promise|null} jsonReasoningReady
+ * @property {Promise|null} errorBodyReady
+ * @property {Function} markFirstToken
  */
 
 /**

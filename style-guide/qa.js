@@ -9,7 +9,7 @@ const fs = require("fs").promises;
 require("../types");
 const harness = require("../harness");
 const { parseAcceptanceReply, validatorMaxStepsFor } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking } = require("../configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking, acceptanceResponseFormat } = require("../configs/shared");
 const { assertRealToolCalls } = require("../utils/agents");
 const { runSharedQaLoop, runAuthorStage } = require("../utils/qa-loop");
 
@@ -112,7 +112,7 @@ async function runFeedback(ctx, seg = null, si = null) {
  */
 async function acceptanceCheck(ctx, iteration, temperature) {
   const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt, styleOutputFile } = ctx;
-  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: styleOutputFile, name: "style-guide.md" }, { file: validationOutputFile, name: "style-guide-validation.md" }, { text: acceptancePrompt }], temperature: temperature ?? judgeTemperature(), ...judgeThinking("ACCEPTANCE"), label: `style-guide-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
+  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: styleOutputFile, name: "style-guide.md" }, { file: validationOutputFile, name: "style-guide-validation.md" }, { text: acceptancePrompt }], temperature: temperature ?? judgeTemperature(), ...judgeThinking("ACCEPTANCE"), responseFormat: acceptanceResponseFormat(), label: `style-guide-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
   const reply = parseAcceptanceReply(acceptanceOutput);
   if (reply === null) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response (got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`);

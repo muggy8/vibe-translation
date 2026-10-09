@@ -657,10 +657,14 @@ function countFindings(findings) {
  * @param {string} [opts.seriesDir] - The series the command worked on, when it knows one.
  * @param {boolean} [opts.quiet] - Assess and record, but do not print.
  * @param {boolean} [opts.brief] - Print the verdict line only, not the findings. Used by autopilot,
- *   whose moves are child processes that each ran their own audit and printed their own findings.
+ *   whose moves are child commands that each ran their own audit and printed their own findings.
+ * @param {PostMortemFinding[]} [opts.extraFindings] - Findings the command already knows about and
+ *   the file checks cannot see — autopilot's refused manager decisions, for instance. They go into
+ *   the report and the ledger like any other finding, which is what makes "the manager could not
+ *   name a move" a recorded fact instead of a line on a console.
  * @returns {Promise<{report: PostMortemReport, recorded: boolean, error: string|null}>}
  */
-async function auditDeliveryRun({ step, argv, exitCode, seriesDir, quiet, brief }) {
+async function auditDeliveryRun({ step, argv, exitCode, seriesDir, quiet, brief, extraFindings }) {
   try {
     const { claims, checks } = claimsFromInvocation({ step, argv, exitCode });
 
@@ -676,6 +680,7 @@ async function auditDeliveryRun({ step, argv, exitCode, seriesDir, quiet, brief 
       ...planRecordFindings({ step, acting: claims.acting }),
       ...runLockFindings(step),
       ...claimFindings(checks, channels, step),
+      ...(Array.isArray(extraFindings) ? extraFindings : []),
     ];
 
     const counts = countFindings(findings);

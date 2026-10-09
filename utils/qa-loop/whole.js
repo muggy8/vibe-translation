@@ -9,7 +9,12 @@
  * Part of the utils/qa-loop.js layer (split out of the original single file).
  */
 
-const { saveRollingState } = require("../../configs/shared");
+const {
+  saveRollingState,
+  loadRollingState,
+  newGradeTally,
+  gradeTallyFields,
+} = require("../../configs/shared");
 const { fingerprintFiles } = require("../fs");
 const { runWriteTurn } = require("./turn");
 const { scoreAndConfirm } = require("./acceptance");
@@ -71,6 +76,12 @@ async function runSharedQaLoop(cfg) {
   const recentRollingScores = [];
   const { maxIterations, onQaLimit } = cfg;
 
+  // The grade tally starts from what this volume's state file already records, so a
+  // grader that keeps failing to produce a usable answer is a running count on disk
+  // and not one console line per process. A wipe deletes the state file, which resets
+  // the count — correctly, because the history belongs to the artifacts that were wiped.
+  const gradeTally = newGradeTally(await loadRollingState(cfg.stateFile));
+
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
     console.log(
       cfg.iterationLogLine
@@ -88,6 +99,7 @@ async function runSharedQaLoop(cfg) {
       stateFile: cfg.stateFile,
       recentRollingScores,
       sourceFingerprint: cfg.sourceFingerprint,
+      tally: gradeTally,
       acceptanceCheck: cfg.acceptanceCheck,
       confirmationCheck: cfg.confirmationCheck,
     });
@@ -102,7 +114,7 @@ async function runSharedQaLoop(cfg) {
 
     // Apply the feedback (task-specific stage), and stop if it applied nothing.
     console.log(cfg.feedbackLogLine());
-    const stalled = await feedbackAppliedNothing(cfg, iteration, recentRollingScores);
+    const stalled = await feedbackAppliedNothing(cfg, iteration, recentRollingScores, gradeTally);
     if (stalled) return stalled;
 
     if (iteration === maxIterations) return await hitIterationLimit(cfg, recentRollingScores);
@@ -152,10 +164,11 @@ async function runValidatorTurn(cfg, iteration) {
  * @param {SharedQaLoopCfg} cfg
  * @param {number} iteration
  * @param {number[]} scores - The rolling window, as it stands when the loop stops.
+ * @param {{attempts: number, failures: number}} tally - The loop's grade tally, persisted with the stalled flag.
  * @returns {Promise<Object|null>} The loop's return value when it stopped here, or null to continue.
  * @throws {Error} Only under ON_QA_LIMIT=fail.
  */
-async function feedbackAppliedNothing(cfg, iteration, scores) {
+async function feedbackAppliedNothing(cfg, iteration, scores, tally) {
   const watched = Array.isArray(cfg.feedbackArtifactFiles) ? cfg.feedbackArtifactFiles.filter(Boolean) : [];
   const before = watched.length ? await fingerprintFiles(watched) : null;
   await cfg.runFeedback(iteration);
@@ -171,6 +184,7 @@ async function feedbackAppliedNothing(cfg, iteration, scores) {
   await saveRollingState(cfg.stateFile, scores, {
     sourceFingerprint: cfg.sourceFingerprint,
     stalled: true,
+    ...gradeTallyFields(tally),
   });
   if (cfg.onQaLimit === "fail") {
     throw new Error(`${cfg.volumeLabel}: the feedback pass applied nothing (ON_QA_LIMIT=fail).`);

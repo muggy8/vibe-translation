@@ -19,6 +19,8 @@ const {
   meetsExceptionalCriteria,
   isExceptionalScore,
   saveRollingState,
+  gradeTallyFields,
+  tallyGrade,
 } = require("../../configs/shared");
 
 /**
@@ -45,11 +47,12 @@ const {
  *   volumeLabel: string,
  *   stateFile: string,
  *   sourceFingerprint?: string,
+ *   tally?: {attempts: number, failures: number},
  * }} p
  * @returns {Promise<{accepted: boolean, confirmations: Array<{score: number|null, temperature: number|null}>}>}
  *   `accepted` when the consensus held and the caller should stop its loop.
  */
-async function confirmExceptionalScore({ score, recentRollingScores, confirmationCheck, volumeLabel, stateFile, sourceFingerprint }) {
+async function confirmExceptionalScore({ score, recentRollingScores, confirmationCheck, volumeLabel, stateFile, sourceFingerprint, tally }) {
   if (score === null || !confirmationCheck || !isExceptionalScore(score)) {
     return { accepted: false, confirmations: [] };
   }
@@ -74,6 +77,10 @@ async function confirmExceptionalScore({ score, recentRollingScores, confirmatio
       score: Number.isFinite(confirmationScore) ? confirmationScore : null,
       temperature: confirmationTemperature,
     });
+    // A confirmation is a grade the loop paid for. When it comes back unusable the
+    // consensus cannot hold, and the reason it failed to hold belongs on the record
+    // next to the grades that did arrive.
+    tallyGrade(tally, confirmationScore);
   }
   // The confirmation scores are NOT pushed into the rolling window. They exist to
   // answer one question — was the exceptional grade real? — and if the answer is
@@ -95,6 +102,7 @@ async function confirmExceptionalScore({ score, recentRollingScores, confirmatio
       acceptedBy: "exceptional-consensus",
       deterministicScore: confirmations.find((c) => c.temperature === 0)?.score,
       confirmations: confirmations.map((c) => c.score),
+      ...gradeTallyFields(tally),
     });
     return { accepted: true, confirmations };
   }
@@ -105,6 +113,7 @@ async function confirmExceptionalScore({ score, recentRollingScores, confirmatio
   await saveRollingState(stateFile, recentRollingScores, {
     sourceFingerprint,
     rejectedConfirmations: confirmations.map((c) => c.score),
+    ...gradeTallyFields(tally),
   });
   return { accepted: false, confirmations };
 }
@@ -144,12 +153,13 @@ async function confirmExceptionalScore({ score, recentRollingScores, confirmatio
  *   volumeLabel: string,
  *   stateFile: string,
  *   sourceFingerprint?: string,
+ *   tally?: {attempts: number, failures: number},
  * }} p
  * @returns {Promise<{ran: boolean, accepted: boolean, confirmations: Array<{score: number|null, temperature: number|null}>}>}
  *   `ran` when re-grades were taken (the caller must NOT also run the feedback
  *   round for this iteration); `accepted` when the window now meets the criterion.
  */
-async function confirmPassingScore({ score, recentRollingScores, confirmationCheck, volumeLabel, stateFile, sourceFingerprint }) {
+async function confirmPassingScore({ score, recentRollingScores, confirmationCheck, volumeLabel, stateFile, sourceFingerprint, tally }) {
   if (!ACCEPTANCE_CONFIRM_ON_PASSING || !confirmationCheck) {
     return { ran: false, accepted: false, confirmations: [] };
   }
@@ -198,6 +208,7 @@ async function confirmPassingScore({ score, recentRollingScores, confirmationChe
       recentRollingScores.push(confirmationScore);
       if (recentRollingScores.length > ACCEPTANCE_WINDOW_SIZE) recentRollingScores.shift();
     }
+    tallyGrade(tally, confirmationScore);
   }
 
   const spread = confirmations
@@ -206,6 +217,7 @@ async function confirmPassingScore({ score, recentRollingScores, confirmationChe
   await saveRollingState(stateFile, recentRollingScores, {
     sourceFingerprint,
     confirmations: confirmations.map((c) => c.score),
+    ...gradeTallyFields(tally),
   });
 
   if (meetsAcceptanceCriteria(recentRollingScores)) {
@@ -220,6 +232,7 @@ async function confirmPassingScore({ score, recentRollingScores, confirmationChe
       acceptedBy: "passing-consensus",
       deterministicScore: confirmations.find((c) => c.temperature === 0)?.score,
       confirmations: confirmations.map((c) => c.score),
+      ...gradeTallyFields(tally),
     });
     return { ran: true, accepted: true, confirmations };
   }

@@ -55,6 +55,9 @@ const {
   structuralError,
   tooBigForOnePassError,
   isTooBigForOnePassError,
+  structuredOutputError,
+  isStructuredOutputError,
+  isStructuredOutputMessage,
   isStructuralError,
 } = require("../configs/shared");
 
@@ -351,6 +354,62 @@ const { runVolumeWithModeFallback } = require("../utils/qa-loop");
     assert.ok(!isTooBigForOnePassError(tagSizeOverflowError(new Error("fetch failed"), "t")), "a network error is not a size error");
     assert.ok(!isTooBigForOnePassError(tagSizeOverflowError(new Error("the model returned no content"), "t")), "an empty reply is not a size error");
     assert.ok(!isTooBigForOnePassError(tagSizeOverflowError(new Error("the turn made no progress for 60 min"), "t")), "a hang is not a size error");
+  }
+
+  // ─── 7b. the "could not answer in the shape it was asked for" error class ────
+
+  {
+    const { tagSizeOverflowError, tagStructuredOutputError } = require("../harness");
+
+    const shapeErr = structuredOutputError("refused shape");
+    assert.ok(isStructuredOutputError(shapeErr));
+    assert.ok(
+      !isTooBigForOnePassError(shapeErr),
+      "a refused shape is NOT a size failure — splitting the request cannot fix a request that was refused whole"
+    );
+    assert.ok(!isStructuralError(shapeErr), "and it is not structural either");
+    assert.ok(!isStructuredOutputError(new Error("ordinary")), "an ordinary error is not a shape error");
+
+    // The wording this machine's endpoint actually answers with (probed live).
+    assert.ok(
+      isStructuredOutputError(
+        tagStructuredOutputError(
+          new Error("HTTP 502: failed to generate structured output: answer does not match the schema code=structured_output_failed"),
+          "t"
+        )
+      ),
+      "the observed refusal is tagged"
+    );
+    assert.ok(
+      isStructuredOutputError(
+        tagStructuredOutputError(new Error("structured output was incomplete (finish_reason=length)"), "t")
+      ),
+      "a shape cut off at the output cap is the same class of failure"
+    );
+
+    // And the ones that must NOT be tagged, for the same reason the size patterns are kept
+    // narrow: a false match relabels the failure and the wrong recovery runs.
+    assert.ok(
+      !isStructuredOutputError(
+        tagStructuredOutputError(new Error("prompt (4337 tokens) + max tokens (262144) exceeds the context"), "t")
+      ),
+      "a size refusal is not a shape refusal"
+    );
+    assert.ok(!isStructuredOutputError(tagStructuredOutputError(new Error("model container died"), "t")), "a dead container is not a shape problem");
+    assert.ok(!isStructuredOutputError(tagStructuredOutputError(new Error("the model returned no content"), "t")), "an empty reply is not a shape problem");
+
+    // One tag per error. A tagged size error must stay a size error, or the whole→chaptered
+    // fallback starts acting on a failure it cannot repair.
+    const sized = tagSizeOverflowError(new Error("This model's maximum context length is 8192 tokens"), "t");
+    assert.ok(isTooBigForOnePassError(sized));
+    assert.ok(!isStructuredOutputError(tagStructuredOutputError(sized, "t")), "tagging is not cumulative");
+
+    // The transport layer (which decides when NOT to re-ask) and the tagger (which decides what
+    // class to report) read ONE list of patterns, so they cannot drift apart.
+    assert.ok(isStructuredOutputMessage("structured_output_failed"));
+    assert.ok(isStructuredOutputMessage("failed to generate structured output"));
+    assert.ok(!isStructuredOutputMessage("fetch failed"));
+    assert.ok(!isStructuredOutputMessage(""), "no text is no signature");
   }
 
   // ─── 8. wipe, then fall back — once ────────────────────────────────────────

@@ -20,6 +20,7 @@ const { tooBigForOnePassError } = require("../configs/shared");
 
 const { logFilePath, logLine, runDir, numberedLogFile } = require("./log");
 const { agentTextGuardChars } = require("./env");
+const { tagStructuredOutputError } = require("./endpoint");
 
 /**
  * Add two AI SDK usage objects together.
@@ -335,7 +336,22 @@ async function consumeEvents(
   } catch (err) {
     // A guard-triggered abort surfaces as an AbortError from the stream;
     // swallow it and fall through to the descriptive guard error below.
-    if (!guardTripped) throw err;
+    if (guardTripped) {
+      /* fall through to the guard error */
+    } else {
+      // The stream died. When the server put its reason INSIDE the stream (an error frame the
+      // parser could not turn into a part), the parser's own message is noise — "cannot read
+      // properties of undefined" says nothing about a request that was refused. The frame the
+      // fetch layer kept is the answer, so it is what the run reports.
+      const tapped = tapsRef.current?.streamError;
+      if (tapped) {
+        throw tagStructuredOutputError(
+          new Error(`${label}: the endpoint answered with an error instead of an answer: ${tapped}`),
+          label
+        );
+      }
+      throw err;
+    }
   } finally {
     // Clear the idle-deadline timer on every exit path (success, guard
     // trip, stream error) so it can never fire after the call finished.
@@ -400,6 +416,26 @@ async function consumeEvents(
 
   if (result.result === "error") {
     throw result.error ?? new Error(`The ${label} run ended in an error.`);
+  }
+  // A server that reported its failure INSIDE the response — an SSE `data: {"error": …}` frame —
+  // and then closed the stream normally. Measured against the scripted endpoint: the SDK reads a
+  // stream with no parts in it, emits no `error` event, and finishes the turn as a normal empty
+  // completion. So the reason dies in the transport layer unless the fetch tap kept it
+  // (see tapSseStream) — and this is where the tap becomes the error the run reports.
+  //
+  // The rule is "an answer that never arrived, next to an error the server wrote itself, is the
+  // error's answer" — including when the stream closed as if it had finished. Without this, every
+  // such failure is "The model returned no content": a message that blames the model for being
+  // empty instead of naming the request that was refused. Tagging it here is what lets a
+  // structured-output refusal stay a structured-output refusal all the way up.
+  const tappedError = tapsRef.current?.streamError;
+  if (tappedError && !result.error && !result.text) {
+    throw tagStructuredOutputError(
+      new Error(
+        `${label}: the endpoint answered with an error instead of an answer: ${tappedError}`
+      ),
+      label
+    );
   }
   // A failed model call reaches this loop as an `error` EVENT, and openharness
   // closes the turn WITHOUT ever emitting `done` when the stream dies (it forwards

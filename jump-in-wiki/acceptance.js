@@ -8,7 +8,7 @@ require("dotenv").config();
 const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { ACCEPTANCE_PASSING_SCORE, judgeTemperature, judgeThinking } = require("../configs/shared");
+const { ACCEPTANCE_PASSING_SCORE, judgeTemperature, judgeThinking, acceptanceResponseFormat } = require("../configs/shared");
 const { parseAcceptanceReply } = require("../utils/prompt");
 
 /**
@@ -33,6 +33,7 @@ async function wikiAcceptanceCheck(ctx, iteration, temperature) {
     ],
     temperature: temperature ?? judgeTemperature(),
     ...judgeThinking("ACCEPTANCE"),
+    responseFormat: acceptanceResponseFormat(),
     label: `jump-in-wiki-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
   });
   const reply = parseAcceptanceReply(acceptanceOutput);

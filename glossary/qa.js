@@ -13,7 +13,7 @@ const fs = require("fs").promises;
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { parseAcceptanceReply, validatorMaxStepsFor } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking } = require("../configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking, acceptanceResponseFormat } = require("../configs/shared");
 const { assertRealToolCalls } = require("../utils/agents");
 const { runSharedQaLoop, runAuthorStage } = require("../utils/qa-loop");
 
@@ -49,6 +49,10 @@ async function acceptanceCheck(ctx, iteration, temperature) {
     // thinking on these calls and answered with nothing — gotcha 59).
     temperature: temperature ?? judgeTemperature(),
     ...judgeThinking("ACCEPTANCE"),
+    // The rubric's answer shape, asked for on the wire and not only in the prompt.
+    // The parser below is still what decides; this only makes a wrong-shaped answer
+    // a named refusal instead of something to guess at.
+    responseFormat: acceptanceResponseFormat(),
     label: `glossary-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}`,
   });
   const reply = parseAcceptanceReply(acceptanceOutput);

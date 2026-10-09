@@ -92,6 +92,68 @@ function isTooBigForOnePassError(err) {
 }
 
 /**
+ * Build the error that means "the endpoint refused to answer in the shape it was
+ * asked for".
+ *
+ * This is a different failure from a bad grade and a different failure from a size
+ * refusal, and telling them apart is the whole point:
+ *   - a bad grade means the artifact has a problem, and the QA loop's answer is a rewrite;
+ *   - a size refusal means the request was too big, and the answer is to split it;
+ *   - a refused SHAPE means the request itself was well-formed and the server could not
+ *     produce an answer that fits it. Rewriting the artifact fixes nothing, splitting the
+ *     request fixes nothing, and re-asking the same question is usually what fails again.
+ *
+ * A structured-output failure is therefore never a `tooBigForOnePass` error (it must not
+ * send a volume down the chapter-by-chapter path) and never a silent empty answer (which
+ * is what it used to become: "The model returned no content").
+ *
+ * @param {string} message - The error message.
+ * @param {Error} [cause] - The underlying error, if any.
+ * @returns {Error} The marked error.
+ */
+function structuredOutputError(message, cause) {
+  const err = new Error(message);
+  err.structuredOutput = true;
+  if (cause) err.cause = cause;
+  return err;
+}
+
+/**
+ * Whether an error means "the endpoint could not answer in the requested shape"
+ * (see {@link structuredOutputError}).
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isStructuredOutputError(err) {
+  return !!(err && typeof err === "object" && err.structuredOutput === true);
+}
+
+/**
+ * Whether a piece of server text is this failure class.
+ *
+ * One list of patterns, used by the transport layer (to decide when a refusal must not be
+ * quietly re-asked) and by the error tagger (to decide what class to report). Keeping them in
+ * two places is how the two drift apart and one of them stops firing.
+ *
+ * Narrow on purpose, in the same shape as the size signatures in ai/endpoint.js: a false match
+ * here would relabel an ordinary server error as a shape problem and stop the client from
+ * retrying a call that a retry would have fixed.
+ *
+ * @param {string} text - Server wording: an error message, a body, or an SSE error frame.
+ * @returns {boolean}
+ */
+function isStructuredOutputMessage(text) {
+  const message = String(text || "");
+  return (
+    /structured_output_failed/i.test(message) ||
+    /\bstructured output\b/i.test(message) ||
+    /response_format/i.test(message) && /\b(invalid|unsupport|fail|error|refus)/i.test(message) ||
+    /json ?schema/i.test(message) && /\b(invalid|violat|does not match|failed)/i.test(message)
+  );
+}
+
+/**
  * Build the error a task must throw when one or more of its volumes failed.
  *
  * Every per-volume loop is wrapped in a try/catch so an un-monitored run can keep
@@ -133,5 +195,8 @@ module.exports = {
   isStructuralError,
   tooBigForOnePassError,
   isTooBigForOnePassError,
+  structuredOutputError,
+  isStructuredOutputError,
+  isStructuredOutputMessage,
   volumeFailureError,
 };

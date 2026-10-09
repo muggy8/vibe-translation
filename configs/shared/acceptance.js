@@ -182,6 +182,80 @@ const ACCEPTANCE_CONFIRMATION_MIN_SCORE = Math.max(
  */
 const ACCEPTANCE_CONFIRM_ON_PASSING = readBoolEnv("ACCEPTANCE_CONFIRM_ON_PASSING", true);
 
+// ── The shape a grade must arrive in ─────────────────────────────────────────
+
+/**
+ * The four bands of the acceptance rubric, in the order the four acceptance
+ * prompts list them.
+ *
+ * They are here rather than only in the prompt files because the same four words
+ * are now written into the request itself (see {@link acceptanceResponseFormat}),
+ * and a rubric whose prompt and request disagree is a grader that cannot answer.
+ *
+ * @type {string[]}
+ */
+const ACCEPTANCE_BANDS = [
+  "Pass",
+  "Pass with minor edits",
+  "Requires revision",
+  "Reject and regenerate",
+];
+
+/**
+ * Whether an acceptance grader asks the endpoint for the answer shape as well as
+ * asking the model for it (ACCEPTANCE_STRUCTURED_OUTPUT, default true).
+ *
+ * This is a DETECTOR, not a guarantee and not a guard. The guarantee is unchanged:
+ * every grader still parses the reply and treats an unreadable one as a failed
+ * check. What the request adds is that a wrong-shaped answer becomes a named,
+ * tagged refusal at the endpoint instead of a reply the parser has to guess at.
+ *
+ * It is switchable because it depends on the server, not on this repository's
+ * policy: an endpoint that does not implement `response_format` is a reason to turn
+ * it off, and turning it off weakens nothing that was ever enforced.
+ *
+ * @type {boolean}
+ */
+const ACCEPTANCE_STRUCTURED_OUTPUT = readBoolEnv("ACCEPTANCE_STRUCTURED_OUTPUT", true);
+
+/**
+ * The `response_format` payload for one acceptance grade: the wire shape that says
+ * "answer with exactly this object".
+ *
+ * Deliberately NOT applied to:
+ *   - a tool-using agent — on this endpoint `response_format` and `tools` are
+ *     mutually exclusive (asking for both is an HTTP 400), and an agent's answer is
+ *     a sequence of file writes, not one object;
+ *   - the translation role — its deliverable is prose, and its prompt contract is a
+ *     single user message with no system prompt (gotcha 51);
+ *   - the verify / polish auditors — their reply is a structured DOCUMENT (a score
+ *     line, a findings list, glossary-dispute blocks) and the findings ARE the
+ *     deliverable of the grade. Wrapping it in a score-and-note envelope would
+ *     delete the half the retranslate pass reads.
+ *
+ * @returns {Object|null} The payload, or null when the knob is off (no field sent).
+ */
+function acceptanceResponseFormat() {
+  if (!ACCEPTANCE_STRUCTURED_OUTPUT) return null;
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "acceptance_grade",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          score: { type: "integer", minimum: 0, maximum: 100 },
+          band: { type: "string", enum: ACCEPTANCE_BANDS },
+          note: { type: "string" },
+        },
+        required: ["score", "band", "note"],
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
 // ── The arithmetic over a window of grades ───────────────────────────────────
 
 /**
@@ -341,9 +415,16 @@ function isAcceptedState(state) {
  * re-run reproduces the decision without re-grading (an exceptional-consensus
  * acceptance has a different score history than a rolling-window one).
  *
+ * gradeAttempts / gradeFailures are ABSOLUTE totals, not deltas for this call: a
+ * QA loop saves this file several times per iteration, and a running total stays
+ * correct however many times it is written. A re-run seeds its tally from the
+ * previous file, so "the grader returned nothing usable four times for volume 06"
+ * survives the process that saw it. Wiping the volume deletes this file, which is
+ * the correct reset: the history belongs to the artifacts that were wiped.
+ *
  * @param {string} filePath - Absolute path to write the state file to.
  * @param {number[]} scores - The current rolling window scores (0–100).
- * @param {{sourceFingerprint?: string, acceptedBy?: string, deterministicScore?: number}} [extra] - Extra persisted fields.
+ * @param {{sourceFingerprint?: string, acceptedBy?: string, deterministicScore?: number, gradeAttempts?: number, gradeFailures?: number}} [extra] - Extra persisted fields.
  */
 async function saveRollingState(filePath, scores, extra = {}) {
   const fs = require("fs").promises;
@@ -371,6 +452,10 @@ async function saveRollingState(filePath, scores, extra = {}) {
   // tell \"ran out of iterations\" apart from \"the rewrite produced nothing\", which
   // are different problems with different fixes.
   if (extra.stalled === true) data.stalled = true;
+  // How many times the grader was asked, and how many of those answers were unusable.
+  // Absolute totals (see the note above), clamped to non-negative integers.
+  if (Number.isFinite(extra.gradeAttempts)) data.gradeAttempts = Math.max(0, Math.trunc(extra.gradeAttempts));
+  if (Number.isFinite(extra.gradeFailures)) data.gradeFailures = Math.max(0, Math.trunc(extra.gradeFailures));
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
 }
 
@@ -382,7 +467,7 @@ async function saveRollingState(filePath, scores, extra = {}) {
  * score-based criterion (fail-open).
  *
  * @param {string} filePath - Absolute path to read the state file from.
- * @returns {{ results: number[] } | null} The loaded state, or `null` on any error.
+ * @returns {{ results: number[], gradeAttempts: number, gradeFailures: number } | null} The loaded state, or `null` on any error.
  */
 async function loadRollingState(filePath) {
   const fs = require("fs").promises;
@@ -427,11 +512,65 @@ async function loadRollingState(filePath) {
       // never agreed\" and \"the rewrite produced nothing\", which need different
       // fixes).
       stalled: data.stalled === true ? true : undefined,
+      // How many grades this volume/step has been asked for, and how many of those
+      // answers were unusable. Cumulative across runs (see saveRollingState), and
+      // 0 rather than undefined so a caller can seed a tally straight from it.
+      gradeAttempts: Number.isFinite(data.gradeAttempts) ? Math.max(0, Math.trunc(data.gradeAttempts)) : 0,
+      gradeFailures: Number.isFinite(data.gradeFailures) ? Math.max(0, Math.trunc(data.gradeFailures)) : 0,
     };
   } catch {
     // File missing, unreadable, or JSON parse error — degrade safely.
     return null;
   }
+}
+
+/**
+ * The grade tally a QA loop starts from: the counts its volume/step already has on
+ * record, or a fresh pair when there is no state file (or the file is unreadable).
+ *
+ * Seeding from disk is what makes a failed grade durable instead of a line on a
+ * console. A grader that answers nothing usable is currently indistinguishable from
+ * a grader that was never called: the loop logs it, drops the null, and the next
+ * process sees an empty window with no explanation. The tally is the explanation.
+ *
+ * @param {{ gradeAttempts?: number, gradeFailures?: number } | null} state - The state returned by {@link loadRollingState}, or null.
+ * @returns {{ attempts: number, failures: number }} A tally the loop mutates in place.
+ */
+function newGradeTally(state) {
+  return {
+    attempts: Number.isFinite(state && state.gradeAttempts) ? state.gradeAttempts : 0,
+    failures: Number.isFinite(state && state.gradeFailures) ? state.gradeFailures : 0,
+  };
+}
+
+/**
+ * The two persisted fields a tally contributes to {@link saveRollingState}. Spread
+ * into the `extra` argument at every save, so no save can quietly drop the counters
+ * and a file written by a loop mid-way still carries the totals it had at that point.
+ *
+ * @param {{ attempts: number, failures: number }} tally - The loop's tally.
+ * @returns {{ gradeAttempts: number, gradeFailures: number }}
+ */
+function gradeTallyFields(tally) {
+  return {
+    gradeAttempts: Number.isFinite(tally && tally.attempts) ? tally.attempts : 0,
+    gradeFailures: Number.isFinite(tally && tally.failures) ? tally.failures : 0,
+  };
+}
+
+/**
+ * Record one grade on the tally: every grade asked for is an attempt, and a grade
+ * that came back unusable is a failure. `null` is the shape the task's own
+ * acceptance check returns when the reply could not be read (fail-closed).
+ *
+ * @param {{ attempts: number, failures: number }} tally
+ * @param {number|null} score - The grade, or null when the answer was unusable.
+ * @returns {void}
+ */
+function tallyGrade(tally, score) {
+  if (!tally) return;
+  tally.attempts += 1;
+  if (!Number.isFinite(score)) tally.failures += 1;
 }
 
 /**
@@ -478,6 +617,9 @@ module.exports = {
   ACCEPTANCE_CONFIRMATION_CHECKS,
   ACCEPTANCE_CONFIRMATION_MIN_SCORE,
   ACCEPTANCE_CONFIRM_ON_PASSING,
+  ACCEPTANCE_BANDS,
+  ACCEPTANCE_STRUCTURED_OUTPUT,
+  acceptanceResponseFormat,
   computeRollingAverage,
   meetsAcceptanceCriteria,
   meetsExceptionalCriteria,
@@ -485,5 +627,8 @@ module.exports = {
   isAcceptedState,
   saveRollingState,
   loadRollingState,
+  newGradeTally,
+  gradeTallyFields,
+  tallyGrade,
   isSourceStale,
 };

@@ -50,7 +50,7 @@ const { spawnSync } = require("child_process");
 const ROOT = path.resolve(__dirname, "..");
 
 const { DELIVERY_COMMANDS, STEP_ARTIFACT_SPECS, specForStep } = require("../utils/artifacts");
-const { postMortemDir, renderPostMortemMarkdown } = require("../utils/postmortem");
+const { postMortemDir, renderPostMortemMarkdown, finding } = require("../utils/postmortem");
 const { createTicket, recordDiagnosis, closeTicket, ticketPaths, writeTickets } = require("../utils/tickets");
 const { auditDeliveryRun, claimsFromInvocation, displayPath } = require("../utils/delivery-audit");
 
@@ -758,6 +758,44 @@ async function scenarioRecordsAndNeverGrabsTheWheel() {
   assert.ok(md.includes("delivery-plan.md"), "a finding must name the file");
 }
 
+// ─── 7b. A fact the command knows and no file check can see ───────────────────
+
+/**
+ * The autopilot loop's refused manager decisions are not files: there is no "decision record" on
+ * disk, so no declared expectation and no cross-record check can find one. `extraFindings` is how
+ * they reach the same report and the same ledger entry as everything else — which is the difference
+ * between "the manager could not decide" being a line on a console and being something the next
+ * run's triage can count across runs.
+ */
+async function scenarioExtraFindingsAreRecorded() {
+  await runFolder("extra");
+  const r = await auditDeliveryRun({
+    step: "autopilot",
+    argv: ["--mode=watch"],
+    exitCode: 1,
+    quiet: true,
+    extraFindings: [
+      finding("HIGH", "manager-refused", "autopilot", null, displayPath(path.join(postMortemDir(), "ledger.json")),
+        "the manager made no move: it called none of the 3 tool(s) it was offered and wrote nothing."),
+    ],
+  });
+  const f = findingOf(r.report, "manager-refused");
+  assert.ok(f, "the finding the command handed in never reached the report");
+  assert.strictEqual(f.severity, "HIGH");
+  assert.strictEqual(r.report.ok, false, "a run where the deciding role produced nothing is not a clean run");
+
+  const ledger = JSON.parse(await fsp.readFile(path.join(postMortemDir(), "ledger.json"), "utf8"));
+  const entry = ledger.entries.find((e) => e.step === "autopilot");
+  assert.ok(entry, "the refusal left no trace in the ledger — it dies with the console");
+  assert.ok((entry.findingKinds || []).includes("manager-refused"), JSON.stringify(entry));
+  assert.strictEqual(
+    entry.kind,
+    "assessment",
+    "a refusal is recorded as an assessment: `attemptCount` and `isSpinning` select on `intervention`, " +
+      "so recording a refusal can never spend a move or launder a spin"
+  );
+}
+
 // ─── 8. The paths the report prints resolve to the repo root ──────────────────
 
 /**
@@ -832,6 +870,9 @@ async function scenarioEntryPointsAreWired() {
 
     await scenarioRecordsAndNeverGrabsTheWheel();
     console.log("delivery audit: records to the ledger, writes its report, never throws, never changes the exit code");
+
+    await scenarioExtraFindingsAreRecorded();
+    console.log("delivery audit: a fact the command knows and no file check can see still reaches the ledger");
 
     await scenarioReportPathsResolveToTheRoot();
     console.log("delivery audit: the report's paths resolve to the repo's own .postmortem (gotcha 80)");

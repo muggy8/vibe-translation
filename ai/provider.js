@@ -23,6 +23,8 @@ const { fileTypeFromBuffer } = require("file-type");
 const { Agent: UndiciAgent, fetch: undiciFetch } = require("undici");
 
 const { envThinkingLevel } = require("./env");
+const { logLine } = require("./log");
+const { isStructuredOutputMessage } = require("../configs/shared");
 
 // Local LLM servers (e.g. llama.cpp) can take many minutes to prefill a huge
 // prompt and to generate a long answer. undici's default fetch timeouts
@@ -151,12 +153,21 @@ function createTapsRef() {
 
 /**
  * Build the per-attempt taps object (see createTapsRef).
- * @returns {{reasoning: string[], firstToken: (number|null), markFirstToken: Function, jsonReasoningReady: (Promise|null)}}
+ * @returns {{reasoning: string[], firstToken: (number|null), markFirstToken: Function, jsonReasoningReady: (Promise|null), streamError: (string|null)}}
  */
 function createTaps() {
   return {
     reasoning: [],
     firstToken: null,
+    // A server that reports its failure INSIDE the response — an SSE `data: {"error": …}`
+    // frame, or a non-2xx JSON body — and then closes the stream. The provider layer sees a
+    // response that produced no parts, so without this the reason dies here and the run ends
+    // as "The model returned no content".
+    streamError: null,
+    // Every refusal of the requested answer shape this attempt saw, in the order it saw them.
+    // The provider's client retry can ask more than once per attempt, so the count is what a
+    // reader needs: "the endpoint was asked 4 times and refused 4 times" is the fact.
+    structuredRefusals: [],
     markFirstToken() {
       if (this.firstToken === null) this.firstToken = Date.now();
     },
@@ -166,10 +177,38 @@ function createTaps() {
 
 
 /**
+ * Turn whatever a server put in an `error` field into one readable line.
+ *
+ * Servers do not agree on the shape: some write a bare string, some `{message, code}`, some
+ * `{type, code, message}`. The code is the part worth keeping — it is the string the server
+ * itself uses to name the failure class, and it is what `tagStructuredOutputError` matches on.
+ *
+ * @param {unknown} error - The `error` value from a stream frame or an error body.
+ * @returns {string} A single line describing it.
+ */
+function describeStreamError(error) {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const parts = [];
+    if (typeof error.message === "string" && error.message) parts.push(error.message);
+    if (typeof error.code === "string" && error.code) parts.push(`code=${error.code}`);
+    if (typeof error.type === "string" && error.type) parts.push(`type=${error.type}`);
+    if (parts.length) return parts.join(" ");
+  }
+  try {
+    return JSON.stringify(error) || String(error);
+  } catch {
+    return String(error);
+  }
+}
+
+
+/**
  * Tap an SSE response body: every chunk passes through unchanged while
  * `data:` lines are inspected for `choices[0].delta.reasoning_content` /
- * `delta.reasoning` (llama.cpp, vLLM and friends emit thinking this way) and
- * for the first non-empty token (TTFT diagnostics).
+ * `delta.reasoning` (llama.cpp, vLLM and friends emit thinking this way), for an
+ * `{"error": …}` frame the server emitted instead of an answer, and for the first
+ * non-empty token (TTFT diagnostics).
  *
  * @param {ReadableStream} body - The SSE body stream.
  * @param {Taps} taps - The taps object to record into.
@@ -194,6 +233,15 @@ function tapSseStream(body, taps) {
           try {
             data = JSON.parse(payload);
           } catch {
+            continue;
+          }
+          if (data && data.error) {
+            // The failure arrived as a frame in the stream rather than as an HTTP status.
+            // Nothing downstream can see it — the SDK reads a stream with no parts in it —
+            // so this is the only place the server's own reason can be kept.
+            const described = describeStreamError(data.error);
+            if (!taps.streamError) taps.streamError = described;
+            if (isStructuredOutputMessage(described)) taps.structuredRefusals.push(described);
             continue;
           }
           const delta = data?.choices?.[0]?.delta;
@@ -233,11 +281,15 @@ function tapSseStream(body, taps) {
 function makeProviderFetch({ extraBody = null, tapsRef = null } = {}) {
   return async function providerFetch(input, init = {}) {
     let { body, headers } = init;
+    // Whether THIS request asked the endpoint for a fixed answer shape. It decides one thing
+    // below, and only that one thing.
+    let askedForShape = false;
     if (extraBody && typeof body === "string" && body.length > 0) {
       try {
         const parsed = JSON.parse(body);
         if (parsed && typeof parsed === "object" && Array.isArray(parsed.messages)) {
           body = JSON.stringify({ ...parsed, ...extraBody });
+          askedForShape = extraBody.response_format !== undefined && extraBody.response_format !== null;
           // The body length changed — drop any stale content-length header.
           if (headers) {
             if (typeof headers.delete === "function") headers.delete("content-length");
@@ -298,6 +350,48 @@ function makeProviderFetch({ extraBody = null, tapsRef = null } = {}) {
           }
         })
         .catch(() => {});
+    } else if (contentType.includes("application/json") && !response.ok) {
+      // A refused request (a size refusal, a refused shape, a dead-role endpoint): the provider
+      // throws its own error for a non-2xx, but the server's wording is what the tagging layer
+      // matches on, and some builds put the real reason only in the body.
+      const raw = await response.clone().text().catch(() => "");
+      let described = "";
+      try {
+        const parsedBody = JSON.parse(raw);
+        described = describeStreamError(parsedBody?.error ?? parsedBody ?? raw);
+      } catch {
+        if (raw) described = raw.slice(0, 400);
+      }
+      if (described) taps.streamError = described;
+
+      // A refused answer shape is retryable BY STATUS CODE ALONE — a 502 is on every client's
+      // retry list — and the provider's own client retry (default 2, and this harness cannot
+      // reach it: the call is made inside the agent library) would then re-ask the endpoint
+      // inside a single attempt. Two things go wrong at once: the re-asks are not counted or
+      // logged by the retry knob this repository actually exposes, and the last of them often
+      // answers 200 with nothing in it, so the refusal ends up reported as "the model returned
+      // no content".
+      //
+      // So a refusal of THIS class is handed to the provider as a status it will not retry on
+      // its own, with the server's own wording and its own status kept in the body. The retry
+      // layer that remains is the harness's loop, which counts, logs, and stops.
+      if (askedForShape && described && isStructuredOutputMessage(described)) {
+        taps.structuredRefusals.push(described);
+        logLine(
+          `  [call-ai] the endpoint refused the requested answer shape (HTTP ${response.status}: ` +
+            `${described.slice(0, 200)}). Not re-asked inside this attempt: the harness's own ` +
+            `retry counter is the one this run counts.`
+        );
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: `HTTP ${response.status}: ${described}`,
+              code: "structured_output_failed",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } }
+        );
+      }
     }
     return response;
   };
@@ -435,6 +529,7 @@ module.exports = {
   thinkingExtraBody,
   createTapsRef,
   createTaps,
+  describeStreamError,
   tapSseStream,
   makeProviderFetch,
   createChatModel,

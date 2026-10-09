@@ -8,8 +8,9 @@
  * stub writes real files into a temp directory, so the deterministic parts
  * run unmodified: assertWrote / assertWroteWithFallback (fallback + recovery
  * gating), the rolling-window bookkeeping, saveRollingState /
- * loadRollingState, meetsAcceptanceCriteria, the ON_QA_LIMIT policy, and the
- * idempotency skip decision (isAcceptedState + isSourceStale).
+ * loadRollingState (including the grade tally — how many grades were asked for
+ * and how many answers were unusable), meetsAcceptanceCriteria, the ON_QA_LIMIT
+ * policy, and the idempotency skip decision (isAcceptedState + isSourceStale).
  *
  * No network, no real endpoint. Run with `npm test` (or standalone:
  * `node test/test-qa-orchestration.js`). The ON_QA_LIMIT=fail variant runs in
@@ -477,6 +478,11 @@ async function scenarioUnparseableAcceptanceFailsClosed() {
     const state = await loadState(ctx.validationOutputFile);
     assert.deepStrictEqual(state.results, [95, 95], "the unparseable reply was not stored");
     assert.strictEqual(isAcceptedState(state), true, "accepted state");
+    // …and it is COUNTED. The window alone cannot tell "the grader refused to answer" apart from
+    // "the grader was never called": both leave a short window. The tally is what makes the
+    // difference visible afterwards.
+    assert.strictEqual(state.gradeAttempts, 3, "all three grades the loop asked for are on the record");
+    assert.strictEqual(state.gradeFailures, 1, "the one it could not read is a failure, not a silence");
   } finally {
     cleanup(v.root);
   }
@@ -1010,6 +1016,63 @@ async function scenarioChunkedTurnProtocol() {
   }
 }
 
+/**
+ * A grader that answers nothing usable is a recorded fact, not a line on a console: the
+ * state file counts the grades the loop asked for and the ones it could not read, a
+ * usable grade is not counted as a failure, and a second process on the same volume adds
+ * to that count instead of starting from zero.
+ */
+async function scenarioGradeTallyRecordsUnusableAnswers() {
+  // (a) Every grade unusable: the window is empty, and the file says why.
+  {
+    const v = makeVolumeDir();
+    const { cfg, artifact, report, partialFile } = makeChunkedCfg(v, {
+      acceptanceCheck: async () => null,
+    });
+    try {
+      script = chunkedScript({ artifact, report, partialFile, writes: true });
+      callLog = [];
+      const first = await runPerChapterQaLoop(cfg);
+      assert.strictEqual(first.accepted, false, "a window with no grades accepts nothing");
+      let state = await loadState(report);
+      assert.deepStrictEqual(state.results, [], "an unusable grade is not stored in the window");
+      assert.strictEqual(state.gradeAttempts, cfg.maxIterations, "every grade asked for is counted");
+      assert.strictEqual(state.gradeFailures, cfg.maxIterations, "every unusable one is a failure");
+
+      // The durable half: the next process adds to the count rather than starting over, so
+      // "this volume's grader keeps failing" survives the run that saw it.
+      callLog = [];
+      await runPerChapterQaLoop(cfg);
+      state = await loadState(report);
+      assert.strictEqual(state.gradeAttempts, cfg.maxIterations * 2, "the tally carries across runs");
+      assert.strictEqual(state.gradeFailures, cfg.maxIterations * 2, "including the failures");
+    } finally {
+      cleanup(v.root);
+    }
+  }
+
+  // (b) A usable grade is not a failure, and the count separates the two.
+  {
+    const v = makeVolumeDir();
+    let asked = 0;
+    const { cfg, artifact, report, partialFile } = makeChunkedCfg(v, {
+      acceptanceCheck: async () => (++asked === 1 ? null : 80),
+    });
+    try {
+      script = chunkedScript({ artifact, report, partialFile, writes: true });
+      callLog = [];
+      const result = await runPerChapterQaLoop(cfg);
+      assert.strictEqual(result.accepted, true, "the window filled and accepted after the first grade failed");
+      const state = await loadState(report);
+      assert.deepStrictEqual(state.results, [80, 80], "the window holds the grades that arrived");
+      assert.strictEqual(state.gradeAttempts, 3, "three grades asked for");
+      assert.strictEqual(state.gradeFailures, 1, "one of them unusable — the other two are not counted against it");
+    } finally {
+      cleanup(v.root);
+    }
+  }
+}
+
 // ─── Entry points ────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1030,6 +1093,7 @@ async function main() {
   await scenarioChunkedStalledRound();
   await scenarioChunkedIterationLimit();
   await scenarioChunkedTurnProtocol();
+  await scenarioGradeTallyRecordsUnusableAnswers();
   console.log("qa-orchestration: all checks passed.");
 }
 

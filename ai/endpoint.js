@@ -15,7 +15,7 @@
 require("dotenv").config();
 require("../types"); // JSDoc type definitions
 const { fetch: undiciFetch } = require("undici");
-const { tooBigForOnePassError } = require("../configs/shared");
+const { tooBigForOnePassError, structuredOutputError, isStructuredOutputMessage } = require("../configs/shared");
 
 const { logLine } = require("./log");
 const { noTimeoutAgent } = require("./provider");
@@ -55,6 +55,47 @@ function tagSizeOverflowError(err, label = "") {
     `retried chapter by chapter).`
   );
   return tooBigForOnePassError(message, err.cause);
+}
+
+
+/**
+ * Recognize the other refusal the endpoint can make before it generates anything:
+ * "I cannot answer in the shape you asked for".
+ *
+ * A server that is asked for structured output (`response_format`) checks the answer
+ * against the schema before it hands it over, and when it fails it says so in its own
+ * words — this machine's endpoint answers HTTP 502 with the code
+ * `structured_output_failed`, and a stream that ran out of tokens mid-shape answers
+ * "structured output was incomplete (finish_reason=length)". Neither of those is a size
+ * problem and neither is a bad grade: the request was well-formed, the model simply could
+ * not produce an answer that fits it.
+ *
+ * Tagging matters for the same reason tagging a size refusal matters (gotcha 55): a task
+ * should not have to string-match a server's error text, and an untagged failure of this
+ * class used to arrive as "The model returned no content", which points at the model
+ * being empty rather than at the shape it was asked for.
+ *
+ * Deliberately NOT tagged here: the size signatures {@link tagSizeOverflowError} owns. The
+ * two pattern sets were checked against this machine's endpoint and do not overlap, and an
+ * error may carry only one of the two tags — the fallback that acts on one must not act on
+ * the other.
+ *
+ * @param {Error} err - The error a model call threw.
+ * @param {string} label - The call label, for the log.
+ * @returns {Error} The same error, tagged when its message is a structured-output signature.
+ */
+function tagStructuredOutputError(err, label = "") {
+  if (!err || typeof err.message !== "string") return err;
+  if (err.structuredOutput === true) return err;
+  // A size refusal stays a size refusal. The chapter-by-chapter fallback is the answer to
+  // that one, and it is the wrong answer to this one.
+  if (err.tooBigForOnePass === true) return err;
+  if (!isStructuredOutputMessage(err.message)) return err;
+  logLine(
+    `  [call-ai] ${label}: the endpoint could not produce an answer in the shape it was ` +
+    `asked for — tagged as a structured-output failure (not a size failure, not a grade).`
+  );
+  return structuredOutputError(err.message, err.cause);
 }
 
 
@@ -231,6 +272,7 @@ async function measurePromptTokens({
 
 module.exports = {
   tagSizeOverflowError,
+  tagStructuredOutputError,
   assertModelServing,
   measurePromptTokens,
 };

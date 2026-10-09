@@ -8,6 +8,12 @@
  * own copy, and the copies had already drifted (only the whole-installment one
  * recorded HOW it accepted when the rolling window met the criterion).
  *
+ * The `tally` is the same lesson on the other side of the boundary. A grade the
+ * grader refused to produce is dropped from the window and logged, and a log line is
+ * gone when the process is. The tally counts every grade asked for and every one that
+ * came back unusable, and it is persisted with the window, so "this volume's grader
+ * answered nothing usable 3 times" is a fact on disk that the after-run audit can read.
+ *
  * Part of the utils/qa-loop.js layer (split out of the original single file).
  */
 
@@ -17,6 +23,8 @@ const {
   computeRollingAverage,
   meetsAcceptanceCriteria,
   saveRollingState,
+  gradeTallyFields,
+  tallyGrade,
 } = require("../../configs/shared");
 const { confirmExceptionalScore, confirmPassingScore } = require("./consensus");
 
@@ -40,6 +48,7 @@ const { confirmExceptionalScore, confirmPassingScore } = require("./consensus");
  *   stateFile: string,
  *   recentRollingScores: number[],
  *   sourceFingerprint?: string,
+ *   tally?: {attempts: number, failures: number},
  *   acceptanceCheck: (iteration: number|string) => Promise<number|null>,
  *   confirmationCheck?: (p: {score: number, index: number, temperature: number|undefined}) => Promise<number|null|{score: number|null, temperature: number}>,
  * }} p
@@ -53,11 +62,18 @@ async function scoreAndConfirm({
   stateFile,
   recentRollingScores,
   sourceFingerprint,
+  tally,
   acceptanceCheck,
   confirmationCheck,
 }) {
   // Acceptance check (always one-shot, tool-less).
   const score = await acceptanceCheck(iteration);
+
+  // Every grade asked for is counted, usable or not. A null is a failed check: it is
+  // not stored in the window (fail-closed), but it IS recorded, because "the grader
+  // answered nothing four times for this volume" is a fact the next run needs and the
+  // window alone cannot tell a refused grade apart from a grade that never happened.
+  tallyGrade(tally, score);
 
   // Record the score in the rolling window (null = unparseable, already logged
   // as a failure by the task's own check; not stored).
@@ -70,7 +86,10 @@ async function scoreAndConfirm({
   // acceptance state without re-calling the AI. Saved on every iteration —
   // including the accepting one — so the idempotency skip-check sees the final
   // state.
-  await saveRollingState(stateFile, recentRollingScores, { sourceFingerprint });
+  await saveRollingState(stateFile, recentRollingScores, {
+    sourceFingerprint,
+    ...gradeTallyFields(tally),
+  });
 
   // ── Exceptional score: is it real, or a fluke? ─────────────────────────────
   const exceptional = await confirmExceptionalScore({
@@ -80,6 +99,7 @@ async function scoreAndConfirm({
     volumeLabel,
     stateFile,
     sourceFingerprint,
+    tally,
   });
   if (exceptional.accepted) {
     return { accepted: true, acceptedBy: "exceptional-consensus", score, scores: recentRollingScores };
@@ -97,6 +117,7 @@ async function scoreAndConfirm({
     await saveRollingState(stateFile, recentRollingScores, {
       sourceFingerprint,
       acceptedBy: "rolling-window",
+      ...gradeTallyFields(tally),
     });
     return { accepted: true, acceptedBy: "rolling-window", score, scores: recentRollingScores };
   }
@@ -112,6 +133,7 @@ async function scoreAndConfirm({
     volumeLabel,
     stateFile,
     sourceFingerprint,
+    tally,
   });
   if (passing.accepted) {
     return { accepted: true, acceptedBy: "passing-consensus", score, scores: recentRollingScores };
