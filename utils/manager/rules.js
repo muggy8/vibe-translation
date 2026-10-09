@@ -1,5 +1,5 @@
 /**
- * The closed vocabulary of DECISIONS (run / diagnose / answer / choose / fix / judge / escalate / end) — different from DELIVERY_ACTIONS, which is the vocabulary of pipeline PRIMITIVES — plus ACTION_MENU_ENTRIES mapping each decision to the entry that gives it a command, so a decision the loop cannot carry out is caught by a test instead of discovered by a run. MANAGER_RULES is the standing contract, restated once per call so every decision in a run is made under one contract.
+ * The closed vocabulary of DECISIONS (run / diagnose / answer / choose / fix / judge / escalate / end) — different from DELIVERY_ACTIONS, which is the vocabulary of pipeline PRIMITIVES — plus ACTION_MENU_ENTRIES mapping each decision to the entry that gives it a command, so a decision the loop cannot carry out is caught by a test instead of discovered by a run. MANAGER_RULES is the standing contract, restated once per call so every decision in a run is made under one contract; MANAGER_TOOLS_NOTE is the tool-shaped half of it, appended in code (AGENTS.md rule 6), and MANAGER_MAX_STEPS is the cap on a turn whose whole job is to call one tool.
  *
  * Part of the manager.js layer (split out of the original single file).
  */
@@ -170,7 +170,10 @@ const ACTION_MENU_ENTRIES = {
  * @property {string} [actionName] - The `DELIVERY_ACTIONS` entry this run maps to.
  * @property {string} [ticket] - For the ticket moves.
  * @property {string} [option] - For `choose`.
+ * @property {string} [question] - For `answer`: the question this move answers, carried on the move so
+ *   the manager never has to quote one back.
  * @property {string} [patch] - For `judge`.
+ * @property {("accept"|"reject")} [outcome] - For `judge`.
  * @property {boolean} [countsAsIntervention] - Copied from the menu entry, so the manager can see
  *   which moves cost it one of its attempts on that step.
  */
@@ -221,7 +224,36 @@ Two things about your own limits:
   Whether anything has actually been attempted is written in the state below, where the run ledger
   records it — count it there, and do not assume an attempt that is not written down.
 
-Answer with ONE fenced \`\`\`json block and nothing after it.`;
+You decide by CALLING ONE of the tools you are given. That tool list IS your menu: a move that is not
+on it is not a move you can make, and what you call is checked against the records before anything
+runs. You are never asked to write an id, a step name or a volume — the tool you call already carries
+them. What you supply is why.`;
+
+
+/**
+ * The tool-shaped half of the contract, appended in code rather than written into a prompt file
+ * (AGENTS.md rule 6). It says the three things a tool list does not say by itself.
+ */
+const MANAGER_TOOLS_NOTE = `
+
+How you make a decision here:
+- Call exactly ONE tool. The loop carries that one move out, then re-reads the run and offers the menu
+  again — so a second call in this turn is refused by the machine, not discouraged by this text.
+- The tool already knows which step, which volume, which ticket, which option and which patch it is
+  about. You write the part only you can write: the reason, the answer, the note.
+- Calling nothing is not a safe choice. If no tool fits the state, the move you are looking for is
+  "escalate", and what you write there is the decision the account owner has to make.`;
+
+
+/**
+ * The manager's step cap. A decision turn reads nothing: it is handed the state and calls one tool.
+ *
+ * This is deliberately a constant and not a setting. The delivery layer's *reading* turns (the
+ * diagnostics team, the dev team) are uncapped on purpose (gotcha 78); a turn whose whole job is to
+ * pick one of the tools in front of it has no reason to keep going, and a cap that could be raised
+ * from the environment is a cap somebody raises.
+ */
+const MANAGER_MAX_STEPS = 4;
 
 
 /**
@@ -288,5 +320,7 @@ module.exports = {
   ACTION_BY_NAME,
   ACTION_MENU_ENTRIES,
   MANAGER_RULES,
+  MANAGER_TOOLS_NOTE,
+  MANAGER_MAX_STEPS,
   NOT_ORDINARY_CODE,
 };

@@ -7,13 +7,15 @@
  * volume folder (gotcha 66), and the iteration cap is the backstop on the manager, not on the
  * run.
  *
- * **One correction per decision, for a mistyped name only.** The manager's answer has to reproduce
- * ids of the shape `TCK-delivery-2026-10-06T18-27-38-632Z-1/O2` character for character, and a model
- * that drops a chunk of one is a transcription error, not a decision the state should die on. When the
- * refusal is "there is no such ticket / option / question / patch", the loop asks once more with the
- * refusal in front of it — the refusal already prints the ids that exist. When the refusal is a guard
- * (a banned option, an answer that cites the code, an `end` that is not provable) the loop stops at
- * once: a guard the role is asked to try again is a guard with a retry button on it.
+ * **One correction per decision, for a name written wrong rather than a move the state forbids.** The
+ * manager decides by calling a tool, and the tool carries the ids — so the answers that used to die on
+ * transcription (a 43-character ticket id, a step name copied as the sentence around it) cannot be
+ * written here. What is left is the same class in a smaller form: the manager reaches for a move that
+ * is not on its menu, or calls nothing at all. When the refusal is "there is no such ticket / option /
+ * question / patch / move", the loop asks once more with the refusal in front of it — the refusal
+ * already prints the names that exist. When the refusal is a guard (a banned option, an answer that
+ * cites the code, an `end` that is not provable) the loop stops at once: a guard the role is asked to
+ * try again is a guard with a retry button on it.
  *
  * Watch mode runs the whole loop and writes nothing: the same reading, the same decision, the
  * same account, no command started.
@@ -51,6 +53,10 @@ const NAMING_SLIPS = new Set([
   "unknown-question",
   "unknown-patch",
   "not-offered",
+  // The two the tool-shaped manager adds: it reached for a move that is not on its menu, or it called
+  // nothing at all. Both refusals print the moves that ARE there, which is what a corrected answer needs.
+  "unknown-move",
+  "no-move",
 ]);
 
 // ─── The loop ─────────────────────────────────────────────────────────────────
@@ -284,6 +290,9 @@ async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.
       offered: moves.map((m) => m.label),
       action: decision.action || null,
       reason: decision.action ? decision.action.reason : null,
+      // Which path produced it: a tool call, or a reply read as text. The text path is the one where a
+      // name can still be written wrong, so a reader of the decision log needs to know which one ran.
+      via: decision.via || null,
       refusal: decision.refusal,
       kind: decision.kind,
       refusedFirst,
@@ -301,7 +310,7 @@ async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.
       // and say what the menu was, because the useful failure is the one the account owner can read.
       log(`REFUSED: ${decision.refusal}`);
       if (refusedFirst) log(`  (twice: the first answer was refused too — ${refusedFirst.refusal})`);
-      if (decision.kind === "unparseable" || decision.kind === "call-failed") {
+      if (decision.kind === "unparseable" || decision.kind === "call-failed" || decision.kind === "no-move") {
         log(
           "  the reply was not a decision at all. On this machine the usual cause is the wrong container " +
             "serving the manager's call: every container advertises the same model id, and the only record " +
@@ -315,6 +324,9 @@ async function runLoop({ mode, seriesDir, iterationCap, log = (line) => console.
     const action = decision.action;
     log(`decision: ${action.action}${action.step ? ` — ${action.step}` : ""}${action.ticket ? ` — ${action.ticket}` : ""}${action.patch ? ` — ${action.patch}` : ""}${action.outcome ? ` (${action.outcome})` : ""}`);
     log(`  why: ${action.reason}`);
+    // A repaired name or a refused second call is information the account owner reads afterwards, and
+    // it belongs in the log and not only in the decision record.
+    for (const w of decision.warnings || []) log(`  note: ${w.message}`);
 
     const args = commandFor(action, { ticket: ticketNamed(action, tickets) });
     if (!acting) {

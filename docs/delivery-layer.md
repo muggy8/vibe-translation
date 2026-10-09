@@ -349,8 +349,8 @@ from an exit code or from error text — and guessing from text is the pattern g
 product; the loop is what makes it run itself. Each iteration: read the state (`readWorkingState` →
 `planResume`), open the ticket the triage says is the answer (`delivery.js --open-ticket`, idempotent,
 so calling it every iteration cannot write the same question twice), build the menu the state actually
-supports, make **one tool-less model call** (`utils/manager.js`), and carry the answer out by spawning
-the account owner's own command in its own process.
+supports, make **one model turn whose tools ARE that menu** (`utils/manager.js`), and carry the answer
+out by spawning the account owner's own command in its own process.
 
 - **Why commands and not functions.** A code fix takes effect at a process boundary, not inside a
   running one (gotcha 66): Node caches a module the first time it is required, and `gulpfile.js`
@@ -389,18 +389,32 @@ the account owner's own command in its own process.
 - **`escalate` is a branch, not a failure state.** A Tier C move is one the manager may name and
   never make, so a loop that could only act would have to work around the rule instead of ending on
   it. The loop prints what the account owner has to decide and exits 1.
-- **A mistyped name gets one correction; a guard gets none.** The manager has to reproduce ids like
-  `TCK-delivery-2026-10-06T18-27-38-632Z-1/O2` character for character, and on 2026-10-07 one came
-  back as `…2026-10-27-38-632Z-1` — the right option, the ticket mangled — which stopped a loop that
-  had already paid 7.1M input tokens for the diagnosis it was about to act on. So a refusal of the
-  shape "there is no such ticket / option / question / patch" is re-asked **once**, with that refusal
-  printed in front of the model (`NAMING_SLIPS`, and `renderManagerBrief`'s `correction` section): the
-  refusal already lists the ids that exist. A refusal that is a **guard** — a banned option, an answer
-  that cites the code, an `end` the records do not prove, a second diagnosis of an answered ticket — is
-  never re-asked, because asking a role to try a guard again is asking it to rephrase the same move
-  until the guard flinches (gotcha 70). `utils/manager.js` also repairs the one case where the state
-  already contains the name: a `choose` whose `option` id holds a real ticket id while its `ticket`
-  field holds a garbled one. The repair is reported in the decision record, never applied silently.
+- **The manager decides by calling a tool, so there is nothing to transcribe.** It used to answer a
+  fenced JSON block, and that made every identifier its job: a ticket id is
+  `TCK-delivery-2026-10-06T18-27-38-632Z-1` (43 characters) and an option appends `/O2` to it. On
+  2026-10-07 one came back as `…2026-10-27-38-632Z-1` — the right option, the ticket mangled — which
+  stopped a loop that had already paid 7.1M input tokens for the diagnosis it was about to act on. On
+  2026-10-08 the same class fired in a field nobody had looked at: the menu offers one `run` move, the
+  only place its step is written out is inside the sentence describing it, the brief said "the step
+  exactly as offered", and the model copied the sentence (gotcha 84). So the menu is now the tool list:
+  `move1_run_glossary`, `move2_diagnose`, `move3_judge_reject`, each carrying its own step, ticket,
+  option, patch and outcome, and each taking only the prose the model is actually for — the reason, the
+  answer, the note. A move the state does not support is not a move the gate catches after the fact; it
+  is a tool that is not there. The first call records the decision and a second call in the same turn is
+  refused by the tool, because the loop re-reads the run after one move and a second move in the same
+  turn is a move no gate has assessed.
+- **A name written wrong gets one correction; a guard gets none.** The text path is kept — a local
+  endpoint on this machine sometimes answers in prose instead of calling a tool (gotcha 18) — and there
+  the old failures still happen, so the gate repairs the two where the state already holds the name
+  (`repairTicketReference`, `repairStepReference`) and reports the repair in the decision record rather
+  than applying it silently. A refusal of the shape "there is no such ticket / option / question / patch
+  / move", or one that says the manager called nothing, is re-asked **once**, with that refusal printed
+  in front of the model (`NAMING_SLIPS`, and `renderManagerBrief`'s `correction` section): the refusal
+  already lists the names that exist — and since gotcha 84 it prints them in the form the caller has to
+  write back, because printing the menu's sentence is what taught a model to copy the sentence. A
+  refusal that is a **guard** — a banned option, an answer that cites the code, an `end` the records do
+  not prove, a second diagnosis of an answered ticket — is never re-asked, because asking a role to try
+  a guard again is asking it to rephrase the same move until the guard flinches (gotcha 70).
 - **`AUTOPILOT_MAX_ITERATIONS` (default 12) is a wall, not a budget.** The anti-spin gate needs a
   repetition and the per-step allowance needs an intervention; a loop making legal, different,
   non-repeating moves that never reach a provable end trips neither, and it should not run overnight.

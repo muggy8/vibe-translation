@@ -1,9 +1,11 @@
 /**
  * The gate that refuses every illegal move by name with what IS available: a step not on the menu, an unknown or already-diagnosed ticket, an answer that cites utils/prompt.js, an answer that does not say which of several open questions it answers, a banned option, calling the dev team without a chosen code-changing option, "volume 15 passes now" as a judgment, a two-word escalation, and end on a state that is not finished.
  *
- * It normalises exactly one thing, and reports it: a `choose` whose `ticket` field names nothing but
- * whose `option` id contains a real ticket id (`repairTicketReference`). A mistyped name the state
- * already holds is a transcription slip, not an illegal move; everything else is refused as before.
+ * It normalises exactly two things, and reports both: a `choose` whose `ticket` field names nothing but
+ * whose `option` id contains a real ticket id (`repairTicketReference`), and a `run` whose `step` field
+ * copied the menu's descriptive sentence instead of the step name (`repairStepReference`). A mistyped
+ * name the state already holds is a transcription slip, not an illegal move; everything else is refused
+ * as before.
  *
  * Part of the manager.js layer (split out of the original single file).
  */
@@ -79,6 +81,53 @@ function repairTicketReference(action, tickets = []) {
 
 
 /**
+ * A `run` answer that copied the menu LINE instead of the step NAME.
+ *
+ * Observed live on 2026-10-08: the menu offers one run move, and the only place its step is written
+ * out in full is inside the sentence that describes it —
+ * `run glossary — wipe-and-cascade, from volume 15, cascade, counts against this step's allowance; …`.
+ * The brief said "the step exactly as offered", the model copied the sentence, and
+ * `validateManagerAction` compared it against `glossary` and refused. Twice: the refusal quoted the
+ * whole sentence back as "the run moves available are: …", so the second answer copied even more of it.
+ * (gotcha 84 — the same class as gotcha 81's mangled ticket id, in the field nobody had looked at.)
+ *
+ * The repair is as exact as `repairTicketReference` and for the same reason: the state already holds
+ * this name, and a decision read against the wrong string is a decision thrown away over paperwork.
+ * It is not fuzzy matching:
+ * - only `run` is considered, because it is the only move whose menu entry is a sentence;
+ * - the answer must START with an offered move's step name, and everything after it must be text that
+ *   move's own label contains — so `polish …` is still refused when `polish` is not on the menu, and
+ *   `glossary — wipe-and-cascade` is not read as some other step's move;
+ * - it applies only when exactly one offered move matches.
+ *
+ * @param {ManagerAction} action - The parsed action.
+ * @param {ManagerMove[]} moves - The offered menu.
+ * @returns {{action: ManagerAction, repaired: {from: string, to: string}|null}}
+ */
+function repairStepReference(action, moves = []) {
+  if (!action || action.action !== "run" || !action.step) return { action, repaired: null };
+  if ((moves || []).some((m) => m.kind === "run" && m.step === action.step)) return { action, repaired: null };
+
+  const typed = String(action.step).trim();
+  // Punctuation-insensitive, but the WORD ORDER has to be the menu's: "wipe-and-cascade from volume 15"
+  // is the menu's own text rearranged; "from volume 15 wipe-and-cascade glossary" is not.
+  const flat = (text) => String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const matches = (moves || []).filter((m) => {
+    if (m.kind !== "run" || !m.step) return false;
+    if (!flat(typed).startsWith(flat(m.step))) return false;
+    const tail = flat(typed).slice(flat(m.step).length).trim();
+    return tail === "" || flat(m.label).includes(tail);
+  });
+  if (matches.length !== 1) return { action, repaired: null };
+
+  return {
+    action: { ...action, step: matches[0].step },
+    repaired: { from: typed, to: matches[0].step },
+  };
+}
+
+
+/**
  * Refuse a decision the current state does not support.
  *
  * This is the manager-side twin of `delivery.js`'s `gateMenu`, and it exists for the same reason:
@@ -87,7 +136,9 @@ function repairTicketReference(action, tickets = []) {
  * is neither — it is the thing that decides which of them happens next.
  *
  * Every refusal names what WAS available, because a refusal that does not name the usable move is
- * the kind of refusal people switch off (gotcha 65).
+ * the kind of refusal people switch off (gotcha 65). It names it in the form the caller has to write
+ * back: the step names, the ticket ids, the option ids — not the descriptive sentence the menu is
+ * printed in, which is the string that got copied last time this module refused a `run`.
  *
  * @param {ManagerAction} action - A parsed action.
  * @param {Object} ctx
@@ -109,12 +160,17 @@ function validateManagerAction(action, { moves = [], tickets = [], patches = [],
       return true;
     });
     if (!match) {
-      const offered = moves.filter((m) => m.kind === action.action).map((m) => m.label);
+      const same = moves.filter((m) => m.kind === action.action);
+      // The names the caller has to write, and the sentences they came from, in that order. Printing
+      // only the sentence is what taught a model to copy the sentence (gotcha 84).
+      const names = action.action === "run" ? same.map((m) => m.step) : same.map((m) => m.label);
       return refuse(
         "not-offered",
-        `there is no "${action.action}" move on the menu for this state.` +
-          (offered.length
-            ? ` The ${action.action} moves available are: ${offered.join(" | ")}.`
+        `there is no "${action.action}" move named ${JSON.stringify(action.step || action.ticket || "")} ` +
+          `on the menu for this state.` +
+          (names.length
+            ? ` The ${action.action} moves are: ${names.join(", ")}. Their full descriptions are: ` +
+              `${same.map((m) => m.label).join(" | ")}.`
             : ` Nothing on this state supports a ${action.action} move right now.`)
       );
     }
@@ -405,6 +461,7 @@ function endIsProvable({ plan = null, tickets = [], patches = [] }) {
 module.exports = {
   pathishWords,
   repairTicketReference,
+  repairStepReference,
   validateManagerAction,
   endIsProvable,
 };

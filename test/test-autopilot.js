@@ -23,9 +23,11 @@
  *      beside a run that is already going.
  *   5. **An accept is the one move it will not take on the manager's word.**
  *
- * The manager's model call is stubbed at `harness.runOneShot`, which is the layer the real
- * `managerDecision` sits on: the shaped brief, the fail-closed parse and the menu gate all run for
- * real, so a scripted reply is tested through the same gate a live one would meet.
+ * The manager's model call is stubbed at `harness.createAgentHandle`, which is the layer the real
+ * `managerDecision` sits on: the shaped brief, the menu-as-tools, the tool that records the decision and
+ * the menu gate all run for real, so a scripted decision is tested through the same gate a live one
+ * would meet. A scripted decision that names a move the state does not offer has no tool to go through,
+ * and it reaches the gate as text — which is the other path a real answer can take.
  * `AI_CLIENT_HOOKS_DIR` is pinned to an empty folder: `pre-autopilot` and `pre-manager` are real
  * executables on this machine and they start real model containers (docs/architecture.md, gotcha 22).
  *
@@ -58,21 +60,91 @@ process.env.AUTOPILOT_MAX_ITERATIONS = "";
 const FIXTURES = "/tmp/opencode/autopilot-tests";
 
 /**
- * Script the manager's replies. Each entry is the raw text a model would have answered with.
+ * Script the manager's decisions.
  *
- * @param {string[]} replies
- * @returns {Array<Object>} - The calls the manager layer actually made, for asserting on.
+ * An entry is either a decision object (`{ action, step, ticket, option, patch, outcome, question,
+ * answer, note, reason }`) or the raw text a model answered with instead of calling a tool.
+ *
+ * A decision object is resolved against the tools the handle was actually handed — the same way the
+ * model resolves one, by reading the tool names and descriptions — and then the REAL tool is executed.
+ * So the ids a tool carries, the one-move rule, the shaped brief and the menu gate are all exercised,
+ * not described. A decision that matches no tool (a step the triage never offered) falls back to the
+ * text path, which is how a model that invents a move reaches the gate.
+ *
+ * @param {Array<Object|string>} replies
+ * @returns {{seen: Array<{cfg: Object, inputs: string[]}>, restore: Function}} - what the manager layer
+ *   actually asked for, for asserting on.
  */
 function scriptManager(replies) {
   const seen = [];
-  const real = harness.runOneShot;
-  harness.runOneShot = async (cfg) => {
-    seen.push(cfg);
+  const real = harness.createAgentHandle;
+  harness.createAgentHandle = async (cfg) => {
+    const entry = { cfg, inputs: [] };
+    seen.push(entry);
     const next = replies.shift();
     if (next === undefined) throw new Error("the script ran out of manager replies");
-    return next;
+    return {
+      name: cfg.name,
+      async sendTurn(input) {
+        entry.inputs.push(input);
+        if (typeof next === "string") return turnResult({ text: next });
+        const name = toolFor(cfg.tools, next);
+        if (!name) return turnResult({ text: json(next) });
+        const args = {};
+        for (const field of ["reason", "answer", "note"]) {
+          if (next[field]) args[field] = next[field];
+        }
+        await cfg.tools[name].execute(args);
+        return turnResult({});
+      },
+      async close() {},
+    };
   };
-  return { seen, restore: () => { harness.runOneShot = real; } };
+  return { seen, restore: () => { harness.createAgentHandle = real; } };
+}
+
+/** The shape `consumeEvents` hands back, so `managerDecision` reads a scripted turn as a real one. */
+function turnResult(over) {
+  return {
+    text: "",
+    reasoning: "",
+    finishReason: "stop",
+    usage: null,
+    result: "stop",
+    error: null,
+    messages: [],
+    toolCalls: [],
+    chunks: 1,
+    offloads: [],
+    ...over,
+  };
+}
+
+/**
+ * Which tool would carry this decision out — found the way the model finds it: the kind in the name,
+ * the identifying text in the description. No match means the scripted decision names a move this
+ * state does not offer, and it goes to the gate as text.
+ *
+ * @param {Object} tools - The tool set the handle was handed.
+ * @param {Object} decision - The scripted decision.
+ * @returns {string|null}
+ */
+function toolFor(tools, decision) {
+  const names = Object.keys(tools || {});
+  const candidates = names.filter((name) => {
+    const rest = /^move\d+_(.+)$/.exec(name);
+    if (!rest) return false;
+    const tail = rest[1];
+    if (tail.split("_")[0] !== decision.action) return false;
+    if (decision.action === "run") return tail === `run_${manager.slug(decision.step || "")}`;
+    if (decision.action === "judge") return tail === `judge_${decision.outcome}`;
+    const description = String((tools[name] && tools[name].description) || "");
+    for (const key of ["ticket", "option", "question", "patch"]) {
+      if (decision[key] && !description.includes(String(decision[key]))) return false;
+    }
+    return true;
+  });
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 const json = (obj) => "```json\n" + JSON.stringify(obj) + "\n```";
@@ -253,7 +325,7 @@ async function testWatchModeWritesNothing() {
   // question is not yet a record. A role that decides from a preview has to be told it is a preview.
   assert.ok(result.decisions[0].offered.some((l) => l.startsWith("diagnose ")), JSON.stringify(result.decisions[0].offered));
   assert.ok(!result.decisions[0].offered.some((l) => l.startsWith("run ")), "there is nothing executable: the plan's answer is a question");
-  const brief = stub.seen[0].messages[0].text;
+  const brief = stub.seen[0].inputs[0];
   assert.ok(brief.includes("PREVIEW — not written"), "the preview says what it is, where the manager reads it");
   assert.ok(brief.includes("reproduced rather than repaired"), "the question act mode would write is the one it was shown");
   assert.ok(log.includes("shown as a preview, not opened"), log);
@@ -305,7 +377,7 @@ async function testIllegalDecisionStops() {
     assert.ok(log.includes("the menu it was offered"), "the refusal prints what WAS available, because a refusal you cannot act on gets worked around");
     assert.ok(log.includes("(twice:"), "the report says the correction was tried: " + log);
     assert.strictEqual(stub.seen.length, 2, "one correction, and then the loop stops");
-    assert.ok(stub.seen[1].messages[0].text.includes("previous answer was refused"), "the retry carries the refusal, not the same question again");
+    assert.ok(stub.seen[1].inputs[0].includes("previous answer was refused"), "the retry carries the refusal, not the same question again");
   } finally {
     stub.restore();
   }

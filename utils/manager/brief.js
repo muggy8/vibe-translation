@@ -1,12 +1,16 @@
 /**
  * The whole message, built from records this layer already wrote for a human: the triage, the deliverable counts, the remaining per-step attempts, each ticket, each patch, and the offered menu. Nothing else: no file is read, and the only place a source path reaches this role at all is a patch's declared file list.
  *
+ * The standing contract (`MANAGER_RULES`) is NOT in here: it is the system prompt of the turn, so it
+ * is stated once per call rather than re-billed inside every state report. What is in here is the
+ * state, and the menu — both as the lines the manager reads and as the tools it calls.
+ *
  * Part of the manager.js layer (split out of the original single file).
  */
 
 require("../../types"); // JSDoc type definitions
 
-const { MANAGER_ACTIONS, MANAGER_RULES } = require("./rules");
+const { describeMoveTools } = require("./move-tools");
 
 /**
  * One ticket, rendered for the role that cannot see the code.
@@ -181,7 +185,7 @@ function renderPatchForManager(patch) {
  * @returns {string}
  */
 function renderManagerBrief({ plan, moves, tickets = [], patches = [], correction = null }) {
-  const out = [MANAGER_RULES, "", "---", ""];
+  const out = [];
 
   out.push(`## The question`);
   out.push(
@@ -194,8 +198,9 @@ function renderManagerBrief({ plan, moves, tickets = [], patches = [], correctio
     out.push(`## Your previous answer was refused`);
     out.push(correction);
     out.push(
-      `Answer again from the same state and the same menu. Ticket, option and patch ids are printed in ` +
-        `full below — copy them character for character rather than writing one from memory.`
+      `Answer again from the same state and the same menu. Call one of the tools named at the bottom of ` +
+        `this message — the ticket, option and patch ids are inside the tools, so there is nothing to ` +
+        `copy and nothing to retype.`
     );
     out.push("");
   }
@@ -278,28 +283,18 @@ function renderManagerBrief({ plan, moves, tickets = [], patches = [], correctio
   for (const m of moves) out.push(`- ${m.label}`);
   out.push("");
 
-  out.push(`## Answer as`);
-  out.push("```json");
+  out.push(`## How you answer`);
   out.push(
-    JSON.stringify(
-      {
-        action: "one of: " + MANAGER_ACTIONS.map((a) => a.name).join(" | "),
-        reason: "why this move, now, in one or two sentences",
-        step: "for run: the step exactly as offered",
-        ticket: "for diagnose / answer / choose / fix: the ticket id",
-        answer: "for answer: your reply to their question",
-        question: "for answer: which question, quoted from the ticket (say it when the ticket has more than one open)",
-        option: "for choose: the option id",
-        patch: "for judge: the patch id",
-        outcome: "for judge: accept or reject",
-        note: "for escalate: what the account owner must decide",
-      },
-      null,
-      2
-    )
+    `Call ONE of your tools. Each one below is a tool, named on the left — the tool already carries ` +
+      `the step, the volume, the ticket, the option and the patch it is about, so there is nothing to ` +
+      `copy and nothing to retype.`
   );
-  out.push("```");
-  out.push("Only the fields your action needs. Nothing after the block.");
+  for (const line of describeMoveTools(moves)) out.push(`- ${line}`);
+  out.push("");
+  out.push(
+    `Write the reason. It is the only record of why this run did what it did, and it is what a human ` +
+      `reads six runs from now.`
+  );
   return out.join("\n");
 }
 

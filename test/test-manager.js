@@ -5,17 +5,19 @@
  * prove. What is pinned here is not "did the model say something sensible" — it is the three things
  * that make a model's answer safe to act on:
  *
- *   1. **The call has no file tools.** The manager's whole guarantee is that it never sees the code
- *      (docs/delivery-layer.md). A tool-less `runOneShot` is that guarantee as a capability; a prompt that
- *      says "do not read the code" is a sentence. So the stub asserts the request it received had no
- *      `tools` and no agent handle, and that the brief it was handed names the folders and reports but
- *      never a `.js`.
- *   2. **The reply is parsed fail-closed, and the menu is closed.** An answer that names a step the
- *      triage did not offer, a ticket that does not exist, an option the filter refused, or a patch
- *      already judged is refused by name — with the refusal saying what IS available, because a
- *      refusal that cannot be acted on is the refusal that gets worked around (gotcha 70). The one
- *      thing it does NOT refuse is a ticket id typed wrong when the answer's own option id contains
- *      the real one: that is a transcription slip, it is corrected, and the correction is on the record.
+ *   1. **The call is handed no file tools.** The manager's whole guarantee is that it never sees the code
+ *      (docs/delivery-layer.md). The tool set it is given IS the offered menu — no readFile, no writeFile,
+ *      no context tools — so the guarantee is a capability and not a sentence in a prompt. The test
+ *      asserts the exact tool names the handle received, and that none of them is a file tool.
+ *   2. **The menu is closed on both paths.** A decision is made by calling a tool, and the tool carries
+ *      the step, the ticket, the option and the patch — so the ids cannot be mistyped. When the model
+ *      answers in prose instead (which a local endpoint on this machine does), the reply goes through the
+ *      same fail-closed parse and the same gate: an answer that names a step the triage did not offer, a
+ *      ticket that does not exist, an option the filter refused, or a patch already judged is refused by
+ *      name, with the refusal saying what IS available in the form the caller has to write back. The two
+ *      things it does NOT refuse are names the state already holds — a ticket id mangled inside an option
+ *      id, and a step name copied as the sentence around it — which are corrected, and the correction is
+ *      on the record.
  *   3. **The two claims that need proving are proved against the records.** "I'm done" and "this patch
  *      is safe to accept without a human" are checked, not believed.
  *
@@ -37,6 +39,7 @@ const os = require("os");
 const harness = require("../harness");
 const manager = require("../utils/manager");
 const resume = require("../utils/resume");
+const { judgeTemperature } = require("../configs/shared");
 
 // Before anything reaches a hook: an empty hooks dir means no `pre-manager`, no container switch.
 const HOOKS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "oresuki-empty-hooks-"));
@@ -170,6 +173,58 @@ function patchOf(over) {
     ],
     ...over,
   };
+}
+
+// ─── The stand-in for the model server ────────────────────────────────────────
+
+/**
+ * Stand in for the model around the manager's turn, without standing in for the tool layer.
+ *
+ * `script` is one entry per manager call: `{ toolCalls: [{ name, input }], text }`. The handle it hands
+ * back is a fake, but the TOOLS it runs are the real ones `buildMoveTools` built, executed for real —
+ * so the one-move rule, the missing-field rule, and the ids a tool carries are exercised rather than
+ * described. A tool name that is not in the set throws the way the provider throws, which is the shape
+ * `unknown-move` exists to report.
+ *
+ * @param {Array<{toolCalls?: Array<{name: string, input?: Object}>, text?: string}>} script
+ * @returns {{seen: Array<{cfg: Object, inputs: string[]}>, restore: Function}} - `seen` collects each
+ *   handle's config and what it was sent.
+ */
+function scriptManagerTurn(script) {
+  const seen = [];
+  const real = harness.createAgentHandle;
+  harness.createAgentHandle = async (cfg) => {
+    const entry = { cfg, inputs: [] };
+    seen.push(entry);
+    const step = script.shift();
+    if (step === undefined) throw new Error("the script ran out of manager turns");
+    return {
+      name: cfg.name,
+      async sendTurn(input) {
+        entry.inputs.push(input);
+        const calls = step.toolCalls || [];
+        for (const call of calls) {
+          const tool = cfg.tools && cfg.tools[call.name];
+          if (!tool) throw new Error(`Model tried to call unavailable tool '${call.name}'`);
+          await tool.execute(call.input || {});
+        }
+        return {
+          text: step.text || "",
+          reasoning: "",
+          finishReason: "stop",
+          usage: null,
+          result: "stop",
+          error: null,
+          messages: [],
+          toolCalls: calls.map((c) => ({ toolName: c.name, input: c.input || {} })),
+          chunks: 1,
+          offloads: [],
+        };
+      },
+      async close() {},
+    };
+  };
+  return { seen, restore: () => { harness.createAgentHandle = real; } };
 }
 
 // ─── 1: the two menus cannot drift ────────────────────────────────────────────
@@ -467,21 +522,47 @@ async function testMistypedIds() {
     "no second field, no repair"
   );
 
-  // End to end, through the real parse and the real gate.
-  const real = harness.runOneShot;
-  harness.runOneShot = async () => "```json\n" + JSON.stringify(mangled) + "\n```";
+  // End to end, on the text path: a model that answers in prose instead of calling a tool. The parse
+  // and the gate are the real ones, and the repair is what saves the decision.
   let decision;
-  try {
-    decision = await manager.managerDecision({ plan: planOf(), moves, tickets, patches: [] });
-  } finally {
-    harness.runOneShot = real;
+  {
+    const stub = scriptManagerTurn([{ text: "```json\n" + JSON.stringify(mangled) + "\n```" }]);
+    try {
+      decision = await manager.managerDecision({ plan: planOf(), moves, tickets, patches: [] });
+    } finally {
+      stub.restore();
+    }
   }
   assert.strictEqual(decision.ok, true, decision.refusal);
+  assert.strictEqual(decision.via, "text", "no tool was called, so the reply was read as text");
   assert.strictEqual(decision.action.ticket, "TCK-1", "the loop acts on the corrected id, not the typed one");
   assert.strictEqual(decision.action.option, ALLOWED_OPTION.id);
   assert.ok(
     decision.warnings.some((w) => w.kind === "repaired-ticket-id"),
     `the correction is on the record: ${JSON.stringify(decision.warnings)}`
+  );
+
+  // And the reason the tool path exists: the same decision, made by calling the tool. There is no id in
+  // the arguments to mistype, so there is nothing to repair — the ticket id and the option id arrive
+  // from the menu entry the tool was built from.
+  {
+    const stub = scriptManagerTurn([
+      { toolCalls: [{ name: "move1_choose", input: { reason: "the free check settles what the gate was refusing before anything is spent" } }] },
+    ]);
+    try {
+      decision = await manager.managerDecision({ plan: planOf(), moves, tickets, patches: [] });
+    } finally {
+      stub.restore();
+    }
+  }
+  assert.strictEqual(decision.ok, true, decision.refusal);
+  assert.strictEqual(decision.via, "tool");
+  assert.strictEqual(decision.action.ticket, "TCK-1", "the id came from the menu, not from the model");
+  assert.strictEqual(decision.action.option, ALLOWED_OPTION.id);
+  assert.deepStrictEqual(
+    decision.warnings,
+    [],
+    "a decision that cannot be mistyped has nothing to report: " + JSON.stringify(decision.warnings)
   );
 
   // On a re-ask, the refusal is put in front of the role with the ids it has to copy.
@@ -593,79 +674,198 @@ function testAutoAcceptSafety() {
   console.log("  auto-accept: ordinary code with green checks and no warning, and nothing else, unattended");
 }
 
-// ─── 7: the call itself — tool-less, hooked, fail-closed ──────────────────────
+// ─── 7: the call itself — the menu as tools, hooked, fail-closed ──────────────
 
 async function testTheCall() {
-  const real = harness.runOneShot;
-  const seen = [];
-  let scripted = "";
-  harness.runOneShot = async (cfg) => {
-    seen.push(cfg);
-    return scripted;
-  };
+  const plan = planOf();
+  const tickets = [ticketOf()];
+  const moves = [
+    {
+      kind: "run",
+      step: "glossary",
+      actionName: "wipe-and-cascade",
+      countsAsIntervention: true,
+      label:
+        "run glossary — wipe-and-cascade, from volume 02, cascade, counts against this step's allowance; " +
+        "the same sequence then continues with character-voice, style-guide",
+    },
+    { kind: "diagnose", ticket: "TCK-1", label: "diagnose TCK-1" },
+  ];
 
+  const stub = scriptManagerTurn([
+    { toolCalls: [{ name: "move2_diagnose", input: { reason: "the gate is the thing I cannot read" } }] },
+  ]);
   try {
-    const plan = planOf();
-    const tickets = [ticketOf()];
-    const moves = [
-      { kind: "run", step: "glossary", actionName: "wipe-and-cascade", label: "run glossary — wipe-and-cascade" },
-      { kind: "diagnose", ticket: "TCK-1", label: "diagnose TCK-1" },
-    ];
-
-    scripted = '```json\n{ "action": "diagnose", "ticket": "TCK-1", "reason": "the gate is the thing I cannot read" }\n```';
     const ok = await manager.managerDecision({ plan, moves, tickets, patches: [] });
     assert.strictEqual(ok.ok, true, ok.refusal);
     assert.strictEqual(ok.action.action, "diagnose");
+    assert.strictEqual(ok.via, "tool");
+    assert.strictEqual(ok.action.ticket, "TCK-1", "the id came from the menu entry, not from the model");
 
     // The load-bearing one: the manager is handed NO file tools. Not "told not to use them" — not given
-    // them. An agent handle would be the code access this role is defined by not having.
-    assert.strictEqual(seen.length, 1);
-    const cfg = seen[0];
-    assert.strictEqual(cfg.tools, undefined, "the manager's call must not advertise tools");
-    assert.ok(!cfg.systemPrompt, "the rules are part of the brief, so there is one message and nothing hidden in it");
-    assert.ok(Array.isArray(cfg.messages) && cfg.messages.length === 1, "one shaped report in");
+    // them. The menu is the entire tool set, and the harness adds nothing to it: the manager role is not
+    // in CONTEXT_MANAGED_ROLES, so no context tools either. An agent handle with the fs tools in it
+    // would be the code access this role is defined by not having.
+    assert.strictEqual(stub.seen.length, 1);
+    const cfg = stub.seen[0].cfg;
+    assert.deepStrictEqual(
+      Object.keys(cfg.tools),
+      ["move1_run_glossary", "move2_diagnose"],
+      JSON.stringify(Object.keys(cfg.tools))
+    );
+    for (const banned of ["readFile", "listFiles", "grep", "writeFile", "editFile", "deleteFile", "manage_context", "recall_memory"]) {
+      assert.ok(!cfg.tools[banned], `the manager was handed ${banned}: that is the code it may not read`);
+    }
+    assert.ok(cfg.systemPrompt.includes("You are a CUSTOMER"), "the role is stated where the model reads it");
+    assert.ok(cfg.systemPrompt.includes("Call exactly ONE tool"), "the one-move rule is stated to the role it binds");
+    assert.ok(cfg.systemPrompt.includes("the source code"), "the boundary is stated to the role that has to respect it");
+    assert.strictEqual(cfg.name, "delivery-manager");
+    assert.strictEqual(cfg.maxSteps, manager.MANAGER_MAX_STEPS, "a decision turn reads nothing, so it is capped");
+    assert.strictEqual(cfg.temperature, judgeTemperature(), "a decision samples like a grader, not like a writer");
     assert.ok(cfg.maxTokens >= 1024, `the reply cap is the manager's own: ${cfg.maxTokens}`);
-    assert.strictEqual(cfg.label, "delivery-manager");
 
-    // What the brief contains, and what it must not. With no patch in front of the manager there is no
-    // legitimate reason for a source path to appear anywhere in what it is shown.
-    const brief = cfg.messages[0].text;
-    assert.ok(brief.includes("You are a CUSTOMER"), "the role is stated where the model reads it");
+    // What the state report contains, and what it must not. With no patch in front of the manager there
+    // is no legitimate reason for a source path to appear anywhere in what it is shown.
+    const brief = stub.seen[0].inputs[0];
     assert.ok(brief.includes("run glossary — wipe-and-cascade"), "the menu it is offered is the menu it must choose from");
+    assert.ok(
+      brief.includes("move1_run_glossary — run glossary"),
+      "every menu line is named by the tool that carries it out: " + brief.slice(-500)
+    );
     assert.ok(brief.includes("diagnose TCK-1"), brief.slice(-400));
     assert.ok(brief.includes("Why does the carry-forward gate refuse"), "the ticket's own question is in front of it");
     assert.ok(brief.includes("glossary.md.rejected"), "the evidence the triage actually looked at is citable");
     assert.ok(!brief.includes(".js"), "nothing in what the manager is shown is source code: " + brief.match(/.{0,60}\.js.{0,20}/g));
-    assert.ok(brief.includes("the source code"), "the boundary is stated to the role that has to respect it");
-
-    // An answer that is not a decision is reported as one, with the reason.
-    scripted = "I would probably just run it again and see.";
-    const bad = await manager.managerDecision({ plan, moves, tickets, patches: [] });
-    assert.strictEqual(bad.ok, false);
-    assert.strictEqual(bad.kind, "unparseable");
-    assert.ok(bad.refusal.length > 10, bad.refusal);
-
-    // An answer that names something the state does not support is refused by the gate, not trusted.
-    scripted = '```json\n{ "action": "run", "step": "polish", "reason": "finish it" }\n```';
-    const offMenu = await manager.managerDecision({ plan, moves, tickets, patches: [] });
-    assert.strictEqual(offMenu.ok, false);
-    assert.strictEqual(offMenu.kind, "not-offered");
-    assert.ok(offMenu.refusal.includes("glossary"), "the refusal names the step that IS offered: " + offMenu.refusal);
-
-    // A call that died is not a decision, and the failure names the most likely cause on this machine.
-    harness.runOneShot = async () => {
-      throw new Error("the model returned no content");
-    };
-    const dead = await manager.managerDecision({ plan, moves, tickets, patches: [] });
-    assert.strictEqual(dead.ok, false);
-    assert.strictEqual(dead.kind, "call-failed");
-    assert.ok(dead.refusal.includes("model-switch-state"), "the wrong-container suspicion is said out loud: " + dead.refusal);
   } finally {
-    harness.runOneShot = real;
-    fs.rmSync(HOOKS_DIR, { recursive: true, force: true });
+    stub.restore();
   }
 
-  console.log("  the call: no tools, one shaped report, fail-closed parse, and a dead call names the container");
+  // One move per decision, enforced by the tool rather than by a sentence in the prompt.
+  {
+    const s = scriptManagerTurn([
+      {
+        toolCalls: [
+          { name: "move1_run_glossary", input: { reason: "glossary is the earliest unfinished step, and every later volume is built on it" } },
+          { name: "move2_diagnose", input: { reason: "and while I am here, ask the team as well" } },
+        ],
+        text: "I picked up the glossary.",
+      },
+    ]);
+    try {
+      const two = await manager.managerDecision({ plan, moves, tickets, patches: [] });
+      assert.strictEqual(two.ok, true, two.refusal);
+      assert.strictEqual(two.action.action, "run", "the first call is the decision of record");
+      assert.ok(two.warnings.some((w) => w.kind === "second-move-refused"), JSON.stringify(two.warnings));
+    } finally {
+      s.restore();
+    }
+  }
+
+  // A call that names a real move and forgets the prose the move needs records nothing.
+  {
+    const s = scriptManagerTurn([{ toolCalls: [{ name: "move1_run_glossary", input: { reason: "   " } }], text: "just run it" }]);
+    try {
+      const thin = await manager.managerDecision({ plan, moves, tickets, patches: [] });
+      assert.strictEqual(thin.ok, false, "a decision with no reason written down is not a decision");
+      assert.ok(thin.warnings.some((w) => w.kind === "move-without-reason"), JSON.stringify(thin.warnings));
+    } finally {
+      s.restore();
+    }
+  }
+
+  // A tool that is not on the menu: the manager reached for a move this state does not support.
+  {
+    const s = scriptManagerTurn([{ toolCalls: [{ name: "move9_wipe_everything", input: { reason: "start over" } }] }]);
+    try {
+      const reached = await manager.managerDecision({ plan, moves, tickets, patches: [] });
+      assert.strictEqual(reached.kind, "unknown-move", reached.refusal);
+      assert.ok(reached.refusal.includes("run glossary"), "the refusal names the moves it WAS offered: " + reached.refusal);
+    } finally {
+      s.restore();
+    }
+  }
+
+  // A turn that called nothing and wrote nothing is reported as that, not as a parse failure.
+  {
+    const s = scriptManagerTurn([{ text: "" }]);
+    try {
+      const silent = await manager.managerDecision({ plan, moves, tickets, patches: [] });
+      assert.strictEqual(silent.kind, "no-move", silent.refusal);
+      assert.ok(silent.refusal.includes("escalate") || silent.refusal.includes("run glossary"), silent.refusal);
+    } finally {
+      s.restore();
+    }
+  }
+
+  // The text path is still there, and still fail-closed: a model that answers in prose.
+  {
+    const s = scriptManagerTurn([{ text: "I would probably just run it again and see." }]);
+    try {
+      const bad = await manager.managerDecision({ plan, moves, tickets, patches: [] });
+      assert.strictEqual(bad.ok, false);
+      assert.strictEqual(bad.kind, "unparseable");
+      assert.strictEqual(bad.via, "text");
+      assert.ok(bad.refusal.length > 10, bad.refusal);
+    } finally {
+      s.restore();
+    }
+  }
+
+  // A step the state does not support is refused by the gate, and the refusal names the step that IS
+  // offered — in the form the caller has to write back, not the sentence around it.
+  {
+    const s = scriptManagerTurn([{ text: '```json\n{ "action": "run", "step": "polish", "reason": "finish it" }\n```' }]);
+    try {
+      const offMenu = await manager.managerDecision({ plan, moves, tickets, patches: [] });
+      assert.strictEqual(offMenu.ok, false);
+      assert.strictEqual(offMenu.kind, "not-offered");
+      assert.ok(offMenu.refusal.includes("The run moves are: glossary"), "the refusal names the step that IS offered: " + offMenu.refusal);
+    } finally {
+      s.restore();
+    }
+  }
+
+  // The shape that stopped a live run on 2026-10-08: the right move, and the step field filled with the
+  // menu's whole sentence because that sentence is the only place the step was written. It is repaired,
+  // reported, and acted on.
+  {
+    const copied = {
+      action: "run",
+      step: "glossary — wipe-and-cascade, from volume 02, cascade",
+      reason: "glossary is the root unfinished step and every later volume is built on it",
+    };
+    const s = scriptManagerTurn([{ text: "```json\n" + JSON.stringify(copied) + "\n```" }]);
+    try {
+      const repaired = await manager.managerDecision({ plan, moves, tickets, patches: [] });
+      assert.strictEqual(repaired.ok, true, repaired.refusal);
+      assert.strictEqual(repaired.action.step, "glossary", "the decision was read against the move the menu offers");
+      assert.ok(repaired.warnings.some((w) => w.kind === "repaired-step-name"), JSON.stringify(repaired.warnings));
+    } finally {
+      s.restore();
+    }
+  }
+
+  // A call that died is not a decision, and the failure names the most likely cause on this machine.
+  {
+    const s = scriptManagerTurn([]);
+    harness.createAgentHandle = async () => {
+      throw new Error("the model returned no content");
+    };
+    try {
+      const dead = await manager.managerDecision({ plan, moves, tickets, patches: [] });
+      assert.strictEqual(dead.ok, false);
+      assert.strictEqual(dead.kind, "call-failed");
+      assert.ok(dead.refusal.includes("model-switch-state"), "the wrong-container suspicion is said out loud: " + dead.refusal);
+    } finally {
+      s.restore();
+    }
+  }
+
+  fs.rmSync(HOOKS_DIR, { recursive: true, force: true });
+  console.log(
+    "  the call: the menu as tools, no file tool in sight, one move per decision, a repaired name on " +
+      "the record, and a dead call names the container"
+  );
 }
 
 // ─── 8: the manager's own reply budget ────────────────────────────────────────

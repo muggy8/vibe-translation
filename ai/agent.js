@@ -308,6 +308,13 @@ function offloadAtChunkBoundary({
  * @param {string} [cfg.cwd] - Base dir for fs tools (default: process.cwd()).
  * @param {number} [cfg.maxSteps] - Step cap (default: AGENT_MAX_STEPS env / 20). On a
  *   context-managed handle it is the size of one CHUNK, not of the turn.
+ * @param {number} [cfg.temperature] - Sampling temperature for this handle (default:
+ *   `AI_TEMPERATURE` via {@link envTemperature}). A handle that decides rather than writes — the
+ *   delivery manager — passes the grader's temperature here, the same `JUDGE_TEMPERATURE` a one-shot
+ *   grader gets (gotcha 59). Without this override an agent handle could only ever sample like a
+ *   writer.
+ * @param {number} [cfg.maxTokens] - Reply budget for this handle (default: {@link envMaxTokens}).
+ *   A role with its own documented cap (the manager's `DELIVERY_MAX_TOKENS`) passes it here.
  * @param {number} [cfg.retry] - Error retries (default: AI_RETRY env).
  * @param {boolean} [cfg.thinking] - Thinking mode (default: AI_THINKING env, on —
  *   agents use full thinking for higher-quality output; tune AI_THINKING_LEVEL
@@ -330,6 +337,8 @@ async function createAgentHandle({
   approve,
   cwd = process.cwd(),
   maxSteps,
+  temperature,
+  maxTokens,
   retry,
   thinking = envThinking(),
   thinkingLevel,
@@ -405,8 +414,8 @@ async function createAgentHandle({
         : baseTools
       : undefined,
     maxSteps: managed ? ctxm.contextChunkSteps() : maxSteps ?? agentMaxSteps(),
-    temperature: envTemperature(),
-    maxTokens: envMaxTokens(),
+    temperature: temperature ?? envTemperature(),
+    maxTokens: maxTokens ?? envMaxTokens(),
     instructions: false,
     ...(approve ? { approve } : {}),
   });

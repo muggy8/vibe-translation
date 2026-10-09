@@ -73,6 +73,10 @@ function offerMoves({ plan, tickets, patches: pending }) {
       moves.push({
         kind: "answer",
         ticket: t.id,
+        // The question travels on the move, so the manager never has to quote one back: `recordAnswer`
+        // matches a question exactly and `diagnose.js` refuses to guess when a ticket holds several, and
+        // a role that can only pick a button cannot mis-quote a sentence it was never asked to copy.
+        question: q,
         label: `answer ${t.id}: "${q}" — say only what a customer is allowed to see (the folders, the reports, the plan).`,
       });
     }
@@ -113,6 +117,17 @@ function offerMoves({ plan, tickets, patches: pending }) {
   moves.push({
     kind: "escalate",
     label: "escalate — stop, and name in one sentence the decision that belongs to the account owner.",
+  });
+
+  // `end` is on the menu because the menu is now the tool list, and a manager with no way to say
+  // "the run is finished" is a manager that escalates instead. It is the one move here that is not
+  // offered *because it is legal* — it is offered so it can be refused: `endIsProvable` checks it
+  // against the triage's verdict, the open tickets, the unjudged patches and the deliverable's
+  // counts, and a "finish" primitive would be a command that claims a result instead of checking one
+  // (gotcha 70).
+  moves.push({
+    kind: "end",
+    label: "end — the run is finished. The machine checks this against the records before it accepts it.",
   });
   return moves;
 }
