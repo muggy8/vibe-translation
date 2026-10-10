@@ -154,6 +154,59 @@ function mirrorMarkerKey(document, volume) {
   return `mirrored_${document}_${Number(volume)}`;
 }
 
+/**
+ * Record that one volume's document was **rebuilt by code** rather than written by an author agent.
+ *
+ * A marker, like the mirror marker, and for the same reason: the audit has to be able to answer "how
+ * did this volume's reference come to exist?" without guessing. A reference rebuilt from a volume's
+ * extraction output is a legitimate artifact and a legitimate record, and it is also a reference nobody
+ * reviewed — so the difference has to be in the file, where every later audit reads it, rather than in
+ * a log line nobody keeps. The detail is stored as JSON so the report can quote the counts.
+ *
+ * @param {{db: Object}} ctx
+ * @param {string} document - `DOCUMENT_GLOSSARY` or `DOCUMENT_VOICE`.
+ * @param {number} volume
+ * @param {Object} detail - What the rebuild did, for the report.
+ * @returns {void}
+ */
+function markDocumentRebuilt(ctx, document, volume, detail = {}) {
+  ctx.db
+    .prepare("INSERT INTO store_info (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(rebuildMarkerKey(document, volume), JSON.stringify({ at: new Date().toISOString(), ...detail }));
+}
+
+/**
+ * Whether a volume's document was rebuilt, and what the rebuild recorded.
+ *
+ * @param {{db: Object}} ctx
+ * @param {string} document
+ * @param {number} volume
+ * @returns {{at: string, filed: number, carried: number, refused: number, characters: number, povUnattached?: number, mirrorRowsRemoved?: number, candidatesFiled?: number, candidatesRefused?: number}|null}
+ *   Null when the document was not rebuilt.
+ */
+function documentRebuilt(ctx, document, volume) {
+  const row = ctx.db.prepare("SELECT value FROM store_info WHERE key = ?").get(rebuildMarkerKey(document, volume));
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.value);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    // A marker this layer cannot read is reported as no marker rather than as a crash; the audit's
+    // own rebuild question then says nothing, which is the failure mode worth noticing.
+    return null;
+  }
+}
+
+/**
+ * The rebuild marker's key. One place, for the same reason the mirror marker is one place.
+ * @param {string} document
+ * @param {number} volume
+ * @returns {string}
+ */
+function rebuildMarkerKey(document, volume) {
+  return `rebuilt_${document}_${Number(volume)}`;
+}
+
 module.exports = {
   DOCUMENT_GLOSSARY,
   DOCUMENT_VOICE,
@@ -164,4 +217,6 @@ module.exports = {
   renderDocumentProse,
   markDocumentMirrored,
   documentMirrored,
+  markDocumentRebuilt,
+  documentRebuilt,
 };

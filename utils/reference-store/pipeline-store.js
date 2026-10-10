@@ -203,12 +203,12 @@ function importVolumeArtifacts(store, { glossaryMarkdown = null, voiceMarkdown =
  * Measure who this volume's own text contains.
  *
  * @param {ReferenceStore} store
- * @returns {{ok: boolean, measured: number, present: number, absent: number, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, measured: number, present: number, absent: number, chapters: number, matchRows: number, refusal: ReferenceRefusal|null}}
  */
 function measureVolumePresence(store) {
   const result = store.recordCastPresence();
-  if (!result.ok) return { ok: false, measured: 0, present: 0, absent: 0, refusal: result.refusal };
-  return { ok: true, measured: result.measured, present: result.present, absent: result.absent, refusal: null };
+  if (!result.ok) return { ok: false, measured: 0, present: 0, absent: 0, chapters: 0, matchRows: 0, refusal: result.refusal };
+  return { ok: true, measured: result.measured, present: result.present, absent: result.absent, chapters: result.chapters, matchRows: result.matchRows, refusal: null };
 }
 
 /**
@@ -252,7 +252,7 @@ function resetDocumentMirror(store, { document = "voice" } = {}) {
  * @param {string} opts.markdown - The artifact as it is on disk.
  * @param {Array<Object>} [opts.refused] - Rows the imports refused, for the report.
  * @param {string} [opts.step]
- * @returns {{findings: PostMortemFinding[], highFindings: PostMortemFinding[], markdown: string, counts: Object<string, number>, checked: number, presence: Object, unadopted: Array<Object>, unadoptedTerms: Array<Object>, absent: Array<Object>}}
+ * @returns {{findings: PostMortemFinding[], highFindings: PostMortemFinding[], markdown: string, counts: Object<string, number>, checked: number, coverageAsked: boolean, coverage: Object, presence: Object, unadopted: Array<Object>, unadoptedTerms: Array<Object>, absent: Array<Object>}}
  */
 function auditVolumeRecord(store, { title, file, markdown, refused = [], step = VALIDATION_STEP }) {
   // Presence first: the coverage question is refined by it, and running the audit before the
@@ -274,11 +274,13 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
     counts: audit.counts,
     checked: audit.checked,
     coverageAsked: audit.coverageAsked,
+    coverage: audit.coverage,
     unadopted,
     unadoptedTerms: terms,
     absent,
     presence,
     refused,
+    rebuilt: (audit.rebuilt || []).find((entry) => entry.document === "character-voice" && entry.volume === store.volume) || null,
   });
 
   return {
@@ -288,10 +290,12 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
     counts: audit.counts,
     checked: audit.checked,
     coverageAsked: audit.coverageAsked,
+    coverage: audit.coverage,
     presence,
     unadopted,
     unadoptedTerms: terms,
     absent,
+    rebuilt: audit.rebuilt || [],
   };
 }
 

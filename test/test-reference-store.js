@@ -487,7 +487,7 @@ function scenarioFixtureCannotReachTheCorpus() {
     ["ch0", "ch1", "ch2"],
     "the fixture's chapters are the ones the store sees"
   );
-  assert.strictEqual(SOURCE_01.ch0.length, 4);
+  assert.strictEqual(SOURCE_01.ch0.length, 5, "the fixture's own chapter is the small known thing the tests are measuring");
   store.close();
 
   console.log("reference-store: every scenario is inside a fixture, and the guard says so");

@@ -468,12 +468,31 @@
  * @property {(segments: Array<{id: string, file?: string, title?: string|null}>|null) => {ok: boolean, registered: number, error: string|null}} registerChaptersFromSource — Register this volume's chapters from the bundle segments the calling stage already has. A plain-text volume produces no bundle manifest, so a store left to find its own chapters finds none and refuses every citation.
  * @property {(entry: {key: string, display?: string, aliases?: string[], persona?: string[], firstSeenVolume?: number}) => {ok: boolean, cast: Object|null, created: boolean, refusal: ReferenceRefusal|null}} upsertCast — Aliases union, `first_seen_volume` only ever moves earlier, and a display the entry does not supply does not erase the one on the row.
  * @property {(factId: string) => Array<{key: string, role: string}>} factCharacters — Who a fact is about, in the roles `fact_characters` exists for: a naive per-character split loses who said it to whom.
- * @property {(opts?: {volume?: number}) => {ok: boolean, volume: number, measured: number, present: number, absent: number, chapters: number, refusal: ReferenceRefusal|null}} recordCastPresence — Measure which cast entries this volume's own text contains. A measurement, not a claim: it lives in `cast_presence`, and a volume with no extracted source is a refusal rather than a volume where nobody appears.
- * @property {(volume?: number) => Array<{volume: number, key: string, present: number, matched: string|null, chapter: string|null, line: number|null}>} castPresence — The measurement, including WHICH rule proved it (`verbatim` / `skeleton`).
+ * @property {(opts?: {volume?: number}) => {ok: boolean, volume: number, measured: number, present: number, absent: number, chapters: number, matchRows: number, refusal: ReferenceRefusal|null}} recordCastPresence — Measure which cast entries this volume's own text contains, and how much of it. A measurement, not a claim: it lives in `cast_presence` (one row per character) and `cast_presence_match` (one row per place a name occurs), and a volume with no extracted source is a refusal rather than a volume where nobody appears.
+ * @property {(volume?: number) => Array<{volume: number, key: string, present: number, matched: string|null, chapter: string|null, line: number|null, chapters: number, matches: number}>} castPresence — The measurement, including WHICH rule proved it (`verbatim` / `skeleton`), how many distinct chapters it was found in, and how many lines in total.
+ * @property {(volume?: number, key: string) => Array<{chapter: string, lines: number, matched: string}>} presenceDetail — Where one character's name actually occurs: one row per chapter, with how many lines in it and the rule that proved each.
  * @property {(volume?: number) => boolean} presenceMeasured — False means nobody has measured this volume, which is a different answer from nobody is in it.
- * @property {(opts?: {volume?: string, step?: string, publishedVolume?: number}) => {ok: boolean, findings: PostMortemFinding[], counts: Object<string, number>, checked: number, coverageAsked: boolean}} integrityFindings — The seven questions a store is asked before it is trusted or copied. `publishedVolume` limits the sealing question to volumes the caller calls finished; `coverageAsked` says whether the roster-coverage question was asked at all.
+ * @property {(opts?: {volume?: string, step?: string, publishedVolume?: number}) => {ok: boolean, findings: PostMortemFinding[], counts: Object<string, number>, checked: number, coverageAsked: boolean, coverage: {asked: boolean, chapters: number|null, measured: boolean, significanceChapters: number, rows: ReferenceCoverageRow[]}, rebuilt: Array<Object>}} integrityFindings — The questions a store is asked before it is trusted or copied. `publishedVolume` limits the sealing question to volumes the caller calls finished; `coverageAsked` says whether the roster-coverage question was asked at all, and `coverage.rows` is its whole answer — every uncovered character with both severity signals measured.
  * @property {() => Object<string, number>} tableCounts — Row counts over `COUNTED_TABLES`, the ones copy-forward compares.
  * @property {() => void} close
+ */
+
+/**
+ * @typedef {Object} ReferenceCoverageRow
+ * One character the character-voice reference says nothing about, with both of the signals that
+ * decide how serious that is. Produced by `utils/reference-store/integrity.js`'s coverage query and
+ * printed in full by the audit report — a softened guard is only honest if every character it
+ * softened is named.
+ * @property {string}   key              — The cast entry.
+ * @property {string}   display          — How the record renders them.
+ * @property {boolean}  measured         — False when presence was never measured for this volume, which forces the stricter HIGH.
+ * @property {number}   chapters         — How many distinct chapters of this volume's text contain their name.
+ * @property {string[]} chapterIds       — Which ones.
+ * @property {number}   lines            — How many lines in total.
+ * @property {string[]} rules            — Which matching rule(s) proved it: `verbatim`, `skeleton`.
+ * @property {number}   extractionClaims — Claims this volume's extraction filed about them that the reference took none of.
+ * @property {"HIGH"|"MEDIUM"} severity  — HIGH when either signal holds; MEDIUM when neither does.
+ * @property {string}   why              — The signals that held, or the ones that did not.
  */
 
 /**

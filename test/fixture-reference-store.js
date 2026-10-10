@@ -56,6 +56,10 @@ const SOURCE_01 = {
     "如月雨露は教室に入った。",
     "「さぁ、今日も俺の熱き血潮を迸らせるぜ！」",
     "大賀太陽は笑った。",
+    // 担任教師 is the fixture's "in every chapter" character: named in all three, with no voice
+    // claim and nothing from the extraction. That is the case the coverage rule's chapter signal
+    // exists for — somebody the book keeps pointing at, whom the reference never mentions.
+    "担任の教師は黒板を叩いた。",
   ],
   ch1: [
     "# 第一章",
@@ -63,6 +67,7 @@ const SOURCE_01 = {
     "如月雨露は「気にすんな！」と言った。",
     "山田は会計の人である。",
     "「ドンマイだ！ ドンマイ！」と大賀太陽が叫んだ。",
+    "担任の教師は出口に立っていた。",
   ],
   ch2: [
     "# 第二章",
@@ -72,6 +77,7 @@ const SOURCE_01 = {
     // a name: 秋野桜 is never printed as three bare kanji anywhere in this fixture. This is the
     // line the skeleton rule exists for (review 05 §3.1).
     "秋野あきの桜さくらは廊下で立ち止まった。",
+    "担任の教師は何も言わなかった。",
   ],
 };
 
@@ -161,6 +167,93 @@ const VOICE_01_MISSING_CHARACTERS = `# Character Voice Reference
 - **Pronouns**: 一人称は俺。
 - **Catchphrases**: 「気にすんな！」はジョーロの定型である。
 `;
+
+/**
+ * The extraction output for volume 01, in the shape `character-voice-new.json` has.
+ *
+ * The rebuild path (`utils/reference-store/rebuild.js`) reads this file and nothing else, so the
+ * fixture has to be the real shape: `type`, `character`, `quirkType`, `description`, `examples`,
+ * `formalityLevel`, and the POV variant with `povCategory`, `marker`, `assignedCharacter`,
+ * `sectionDescription`. Its quotes are real lines of `SOURCE_01`, including the furigana-only line
+ * the skeleton rule exists for, and it names characters three different ways — the roster's own
+ * spelling, the spelling with a bracketed nickname, and a spelling nobody in the glossary uses
+ * (俺（主人公）) — because that is exactly the case that makes a rebuilt reference fragment its
+ * roster if the name is not resolved.
+ *
+ * @type {Array<Object>}
+ */
+const EXTRACTION_01 = [
+  {
+    type: "voice",
+    character: "如月雨露（ジョーロ）",
+    quirkType: "pronoun",
+    description: "First person is 俺 throughout the prologue.",
+    examples: ["さぁ、今日も俺の熱き血潮を迸らせるぜ！"],
+    formalityLevel: "casual",
+  },
+  {
+    type: "voice",
+    character: "俺（主人公）",
+    quirkType: "catchphrase",
+    description: "Turns down every request with the same four words.",
+    examples: ["気にすんな！"],
+  },
+  {
+    type: "voice",
+    character: "三色院菫子（パンジー）",
+    quirkType: "vocabulary",
+    description: "Narration about her is flat and bookish.",
+    examples: ["三色院菫子は本を読んでいた。"],
+  },
+  {
+    type: "voice",
+    character: "大賀太陽（サンちゃん）",
+    quirkType: "catchphrase",
+    description: "Encourages people with the same word twice.",
+    examples: ["ドンマイだ！ ドンマイ！"],
+  },
+  {
+    type: "voice",
+    character: "秋野桜（コスモス）",
+    quirkType: "sentenceEnding",
+    description: "Her name is only ever printed with its reading aids.",
+    examples: ["秋野あきの桜さくらは廊下で立ち止まった。"],
+  },
+  {
+    type: "voice",
+    character: "山田",
+    quirkType: "vocabulary",
+    description: "Named only by what job he has.",
+    examples: ["山田は会計の人である。"],
+  },
+  {
+    type: "pov",
+    povCategory: "marker",
+    marker: "※",
+    assignedCharacter: "如月雨露（ジョーロ）",
+    sectionDescription: "The break before the second scene keeps the same narrator.",
+    examples: ["如月雨露は教室に入った。"],
+  },
+  {
+    type: "pov",
+    povCategory: "distance",
+    sectionDescription: "Narration borrows the protagonist's vocabulary when it describes the library committee.",
+    examples: ["三色院菫子は本を読んでいた。"],
+  },
+];
+
+/**
+ * An extraction claim whose quote is nowhere in the book.
+ *
+ * The evidence rule has no exception for a rebuild, and this is the claim that proves it.
+ */
+const EXTRACTION_01_UNVERIFIABLE = {
+  type: "voice",
+  character: "存在しない人物",
+  quirkType: "catchphrase",
+  description: "A line the extractor invented, about somebody the book never prints.",
+  examples: ["存在しない台詞など無い。"],
+};
 
 /**
  * Lay out a two-volume fixture series with a plan of record and extracted sources.
@@ -270,6 +363,8 @@ module.exports = {
   GLOSSARY_UNVERIFIABLE_ROW,
   VOICE_01,
   VOICE_01_MISSING_CHARACTERS,
+  EXTRACTION_01,
+  EXTRACTION_01_UNVERIFIABLE,
   fixtureStoreSeries,
   assertInsideFixture,
 };

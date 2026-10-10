@@ -168,6 +168,211 @@ change, and does the translation reflect it?* — and watch it across the first 
 scores badly while everything else scores well, the decision was wrong, and adding a one-line meaning
 per change is a small, contained fix. If it scores well, the cheaper design was right.
 
+### 7.2 Rebuilding a reference from its extraction output, and what it does not buy
+
+Volume 01 is the case §7.1 was written for and the case the store was built to catch: its
+`character-voice.md` is destroyed (106 lines, one line of 54,341 characters, 3 `###` sections for a
+cast of 10, 7 characters with no voice claim at all) while its **extraction output is healthy** —
+`character-voice-new.json`, 223 structured claims, produced for about 1.1M tokens. Re-importing the
+destroyed file into the store faithfully reproduces the damage; rebuilding from the extraction does
+not.
+
+`voice-adapter.js` renders rows whose `source_stage` is not `extract`, because extraction claims are
+**candidates** rather than adopted content. That filter is a guard, so it was not widened,
+parameterised, or bypassed. What was added is a fourth kind of row — `source_stage = "rebuild"`,
+stamped by nothing else in the repository — and a claim becomes renderable by being **adopted in the
+open**: a named, deterministic, code-only step that re-runs the same evidence rule every other row
+goes through. Promoting the extraction rows in place was rejected because it would collapse "what the
+extractor found" and "what the document says" into one set of rows. The damaged file is never an input,
+and it is moved to `character-voice.md.rejected` rather than overwritten. Sections and bullets are
+rendered **in chapter order**, which is §7.1's mitigation applied to a file no author wrote. (The
+candidates are now filed beside the adopted rows rather than absent from a rebuilt record — §7.4.)
+
+**What volume 01 actually measured** (rehearsal against a copy under `/tmp/opencode/`, no model call,
+nothing written into the series folder):
+
+| | faithful import of the destroyed file | rebuilt from the extraction |
+|---|---|---|
+| claims the store accepted | 15 voice rows, plus the volume's 216 extraction claims filed alongside them the way a real run files them | **214 of 223** (8 refused, 1 duplicate), each with its candidate copy beside it — 214 `rebuild` rows and 214 `extract` rows |
+| characters with a voice claim | 3 | **8** |
+| the roster the coverage question is asked against | 13 | 10 |
+| coverage finding | **HIGH — 8 uncovered**, each named with the extraction claims that prove the loss (三色院菫子 30, 如月雨露 40, 俺 55, 秋野桜 28, 日向葵 24, 大賀太陽 16, 女 4, 下級生の女子生徒 1); 2 more at MEDIUM | **no HIGH finding at all**; 2 at MEDIUM (山田, ジョージョエン・スカイウォーカー) |
+| longest line | 54,341 characters | 486 characters |
+| file | 106 lines / 336,428 bytes | 227 lines / 94,841 bytes |
+
+**The finding, stated plainly: rebuilding produces a better reference, not a passing one.** The
+destroyed reference says something about 3 of the 13 names its own record ends up carrying, and the 8
+it lost are characters this volume's extraction wrote 198 claims between. 山田 and
+ジョージョエン・スカイウォーカー are printed in the volume's text and the extractor said nothing about
+them; 一人の女子生徒, 主人公の母 and 店員 exist in the roster **only because the destroyed reference named
+them**, so a rebuild that refuses to import that file also loses them. The coverage stop stays HIGH
+with no exemption — `test/test-reference-store-rebuild.js` plants it on a **rebuilt** reference too, and
+since §7.4 both signals are available there, including the 1-chapter case the chapter count alone used
+to soften.
+
+**The other thing it measured:** the extraction names characters its own way, and 8 of volume 01's 10
+names resolve onto the roster the glossary built by rules that cannot guess. **俺 does not** — 44
+claims, the largest group in the file — and linking it to 如月雨露 is a translation decision, so it is
+supplied by the operator (`--alias=俺=如月雨露 --alias-reason="…"`) and recorded through `castAlias`,
+which refuses a link with no reason. Without it the roster holds 如月雨露 and 俺 as two characters.
+Both doors that file extraction names now use one resolver (`utils/reference-store/name-resolution.js`),
+which is what §7.3's first signal depends on.
+
+### 7.3 The coverage guard, recalibrated: what a gap is measured against
+
+The stop slice 6 installed — *the character-voice reference covers fewer characters than the roster,
+and the volume's own text says they are there* — is the check that turns volume 01's failure into a
+refusal. It stayed HIGH in every scenario that planted that failure, and it stays the only coverage
+finding that blocks a copy-forward. What changed is the other half: the same finding also fired on a
+self-declared throwaway (『山田さん、モブキャラ』) and on a fictional film actor Himawari invents, and
+a stop that fires on those is a stop people learn to argue with.
+
+**Raw name counts were measured and rejected.** Volume 01, occurrences / distinct chapters / whether
+the extraction has voice claims for them:
+
+| name | occurrences | chapters | claims |
+|---|---|---|---|
+| 俺 | 858 | 10 | yes |
+| ジョージョエン・スカイウォーカー | 6 | 2 | **no** |
+| 三色院菫子 | **3** | 2 | **yes, 30** |
+| 店員 | 3 | 3 | no |
+| 山田 | 2 | 1 | no |
+| 如月雨露, 日向葵, 秋野桜, 大賀太陽 | **0** | 0 | yes |
+
+A threshold on occurrences ranks a film actor above a main character, and the last row is the other
+half of the same trap: four characters with real voice claims are printed **zero** times as bare
+kanji. Any rule of the form "fewer than N mentions ⇒ not important" is wrong in both directions here.
+
+**What the rule uses instead — two independent readings of the same book.** A character the reference
+says nothing about, who IS in this volume's text, is a **loss** (HIGH, blocks the copy-forward) when
+either holds:
+
+1. **this volume's extraction filed a claim about them and the reference took none.** The per-chapter
+   extraction and the reference document are two separate passes, so this is a disagreement between
+   two readings rather than a document graded against itself. This is volume 01's actual failure, and
+   it has no exemption.
+2. **their name occurs in `COVERAGE_SIGNIFICANCE_CHAPTERS` or more distinct chapters** of the volume's
+   own text, measured with the store's matching rule (verbatim, then the Han-character skeleton).
+
+Neither, and it is a **mention** (MEDIUM, `reference-voice-mention-not-covered`): reported, every one
+named, each with the signal that was missing, and it does not stop the next volume. A character the
+volume's text does not contain is on neither list, unchanged. An unmeasured volume falls back to the
+stricter rule — every uncovered entry at HIGH — because "nobody appears in this volume" is not a thing
+a store may assume.
+
+**How 3 was picked, and why it is not tunable.** Measured on volume 01 with the store's own matching
+rule (which is not the same as a raw string search — it finds 三色院菫子 in **4** chapters where the
+printed name appears in 2):
+
+| name | chapters | lines | verdict if the reference lost them |
+|---|---|---|---|
+| 俺 | 10 | 789 | covered — not asked |
+| 女 | 9 | 146 | covered — not asked |
+| 三色院菫子 | 4 | 8 | **loss** |
+| 如月雨露 | 3 | 3 | **loss** |
+| ジョージョエン・スカイウォーカー | 2 | 6 | **mention** |
+| 大賀太陽 | 2 | 2 | covered — not asked |
+| 山田 | 1 | 2 | **mention** |
+| 日向葵 | 1 | 1 | covered — not asked |
+| 秋野桜 | 1 | 1 | covered — not asked |
+
+ジョージョエン is named in 2 chapters and must be a mention ⇒ the line is above 2. 如月雨露, whom the
+destroyed reference lost, is named in 3 and must be a loss ⇒ the line is at or below 3. **3 is the only
+value that satisfies both**, so it is a constant in `utils/reference-store/integrity.js` with no
+environment knob (AGENTS.md rule 3), pinned by `test/test-reference-store-pipeline.js`.
+
+**What had to be built first.** `cast_presence` stored one row per character and stopped at the first
+hit, so "in this volume" and "in every chapter of this volume" were the same row and the second signal
+was unanswerable. Migration 4 adds `cast_presence_match` — one row per (volume, character, chapter,
+line, the name that matched) with the rule that proved it — and `chapters` / `matches` on the summary,
+so every existing reader of `cast_presence` keeps working. Volume 01 measures 10 cast entries into 959
+match rows across its 10 chapter files.
+
+**Where the rule still answers wrong, stated.** Two places, both named in the code:
+
+- **Chapter count cannot see a character the book rarely names.** 日向葵 and 秋野桜 are major
+  characters named in **one** chapter each. If the reference lost them, only signal 1 saves them.
+  That is why signal 1 is the primary one and why every MEDIUM is printed by name with the signal that
+  was missing — the report's *Characters the reference does not cover* table is the price of softening
+  the guard, not a decoration.
+- **A claim with no citation is invisible to both signals.** Signal 1 counts claims the store
+  accepted, and a claim whose quotes are on no line of the volume's text is refused at the door — so a
+  character whose every extraction claim failed the citation rule has no claim to count and no signal
+  but the chapter count. That is not a hole in the coverage rule; it is the evidence rule answering
+  first. Every such claim is named per character in the report's *Rows the store refused to record*
+  section, which is where a human is supposed to see it.
+
+**Closed since the first version of §7.3: a rebuilt record used to have no `extract` rows.** The
+rebuild consumed the extraction into record content, so signal 1 could never fire about a rebuilt
+reference and a rebuilt reference that lost 日向葵 (1 chapter) would have been a MEDIUM. §7.4 is the
+decision that closed it.
+
+**Measured on the real volume, after the recalibration.** Faithful import of the destroyed
+`character-voice.md` plus the volume's own extraction claims, in a copy under `/tmp/opencode`: 13 cast
+entries, 12 present, 10 uncovered — **8 at HIGH** (三色院菫子 carried by 30 extraction claims, 大賀太陽
+by 16, 日向葵 by 24, 秋野桜 by 28, plus 俺, 女, 如月雨露, 下級生の女子生徒) and **2 at MEDIUM** (山田,
+ジョージョエン・スカイウォーカー). The rebuilt reference from the same volume's extraction: **0 HIGH**,
+the same 2 at MEDIUM, plus the rebuild-provenance MEDIUM. The two cases the guard exists for are
+therefore separated by the rule rather than by a threshold somebody picked.
+
+### 7.4 The rebuild files its candidates too — the hole in §7.3 closed
+
+The first version of the rebuild filed only adopted rows, and §7.3 named the consequence as a
+limitation: on a rebuilt record signal 1 could never fire. The question put to the account owner was
+whether to file the extraction claims as **candidates** beside the adopted rows, with the objection
+that `unadoptedVoiceClaims` would then permanently answer "nothing". The decision was to close it.
+
+**What was built.** For every claim the rebuild evaluates and can cite, it files two rows: the adopted
+one (`source_stage = "rebuild"`, what the document renders) and the candidate one
+(`source_stage = "extract"`, what the extractor found). The candidate goes through a **second handle on
+the same file, opened with the `extract` stage** — a row's kind comes from the scope its handle was
+opened with and never from the caller, so the rebuild's own handle cannot file a candidate and is not
+allowed to try; `rebuildVoiceFromExtraction` refuses a candidate handle scoped to any other stage
+rather than quietly filing none, which is how a record would otherwise lose its second reading for a
+whole series. Both doors build the row from the same shape function (`voiceCandidateRow` /
+`povCandidateRow`, in `extraction-adapter.js`), because two doors writing one kind of row from two
+hand-written field lists is how a record ends up holding the same claim twice under two shapes the
+idempotence guard cannot recognise.
+
+**The objection, tested rather than argued.** The owner's reasoning was right, and the test says so:
+
+- A rebuild that adopted every claim it could cite has **nothing unadopted**, and the query returns
+  empty because it compared 214 candidates against 214 adopted rows — not because there were no
+  candidates to compare. `test/test-reference-store-rebuild.js` asserts both halves.
+- The claims the rebuild **refused** never become candidates at either door — a claim with no citation
+  is not evidence — and they are not hidden: the same test asserts the report names them, so an empty
+  adoption query cannot be read as "the extraction said nothing".
+- Plant the gap and the query sees it. Take 日向葵's 24 adopted rows out of the real volume-01 rebuilt
+  record (through `deleteOwnFact`, the verb the rebuild itself owns) and `unadoptedVoiceClaims` returns
+  24 rows for her, the coverage finding is **HIGH** — *"日向葵 — the extraction filed 24 claim(s) about
+  them and the reference took none"*, 1 of 10 chapters, matched by the skeleton rule — and volume 2's
+  copy-forward refuses with `reference-source-fails-integrity`. Delete the candidate rows from the same
+  record and the **identical loss is a MEDIUM** and the copy runs. Same volume, same loss, same rule;
+  the only difference is whether the record holds a second reading.
+
+**What the change does not do.** It does not manufacture a disagreement where there is none. A rebuild
+adopts every claim it can cite, so on a freshly rebuilt record the two sets coincide and the adoption
+query is empty by construction — which is a true answer, not a broken query. The loss channel a rebuild
+still has is the evidence gate, and a claim that failed it is not filed anywhere. The gap signal
+becomes available rather than always-on: it fires whenever the record holds candidates the document
+lacks, which is what a thinner rebuild input, a later edit, or a future adoption filter would produce.
+
+**One disagreement the two doors still have, measured on volume 01.** The extraction door searches a
+claim's last-resort candidate using the **roster key** the name resolved to; the rebuild searches using
+the **extraction's own spelling**. On volume 01 that is 216 accepted / 7 refused against 215 accepted /
+8 refused: the two claims in question are 如月雨露（ジョーロ）／俺's *Internal voice* and *Catchphrases*,
+whose only findable "evidence" is a line containing 俺. The rebuild's stricter reading is the better
+one, and aligning the doors by loosening it is not on the table. Left as it is, the effect is that a
+real run files 2 candidates a later rebuild will not adopt, and the audit reports them as unadopted —
+which is what that query is for.
+
+**Cost, measured:** 214 extra rows on volume 01 (300 → 514 facts in the rehearsal record), and the
+audit re-checks every one of their citations against the source text. The rehearsal still makes **zero
+requests** to the scripted endpoint and still exits 2 with 0 HIGH / 2 MEDIUM.
+
+See gotcha 99, `docs/map-helpers.md` (`integrity.js`, `presence.js`, `name-resolution.js`) and
+`docs/map-preproduction.md`.
+
 ---
 
 ## 8. Build order

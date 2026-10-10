@@ -1,5 +1,5 @@
 /**
- * utils/reference-store/presence.js — who is actually in this volume's text.
+ * utils/reference-store/presence.js — who is actually in this volume's text, and how much.
  *
  * The character-voice coverage rule ("the reference covers fewer characters than the cast
  * holds") is only a real finding when the missing character was in the book. The reference
@@ -7,7 +7,7 @@
  * would deny it — so the answer comes from the only source that can give it: the volume's own
  * extracted chapter text, searched by code.
  *
- * Two rules decide this module's shape:
+ * Three rules decide this module's shape:
  *
  *   - **It is a measurement, not a claim.** Everything in `facts` needs a citation that
  *     verifies at a line, and an absence has no passage to cite. So presence lives in its own
@@ -19,13 +19,20 @@
  *     store's one matching rule — verbatim, then the Han-character skeleton with its
  *     minimum-length guard — because 如月雨露 is printed 如月きさらぎ雨あま露つゆ, and a check
  *     that only matches bare kanji would report half the cast as absent and quietly switch
- *     itself off.
+ *     itself off. `evidence.js`'s prepared-line form is used so the rule is the same one the
+ *     evidence check runs and the measurement is affordable over a whole volume.
+ *   - **Every match is kept, not just the first one.** "Is this character barely in this
+ *     volume, or are they the book?" is a question about *how many chapters*, and a measurement
+ *     that stopped at the first hit could not tell a character named once from a character named
+ *     in every chapter. `cast_presence` is the per-character answer; `cast_presence_match` is
+ *     one row per place a name occurred, each stamped with the rule that proved it — which is
+ *     what lets the audit say *how* it knows a character is in the volume.
  *
  * @module utils/reference-store/presence
  */
 
 const { readChapterLines } = require("./source-chapters");
-const { matchQuoteOnLine } = require("./evidence");
+const { prepareLineForQuoteSearch, prepareQuoteForSearch, matchPreparedLine } = require("./evidence");
 const { refusal } = require("./refusals");
 require("../../types"); // JSDoc type definitions
 
@@ -33,11 +40,12 @@ require("../../types"); // JSDoc type definitions
  * Measure which cast entries this volume's own text contains, and store the answer.
  *
  * Replace, not merge: the measurement belongs to the source files, and a re-run after the
- * source changes has to overwrite the old answer instead of layering on top of it.
+ * source changes has to overwrite the old answer instead of layering on top of it. That includes
+ * the per-match rows, which are deleted and rewritten along with the summary.
  *
- * @param {{db: Object, volumeDir: string, volume: number}} ctx
+ * @param {{db: Object, volumeDir: string, volume: number, listChapters: Function}} ctx
  * @param {{volume?: number}} [opts] - Defaults to the volume this store is open for.
- * @returns {{ok: boolean, volume: number, measured: number, present: number, absent: number, chapters: number, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, volume: number, measured: number, present: number, absent: number, chapters: number, matchRows: number, refusal: ReferenceRefusal|null}}
  */
 function recordCastPresence(ctx, { volume } = {}) {
   const vol = Number(volume === undefined ? ctx.volume : volume);
@@ -50,6 +58,7 @@ function recordCastPresence(ctx, { volume } = {}) {
       present: 0,
       absent: 0,
       chapters: 0,
+      matchRows: 0,
       refusal: refusal({
         verb: "record_cast_presence",
         rule: "presence-source-missing",
@@ -61,33 +70,67 @@ function recordCastPresence(ctx, { volume } = {}) {
     };
   }
 
-  // Each chapter file is read once and searched for every name, which is the same cost the
-  // evidence discovery already pays.
+  // Each chapter file is read once and its lines prepared once, then searched for every name the
+  // record holds. Preparing per line rather than per (line, name) pair is what keeps this a
+  // measurement a stage can afford to run on every volume.
   const chapters = [];
   for (const chapter of listed.chapters) {
     if (!chapter.file) continue;
     const lines = readChapterLines(ctx.volumeDir, chapter.file);
     if (!lines) continue;
-    chapters.push({ id: chapter.id, lines });
+    chapters.push({ id: chapter.id, prepared: lines.map(prepareLineForQuoteSearch) });
   }
 
   const castRows = ctx.db
     .prepare("SELECT key, display, aliases FROM cast WHERE merged_into IS NULL ORDER BY key")
     .all();
 
-  const insert = ctx.db.prepare(
-    "INSERT INTO cast_presence (volume, key, present, matched, chapter, line) VALUES (?,?,?,?,?,?) " +
+  const insertSummary = ctx.db.prepare(
+    "INSERT INTO cast_presence (volume, key, present, matched, chapter, line, chapters, matches) VALUES (?,?,?,?,?,?,?,?) " +
       "ON CONFLICT(volume, key) DO UPDATE SET present = excluded.present, matched = excluded.matched, " +
-      "chapter = excluded.chapter, line = excluded.line"
+      "chapter = excluded.chapter, line = excluded.line, chapters = excluded.chapters, matches = excluded.matches"
+  );
+  const insertMatch = ctx.db.prepare(
+    "INSERT INTO cast_presence_match (volume, key, chapter, line, name, matched) VALUES (?,?,?,?,?,?) " +
+      "ON CONFLICT(volume, key, chapter, line, name) DO UPDATE SET matched = excluded.matched"
   );
 
   let present = 0;
+  let matchRows = 0;
   ctx.db.exec("BEGIN");
   try {
+    // Replace, not merge: the old answer for this volume is dropped before the new one is written,
+    // so a name that stopped appearing does not stay "present" from the previous measurement.
+    ctx.db.prepare("DELETE FROM cast_presence_match WHERE volume = ?").run(vol);
+    ctx.db.prepare("DELETE FROM cast_presence WHERE volume = ?").run(vol);
+    // How many chapter files this measurement actually read, recorded next to the answer it gives.
+    // "Named in 3 of 10 chapters" is only meaningful with its denominator, and the denominator belongs
+    // to the measurement rather than to whatever the `chapters` table happens to hold.
+    ctx.db
+      .prepare("INSERT INTO store_info (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(`presence_chapters_${vol}`, String(chapters.length));
+
     for (const entry of castRows) {
       const found = findName(entry, chapters);
-      insert.run(vol, entry.key, found ? 1 : 0, found ? found.matched : null, found ? found.chapter : null, found ? found.line : null);
-      if (found) present += 1;
+      if (found) {
+        present += 1;
+        matchRows += found.matches.length;
+        insertSummary.run(
+          vol,
+          entry.key,
+          1,
+          found.first.matched,
+          found.first.chapter,
+          found.first.line,
+          found.chapterIds.length,
+          found.matches.length
+        );
+        for (const match of found.matches) {
+          insertMatch.run(vol, entry.key, match.chapter, match.line, match.name, match.matched);
+        }
+      } else {
+        insertSummary.run(vol, entry.key, 0, null, null, null, 0, 0);
+      }
     }
     ctx.db.exec("COMMIT");
   } catch (err) {
@@ -102,22 +145,21 @@ function recordCastPresence(ctx, { volume } = {}) {
     present,
     absent: castRows.length - present,
     chapters: chapters.length,
+    matchRows,
     refusal: null,
   };
 }
 
 /**
- * Where one cast entry's name first occurs in this volume's chapters.
+ * The names one cast entry is searched for: its key and its recorded aliases.
  *
- * The key and the recorded aliases are the names tried; a display like
- * `如月雨露（ジョーロ）【俺人格】` is not a string the book prints, so it is only tried when it
- * is the key itself.
+ * A display like `如月雨露（ジョーロ）【俺人格】` is not a string the book prints, so it is only
+ * tried when it is the key itself.
  *
  * @param {{key: string, display: string|null, aliases: string}} entry
- * @param {Array<{id: string, lines: string[]}>} chapters
- * @returns {{name: string, chapter: string, line: number, matched: string}|null}
+ * @returns {Array<{name: string, prepared: Object}>}
  */
-function findName(entry, chapters) {
+function namesForEntry(entry) {
   const names = [entry.key];
   try {
     for (const alias of JSON.parse(entry.aliases || "[]")) {
@@ -127,17 +169,45 @@ function findName(entry, chapters) {
     /* an unparsable aliases column costs this entry its aliases, not the measurement */
   }
   if (entry.display && entry.display === entry.key) names.push(entry.display);
+  return [...new Set(names)].map((name) => ({ name, prepared: prepareQuoteForSearch(name) }));
+}
 
-  for (const name of names) {
+/**
+ * Every place one cast entry's names occur in this volume's chapters.
+ *
+ * Name first, then chapter, then line — the order the measurement has always used, which is why
+ * `first` is the same hit `cast_presence` recorded before this table recorded every hit.
+ *
+ * @param {{key: string, display: string|null, aliases: string}} entry
+ * @param {Array<{id: string, prepared: Array<Object>}>} chapters
+ * @returns {{first: {name: string, chapter: string, line: number, matched: string}|null, matches: Array<{name: string, chapter: string, line: number, matched: string}>, chapterIds: string[], rules: string[]}|null}
+ */
+function findName(entry, chapters) {
+  const names = namesForEntry(entry);
+  /** @type {Array<{name: string, chapter: string, line: number, matched: string}>} */
+  const matches = [];
+  const chapterIds = new Set();
+  const rules = new Set();
+
+  for (const { name, prepared } of names) {
     for (const chapter of chapters) {
-      for (let i = 0; i < chapter.lines.length; i += 1) {
-        const matched = matchQuoteOnLine(chapter.lines[i], name);
+      for (let i = 0; i < chapter.prepared.length; i += 1) {
+        const matched = matchPreparedLine(chapter.prepared[i], prepared);
         if (!matched) continue;
-        return { name, chapter: chapter.id, line: i + 1, matched };
+        matches.push({ name, chapter: chapter.id, line: i + 1, matched });
+        chapterIds.add(chapter.id);
+        rules.add(matched);
       }
     }
   }
-  return null;
+
+  if (matches.length === 0) return null;
+  return {
+    first: matches[0],
+    matches,
+    chapterIds: [...chapterIds],
+    rules: [...rules],
+  };
 }
 
 /**
@@ -145,12 +215,37 @@ function findName(entry, chapters) {
  *
  * @param {{db: Object}} ctx
  * @param {number} volume
- * @returns {Array<{volume: number, key: string, present: number, matched: string|null, chapter: string|null, line: number|null}>}
+ * @returns {Array<{volume: number, key: string, present: number, matched: string|null, chapter: string|null, line: number|null, chapters: number, matches: number}>}
  */
 function castPresence(ctx, volume) {
   return ctx.db
-    .prepare("SELECT volume, key, present, matched, chapter, line FROM cast_presence WHERE volume = ? ORDER BY key")
+    .prepare(
+      "SELECT volume, key, present, matched, chapter, line, chapters, matches FROM cast_presence WHERE volume = ? ORDER BY key"
+    )
     .all(Number(volume));
+}
+
+/**
+ * Where one character's name actually occurs in one volume's text, chapter by chapter.
+ *
+ * The audit's answer to "how do you know they are in the volume" — the chapters, how many lines
+ * in each, and which rule proved each one. An empty array means the measurement was never taken
+ * for that character, which is a different answer from "they are not in the book": that is
+ * `cast_presence.present = 0` with `chapters = 0`, and `presenceMeasured` is what tells them apart.
+ *
+ * @param {{db: Object}} ctx
+ * @param {number} volume
+ * @param {string} key
+ * @returns {Array<{chapter: string, lines: number, matched: string}>} One row per chapter the name was found in.
+ */
+function presenceDetail(ctx, volume, key) {
+  return ctx.db
+    .prepare(
+      "SELECT chapter, COUNT(*) AS lines, GROUP_CONCAT(DISTINCT matched) AS matched FROM cast_presence_match " +
+        "WHERE volume = ? AND key = ? GROUP BY chapter ORDER BY chapter"
+    )
+    .all(Number(volume), key)
+    .map((row) => ({ chapter: row.chapter, lines: Number(row.lines), matched: row.matched }));
 }
 
 /**
@@ -167,8 +262,27 @@ function presenceMeasured(ctx, volume) {
   return ctx.db.prepare("SELECT COUNT(*) AS n FROM cast_presence WHERE volume = ?").get(Number(volume)).n > 0;
 }
 
+/**
+ * How many of this volume's chapter files the presence measurement read.
+ *
+ * The denominator of "named in 3 of 10 chapters". Null when the measurement has not run, which is
+ * the same "nobody has measured this volume" answer `presenceMeasured` gives.
+ *
+ * @param {{db: Object}} ctx
+ * @param {number} volume
+ * @returns {number|null}
+ */
+function presenceChapterCount(ctx, volume) {
+  const row = ctx.db.prepare("SELECT value FROM store_info WHERE key = ?").get(`presence_chapters_${Number(volume)}`);
+  if (!row) return null;
+  const n = Number.parseInt(row.value, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 module.exports = {
   recordCastPresence,
   castPresence,
+  presenceDetail,
+  presenceChapterCount,
   presenceMeasured,
 };

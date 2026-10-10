@@ -48,12 +48,14 @@ const __queries = require("./reference-store/queries");
 const __integrity = require("./reference-store/integrity");
 const __prose = require("./reference-store/document-prose");
 const __presence = require("./reference-store/presence");
+const __names = require("./reference-store/name-resolution");
 const __copy = require("./reference-store/copy-forward");
 const __glossary = require("./reference-store/glossary-adapter");
 const __voice = require("./reference-store/voice-adapter");
 const __extraction = require("./reference-store/extraction-adapter");
 const __validation = require("./reference-store/validation");
 const __pipeline = require("./reference-store/pipeline-store");
+const __rebuild = require("./reference-store/rebuild");
 
 const __open = require("./reference-store/open");
 
@@ -70,11 +72,13 @@ module.exports = {
   ...__integrity,
   ...__prose,
   ...__presence,
+  ...__names,
   ...__copy,
   ...__glossary,
   ...__voice,
   ...__extraction,
   ...__validation,
   ...__pipeline,
+  ...__rebuild,
   openReferenceStore: __open.openReferenceStore,
 };

@@ -1,0 +1,1068 @@
+/**
+ * test/test-reference-store-rebuild.js — the rebuild-from-extraction path.
+ *
+ * What this suite is for. Volume 01's `character-voice.md` is destroyed and its extraction output is
+ * healthy, so `utils/reference-store/rebuild.js` can type the reference from the extraction instead of
+ * paying the authoring agents to re-type it. That is a path which, done wrong, is simply "let the
+ * extractor's raw output into a published artifact", so every scenario here checks a boundary that
+ * path is supposed to respect — and, as in `test/test-reference-store-pipeline.js`, plants the defect
+ * and names the severity a query is supposed to report, because "the audit found something" is not a
+ * result.
+ *
+ * The boundaries:
+ *
+ *   - the candidate rule is untouched: rows the extractor filed still do not render, and a rebuild
+ *     makes a claim renderable by **adopting it into a new kind of row**, not by loosening a filter;
+ *   - the evidence rule is untouched: a claim whose quotes are not in this volume's text is refused;
+ *   - the damaged artifact is not an input, and it is not overwritten without being moved aside;
+ *   - a rebuilt reference is audited by the same queries as an authored one — coverage still fires at
+ *     HIGH — and it is labelled as rebuilt in the record, in the report and in the file;
+ *   - names are resolved narrowly, so a rebuilt roster does not silently split one character in two,
+ *     and the links a human has to supply are reported rather than invented.
+ *
+ * Every scenario runs inside `test/fixture-reference-store.js`'s throwaway series. Nothing here can
+ * reach the real corpus (AGENTS.md rule 8, gotcha 69). No model, no network — and the last scenario
+ * points the environment at the scripted endpoint in `test/fake-backend.js` and asserts it heard
+ * nothing, which is the only way to assert "this path is deterministic" without reading the source for
+ * promises.
+ *
+ * Run with `npm test`, or standalone: `node test/test-reference-store-rebuild.js`.
+ */
+
+require("./test-home"); // the run's records get a throwaway home (gotcha 69)
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+
+delete process.env.GLOSSARY_STORE_VALIDATORS;
+delete process.env.VOICE_STORE_VALIDATORS;
+
+const {
+  openReferenceStore,
+  importVolumeArtifacts,
+  importVolumeExtraction,
+  importVoiceExtraction,
+  copyForwardStore,
+  sealVolumeRecord,
+  auditVolumeRecord,
+  importVoice,
+  renderVoice,
+  rebuildVoiceFromExtraction,
+  renderRebuiltVoice,
+  writeRebuiltVoiceFile,
+  rebuildVoiceVolume,
+  moveArtifactAside,
+  resolveExtractionName,
+  applyAliasDeclarations,
+  displayAliasSpans,
+  rebuiltDocuments,
+  rebuildProvenance,
+  unadoptedVoiceClaims,
+  artifactShapeFindings,
+  REBUILD_SOURCE_STAGE,
+  EXTRACTION_SOURCE_STAGE,
+  DOCUMENT_SOURCE_STAGE,
+  COVERAGE_SIGNIFICANCE_CHAPTERS,
+  MAX_REBUILD_BULLET_CHARS,
+  voicePrimaryName,
+} = require("../utils/reference-store");
+const { documentRebuilt, DOCUMENT_VOICE } = require("../utils/reference-store/document-prose");
+const { startFakeBackend } = require("./fake-backend");
+const { fixtureStoreSeries, assertInsideFixture, GLOSSARY_01, VOICE_01, EXTRACTION_01, EXTRACTION_01_UNVERIFIABLE } = require("./fixture-reference-store");
+
+/**
+ * Open a fixture volume's record in a named stage.
+ *
+ * @param {ReturnType<typeof fixtureStoreSeries>} series
+ * @param {number} volume
+ * @param {string} stage
+ * @returns {ReferenceStore}
+ */
+function openFixture(series, volume, stage) {
+  const entry = series.volumes[volume - 1];
+  const store = openReferenceStore({ volume, folder: entry.folder, seriesDir: series.dir, stage });
+  assertInsideFixture(store.file, series.dir);
+  store.registerChaptersFromSource();
+  return store;
+}
+
+/**
+ * Read the volume's glossary into its record — the roster the coverage question needs.
+ *
+ * @param {ReturnType<typeof fixtureStoreSeries>} series
+ * @param {number} [volume]
+ * @returns {ReferenceStore}
+ */
+function withRoster(series, volume = 1) {
+  const store = openFixture(series, volume, DOCUMENT_SOURCE_STAGE);
+  importVolumeArtifacts(store, { glossaryMarkdown: GLOSSARY_01 });
+  store.close();
+  return store;
+}
+
+/**
+ * Run a rebuild against a fixture volume and report what it did.
+ *
+ * @param {ReturnType<typeof fixtureStoreSeries>} series
+ * @param {{volume?: number, entries?: Array<Object>, aliases?: Array<{key: string, alias: string, reason: string}>}} [opts]
+ * @returns {{store: ReferenceStore, result: Object}}
+ */
+function rebuildFixture(series, { volume = 1, entries = EXTRACTION_01, aliases = [], candidates = true } = {}) {
+  const entry = series.volumes[volume - 1];
+  const store = openReferenceStore({ volume, folder: entry.folder, seriesDir: series.dir, stage: REBUILD_SOURCE_STAGE });
+  assertInsideFixture(store.file, series.dir);
+  store.registerChaptersFromSource();
+  const aliasResult = applyAliasDeclarations(store, aliases);
+  // The same wiring `rebuildVoiceVolume` uses: the adopted rows through the rebuild handle, the
+  // candidate copies through a handle opened as the extraction stage. `candidates: false` is how a
+  // scenario asks what a record looks like without them.
+  const candidateStore = candidates
+    ? openReferenceStore({ volume, folder: entry.folder, seriesDir: series.dir, stage: EXTRACTION_SOURCE_STAGE })
+    : null;
+  let rebuild;
+  try {
+    rebuild = rebuildVoiceFromExtraction(store, entries, { candidateStore });
+  } finally {
+    if (candidateStore) candidateStore.close();
+  }
+  return { store, result: { rebuild, aliasResult } };
+}
+
+/**
+ * A claim long enough to break the artifact's read limit.
+ *
+ * @returns {Object}
+ */
+function anOverlongClaim() {
+  return {
+    type: "voice",
+    character: "三色院菫子（パンジー）",
+    quirkType: "vocabulary",
+    description: `Her register is flat. ${"flat bookish narration ".repeat(120)}`,
+    examples: ["三色院菫子は本を読んでいた。"],
+  };
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A rebuild files claims as rows the document renders, and leaves the candidate rule alone.
+ * @returns {void}
+ */
+function scenarioRebuildFilesClaimsAsRenderableRows() {
+  const series = fixtureStoreSeries("rebuild-renderable");
+  withRoster(series);
+  const { store, result } = rebuildFixture(series);
+
+  assert.strictEqual(result.rebuild.refusal, null, "the rebuild ran");
+  assert.ok(result.rebuild.filedCount >= 7, `claims filed: ${result.rebuild.filedCount}`);
+
+  const stages = store.db.prepare("SELECT source_stage, COUNT(*) AS n FROM facts GROUP BY source_stage ORDER BY source_stage").all();
+  const byStage = new Map(stages.map((row) => [row.source_stage, row.n]));
+  assert.ok((byStage.get(REBUILD_SOURCE_STAGE) || 0) >= 7, "the rows are stamped rebuild");
+  assert.strictEqual(
+    byStage.get(EXTRACTION_SOURCE_STAGE) || 0,
+    result.rebuild.candidates.filed,
+    "and every claim the rebuild evaluated and could cite is also filed as a candidate, through the extraction door's own row shape"
+  );
+  assert.ok(result.rebuild.candidates.filed >= 7, `candidates filed: ${result.rebuild.candidates.filed}`);
+
+  const paired = store.db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM facts r WHERE r.source_stage = ? AND EXISTS (SELECT 1 FROM facts c " +
+        "WHERE c.source_stage = ? AND c.key IS r.key AND c.aspect = r.aspect AND c.body = r.body)"
+    )
+    .get(REBUILD_SOURCE_STAGE, EXTRACTION_SOURCE_STAGE).n;
+  assert.strictEqual(paired, byStage.get(REBUILD_SOURCE_STAGE), "each adopted claim has its candidate beside it — the record holds both readings of the same claim");
+
+  const candidateLabel = store.db
+    .prepare("SELECT label FROM facts WHERE source_stage = ? AND aspect = 'catchphrase' AND label IS NOT NULL LIMIT 1")
+    .get(EXTRACTION_SOURCE_STAGE);
+  const adoptedLabel = store.db
+    .prepare("SELECT label FROM facts WHERE source_stage = ? AND aspect = 'catchphrase' AND label IS NOT NULL LIMIT 1")
+    .get(REBUILD_SOURCE_STAGE);
+  assert.ok(candidateLabel && adoptedLabel, "both kinds carry a catchphrase claim");
+  assert.notStrictEqual(candidateLabel.label, adoptedLabel.label, "the candidate keeps the extraction's own label; the adopted row uses the artifact's wording");
+
+  const rendered = renderRebuiltVoice(store);
+  assert.ok(rendered.markdown.includes("### 如月雨露"), "the roster's own spelling is the heading");
+  assert.ok(rendered.markdown.includes("- **Pronouns**:"), "the artifact's own bullet labels are used");
+  assert.ok(rendered.markdown.includes("「気にすんな！」"), "the verified quote is printed, not only a description of it");
+
+  store.close();
+  console.log("  rebuild files claims as rows the document renders");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The candidate rule is untouched: extraction rows still do not render, before or after a rebuild.
+ * @returns {void}
+ */
+function scenarioExtractionClaimsStillDoNotRender() {
+  const series = fixtureStoreSeries("rebuild-candidate-guard");
+  withRoster(series);
+
+  const extractor = openFixture(series, 1, EXTRACTION_SOURCE_STAGE);
+  importVoiceExtraction(extractor, EXTRACTION_01);
+  const beforeRender = renderVoice(extractor);
+  assert.strictEqual(beforeRender.split("\n").filter((line) => line.startsWith("### ")).length, 0, "a store holding only candidates renders no character");
+  extractor.close();
+
+  const { store } = rebuildFixture(series);
+  const after = renderRebuiltVoice(store);
+  assert.ok(after.sections > 0, "the rebuild's own rows do render");
+
+  // And the ordinary renderer still refuses the candidates it has always refused.
+  const reader = openReferenceStore({ volume: 1, folder: series.volumes[0].folder, seriesDir: series.dir, stage: DOCUMENT_SOURCE_STAGE });
+  const authored = renderVoice(reader);
+  const bullets = authored.split("\n").filter((line) => line.startsWith("- **"));
+  assert.ok(bullets.length > 0 && bullets.every((line) => !line.includes("Her register is flat")), "the extractor's sentences are not in the document");
+  reader.close();
+  store.close();
+  console.log("  extraction claims still do not render — the guard was not widened");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Planted defect: a claim whose quote the book never prints. Refused, named, and not stored.
+ * @returns {void}
+ */
+function scenarioRebuildRefusesAnUncitableClaim() {
+  const series = fixtureStoreSeries("rebuild-evidence");
+  withRoster(series);
+  const { store, result } = rebuildFixture(series, { entries: [...EXTRACTION_01, EXTRACTION_01_UNVERIFIABLE] });
+
+  const refused = result.rebuild.refused.filter((item) => item.kind === "voice");
+  assert.strictEqual(refused.length, 1, `one claim refused: ${JSON.stringify(refused.map((r) => r.because))}`);
+  assert.ok(refused[0].because.includes("does not occur") || refused[0].because.includes("occurs in volume"), refused[0].because);
+
+  const stored = store.db.prepare("SELECT body FROM facts WHERE source_stage = ?").all(REBUILD_SOURCE_STAGE);
+  assert.ok(!stored.some((row) => row.body.includes("A line the extractor invented")), "the refused claim is not in the record");
+  assert.ok(!renderRebuiltVoice(store).markdown.includes("A line the extractor invented"), "and not in the file");
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM cast WHERE key = ?").get("存在しない人物").n,
+    0,
+    "and it did not put a character the book never prints onto the roster either"
+  );
+
+  store.close();
+  console.log("  a claim the book does not print is refused by name");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A rebuild needs its own write scope; an ordinary handle cannot stamp its rows.
+ * @returns {void}
+ */
+function scenarioRebuildNeedsItsOwnWriteScope() {
+  const series = fixtureStoreSeries("rebuild-scope");
+  withRoster(series);
+  const store = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  const result = rebuildVoiceFromExtraction(store, EXTRACTION_01);
+  assert.strictEqual(result.ok, false, "refused");
+  assert.strictEqual(result.refusal.rule, "rebuild-needs-its-own-write-scope", result.refusal && result.refusal.rule);
+  assert.strictEqual(result.filedCount, 0, "nothing was filed");
+  assert.strictEqual(store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ?").get(REBUILD_SOURCE_STAGE).n, 0, "and no rebuild row exists");
+  store.close();
+  console.log("  a rebuild run from the wrong stage is refused");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A rebuild is re-runnable: the second pass files nothing new.
+ * @returns {void}
+ */
+function scenarioRebuildIsIdempotent() {
+  const series = fixtureStoreSeries("rebuild-idempotent");
+  withRoster(series);
+  const first = rebuildFixture(series);
+  const firstCount = first.store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ?").get(REBUILD_SOURCE_STAGE).n;
+  const firstCandidates = first.store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ?").get(EXTRACTION_SOURCE_STAGE).n;
+  first.store.close();
+
+  const second = rebuildFixture(series);
+  const secondCount = second.store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ?").get(REBUILD_SOURCE_STAGE).n;
+  assert.strictEqual(secondCount, firstCount, `the second pass added rows: ${firstCount} → ${secondCount}`);
+  assert.strictEqual(second.result.rebuild.filedCount, 0, `the second pass filed ${second.result.rebuild.filedCount} claims again`);
+  assert.strictEqual(second.result.rebuild.carried.length, firstCount, `the second pass recognised ${second.result.rebuild.carried.length} of ${firstCount}`);
+  assert.strictEqual(
+    second.store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ?").get(EXTRACTION_SOURCE_STAGE).n,
+    firstCandidates,
+    "and the candidate copies are not doubled either — the extraction door's own idempotence guard is what the rebuild files through"
+  );
+  assert.strictEqual(second.result.rebuild.candidates.filed, 0, `the second pass filed ${second.result.rebuild.candidates.filed} candidates again`);
+  second.store.close();
+  console.log("  running the rebuild twice files nothing twice");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Names are resolved onto the roster the glossary built — and only by rules that cannot guess.
+ * @returns {void}
+ */
+function scenarioNamesResolveOntoTheRoster() {
+  const series = fixtureStoreSeries("rebuild-names");
+  withRoster(series);
+  const store = openFixture(series, 1, REBUILD_SOURCE_STAGE);
+
+  const nickname = resolveExtractionName(store, "如月雨露（ジョーロ）");
+  assert.strictEqual(nickname.key, "如月雨露", "a bracketed nickname finds the roster entry");
+  assert.strictEqual(nickname.resolved, true, nickname.how);
+
+  const persona = resolveExtractionName(store, "如月雨露（ジョーロ）【俺人格】");
+  assert.strictEqual(persona.key, "如月雨露", "a persona tag does not hide the name");
+
+  const unknown = resolveExtractionName(store, "俺（主人公）");
+  assert.strictEqual(unknown.resolved, false, "a name nothing in the roster carries stays unresolved");
+  assert.strictEqual(unknown.key, "俺", "and is reported under the name it would create");
+
+  // The narrowness is the point: 女 is a substring of 一人の女子生徒, and a substring match would
+  // make a character look covered when nothing was written about them.
+  store.upsertCast({ key: "一人の女子生徒", display: "一人の女子生徒", firstSeenVolume: 1 });
+  const substring = resolveExtractionName(store, "女（図書委員）");
+  assert.strictEqual(substring.resolved, false, "a substring of a roster name is not that character");
+
+  assert.deepStrictEqual(displayAliasSpans("如月雨露（ジョーロ）【俺人格】"), ["ジョーロ", "俺人格"], "the bracketed spans are the aliases the heading carries");
+
+  store.close();
+  console.log("  names resolve onto the roster, and a substring match is refused");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A link the artifacts do not record is a human decision, and the store makes them say the reason.
+ * @returns {void}
+ */
+function scenarioAnAliasNeedsAReason() {
+  const series = fixtureStoreSeries("rebuild-alias");
+  withRoster(series);
+  const store = openFixture(series, 1, REBUILD_SOURCE_STAGE);
+
+  const withoutReason = applyAliasDeclarations(store, [{ key: "如月雨露", alias: "俺", reason: "" }]);
+  assert.strictEqual(withoutReason.applied.length, 0, "nothing applied");
+  assert.ok(withoutReason.refused[0].because.includes("needs a reason"), withoutReason.refused[0].because);
+  assert.strictEqual(resolveExtractionName(store, "俺（主人公）").resolved, false, "and the link really was not made");
+
+  const withReason = applyAliasDeclarations(store, [{ key: "如月雨露", alias: "俺", reason: "the glossary's own row says the narrator switches between 僕 and 俺" }]);
+  assert.strictEqual(withReason.applied.length, 1, JSON.stringify(withReason));
+  assert.strictEqual(resolveExtractionName(store, "俺（主人公）").key, "如月雨露", "the declared link resolves the name");
+
+  store.close();
+  console.log("  an undeclared name stays unresolved; a declared one needs a reason");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A declared alias keeps one character from being filed as two roster entries.
+ * @returns {void}
+ */
+function scenarioADeclaredAliasMergesTheRosterBeforeFiling() {
+  const series = fixtureStoreSeries("rebuild-alias-merge");
+  withRoster(series);
+  const { store, result } = rebuildFixture(series, { aliases: [{ key: "如月雨露", alias: "俺", reason: "the glossary's own row says the narrator switches between 僕 and 俺" }] });
+
+  assert.strictEqual(result.aliasResult.applied.length, 1, "the alias was declared");
+  const keys = store.db.prepare("SELECT key FROM cast WHERE merged_into IS NULL ORDER BY key").all().map((row) => row.key);
+  assert.ok(!keys.includes("俺"), `the roster did not gain a second protagonist: ${keys.join(", ")}`);
+
+  const protagonist = store.db
+    .prepare("SELECT COUNT(*) AS n FROM facts WHERE key = ? AND source_stage = ?")
+    .get("如月雨露", REBUILD_SOURCE_STAGE).n;
+  assert.ok(protagonist >= 2, `the protagonist's claims all landed on the roster entry: ${protagonist}`);
+  assert.deepStrictEqual(
+    result.rebuild.unresolved.map((entry) => entry.key).sort(),
+    ["山田", "秋野桜"],
+    `the names the fixture glossary never registered: ${JSON.stringify(result.rebuild.unresolved)}`
+  );
+
+  store.close();
+  console.log("  a declared alias files the extraction's claims on the character they belong to");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Sections and bullets follow the order the book prints them in, not the order the extraction listed them.
+ * @returns {void}
+ */
+function scenarioSectionsAndBulletsFollowChapterOrder() {
+  const series = fixtureStoreSeries("rebuild-order");
+  withRoster(series);
+  const { store } = rebuildFixture(series, {
+    aliases: [{ key: "如月雨露", alias: "俺", reason: "the glossary's own row says the narrator switches between 僕 and 俺" }],
+  });
+  const rendered = renderRebuiltVoice(store);
+
+  const order = rendered.characters.map((entry) => entry.key);
+  assert.ok(order.indexOf("如月雨露") < order.indexOf("三色院菫子"), `the prologue's character comes first: ${order.join(", ")}`);
+  assert.ok(order.indexOf("三色院菫子") < order.indexOf("秋野桜"), `the first chapter's character comes before the second chapter's: ${order.join(", ")}`);
+  assert.strictEqual(rendered.characters.find((entry) => entry.key === "秋野桜").firstChapter, "ch2", "秋野桜 is only in the second chapter");
+
+  // Inside one character, the bullets are in chapter order too: that ordering is the only thing
+  // carrying "what changed and when" (doc 04 §7.1).
+  const lines = rendered.markdown.split("\n");
+  const start = lines.findIndex((line) => line === "### 如月雨露");
+  const bullets = [];
+  for (let i = start + 1; i < lines.length && !lines[i].startsWith("### "); i += 1) {
+    if (lines[i].startsWith("- **")) bullets.push(lines[i]);
+  }
+  const classroom = bullets.findIndex((line) => line.includes("教室に入った"));
+  const catchphrase = bullets.findIndex((line) => line.includes("気にすんな！"));
+  assert.ok(classroom >= 0 && catchphrase >= 0, "both claims are rendered");
+  assert.ok(classroom < catchphrase, `the prologue's claim comes before the first chapter's: ${classroom} vs ${catchphrase}`);
+
+  store.close();
+  console.log("  sections and bullets are in chapter order");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Planted defect: a claim long enough to become the 54,341-character line. It is capped, and the cap
+ * says so in the file.
+ * @returns {void}
+ */
+function scenarioAnOverlongBulletIsCappedAndNamed() {
+  const series = fixtureStoreSeries("rebuild-long-line");
+  withRoster(series);
+  const { store } = rebuildFixture(series, { entries: [...EXTRACTION_01, anOverlongClaim()] });
+  const rendered = renderRebuiltVoice(store);
+
+  const longest = Math.max(...rendered.markdown.split("\n").map((line) => line.length));
+  assert.ok(longest <= MAX_REBUILD_BULLET_CHARS, `the file has a ${longest}-character line (the cap is ${MAX_REBUILD_BULLET_CHARS})`);
+  assert.strictEqual(rendered.truncated, 1, `truncated bullets: ${rendered.truncated}`);
+  assert.ok(rendered.markdown.includes("the full claim is in this volume's reference record"), "the file says the claim was truncated and where the whole of it is");
+
+  const shape = artifactShapeFindings(rendered.markdown, { file: "character-voice.md", volume: "01", step: "rebuild" });
+  assert.deepStrictEqual(shape.map((item) => item.kind), [], `the rebuilt file fails its own shape check: ${JSON.stringify(shape.map((item) => item.kind))}`);
+
+  const full = store.db.prepare("SELECT body FROM facts WHERE body LIKE 'Her register is flat%'").get();
+  assert.ok(full.body.length > MAX_REBUILD_BULLET_CHARS, "the record still holds the whole claim");
+
+  store.close();
+  console.log("  a bullet too long to read is capped, named, and kept whole in the record");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A rebuilt reference is labelled as rebuilt — in the record, in the report, and in the file.
+ * @returns {void}
+ */
+function scenarioARebuiltReferenceIsReportedAsRebuilt() {
+  const series = fixtureStoreSeries("rebuild-provenance");
+  withRoster(series);
+  const { store, result } = rebuildFixture(series);
+  const rendered = renderRebuiltVoice(store);
+
+  const marker = documentRebuilt(store, DOCUMENT_VOICE, 1);
+  assert.ok(marker, "the record carries a rebuild marker");
+  assert.strictEqual(marker.filed, result.rebuild.filedCount, "with the counts the rebuild reported");
+  assert.strictEqual(rebuildProvenance(store).characters, result.rebuild.characters, "and the read half agrees");
+
+  const audit = auditVolumeRecord(store, { title: "Character-voice reference", file: "character-voice.md", markdown: rendered.markdown });
+  const provenance = audit.findings.find((item) => item.kind === "reference-document-rebuilt-from-extraction");
+  assert.ok(provenance, `the audit does not say how this reference was written: ${JSON.stringify(audit.findings.map((f) => f.kind))}`);
+  assert.strictEqual(provenance.severity, "MEDIUM", "provenance is not damage, and it is not silence either");
+  assert.ok(audit.markdown.includes("## How this reference was written"), "the report has a section for it");
+  assert.ok(rendered.markdown.includes("no author agent wrote this file"), "and the file says it about itself");
+
+  store.close();
+  console.log("  a rebuilt reference is distinguishable from an authored one, at MEDIUM");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Planted defect at HIGH: a rebuilt reference that does not cover the cast is still damaged.
+ * Rebuilding is not an exemption.
+ *
+ * The extraction claims are filed first, through their own handle, the way a stage files them — which
+ * is what makes this volume 01's real failure rather than a hypothetical one: two independent passes
+ * over the same book, the extraction and the reference, disagreeing about the same characters.
+ * @returns {void}
+ */
+function scenarioCoverageStillFiresOnARebuiltReference() {
+  const series = fixtureStoreSeries("rebuild-coverage");
+  withRoster(series);
+
+  const extractor = openFixture(series, 1, EXTRACTION_SOURCE_STAGE);
+  const filed = importVoiceExtraction(extractor, EXTRACTION_01);
+  assert.ok(filed.ok, JSON.stringify(filed.refused));
+  extractor.close();
+
+  // The reference this rebuild types covers two of them and nothing about the rest.
+  const thin = EXTRACTION_01.filter((entry) => entry.character === "如月雨露（ジョーロ）" || entry.character === "俺（主人公）");
+  const { store } = rebuildFixture(series, { entries: thin });
+  const rendered = renderRebuiltVoice(store);
+
+  const audit = auditVolumeRecord(store, { title: "Character-voice reference", file: "character-voice.md", markdown: rendered.markdown });
+  const coverage = audit.findings.find((item) => item.kind === "reference-voice-covers-fewer-characters");
+  assert.ok(coverage, `coverage did not fire: ${JSON.stringify(audit.findings.map((f) => f.kind))}`);
+  assert.strictEqual(coverage.severity, "HIGH", "the damaged-reference stop is not downgraded for a rebuild");
+  assert.ok(coverage.message.includes("三色院菫子"), coverage.message);
+  assert.ok(coverage.message.includes("the extraction filed"), `and it says which signal made it a loss: ${coverage.message}`);
+  assert.strictEqual(audit.highFindings.length, 1, JSON.stringify(audit.findings.map((f) => f.kind)));
+
+  store.close();
+  console.log("  a rebuilt reference that misses the cast is still HIGH");
+}
+
+/**
+ * The other half, on a rebuilt reference: a character the extraction says nothing about, named in
+ * one chapter, is a mention. MEDIUM, named with the missing signal, and the next volume is still
+ * built on this record.
+ * @returns {void}
+ */
+function scenarioARebuiltReferenceThatMissesAMentionIsNotAStop() {
+  const series = fixtureStoreSeries("rebuild-mention");
+  withRoster(series);
+
+  // Nothing from the extraction is filed, and the rebuild types only 如月雨露. 大賀太陽 (two
+  // chapters) and 三色院菫子 (one chapter) are in the text and in the roster, and neither signal holds.
+  const thin = EXTRACTION_01.filter((entry) => entry.character === "如月雨露（ジョーロ）");
+  const { store } = rebuildFixture(series, { entries: thin });
+  const rendered = renderRebuiltVoice(store);
+
+  const audit = auditVolumeRecord(store, { title: "Character-voice reference", file: "character-voice.md", markdown: rendered.markdown });
+  const mention = audit.findings.find((item) => item.kind === "reference-voice-mention-not-covered");
+  assert.ok(mention, `the mention finding did not fire: ${JSON.stringify(audit.findings.map((f) => f.kind))}`);
+  assert.strictEqual(mention.severity, "MEDIUM");
+  assert.ok(mention.message.includes("三色院菫子") && mention.message.includes("大賀太陽"), mention.message);
+  assert.strictEqual(audit.highFindings.length, 0, JSON.stringify(audit.findings.map((f) => `${f.severity} ${f.kind}`)));
+  assert.match(audit.markdown, /## Characters the reference does not cover/, "and the report names every one of them");
+
+  sealVolumeRecord(store);
+  store.close();
+
+  const carried = copyForwardStore({
+    fromVolume: 1,
+    toVolume: 2,
+    seriesDir: series.dir,
+    fromFolder: series.volumes[0].folder,
+    toFolder: series.volumes[1].folder,
+  });
+  assert.ok(carried.ok, carried.refusal ? carried.refusal.because : "a mention does not stop the next volume");
+
+  console.log("  a rebuilt reference that misses a barely-present character is a MEDIUM, and the copy still runs");
+}
+
+/**
+ * Make a rebuilt reference lose a character it had covered, using only the verb the rebuild itself owns.
+ *
+ * `deleteOwnFact` is the legal door: these rows were written by this volume's rebuild handle and are
+ * unsealed, so the rebuild can take them back. What is being simulated is the failure the guard exists
+ * for — a reference that says nothing about somebody the volume's extraction wrote claims about.
+ *
+ * @param {ReferenceStore} store - Opened with the rebuild stage.
+ * @param {string} key - The character.
+ * @returns {number} How many rows were removed.
+ */
+function dropCharacterFromTheRebuiltReference(store, key) {
+  const rows = store.db
+    .prepare("SELECT id FROM facts WHERE key = ? AND source_stage = ? AND owner_volume = ?")
+    .all(key, REBUILD_SOURCE_STAGE, store.volume);
+  assert.ok(rows.length > 0, `the rebuilt reference covered ${key} before this scenario took it away`);
+  let removed = 0;
+  for (const row of rows) {
+    const result = store.deleteOwnFact(row.id, "the rebuilt reference lost this character's section");
+    assert.ok(result.ok, JSON.stringify(result.refusal));
+    assert.strictEqual(result.changed, 1, `a rebuild may delete the row its own handle wrote (changed ${result.changed})`);
+    removed += result.changed;
+  }
+  return removed;
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * **The point of this slice.** A rebuilt reference that lost a character the extraction found, named in
+ * only one chapter, is a HIGH loss and the next volume is not built on it.
+ *
+ * Before the rebuild filed candidate copies, this exact record could not be seen as damaged: the rebuild
+ * had consumed the extraction into the document, so the record held one reading of the book and the
+ * coverage rule's second signal had nothing to compare against. 三色院菫子 is in 1 of the fixture's 3
+ * chapters — below the 3-chapter line — so the chapter signal alone says "mention". Only the extraction's
+ * own rows, kept beside the adopted ones, say "loss".
+ * @returns {void}
+ */
+function scenarioARebuiltReferenceThatLostACharacterTheExtractionFiledIsAStop() {
+  const series = fixtureStoreSeries("rebuild-candidate-loss");
+  withRoster(series);
+
+  // A standalone rebuild: no extraction stage ran first, which is exactly the state
+  // `node rebuild-voice.js` produces.
+  const { store } = rebuildFixture(series);
+  dropCharacterFromTheRebuiltReference(store, "三色院菫子");
+
+  const audit = auditVolumeRecord(store, {
+    title: "Character-voice reference",
+    file: "character-voice.md",
+    markdown: renderRebuiltVoice(store).markdown,
+  });
+  const coverage = audit.findings.find((item) => item.kind === "reference-voice-covers-fewer-characters");
+  assert.ok(coverage, `the loss was not reported as a loss: ${JSON.stringify(audit.findings.map((f) => `${f.severity} ${f.kind}`))}`);
+  assert.strictEqual(coverage.severity, "HIGH");
+
+  const row = audit.coverage.rows.find((item) => item.key === "三色院菫子");
+  assert.ok(row, JSON.stringify(audit.coverage.rows.map((r) => r.key)));
+  assert.ok(row.chapters < COVERAGE_SIGNIFICANCE_CHAPTERS, `she is below the chapter line (${row.chapters})`);
+  assert.ok(row.extractionClaims >= 1, `and the extraction's reading of her is still in the record: ${row.extractionClaims}`);
+  assert.match(coverage.message, /三色院菫子 — the extraction filed \d+ claim\(s\) about them/);
+
+  assert.ok(
+    unadoptedVoiceClaims(store).some((claim) => claim.key === "三色院菫子"),
+    "and the adoption query sees the same gap, which is what 'the query became useless' would have denied"
+  );
+
+  sealVolumeRecord(store);
+  store.close();
+
+  const carried = copyForwardStore({
+    fromVolume: 1,
+    toVolume: 2,
+    seriesDir: series.dir,
+    fromFolder: series.volumes[0].folder,
+    toFolder: series.volumes[1].folder,
+  });
+  assert.strictEqual(carried.ok, false, "a rebuilt reference that lost a character the extraction found does not become the next volume's starting point");
+  assert.strictEqual(carried.refusal.rule, "reference-source-fails-integrity");
+
+  console.log("  a rebuilt reference that lost a 1-chapter character the extraction filed is HIGH, and the copy refuses");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The same record without the candidate copies, which is what a rebuilt record looked like before this
+ * change. Same fixture, same loss, different answer — the difference is the second reading, not the rule.
+ * @returns {void}
+ */
+function scenarioARebuiltRecordWithoutItsCandidatesCannotSeeThatLoss() {
+  const series = fixtureStoreSeries("rebuild-no-candidate-loss");
+  withRoster(series);
+  const { store } = rebuildFixture(series, { candidates: false });
+  dropCharacterFromTheRebuiltReference(store, "三色院菫子");
+
+  const audit = auditVolumeRecord(store, {
+    title: "Character-voice reference",
+    file: "character-voice.md",
+    markdown: renderRebuiltVoice(store).markdown,
+  });
+  assert.ok(
+    !audit.findings.some((item) => item.kind === "reference-voice-covers-fewer-characters"),
+    "with one reading of the book there is nothing to disagree with, so the loss is not a stop"
+  );
+  const mention = audit.findings.find((item) => item.kind === "reference-voice-mention-not-covered");
+  assert.ok(mention, JSON.stringify(audit.findings.map((f) => f.kind)));
+  assert.ok(mention.message.includes("三色院菫子"), "she is still named — a softened guard that is silent is worse than a strict one");
+
+  sealVolumeRecord(store);
+  store.close();
+  const carried = copyForwardStore({
+    fromVolume: 1,
+    toVolume: 2,
+    seriesDir: series.dir,
+    fromFolder: series.volumes[0].folder,
+    toFolder: series.volumes[1].folder,
+  });
+  assert.ok(carried.ok, carried.refusal ? carried.refusal.because : "and the copy runs, which is the hole");
+
+  console.log("  the same loss in a record with no candidate copies is only a MEDIUM — that is what the candidates bought");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The candidate handle is checked, not trusted.
+ *
+ * A row's kind comes from the scope its handle was opened with, so a rebuild cannot file a candidate
+ * through its own handle. Handing `rebuildVoiceFromExtraction` a handle scoped to something else is a
+ * wiring mistake, and the answer is a refusal that names the door — not a quiet "no candidates then",
+ * which is how a record ends up missing its second reading for a whole series.
+ * @returns {void}
+ */
+function scenarioARebuildRefusesACandidateHandleOfAnotherStage() {
+  const series = fixtureStoreSeries("rebuild-candidate-scope");
+  withRoster(series);
+  const store = openFixture(series, 1, REBUILD_SOURCE_STAGE);
+  const wrongStage = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  try {
+    const result = rebuildVoiceFromExtraction(store, EXTRACTION_01, { candidateStore: wrongStage });
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.refusal.rule, "rebuild-candidates-need-the-extraction-scope");
+    assert.match(result.refusal.because, /not "extract" on volume 1/);
+    assert.strictEqual(result.filedCount, 0, "and nothing was filed: the refusal happens before the first claim is evaluated");
+    assert.strictEqual(
+      store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage IN (?, ?)").get(REBUILD_SOURCE_STAGE, EXTRACTION_SOURCE_STAGE).n,
+      0,
+      "and no row of either kind was written"
+    );
+  } finally {
+    wrongStage.close();
+    store.close();
+  }
+
+  console.log("  a candidate handle opened as the wrong stage is a refusal, not a silent omission");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * What the candidate copies are **not**: a place for a claim the evidence rule refused, and a way to make
+ * the adoption query report something that is not there.
+ * @returns {void}
+ */
+function scenarioRefusedClaimsAreNotCandidatesAndAnEmptyAdoptionQueryIsTheTrueAnswer() {
+  const series = fixtureStoreSeries("rebuild-candidate-refusals");
+  withRoster(series);
+  const { store, result } = rebuildFixture(series, { entries: [...EXTRACTION_01, EXTRACTION_01_UNVERIFIABLE] });
+
+  assert.ok(result.rebuild.refused.some((row) => row.character === "存在しない人物"), "the uncitable claim is refused by name");
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ? AND key = ?").get(EXTRACTION_SOURCE_STAGE, "存在しない人物").n,
+    0,
+    "and it is not filed as a candidate either — a claim with no citation is not evidence in either door"
+  );
+  assert.strictEqual(store.db.prepare("SELECT COUNT(*) AS n FROM cast WHERE key = ?").get("存在しない人物").n, 0, "and it does not register the character");
+  assert.strictEqual(result.rebuild.candidates.refused.length, 0, "no candidate copy failed for a different reason");
+
+  const unadopted = unadoptedVoiceClaims(store);
+  assert.deepStrictEqual(unadopted, [], "a rebuild that adopted every claim it could cite has nothing unadopted, and the query says so because it checked, not because it had nothing to check");
+
+  const audit = auditVolumeRecord(store, {
+    title: "Character-voice reference",
+    file: "character-voice.md",
+    markdown: renderRebuiltVoice(store).markdown,
+    refused: result.rebuild.refused,
+  });
+  assert.match(audit.markdown, /存在しない人物/, "and the refused claim is named in the report, so an empty adoption query does not hide it");
+
+  store.close();
+  console.log("  refused claims are not candidates, and 'nothing unadopted' is a measured answer");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A volume whose voice record is already published cannot be rebuilt over: a rebuild is not a challenge.
+ * @returns {void}
+ */
+function scenarioASealedVoiceRecordRefusesARebuild() {
+  const series = fixtureStoreSeries("rebuild-sealed");
+  const store = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  importVolumeArtifacts(store, { glossaryMarkdown: GLOSSARY_01, voiceMarkdown: VOICE_01 });
+  sealVolumeRecord(store);
+  store.close();
+
+  const attempt = openReferenceStore({ volume: 1, folder: series.volumes[0].folder, seriesDir: series.dir, stage: REBUILD_SOURCE_STAGE });
+  attempt.registerChaptersFromSource();
+  const result = rebuildVoiceFromExtraction(attempt, EXTRACTION_01);
+  assert.strictEqual(result.ok, false, "refused");
+  assert.strictEqual(result.refusal.rule, "rebuild-refuses-a-sealed-voice-record", result.refusal && result.refusal.rule);
+  assert.ok(result.refusal.useInstead.some((entry) => entry.includes("challenge_fact")), JSON.stringify(result.refusal.useInstead));
+
+  const stillThere = attempt.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ? AND sealed = 1").get(DOCUMENT_SOURCE_STAGE).n;
+  assert.ok(stillThere > 0, "the published rows are untouched");
+  attempt.close();
+  console.log("  a sealed voice record refuses to be rebuilt over");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A rebuild replaces this volume's own mirror of the reference it is rebuilding, and nothing else —
+ * and it does it through the verb that is allowed to, not by reaching across stages.
+ * @returns {void}
+ */
+function scenarioARebuildClearsOnlyItsOwnMirror() {
+  const series = fixtureStoreSeries("rebuild-mirror");
+  const writer = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  const imported = importVolumeArtifacts(writer, { glossaryMarkdown: GLOSSARY_01, voiceMarkdown: VOICE_01 });
+  const glossaryRows = writer.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE aspect = 'term_usage'").get().n;
+  const voiceRows = imported.voice.importedCount;
+  writer.close();
+
+  // Asked directly, from a rebuild handle: refused, because those rows belong to the import stage.
+  const direct = openReferenceStore({ volume: 1, folder: series.volumes[0].folder, seriesDir: series.dir, stage: REBUILD_SOURCE_STAGE });
+  direct.registerChaptersFromSource();
+  const refused = rebuildVoiceFromExtraction(direct, EXTRACTION_01);
+  assert.strictEqual(refused.ok, false, "refused");
+  assert.strictEqual(refused.refusal.rule, "rebuild-needs-its-mirror-cleared-first", refused.refusal && refused.refusal.rule);
+  assert.ok(refused.refusal.useInstead.some((entry) => entry.includes("resetDocumentMirror")), JSON.stringify(refused.refusal.useInstead));
+  const untouched = direct.db
+    .prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ? AND sealed = 0 AND aspect != 'term_usage'")
+    .get(DOCUMENT_SOURCE_STAGE).n;
+  assert.strictEqual(untouched, voiceRows, "and nothing was deleted on the way to the refusal");
+  direct.close();
+
+  // Through the flow, which clears the mirror with the handle that owns those rows.
+  const result = rebuildVoiceVolume({
+    volume: 1,
+    folder: series.volumes[0].folder,
+    seriesDir: series.dir,
+    entries: EXTRACTION_01,
+  });
+  assert.ok(result.ok, JSON.stringify(result.refusal));
+  assert.strictEqual(result.cleared.deleted, voiceRows, `cleared ${result.cleared.deleted} of ${voiceRows} mirror rows`);
+
+  const store = openReferenceStore({ volume: 1, folder: series.volumes[0].folder, seriesDir: series.dir, stage: DOCUMENT_SOURCE_STAGE });
+  assert.strictEqual(documentRebuilt(store, DOCUMENT_VOICE, 1).mirrorRowsRemoved, voiceRows, "and the record says so");
+  const glossaryNow = store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE aspect = 'term_usage'").get().n;
+  assert.strictEqual(glossaryNow, glossaryRows, "the glossary's rows are not the reference being rebuilt");
+  const leftover = store.db
+    .prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ? AND sealed = 0 AND aspect != 'term_usage'")
+    .get(DOCUMENT_SOURCE_STAGE).n;
+  assert.strictEqual(leftover, 0, `${leftover} mirror rows survived`);
+  store.close();
+
+  console.log("  a rebuild clears the mirror of the file it replaces, and only that");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The damaged artifact is moved aside, kept, and never silently overwritten.
+ * @returns {void}
+ */
+function scenarioTheDamagedFileIsMovedAsideAndKept() {
+  const series = fixtureStoreSeries("rebuild-aside");
+  withRoster(series);
+  const volumeDir = series.volumes[0].dir;
+  fs.writeFileSync(path.join(volumeDir, "character-voice.md"), VOICE_01, "utf8");
+
+  const { store } = rebuildFixture(series);
+  const rendered = renderRebuiltVoice(store);
+
+  const refused = writeRebuiltVoiceFile(store, volumeDir, rendered, { moveAside: false });
+  assert.strictEqual(refused.ok, false, "writing over an existing artifact without permission is refused");
+  assert.strictEqual(refused.refusal.rule, "rebuild-will-not-overwrite-an-artifact", refused.refusal && refused.refusal.rule);
+  assert.strictEqual(fs.readFileSync(path.join(volumeDir, "character-voice.md"), "utf8"), VOICE_01, "and the existing file is untouched");
+
+  const written = writeRebuiltVoiceFile(store, volumeDir, rendered, { moveAside: true });
+  assert.ok(written.ok, JSON.stringify(written.refusal));
+  assert.ok(fs.existsSync(written.moved), "the file it replaced is kept as evidence");
+  assert.strictEqual(fs.readFileSync(written.moved, "utf8"), VOICE_01, "kept whole");
+  assert.ok(fs.readFileSync(written.written, "utf8").includes("no author agent wrote this file"), "and the new one replaced it");
+
+  const second = writeRebuiltVoiceFile(store, volumeDir, rendered, { moveAside: true });
+  assert.strictEqual(second.ok, false, "a second rejection is refused rather than stacked on the first");
+  assert.strictEqual(second.refusal.rule, "rejected-artifact-already-exists", second.refusal && second.refusal.rule);
+
+  const aside = moveArtifactAside(volumeDir, "character-voice.md");
+  assert.strictEqual(aside.ok, false, "and the refusal comes from the move itself, not only from the writer");
+
+  store.close();
+  console.log("  the reference being replaced is moved aside, kept, and never overwritten silently");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The rebuilt file re-imports into the aspects it was filed as — the round trip closes.
+ * @returns {void}
+ */
+function scenarioTheRebuiltFileRoundTrips() {
+  const series = fixtureStoreSeries("rebuild-round-trip");
+  withRoster(series);
+  const { store } = rebuildFixture(series);
+  const rendered = renderRebuiltVoice(store);
+  const before = store.db
+    .prepare("SELECT key, aspect, label, body FROM facts WHERE source_stage = ? AND key IS NOT NULL ORDER BY ord")
+    .all(REBUILD_SOURCE_STAGE);
+
+  const reader = openReferenceStore({ volume: 1, folder: series.volumes[0].folder, seriesDir: series.dir, stage: DOCUMENT_SOURCE_STAGE });
+  reader.registerChaptersFromSource();
+  const imported = importVoice(reader, rendered.markdown);
+  assert.strictEqual(imported.refused.length, 0, `the rebuilt file could not be re-imported: ${JSON.stringify(imported.refused.map((r) => r.because))}`);
+
+  const after = reader.db
+    .prepare("SELECT key, aspect, label, body FROM facts WHERE source_stage = ? AND key IS NOT NULL ORDER BY ord")
+    .all(DOCUMENT_SOURCE_STAGE);
+  assert.strictEqual(after.length, before.length, `${before.length} claims became ${after.length}`);
+  for (const row of after) {
+    assert.notStrictEqual(row.aspect, "unclassified", `the label ${row.label} came back as the fallback`);
+  }
+  const pov = after.filter((row) => row.aspect === "pov");
+  assert.ok(pov.length > 0, "the Point of view label maps back to the pov aspect");
+
+  reader.close();
+  store.close();
+  console.log("  the rebuilt file re-imports into the same aspects it was filed as");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The provenance carries forward: volume 2's record still says volume 1 was rebuilt.
+ * @returns {void}
+ */
+function scenarioTheProvenanceCarriesForward() {
+  const series = fixtureStoreSeries("rebuild-carried");
+  withRoster(series);
+  const { store } = rebuildFixture(series);
+  sealVolumeRecord(store);
+  store.close();
+
+  const copy = copyForwardStore({
+    fromVolume: 1,
+    toVolume: 2,
+    seriesDir: series.dir,
+    fromFolder: series.volumes[0].folder,
+    toFolder: series.volumes[1].folder,
+  });
+  assert.ok(copy.ok, JSON.stringify(copy.refusal));
+
+  const next = openFixture(series, 2, DOCUMENT_SOURCE_STAGE);
+  const carried = rebuiltDocuments(next, 2);
+  assert.strictEqual(carried.length, 1, JSON.stringify(carried));
+  assert.strictEqual(carried[0].volume, 1, "it names the volume that was rebuilt, not the volume that carried it");
+  assert.strictEqual(
+    carried[0].candidatesFiled,
+    next.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ? AND owner_volume = 1").get(EXTRACTION_SOURCE_STAGE).n,
+    "and the record still says how many candidate copies it carries, because that is what keeps the coverage signal alive in every later volume"
+  );
+  assert.strictEqual(
+    next.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ? AND owner_volume = 1").get(EXTRACTION_SOURCE_STAGE).n,
+    next.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE source_stage = ? AND owner_volume = 1").get(REBUILD_SOURCE_STAGE).n,
+    "the candidate copies travel with the adopted rows — one beside each"
+  );
+
+  const audit = next.integrityFindings({ volume: "02" });
+  const provenance = audit.findings.find((item) => item.kind === "reference-document-rebuilt-from-extraction");
+  assert.ok(provenance, `volume 2's audit does not know volume 1 was rebuilt: ${JSON.stringify(audit.findings.map((f) => f.kind))}`);
+  assert.ok(provenance.message.includes("volume 1's"), provenance.message);
+
+  next.close();
+  console.log("  a rebuilt volume is still labelled as rebuilt in every later volume's record");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The whole flow, end to end, with a real endpoint listening and nothing reaching it.
+ *
+ * The claim this suite is really making is that this path is deterministic: extraction JSON in,
+ * markdown out. Pointing the environment at the scripted server and then asserting the server heard
+ * nothing is the only way to assert that without reading the source for promises.
+ *
+ * @returns {Promise<void>}
+ */
+async function scenarioTheWholePathMakesNoModelCall() {
+  const series = fixtureStoreSeries("rebuild-no-model");
+  withRoster(series);
+  const volumeDir = series.volumes[0].dir;
+
+  const backend = await startFakeBackend({ model: "stub" });
+  backend.pointEnvAt({ prefixes: ["GLOSSARY", "VOICE"] });
+  try {
+    const result = rebuildVoiceVolume({
+      volume: 1,
+      folder: series.volumes[0].folder,
+      seriesDir: series.dir,
+      entries: EXTRACTION_01,
+      aliases: [{ key: "如月雨露", alias: "俺", reason: "the glossary's own row says the narrator switches between 僕 and 俺" }],
+    });
+    assert.ok(result.ok, JSON.stringify(result.refusal));
+    assert.ok(result.rendered.markdown.includes("### 如月雨露"), "it rendered");
+    assert.ok(result.audit, "it audited");
+    assert.strictEqual(backend.requests.length, 0, `the rebuild made ${backend.requests.length} request(s) to the endpoint`);
+    assert.ok(!result.audit.findings.some((item) => item.severity === "HIGH"), JSON.stringify(result.audit.findings.map((f) => `${f.severity} ${f.kind}`)));
+
+    const writer = openReferenceStore({ volume: 1, folder: series.volumes[0].folder, seriesDir: series.dir, stage: REBUILD_SOURCE_STAGE });
+    const written = writeRebuiltVoiceFile(writer, volumeDir, result.rendered, { moveAside: true });
+    writer.close();
+    assert.ok(written.ok, JSON.stringify(written.refusal));
+    assert.ok(fs.existsSync(path.join(volumeDir, "series.db")), "and the record it built is in the volume folder, where the next volume reads it");
+    assert.strictEqual(backend.requests.length, 0, `writing the artifact made ${backend.requests.length} request(s)`);
+  } finally {
+    await backend.close();
+  }
+  console.log("  extraction in, markdown out: the scripted endpoint heard nothing at all");
+}
+
+/**
+ * A rebuild does not carry the earlier volumes' record, so it refuses rather than rendering a
+ * reference that has silently forgotten them.
+ * @returns {void}
+ */
+function scenarioALaterVolumeNeedsItsEarlierRecordFirst() {
+  const series = fixtureStoreSeries("rebuild-carried-first");
+  withRoster(series, 1);
+  const { store } = rebuildFixture(series);
+  sealVolumeRecord(store);
+  store.close();
+
+  // Volume 2 exists in the plan of record and its own record is empty.
+  const empty = rebuildVoiceVolume({
+    volume: 2,
+    folder: series.volumes[1].folder,
+    seriesDir: series.dir,
+    entries: [{ type: "voice", character: "如月雨露", quirkType: "pronoun", description: "First person is 僕.", examples: ["如月雨露は「気にすんな！」と言った。"] }],
+  });
+  assert.strictEqual(empty.ok, false, "refused");
+  assert.strictEqual(empty.refusal.rule, "rebuild-record-missing-its-earlier-volumes", empty.refusal && empty.refusal.rule);
+  assert.ok(empty.refusal.useInstead.some((entry) => entry.includes("openVolumeRecord")), JSON.stringify(empty.refusal.useInstead));
+
+  // Carry volume 1 forward the way the pipeline does, and the same rebuild is allowed.
+  const carried = copyForwardStore({
+    fromVolume: 1,
+    toVolume: 2,
+    seriesDir: series.dir,
+    fromFolder: series.volumes[0].folder,
+    toFolder: series.volumes[1].folder,
+  });
+  assert.ok(carried.ok, JSON.stringify(carried.refusal));
+
+  const allowed = rebuildVoiceVolume({
+    volume: 2,
+    folder: series.volumes[1].folder,
+    seriesDir: series.dir,
+    entries: [{ type: "voice", character: "如月雨露", quirkType: "pronoun", description: "First person is 僕.", examples: ["如月雨露は「気にすんな！」と言った。"] }],
+  });
+  assert.ok(allowed.ok, JSON.stringify(allowed.refusal));
+  const carriedRows = allowed.audit.counts.facts;
+  assert.ok(carriedRows > 1, `the earlier volume's rows are still there: ${carriedRows}`);
+
+  console.log("  rebuilding a later volume into an empty record is refused, not silently truncated");
+}
+
+// ─── Run ─────────────────────────────────────────────────────────────────────
+
+(async () => {
+  scenarioRebuildFilesClaimsAsRenderableRows();
+  scenarioExtractionClaimsStillDoNotRender();
+  scenarioRebuildRefusesAnUncitableClaim();
+  scenarioRebuildNeedsItsOwnWriteScope();
+  scenarioRebuildIsIdempotent();
+  scenarioNamesResolveOntoTheRoster();
+  scenarioAnAliasNeedsAReason();
+  scenarioADeclaredAliasMergesTheRosterBeforeFiling();
+  scenarioSectionsAndBulletsFollowChapterOrder();
+  scenarioAnOverlongBulletIsCappedAndNamed();
+  scenarioARebuiltReferenceIsReportedAsRebuilt();
+  scenarioCoverageStillFiresOnARebuiltReference();
+  scenarioARebuiltReferenceThatMissesAMentionIsNotAStop();
+  scenarioARebuiltReferenceThatLostACharacterTheExtractionFiledIsAStop();
+  scenarioARebuiltRecordWithoutItsCandidatesCannotSeeThatLoss();
+  scenarioARebuildRefusesACandidateHandleOfAnotherStage();
+  scenarioRefusedClaimsAreNotCandidatesAndAnEmptyAdoptionQueryIsTheTrueAnswer();
+  scenarioASealedVoiceRecordRefusesARebuild();
+  scenarioARebuildClearsOnlyItsOwnMirror();
+  scenarioTheDamagedFileIsMovedAsideAndKept();
+  scenarioTheRebuiltFileRoundTrips();
+  scenarioTheProvenanceCarriesForward();
+  scenarioALaterVolumeNeedsItsEarlierRecordFirst();
+  await scenarioTheWholePathMakesNoModelCall();
+  console.log("reference-store rebuild: all checks passed.");
+})().catch((err) => {
+  console.error(`reference-store rebuild test failed: ${err.message}`);
+  process.exit(1);
+});

@@ -21,6 +21,15 @@
  *     query (see `schema.js`'s `EXTRACTION_SOURCE_STAGE`). Without that line between them, a voice
  *     reference that lost a character would look covered as long as the extractor had noticed the
  *     character — the false pass the whole layer exists to prevent.
+ *   - **They land on the roster entry the record already uses for that character.** The extraction
+ *     writes 三色院菫子（パンジー） and the glossary writes 三色院菫子. Filing under the extraction's own
+ *     spelling builds a second roster, and then the coverage rule's "did the extraction find voice
+ *     material for them?" question answers "no" for a character the extraction wrote thirty claims
+ *     about. `name-resolution.js` is the one answer, shared with `rebuild.js`.
+ *   - **A refused claim does not register a name.** The roster entry is written after the evidence
+ *     gate, not before it: a claim the store would not record must not leave its character on the
+ *     cast list, where the coverage question would then report somebody nobody ever wrote anything
+ *     about.
  *   - **The comparison between the two is the check.** Once the store holds both what the
  *     extractor found and what the published document says, "the author agent dropped N claims the
  *     extractor produced" is a query with a number in it, not something a validator agent might
@@ -33,6 +42,7 @@ const { normalizeQuote, matchQuoteOnLine } = require("./evidence");
 const { EXTRACTION_SOURCE_STAGE } = require("./schema");
 const { readChapterLines } = require("./source-chapters");
 const { quoteCandidates } = require("./voice-adapter");
+const { resolveExtractionName } = require("./name-resolution");
 require("../../types"); // JSDoc type definitions
 
 /**
@@ -60,6 +70,9 @@ const UNMAPPED_ASPECT = "unclassified";
 
 /** How many of an entry's own quotes the importer will try before it gives up. */
 const QUOTE_CANDIDATES_PER_ENTRY = 4;
+
+/** What an extraction entry with no quirk type is labelled. */
+const EXTRACTION_VOICE_LABEL = "Quirk";
 
 /**
  * Whether this exact claim is already in the record as an extraction claim.
@@ -129,12 +142,65 @@ function findEntryEvidence(volumeDir, chapters, volume, examples, description, k
 }
 
 /**
+ * The row an extraction claim has: the shape `importVoiceExtraction` files, in one place.
+ *
+ * There are two doors that file extraction candidates into a volume's record — this one, and
+ * `rebuild.js`, which files a candidate beside every claim it adopts so a rebuilt record holds both
+ * readings of the book. Two doors writing the same kind of row is how one ends up with two shapes of
+ * it, and a candidate the extraction door cannot recognise as already filed is a duplicate claim in
+ * the record. So the shape lives here and both doors call it; the evidence and the volume stamps are
+ * the caller's, because only the caller has searched the source.
+ *
+ * @param {Object} entry - One `character-voice-new.json` voice record.
+ * @param {string|null} key - The roster entry the claim resolves to.
+ * @returns {{key: string|null, aspect: string, label: string, section: null, body: string, examples: string[], formality: string|null}}
+ */
+function voiceCandidateRow(entry, key) {
+  const quirk = typeof entry.quirkType === "string" ? entry.quirkType.trim() : "";
+  const label = quirk || EXTRACTION_VOICE_LABEL;
+  const description = typeof entry.description === "string" ? entry.description.trim() : "";
+  return {
+    key,
+    aspect: QUIRK_TYPE_TO_ASPECT[quirk.toLowerCase()] || UNMAPPED_ASPECT,
+    label,
+    section: null,
+    body: description || label,
+    examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string").slice(0, QUOTE_CANDIDATES_PER_ENTRY),
+    formality: typeof entry.formalityLevel === "string" && entry.formalityLevel.trim() ? entry.formalityLevel.trim() : null,
+  };
+}
+
+/**
+ * The row a POV claim has, in the same shape for the same reason.
+ *
+ * @param {Object} entry - One `character-voice-new.json` POV record.
+ * @param {string|null} key - The roster entry the assigned character resolves to, or null.
+ * @returns {{key: string|null, aspect: "pov", label: string, section: null, body: string, examples: string[], formality: null}|null}
+ *   Null when the entry carries neither a description nor a marker, which is not a claim.
+ */
+function povCandidateRow(entry, key) {
+  const description = typeof entry.sectionDescription === "string" ? entry.sectionDescription.trim() : "";
+  const marker = typeof entry.marker === "string" && entry.marker.trim() ? entry.marker.trim() : null;
+  const body = description || (marker ? `POV marker ${marker}` : "");
+  if (!body) return null;
+  return {
+    key,
+    aspect: "pov",
+    label: marker ? `POV ${marker}` : "POV",
+    section: null,
+    body,
+    examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string").slice(0, QUOTE_CANDIDATES_PER_ENTRY),
+    formality: null,
+  };
+}
+
+/**
  * File the volume's extracted voice and POV claims into its store.
  *
  * @param {ReferenceStore} store
  * @param {Array<Object>} entries - The parsed `character-voice-new.json` array.
  * @param {{volume?: number}} [opts]
- * @returns {{ok: boolean, imported: Array<Object>, importedCount: number, refused: Array<Object>, characters: number, povCount: number}}
+ * @returns {{ok: boolean, imported: Array<Object>, importedCount: number, carried: Array<Object>, refused: Array<Object>, unresolved: Array<{name: string, key: string, because: string}>, characters: number, povCount: number}}
  */
 function importVoiceExtraction(store, entries, { volume } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -144,6 +210,7 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
   const imported = [];
   const refused = [];
   const carried = [];
+  const unresolved = [];
   const characters = new Set();
   let povCount = 0;
 
@@ -158,6 +225,7 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
       if (result.ok) {
         imported.push(result.fact);
         povCount += 1;
+        if (result.unresolved) unresolved.push(result.unresolved);
       } else {
         refused.push({ kind: "pov", because: result.because });
       }
@@ -170,29 +238,25 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
       continue;
     }
 
-    // No `display` on purpose: when the character is already in the cast, the name the published
-    // document uses for them (如月雨露（ジョーロ）【俺人格】) is the one the renderer puts back in the
-    // file, and an extraction entry naming them 如月雨露 must not overwrite it. When they are new,
-    // the store falls back to the key, which is the name the extraction gave them.
-    const castResult = store.upsertCast({ key: name, firstSeenVolume: vol });
-    if (!castResult.ok) {
-      refused.push({ kind: "voice", character: name, because: castResult.refusal.because });
-      continue;
-    }
+    // The extraction's spelling is resolved onto the roster before anything is written, through the
+    // same leaf `rebuild.js` uses. Filing 三色院菫子（パンジー）'s claims under 三色院菫子（パンジー） builds a
+    // second roster, and then every question about coverage and adoption is asked about a name no
+    // volume ever published — including this adapter's own contribution to the coverage rule.
+    const resolved = resolveExtractionName(store, name);
+    const key = resolved.key;
 
-    const description = typeof entry.description === "string" ? entry.description.trim() : "";
-    const label = typeof entry.quirkType === "string" && entry.quirkType.trim() ? entry.quirkType.trim() : "Quirk";
-    const aspect = QUIRK_TYPE_TO_ASPECT[label.toLowerCase()] || UNMAPPED_ASPECT;
-    if (extractionClaimAlreadyStored(store, { key: name, aspect, body: description || label })) {
-      carried.push({ kind: "voice", character: name, label });
+    const row = voiceCandidateRow(entry, key);
+    if (extractionClaimAlreadyStored(store, { key, aspect: row.aspect, body: row.body })) {
+      carried.push({ kind: "voice", character: name, key, label: row.label });
       continue;
     }
-    const { evidence, tried } = findEntryEvidence(store.volumeDir, chapters, vol, entry.examples, description, name);
+    const { evidence, tried } = findEntryEvidence(store.volumeDir, chapters, vol, entry.examples, row.body, key);
     if (!evidence) {
       refused.push({
         kind: "voice",
         character: name,
-        label,
+        key,
+        label: row.label,
         because:
           `none of this claim's quotes (${tried.join(", ") || "no quoted span"}) occurs in volume ${vol}'s source ` +
           "text, so the extraction result is not evidence for anything.",
@@ -200,24 +264,33 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
       continue;
     }
 
+    // The roster entry is written only for a claim that passed the evidence gate. A claim the store
+    // refused must not leave a name on the roster, because the coverage question then reports a
+    // character nobody ever wrote anything about.
+    //
+    // No `display` on purpose: when the character is already in the cast, the name the published
+    // document uses for them (如月雨露（ジョーロ）【俺人格】) is the one the renderer puts back in the
+    // file, and an extraction entry naming them 如月雨露 must not overwrite it. When they are new,
+    // the store falls back to the key, which is the name the extraction gave them.
+    const castResult = store.upsertCast({ key, firstSeenVolume: vol });
+    if (!castResult.ok) {
+      refused.push({ kind: "voice", character: name, key, because: castResult.refusal.because });
+      continue;
+    }
+
     const result = store.insertFact({
-      key: name,
-      aspect,
-      label,
-      section: null,
-      body: description || label,
-      examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string").slice(0, 4),
-      formality: typeof entry.formalityLevel === "string" && entry.formalityLevel.trim() ? entry.formalityLevel.trim() : null,
+      ...row,
       evidence,
       establishedVolume: vol,
       appliesFromVolume: vol,
     });
     if (!result.ok) {
-      refused.push({ kind: "voice", character: name, label, because: result.refusal.because });
+      refused.push({ kind: "voice", character: name, key, label: row.label, because: result.refusal.because });
       continue;
     }
     imported.push(result.fact);
-    characters.add(name);
+    characters.add(key);
+    if (!resolved.resolved) unresolved.push({ name, key, because: resolved.how });
   }
 
   return {
@@ -226,6 +299,7 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
     importedCount: imported.length,
     carried,
     refused,
+    unresolved,
     characters: characters.size,
     povCount,
   };
@@ -242,42 +316,47 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
  * @param {Object} entry
  * @param {number} vol
  * @param {Array<{id: string, file: string}>} chapters
- * @returns {{ok: boolean, fact: Object|null, because: string|null}}
+ * @returns {{ok: boolean, fact: Object|null, because: string|null, unresolved: {name: string, key: string, because: string}|null}}
  */
 function importPovEntry(store, entry, vol, chapters) {
   const assigned = typeof entry.assignedCharacter === "string" ? entry.assignedCharacter.trim() : "";
-  const description = typeof entry.sectionDescription === "string" ? entry.sectionDescription.trim() : "";
-  const marker = typeof entry.marker === "string" && entry.marker.trim() ? entry.marker.trim() : null;
-  const body = description || (marker ? `POV marker ${marker}` : "");
-  if (!body) return { ok: false, fact: null, because: "the POV entry carries no description and no marker." };
 
-  if (assigned) {
-    const castResult = store.upsertCast({ key: assigned, firstSeenVolume: vol });
-    if (!castResult.ok) return { ok: false, fact: null, because: castResult.refusal.because };
-  }
+  // Same roster resolution as a voice claim: "this section is her free indirect discourse" is a claim
+  // about her, and it has to land on the roster entry the rest of the record uses for her.
+  const resolved = assigned ? resolveExtractionName(store, assigned) : null;
+  const key = resolved ? resolved.key : null;
 
-  const { evidence, tried } = findEntryEvidence(store.volumeDir, chapters, vol, entry.examples, body, assigned);
+  const row = povCandidateRow(entry, key);
+  if (!row) return { ok: false, fact: null, because: "the POV entry carries no description and no marker.", unresolved: null };
+
+  const { evidence, tried } = findEntryEvidence(store.volumeDir, chapters, vol, entry.examples, row.body, key);
   if (!evidence) {
     return {
       ok: false,
       fact: null,
       because: `none of this POV claim's quotes (${tried.join(", ") || "no quoted span"}) occurs in volume ${vol}'s source text.`,
+      unresolved: null,
     };
   }
 
+  if (key) {
+    const castResult = store.upsertCast({ key, firstSeenVolume: vol });
+    if (!castResult.ok) return { ok: false, fact: null, because: castResult.refusal.because, unresolved: null };
+  }
+
   const result = store.insertFact({
-    key: assigned || null,
-    aspect: "pov",
-    label: marker ? `POV ${marker}` : "POV",
-    section: null,
-    body,
-    examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string").slice(0, 4),
+    ...row,
     evidence,
     establishedVolume: vol,
     appliesFromVolume: vol,
   });
-  if (!result.ok) return { ok: false, fact: null, because: result.refusal.because };
-  return { ok: true, fact: result.fact, because: null };
+  if (!result.ok) return { ok: false, fact: null, because: result.refusal.because, unresolved: null };
+  return {
+    ok: true,
+    fact: result.fact,
+    because: null,
+    unresolved: resolved && !resolved.resolved ? { name: assigned, key, because: resolved.how } : null,
+  };
 }
 
 /**
@@ -349,8 +428,11 @@ function importNewTerms(store, entries, { volume } = {}) {
 module.exports = {
   QUIRK_TYPE_TO_ASPECT,
   UNMAPPED_ASPECT,
+  EXTRACTION_VOICE_LABEL,
   findEntryEvidence,
   extractionClaimAlreadyStored,
+  voiceCandidateRow,
+  povCandidateRow,
   importVoiceExtraction,
   importNewTerms,
 };

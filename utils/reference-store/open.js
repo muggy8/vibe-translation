@@ -257,6 +257,7 @@ function openReferenceStore({ volume, folder, seriesDir, stage = "merge", create
 
   ctx.recordCastPresence = (opts) => presence.recordCastPresence(ctx, opts);
   ctx.castPresence = (vol) => presence.castPresence(ctx, vol);
+  ctx.presenceDetail = (vol, key) => presence.presenceDetail(ctx, vol, key);
   ctx.presenceMeasured = (vol) => presence.presenceMeasured(ctx, vol);
 
   ctx.factsFor = (query) => queries.factsFor(ctx, query);

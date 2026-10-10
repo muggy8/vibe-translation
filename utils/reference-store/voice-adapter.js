@@ -64,6 +64,10 @@ const VOICE_LABEL_TO_ASPECT = {
   "internal voice": "internal_voice",
   "notes": "unclassified",
   "appears in": "appearance",
+  // The label a reference rebuilt from the extraction output gives a POV claim (`rebuild.js`). It is
+  // here because the round trip has to close: a label the importer does not know lands in
+  // `unclassified`, and a rebuilt reference would then be reported for a fallback the file never used.
+  "point of view": "pov",
 };
 
 /**

@@ -60,13 +60,14 @@ const {
   voiceNewestSections,
   GRADE_SAMPLE_MAX_CHARS,
   REPORT_LIST_LIMIT,
+  COVERAGE_SIGNIFICANCE_CHAPTERS,
   EXTRACTION_SOURCE_STAGE,
   DOCUMENT_SOURCE_STAGE,
 } = require("../utils/reference-store");
 const { documentMirrored, DOCUMENT_VOICE } = require("../utils/reference-store/document-prose");
 const { STORE_VALIDATORS } = require("../configs/shared");
 const { envMaxLineLength } = require("../ai/env");
-const { fixtureStoreSeries, assertInsideFixture, GLOSSARY_01, VOICE_01, VOICE_01_MISSING_CHARACTERS } = require("./fixture-reference-store");
+const { fixtureStoreSeries, assertInsideFixture, GLOSSARY_01, VOICE_01, VOICE_01_MISSING_CHARACTERS, EXTRACTION_01 } = require("./fixture-reference-store");
 const voiceStore = require("../character-voice/store");
 const glossaryStore = require("../glossary/store");
 
@@ -280,8 +281,14 @@ function scenarioUnmeasuredVolumeUsesTheStricterRule() {
 }
 
 /**
- * A reference that lost characters who ARE in the volume's text is HIGH, and the next volume cannot
- * be built on it. No exception, no downgrade.
+ * A reference that lost characters who ARE in the volume's text, and whom the extraction found, is
+ * HIGH, and the next volume cannot be built on it. No exception, no downgrade.
+ *
+ * This is volume 01's failure in fixture shape, with both of the rule's signals planted: the
+ * extraction pass filed claims about the lost characters (two independent readings of the same book
+ * disagreeing), and the volume's own text names them. Either one alone is enough for HIGH — see
+ * `scenarioACharacterInEnoughChaptersIsALossWithoutTheExtraction` for the other half.
+ * @returns {void}
  */
 function scenarioDamagedReferenceIsNotCarriedForward() {
   const fx = fixtureStoreSeries("pipeline-damaged-chain");
@@ -289,6 +296,20 @@ function scenarioDamagedReferenceIsNotCarriedForward() {
   const one = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage: DOCUMENT_SOURCE_STAGE });
   importGlossary(one, GLOSSARY_01);
   importVoice(one, VOICE_01_MISSING_CHARACTERS);
+
+  // The extraction pass ran over this volume and noticed the two characters the reference lost.
+  // Filed through its own handle, the way a stage files them.
+  const filed = importVolumeExtraction({
+    volume: 1,
+    folder: fx.volumes[0].folder,
+    seriesDir: fx.dir,
+    voiceEntries: [
+      { type: "voice", character: "大賀太陽", quirkType: "catchphrase", description: "Chants it.", examples: ["ドンマイだ！ ドンマイ！"] },
+      { type: "voice", character: "三色院菫子", quirkType: "pronoun", description: "She reads.", examples: ["三色院菫子は本を読んでいた。"] },
+    ],
+  }).voice;
+  assert.strictEqual(filed.importedCount, 2, "both claims cite a line that is really there");
+
   recordCastPresence(one);
   const audit = one.integrityFindings({ volume: "01" });
   const coverage = expectFinding(audit, "reference-voice-covers-fewer-characters");
@@ -296,6 +317,7 @@ function scenarioDamagedReferenceIsNotCarriedForward() {
   assert.match(coverage.message, /大賀太陽/, "it names the characters the reference lost");
   assert.match(coverage.message, /三色院菫子/);
   assert.match(coverage.message, /the volume's own text contains them/, "and it says the absence was measured, not assumed");
+  assert.match(coverage.message, /the extraction filed 1 claim\(s\) about them/, "and it says which signal made it a loss");
   one.sealVolume(1);
   one.close();
 
@@ -308,6 +330,176 @@ function scenarioDamagedReferenceIsNotCarriedForward() {
 
   console.log("reference-store pipeline: a volume whose character-voice reference lost characters is not copied forward, at HIGH");
 }
+
+/**
+ * The extraction's own spellings land on the roster entry the record already uses for that character.
+ *
+ * This is not tidiness. The coverage rule's first signal asks "did this volume's extraction file a
+ * claim about them", and if 三色院菫子（パンジー）'s claims were filed under 三色院菫子（パンジー） the answer is
+ * "no" for a character the extraction wrote claims about — a signal that is always false, which looks
+ * exactly like a volume whose extractor saw nothing. Volume 01's extraction names all 11 of its
+ * characters with brackets.
+ * @returns {void}
+ */
+function scenarioExtractionNamesLandOnTheRosterEntry() {
+  const { fx, store } = openVolumeOne("pipeline-name-resolution");
+  importGlossary(store, GLOSSARY_01);
+
+  const filed = fileExtractionClaims(fx, EXTRACTION_01).voice;
+  assert.ok(filed.ok, JSON.stringify(filed.refused));
+
+  const keys = store.db.prepare("SELECT key FROM cast ORDER BY key").all().map((row) => row.key);
+  assert.ok(keys.includes("三色院菫子") && !keys.includes("三色院菫子（パンジー）"), `the claims land on the roster entry: ${keys.join(", ")}`);
+  assert.ok(!keys.includes("如月雨露（ジョーロ）") && !keys.includes("大賀太陽（サンちゃん）"), "the same for the two other names the glossary already carries");
+  const claims = store.db
+    .prepare("SELECT COUNT(*) AS n FROM facts WHERE key = '三色院菫子' AND source_stage = ?")
+    .get(EXTRACTION_SOURCE_STAGE).n;
+  assert.ok(claims > 0, "and the claim is filed under it, which is what the coverage query reads");
+
+  const unresolved = filed.unresolved.map((row) => row.name);
+  assert.ok(unresolved.includes("俺（主人公）") && unresolved.includes("秋野桜（コスモス）"), `names nothing carries are reported, not guessed at: ${unresolved.join(", ")}`);
+
+  // The consequence, measured: a reference that mentions only 如月雨露 is a HIGH loss for the two
+  // characters the extraction filed claims about, because those claims are findable under their keys.
+  importVoice(store, `# Character Voice Reference\n\n## Characters\n\n### 如月雨露（ジョーロ）【俺人格】\n\n- **Pronouns**: 一人称は俺。\n`);
+  recordCastPresence(store);
+  const coverage = expectFinding(store.integrityFindings({ volume: "01" }), "reference-voice-covers-fewer-characters", "the extraction found them and the reference did not");
+  assert.match(coverage.message, /三色院菫子 — the extraction filed \d+ claim\(s\) about them/);
+
+  store.close();
+  console.log("reference-store pipeline: an extraction name is resolved onto the roster entry, so the coverage rule's extraction signal can actually be found");
+}
+
+/**
+ * The coverage line, pinned. It is a constant in the module that uses it and there is no
+ * environment variable that moves it (AGENTS.md rule 3), so the only way to change it is to edit
+ * the file that states how it was measured.
+ * @returns {void}
+ */
+function scenarioTheCoverageLineIsAConstant() {
+  assert.strictEqual(
+    COVERAGE_SIGNIFICANCE_CHAPTERS,
+    3,
+    "volume 01's measurements put the line here: a fictional film actor named in 2 chapters is a " +
+      "mention, and 如月雨露, whom the destroyed reference lost, is named in 3"
+  );
+  console.log("reference-store pipeline: the coverage line is a pinned constant, not a setting");
+}
+
+/**
+ * Presence records every place a name occurs, not the first one, and says which rule proved each.
+ * Without this the coverage rule cannot ask "in how many chapters", because a character named once
+ * and a character named in every chapter would look identical.
+ * @returns {void}
+ */
+function scenarioPresenceRecordsEveryPlaceANameOccurs() {
+  const { store } = openVolumeOne("pipeline-presence-matches");
+  importGlossary(store, GLOSSARY_01);
+  store.upsertCast({ key: "担任教師", display: "担任教師", firstSeenVolume: 1 });
+
+  const measured = recordCastPresence(store);
+  assert.ok(measured.ok, measured.refusal ? measured.refusal.because : "measurement failed");
+  assert.ok(measured.matchRows > 4, `every match is a row: ${measured.matchRows}`);
+
+  const rows = castPresence(store, 1);
+  const teacher = rows.find((row) => row.key === "担任教師");
+  assert.strictEqual(teacher.present, 1);
+  assert.strictEqual(teacher.chapters, 3, "the summary answers \"how many chapters\", which the first match alone could not");
+  assert.strictEqual(teacher.matches, 3, "and how many lines");
+  assert.strictEqual(teacher.matched, "skeleton", "the name is only ever printed with 担任の教師, so the skeleton rule is what proved it");
+
+  const detail = store.presenceDetail(1, "担任教師");
+  assert.deepStrictEqual(detail.map((row) => row.chapter), ["ch0", "ch1", "ch2"], "and the audit can name WHICH chapters");
+  assert.ok(detail.every((row) => row.matched === "skeleton"), "with the rule that proved each one");
+
+  const hits = store.db
+    .prepare("SELECT chapter, line, name, matched FROM cast_presence_match WHERE volume = 1 AND key = ? ORDER BY chapter, line")
+    .all("担任教師");
+  assert.strictEqual(hits.length, 3, "one row per place the name occurs");
+  assert.ok(hits.every((row) => row.line >= 2 && row.name === "担任教師"));
+
+  // Re-measuring replaces the answer instead of layering on top of it.
+  const again = recordCastPresence(store);
+  assert.strictEqual(again.matchRows, measured.matchRows, "a second measurement does not double the rows");
+
+  store.close();
+  console.log("reference-store pipeline: presence records every place a name occurs, with the rule that proved it");
+}
+
+/**
+ * The second signal on its own: a character the extraction says nothing about, named in enough of
+ * the volume's chapters to be in the book. HIGH, and it stops the copy.
+ * @returns {void}
+ */
+function scenarioACharacterInEnoughChaptersIsALossWithoutTheExtraction() {
+  const fx = fixtureStoreSeries("pipeline-chapter-signal");
+
+  const one = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage: DOCUMENT_SOURCE_STAGE });
+  importGlossary(one, GLOSSARY_01);
+  // 担任教師 is in the roster and in all three chapters, and the reference never mentions them.
+  // Nothing from the extraction is filed: this character is caught by the chapter signal alone.
+  one.upsertCast({ key: "担任教師", display: "担任教師", firstSeenVolume: 1 });
+  importVoice(one, `# Character Voice Reference\n\n## Characters\n\n### 如月雨露（ジョーロ）【俺人格】\n\n- **Pronouns**: 一人称は俺。\n- **Catchphrases**: 「気にすんな！」はジョーロの定型である。\n`);
+  recordCastPresence(one);
+
+  const audit = one.integrityFindings({ volume: "01" });
+  const coverage = expectFinding(audit, "reference-voice-covers-fewer-characters", "somebody named in three of three chapters is in the book");
+  assert.strictEqual(coverage.severity, "HIGH");
+  assert.match(coverage.message, /担任教師/);
+  assert.match(coverage.message, /their name occurs in 3 of this volume's 3 chapters/);
+
+  one.close();
+  console.log("reference-store pipeline: a character named in enough chapters is a loss even when the extraction says nothing about them");
+}
+
+/**
+ * The softened half: a character who IS in the volume but only barely, and about whom the
+ * extraction says nothing either, is a mention. MEDIUM, named with the signal that was missing, and
+ * the next volume is still built on this record.
+ * @returns {void}
+ */
+function scenarioABarelyPresentCharacterIsAMentionNotALoss() {
+  const fx = fixtureStoreSeries("pipeline-mention-only");
+
+  const one = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage: DOCUMENT_SOURCE_STAGE });
+  importGlossary(one, GLOSSARY_01);
+  // 山田 (one line, one chapter) and 三色院菫子 (one chapter) are both in the text and both absent
+  // from the reference, and no extraction claim covers either.
+  importVoice(one, `# Character Voice Reference\n\n## Characters\n\n### 如月雨露（ジョーロ）【俺人格】\n\n- **Pronouns**: 一人称は俺。\n- **Catchphrases**: 「気にすんな！」はジョーロの定型である。\n`);
+  recordCastPresence(one);
+
+  const audit = one.integrityFindings({ volume: "01" });
+  expectNoFinding(audit, "reference-voice-covers-fewer-characters", "neither signal holds for these two, so this is not the stop");
+  const mention = expectFinding(audit, "reference-voice-mention-not-covered", "a barely-present character is still reported");
+  assert.strictEqual(mention.severity, "MEDIUM");
+  assert.match(mention.message, /三色院菫子/, "named, not counted");
+  assert.match(mention.message, /below the 3-chapter line/, "with the signal that was missing");
+  assert.match(mention.message, /the extraction found nothing about them/);
+
+  const report = renderAuditReport({
+    title: "Character-voice reference",
+    file: "character-voice.md",
+    volume: 1,
+    findings: audit.findings,
+    counts: audit.counts,
+    checked: audit.checked,
+    coverageAsked: audit.coverageAsked,
+    coverage: audit.coverage,
+  });
+  assert.match(report, /## Characters the reference does not cover/, "and every one of them is in the report a human reads");
+  assert.match(report, /MEDIUM — a mention/);
+  assert.match(report, /三色院菫子.*1 of 3 chapters \(1 line\(s\); verbatim\) — ch1/, "and it names WHICH chapter it found them in, so the verdict can be checked by opening the book");
+
+  one.sealVolume(1);
+  one.close();
+
+  const carried = copyForwardStore({ fromVolume: 1, toVolume: 2, seriesDir: fx.dir, fromFolder: "Test Story(01)", toFolder: "Test Story(02)" });
+  assert.ok(carried.ok, carried.refusal ? carried.refusal.because : "a mention does not stop the next volume");
+  assert.strictEqual(volumeRecordExists({ volume: 2, folder: "Test Story(02)", seriesDir: fx.dir }), true);
+
+  console.log("reference-store pipeline: a barely-present character is a mention — named in the report, and not a stop");
+}
+
 
 /**
  * The store's own record of who is in the volume, and the report's statement of it, agree.
@@ -326,7 +518,13 @@ function scenarioCoverageIsNotAskedBeforeTheReferenceIsMirrored() {
   assert.strictEqual(documentMirrored(store, DOCUMENT_VOICE, 1), true, "the import records that the mirror exists");
   const after = store.integrityFindings({ volume: "01" });
   assert.strictEqual(after.coverageAsked, true);
-  expectFinding(after, "reference-voice-covers-fewer-characters", "once the reference is in the record, the question is asked");
+  assert.strictEqual(after.coverage.asked, true, "and the answer carries the measured signals for each name");
+  expectFinding(
+    after,
+    "reference-voice-mention-not-covered",
+    "once the reference is in the record the question is asked — these two are barely-present, so it lands at MEDIUM"
+  );
+  assert.ok(after.coverage.rows.length === 2, `both uncovered characters are in the answer: ${JSON.stringify(after.coverage.rows.map((r) => r.key))}`);
 
   store.close();
   console.log("reference-store pipeline: the coverage question is asked once the volume's reference is in the record, and the report says which it did");
@@ -410,6 +608,11 @@ function scenarioInventedExtractionClaimsAreRefused() {
   assert.strictEqual(filed.importedCount, 0);
   assert.strictEqual(filed.refused.length, 1);
   assert.match(filed.refused[0].because, /none of this claim's quotes .* occurs in volume 1's source text/);
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM cast WHERE key = '氷室'").get().n,
+    0,
+    "a claim the store refused does not put its character on the roster — the coverage query would then demand an entry for somebody nobody wrote anything about"
+  );
 
   store.close();
   console.log("reference-store pipeline: an extraction claim with no quote in the book is refused and named, not filed");
@@ -659,9 +862,15 @@ function scenarioGradedSampleIsDeterministicAndBounded() {
  * checked.
  */
 function scenarioReportKeepsTheShapeItsReadersExpect() {
-  const { store } = openVolumeOne("pipeline-report");
+  const { fx, store } = openVolumeOne("pipeline-report");
   importGlossary(store, GLOSSARY_01);
   importVoice(store, VOICE_01_MISSING_CHARACTERS);
+  // The extraction noticed both characters the reference lost, which is what makes this the HIGH
+  // shape of the coverage finding rather than the mention shape.
+  fileExtractionClaims(fx, [
+    { type: "voice", character: "大賀太陽", quirkType: "catchphrase", description: "Chants it.", examples: ["ドンマイだ！ ドンマイ！"] },
+    { type: "voice", character: "三色院菫子", quirkType: "pronoun", description: "She reads.", examples: ["三色院菫子は本を読んでいた。"] },
+  ]);
 
   const audit = auditVolumeRecord(store, {
     title: "Character-voice reference",
@@ -678,6 +887,8 @@ function scenarioReportKeepsTheShapeItsReadersExpect() {
   assert.match(audit.markdown, /## Rows the store refused to record/);
   assert.match(audit.markdown, /大賀太陽/, "a refused row is named, not dropped quietly");
   assert.ok(audit.highFindings.length >= 1);
+  assert.match(audit.markdown, /## Characters the reference does not cover/, "and the coverage answer is a table a human can read, not only a finding message");
+  assert.match(audit.markdown, /\*\*HIGH — a real loss\*\*/, "with the verdict and the signal that produced it");
 
   const clean = auditVolumeRecord(
     (() => {
@@ -824,6 +1035,11 @@ function scenarioExtractionRowsNeverRenderIntoADocument() {
   scenarioAbsentCharactersAreLeftAloneAndNotDemanded();
   scenarioUnmeasuredVolumeUsesTheStricterRule();
   scenarioDamagedReferenceIsNotCarriedForward();
+  scenarioTheCoverageLineIsAConstant();
+  scenarioExtractionNamesLandOnTheRosterEntry();
+  scenarioPresenceRecordsEveryPlaceANameOccurs();
+  scenarioACharacterInEnoughChaptersIsALossWithoutTheExtraction();
+  scenarioABarelyPresentCharacterIsAMentionNotALoss();
   scenarioCoverageIsNotAskedBeforeTheReferenceIsMirrored();
   scenarioUnadoptedClaimsAreNamed();
   scenarioExtractionClaimsAreNotCoverage();

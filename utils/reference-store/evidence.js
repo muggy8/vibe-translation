@@ -75,24 +75,63 @@ function quoteSkeleton(text) {
 }
 
 /**
+ * One source line, prepared once so it can be searched for many quotes.
+ *
+ * `presence.js` searches a chapter's whole text for every name the record holds, which is
+ * thousands of lines times a dozen names. Normalising and skeletonising the line once per line —
+ * instead of once per (line, name) pair — is the difference between a measurement that runs and one
+ * that has to be skipped, and it is the only reason these two shapes exist. The rule they feed is
+ * `matchPreparedLine`, which is the same rule `matchQuoteOnLine` runs.
+ *
+ * @param {string} line - One physical line of the chapter's source text.
+ * @returns {{normalized: string, skeleton: string}}
+ */
+function prepareLineForQuoteSearch(line) {
+  return { normalized: normalizeQuote(line), skeleton: quoteSkeleton(line) };
+}
+
+/**
+ * One quote, prepared once so it can be searched across a whole volume.
+ *
+ * @param {string} quote - The quoted text, or a name to search for.
+ * @returns {{needle: string, skeleton: string, usable: boolean}}
+ */
+function prepareQuoteForSearch(quote) {
+  const needle = normalizeQuote(quote);
+  return { needle, skeleton: quoteSkeleton(quote), usable: needle.length > 0 };
+}
+
+/**
+ * The store's one matching rule, on already-prepared inputs.
+ *
+ * @param {{normalized: string, skeleton: string}} preparedLine - From `prepareLineForQuoteSearch`.
+ * @param {{needle: string, skeleton: string, usable: boolean}} preparedQuote - From `prepareQuoteForSearch`.
+ * @returns {"verbatim"|"skeleton"|null} How it matched, or null when it did not.
+ */
+function matchPreparedLine(preparedLine, preparedQuote) {
+  if (!preparedQuote || !preparedQuote.usable) return null;
+  if (preparedLine.normalized.includes(preparedQuote.needle)) return "verbatim";
+  if (preparedQuote.skeleton.length < GLOSSARY_SKELETON_MIN_CHARS) return null;
+  if (preparedLine.skeleton.includes(preparedQuote.skeleton)) return "skeleton";
+  return null;
+}
+
+/**
  * Whether one quote matches one source line, and BY WHICH RULE.
  *
  * Verbatim first, always: it is the stronger claim and the cheaper test. The skeleton rule
  * only runs on a skeleton long enough to mean something — `GLOSSARY_SKELETON_MIN_CHARS`, the
  * carry-forward gate's guard, carried over deliberately (review 05 §3.1 condition 1).
  *
+ * This is the convenience wrapper over `matchPreparedLine`, and it is the same rule: a search that
+ * used a second copy of this logic could report a line as evidence and presence as absence.
+ *
  * @param {string} line - One physical line of the chapter's source text.
  * @param {string} quote - The quoted evidence.
  * @returns {"verbatim"|"skeleton"|null} How it matched, or null when it did not.
  */
 function matchQuoteOnLine(line, quote) {
-  const needle = normalizeQuote(quote);
-  if (!needle) return null;
-  if (normalizeQuote(line).includes(needle)) return "verbatim";
-  const skeleton = quoteSkeleton(quote);
-  if (skeleton.length < GLOSSARY_SKELETON_MIN_CHARS) return null;
-  if (quoteSkeleton(line).includes(skeleton)) return "skeleton";
-  return null;
+  return matchPreparedLine(prepareLineForQuoteSearch(line), prepareQuoteForSearch(quote));
 }
 
 /**
@@ -321,6 +360,9 @@ function verifyStoredEvidence(facts, resolveVolume) {
 module.exports = {
   normalizeQuote,
   quoteSkeleton,
+  prepareLineForQuoteSearch,
+  prepareQuoteForSearch,
+  matchPreparedLine,
   matchQuoteOnLine,
   evidenceShape,
   locateQuote,

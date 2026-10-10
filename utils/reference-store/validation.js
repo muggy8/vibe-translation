@@ -30,6 +30,7 @@
 const { finding } = require("../postmortem");
 const { envMaxLineLength } = require("../../ai/env");
 const { EXTRACTION_SOURCE_STAGE } = require("./schema");
+const { DOCUMENT_VOICE, documentRebuilt } = require("./document-prose");
 const { normalizeQuote } = require("./evidence");
 require("../../types"); // JSDoc type definitions
 
@@ -218,6 +219,23 @@ function absentCharacters(store, { volume } = {}) {
 }
 
 /**
+ * How this volume's character-voice reference came to exist.
+ *
+ * Returns null when nothing rebuilt it — which is the normal case, and the case the report should not
+ * mention. When it returns something, the reference in this record was adopted from the volume's
+ * extraction output by code, and nobody reviewed it. The finding that says so lives in `integrity.js`,
+ * with the other questions about how a row got into the record; this is the read half, for the report.
+ *
+ * @param {ReferenceStore} store
+ * @param {{volume?: number, document?: string}} [opts]
+ * @returns {{at: string, filed: number, carried: number, refused: number, characters: number}|null}
+ */
+function rebuildProvenance(store, { volume, document = DOCUMENT_VOICE } = {}) {
+  const vol = Number(volume === undefined ? store.volume : volume);
+  return documentRebuilt(store, document, vol);
+}
+
+/**
  * Render the audit report the feedback stage reads.
  *
  * The file keeps the name and the reader it has always had; what changed is that it is written from
@@ -239,6 +257,12 @@ function absentCharacters(store, { volume } = {}) {
  * @param {Array<{term: string, label: string|null}>} [report.unadoptedTerms]
  * @param {{measured: number, present: number, absent: number}|null} [report.presence]
  * @param {Array<{character: string|null, label: string|null, because: string}>} [report.refused]
+ * @param {{at: string, filed: number, carried: number, refused: number, characters: number, candidatesFiled?: number|null, candidatesRefused?: number|null}|null} [report.rebuilt]
+ *   Set when this volume's character-voice reference was rebuilt by code from its extraction output.
+ * @param {{asked: boolean, chapters: number|null, measured: boolean, significanceChapters: number|null, rows: Array<Object>}} [report.coverage]
+ *   The coverage question's whole answer, one row per uncovered character with both signals measured.
+ *   This is what a softened guard has to pay for visibility: every character the audit downgraded is
+ *   named here, with the signal that was missing.
  * @returns {string} Markdown, ending in a newline.
  */
 function renderAuditReport({
@@ -254,6 +278,8 @@ function renderAuditReport({
   unadoptedTerms: unadoptedTermRows = [],
   presence = null,
   refused = [],
+  rebuilt = null,
+  coverage = null,
 }) {
   const out = [
     `# ${title} — deterministic audit (volume ${volume})`,
@@ -262,6 +288,31 @@ function renderAuditReport({
     "produce this report, and every number in it is a query result.",
     "",
   ];
+
+  if (rebuilt) {
+    out.push("## How this reference was written");
+    out.push("");
+    out.push(
+      `**This volume's character-voice reference was rebuilt by code from its own extraction output** ` +
+        `on ${rebuilt.at}: ${rebuilt.filed} claim(s) adopted, ${rebuilt.refused} refused, ` +
+        `${rebuilt.characters} character(s) with at least one claim.`
+    );
+    out.push("");
+    if (Number.isFinite(rebuilt.candidatesFiled)) {
+      out.push(
+        `${rebuilt.candidatesFiled} of those claims are also filed a second time as extraction ` +
+          `candidates${rebuilt.candidatesRefused ? ` (${rebuilt.candidatesRefused} candidate copy could not be filed)` : ""}. ` +
+          "That is the record's second reading of the same book: what the extractor found, kept beside " +
+          "what this reference says, so \"the reference lost something the extraction found\" stays a question " +
+          "the store can answer about a rebuilt volume instead of one it has to take on trust."
+      );
+      out.push("");
+    }
+    out.push("No author agent wrote it and no reader has reviewed it. Every bullet in it cites a line of");
+    out.push("this volume's text, which is more than an unreviewed artifact usually has; what it does not");
+    out.push("have is a reader. An author pass over this file is what turns it into a reviewed reference.");
+    out.push("");
+  }
 
   const order = ["HIGH", "MEDIUM", "LOW"];
   const high = findings.filter((f) => f.severity === "HIGH").length;
@@ -309,6 +360,13 @@ function renderAuditReport({
         : "asked"
     } |`
   );
+  out.push(
+    `| how a coverage gap is judged | ${
+      coverage && coverage.significanceChapters
+        ? `${coverage.significanceChapters}+ chapters of this volume's text, or a claim the extraction filed about them`
+        : "—"
+    } |`
+  );
   out.push("");
 
   if (presence) {
@@ -316,7 +374,8 @@ function renderAuditReport({
     out.push("");
     out.push(
       `Measured from the volume's own chapter files: ${presence.measured} cast entries searched, ` +
-        `${presence.present} found, ${presence.absent} not present.`
+        `${presence.present} found, ${presence.absent} not present` +
+        (presence.matchRows ? ` — ${presence.matchRows} place(s) where a name occurs, recorded one per line with the rule that proved it.` : ".")
     );
     out.push("");
     if (absent.length) {
@@ -326,6 +385,48 @@ function renderAuditReport({
       out.push("name the record does not carry looks exactly like this, so this list is worth reading.");
       out.push("");
       out.push(...listLines(absent, (entry) => `- ${entry.display} (\`${entry.key}\`) — not printed in volume ${volume}'s text; no entry is required for them`));
+      out.push("");
+    }
+  }
+
+  if (coverage && coverage.asked && coverage.rows && coverage.rows.length) {
+    const k = coverage.significanceChapters;
+    const chapters = coverage.chapters === null || coverage.chapters === undefined ? "?" : coverage.chapters;
+    const high = coverage.rows.filter((row) => row.severity === "HIGH");
+    const mentions = coverage.rows.filter((row) => row.severity === "MEDIUM");
+    out.push("## Characters the reference does not cover");
+    out.push("");
+    out.push(
+      `Every one of them, with both signals measured. A gap is a **loss** when the extraction found ` +
+        `voice material for them or their name occurs in ${k} or more of this volume's ${chapters} ` +
+        "chapters; it is a **mention** when neither is true. The line is a constant in " +
+        "`utils/reference-store/integrity.js`, pinned by a test, and it has no environment knob."
+    );
+    out.push("");
+    out.push("| character | in this volume's text | the extraction found | verdict |");
+    out.push("|---|---|---|---|");
+    for (const row of coverage.rows) {
+      const inText = row.measured
+        ? `${row.chapters} of ${chapters} chapters (${row.lines} line(s)${row.rules.length ? `; ${row.rules.join(", ")}` : ""})${chapterList(row.chapterIds)}`
+        : "not measured";
+      const found = row.extractionClaims > 0 ? `${row.extractionClaims} claim(s)` : "nothing";
+      const verdict =
+        row.severity === "HIGH"
+          ? "**HIGH — a real loss**"
+          : `MEDIUM — a mention (${row.why.replace(/^both signals are missing: /, "")})`;
+      out.push(`| ${row.display} (\`${row.key}\`) | ${inText} | ${found} | ${verdict} |`);
+    }
+    out.push("");
+    if (mentions.length) {
+      out.push(
+        `${mentions.length} of these are downgraded to MEDIUM, and each one is named above with the signal ` +
+          "that was missing. That list is the price of softening the guard: a main character the book only " +
+          "names once looks exactly like a throwaway here, and the only defence is that a human can see it."
+      );
+      out.push("");
+    }
+    if (high.length) {
+      out.push(`${high.length} of them is why this volume's record will not be copied forward.`);
       out.push("");
     }
   }
@@ -575,6 +676,25 @@ function clip(body) {
 }
 
 /**
+ * Which chapters a name was found in, spelled out — the part of a coverage verdict a reader can
+ * check by opening the book.
+ *
+ * Bounded, because 俺 is in all ten of volume 01's chapters and a list of every chapter id is not
+ * more useful than the count; the count is what the rule acts on and the ids are what makes it
+ * checkable. Beyond the bound the list says so rather than stopping silently.
+ *
+ * @param {string[]} chapterIds
+ * @returns {string} ` — ch1, ch4, ch6, ch7.1`, or "" when there is nothing to name.
+ */
+function chapterList(chapterIds) {
+  const ids = Array.isArray(chapterIds) ? chapterIds.filter(Boolean) : [];
+  if (ids.length === 0) return "";
+  const shown = ids.slice(0, 6);
+  const rest = ids.length - shown.length;
+  return ` — ${shown.join(", ")}${rest > 0 ? `, +${rest} more` : ""}`;
+}
+
+/**
  * How many named rows one section of the audit report lists before it switches to a count.
  *
  * The report is handed to the acceptance grader and to the feedback stage, so its size is a cost the
@@ -608,6 +728,7 @@ module.exports = {
   unadoptedVoiceClaims,
   unadoptedTerms,
   absentCharacters,
+  rebuildProvenance,
   renderAuditReport,
   buildGradeSample,
   voiceNewestSections,

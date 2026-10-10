@@ -118,11 +118,25 @@ const EXTRACTION_SOURCE_STAGE = "extract";
  */
 const DOCUMENT_SOURCE_STAGE = "import";
 
+/**
+ * The stage a **rebuild** opens its handle with, and the stamp every row it adopts carries.
+ *
+ * `rebuild` is record content, not a candidate: a reference rebuilt from a volume's extraction output
+ * is a published artifact, and it renders and counts as coverage like any other document row. It is a
+ * separate stage rather than a reuse of `import` for one reason — the audit has to be able to tell a
+ * reference an author wrote from one code adopted from the extractor's claims, and `rebuildVoiceFrom
+ * Extraction` is the only code in the repository allowed to stamp it. Adding the value changes no
+ * table, no column and no constraint, so it needs no migration; what it changes is who may write a
+ * row, and that is stated here rather than in a CHECK clause the store's own write scope already
+ * enforces.
+ */
+const REBUILD_SOURCE_STAGE = "rebuild";
+
 /** What a fact can be, and the only four values `status` accepts. */
 const FACT_STATUSES = ["active", "superseded", "disputed", "retracted"];
 
 /** Which stage of the pipeline wrote a fact (doc 03 §4). */
-const SOURCE_STAGES = ["extract", "merge", "repair", "verify", "import"];
+const SOURCE_STAGES = ["extract", "merge", "repair", "verify", "import", "rebuild"];
 
 /** The roles a character can play in a relational fact (doc 03 §2). */
 const FACT_CHARACTER_ROLES = ["subject", "agent", "patient", "witness"];
@@ -130,7 +144,7 @@ const FACT_CHARACTER_ROLES = ["subject", "agent", "patient", "witness"];
 // ─── Version ──────────────────────────────────────────────────────────────────
 
 /** The schema this build of the code writes. */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /**
  * The migrations, oldest first. Version 1 is the whole design as built.
@@ -339,6 +353,38 @@ const MIGRATIONS = [
        )`,
     ],
   },
+  {
+    version: 4,
+    name: "slice 6 recalibration — every place a name occurs, not the first one",
+    // The coverage rule asks "is this character barely in this volume, or are they the book?", and
+    // one row per character cannot answer it: the measurement stopped at the first match, so a
+    // character named once and a character named in every chapter looked identical. `cast_presence`
+    // stays the per-character answer — every existing reader of it keeps working, including the
+    // report's "who is in this volume's text" section — and gains the two counts the rule needs. The
+    // detail goes in its own table: one row per (volume, character, chapter, line, name), each with
+    // the rule that proved it, so the audit can say HOW it knows a character is in the volume instead
+    // of only that they are. Same source files, same matching rule; this migration only stops
+    // throwing the rest of the measurement away.
+    up: [
+      `CREATE TABLE IF NOT EXISTS cast_presence_match (
+         volume  INTEGER NOT NULL,
+         key     TEXT NOT NULL REFERENCES cast(key),
+         chapter TEXT NOT NULL,
+         line    INTEGER NOT NULL,
+         name    TEXT NOT NULL,
+         matched TEXT NOT NULL CHECK (matched IN ('verbatim','skeleton')),
+         PRIMARY KEY (volume, key, chapter, line, name)
+       )`,
+
+      `CREATE INDEX IF NOT EXISTS idx_presence_match_chapters ON cast_presence_match(volume, key, chapter)`,
+
+      // The summary's own answer to "how much do they appear", stored rather than re-derived, so a
+      // reader of `cast_presence` does not have to know the detail table exists to see the difference
+      // between a character in one chapter and a character in ten.
+      `ALTER TABLE cast_presence ADD COLUMN chapters INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE cast_presence ADD COLUMN matches INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
 ];
 
 /**
@@ -363,6 +409,7 @@ const COUNTED_TABLES = [
   "challenges",
   "document_prose",
   "cast_presence",
+  "cast_presence_match",
 ];
 
 // ─── Applying it ──────────────────────────────────────────────────────────────
@@ -457,6 +504,7 @@ module.exports = {
   EVIDENCE_MATCHES,
   EXTRACTION_SOURCE_STAGE,
   DOCUMENT_SOURCE_STAGE,
+  REBUILD_SOURCE_STAGE,
   applySchema,
   readSchemaVersion,
   isInVocabulary,
