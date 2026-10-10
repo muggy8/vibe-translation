@@ -17,7 +17,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { transformUserPrompt, writePromptDump } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, validateRequiredEnv } = require("../configs/shared");
+const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, validateRequiredEnv, STORE_VALIDATORS } = require("../configs/shared");
 const { fileExists, inlineReferenceMessage } = require("../utils/fs");
 const { loadGlossaryDisputes } = require("../utils/disputes");
 const { runVolumeWithModeFallback } = require("../utils/qa-loop");
@@ -36,6 +36,7 @@ const { buildDisputesNote, buildUnusedEntriesNote } = require("./notes");
 const { RESEARCHER_SYSTEM_PROMPT, buildPerTermResearchPrompt, pendingPlaceholder, researchBatch } = require("./research");
 const { buildGlossaryAuthorTurnPrompt, buildGlossaryFeedbackTurnPrompt, buildGlossaryFindingsMergePrompt, buildGlossarySegmentFeedbackPrompt, buildGlossarySegmentValidatorPrompt, buildGlossaryValidatorTurnPrompt } = require("./prompts");
 const { assertGlossaryCarryForward, buildGlossaryIndex, seedGlossaryFromPrevious } = require("./carry-forward");
+const { openGlossaryRecord, fileGlossaryExtraction, mirrorGlossaryArtifact, sealGlossaryRecord } = require("./store");
 const { writeGlossaryCoverageReport } = require("./coverage");
 const { parseTerms, truncateGlossary } = require("./extract");
 const { runChunkedVolumeAgent } = require("./chunked");
@@ -177,6 +178,18 @@ async function processGlossaryVolume({ folderName, index }, run) {
   // A volume is being (re)generated; later volumes depend on it.
   cascade.regeneratedAny = true;
 
+  // Slice 6: open this volume's reference record, carrying the previous volume's published record in
+  // first. The integrity gate inside that copy is the hard stop — a volume whose character-voice
+  // reference lost characters this volume's text contains is not carried forward, with no exception
+  // and no downgrade. Behind GLOSSARY_STORE_VALIDATORS; with the flag off this block does not run.
+  if (STORE_VALIDATORS.glossary) {
+    const previous = ctx.previousFolderName ? volumeByFolder.get(ctx.previousFolderName) : null;
+    const attempt = openGlossaryRecord(ctx, previous ? previous.installmentNumber : null);
+    if (!attempt.ok) throw new Error(`Volume ${values.INSTALLMENT_NUMBER}: ${attempt.error}`);
+    ctx.refStore = attempt.opened.store;
+    ctx.storeCarried = attempt.opened.carried;
+  }
+
   await runVolumeWithModeFallback({
     label: `Volume ${volume.installmentNumber}`,
     ctx,
@@ -198,6 +211,15 @@ async function processGlossaryVolume({ folderName, index }, run) {
     ],
     attemptGlob: /^glossary-.*\.md$/,
   });
+
+  // The glossary stage seals the volume at the end of its own work on it, and the character-voice
+  // stage seals it again at the end of its work (see glossary/store.js's header for why the seal is
+  // per stage and not per volume). Closing here only releases this stage's handle.
+  sealGlossaryRecord(ctx);
+  if (ctx.refStore) {
+    ctx.refStore.close();
+    ctx.refStore = null;
+  }
 }
 
 
@@ -405,6 +427,10 @@ async function runVolumeAgent(ctx) {
   }
 
   const terms = await extractNewTerms(ctx);
+  // Slice 6: the new-terms list is the cheapest data the store needs, because the stage already paid
+  // for it. These are the extractor's claims, not glossary rows — filing them is what makes "the
+  // glossary has no row for a term the extractor found" a query with a number in it.
+  fileGlossaryExtraction(ctx, terms);
   await openAgentTools(ctx);
 
   // Pass 2: research the new terms with parallel agents (one per term, batched).
@@ -425,6 +451,7 @@ async function runVolumeAgent(ctx) {
 
   await generateGlossary(ctx, terms, researchNotesAvailable);
   await assertGlossaryCarryForward(ctx, "the amend pass");
+  await mirrorGlossaryArtifact(ctx);
 
   // QA loop: fresh validator per iteration + fresh author for feedback.
   await runQaLoop(ctx);

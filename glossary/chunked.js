@@ -26,6 +26,7 @@ const {
 } = require("../utils/source");
 
 const { pendingPlaceholder, researchBatch } = require("./research");
+const { fileGlossaryExtraction, mirrorGlossaryArtifact, auditGlossaryArtifact } = require("./store");
 const { maxValidationIterations, researchEnabled } = require("./config");
 const { parseTerms, truncateGlossary } = require("./extract");
 const { buildGlossaryIndex, guardCarryForwardAgainst, seedGlossaryFromPrevious } = require("./carry-forward");
@@ -126,6 +127,10 @@ async function runChunkedVolumeAgent(ctx) {
   }
 
   // QA loop: per-chapter validation partials → findings merge → acceptance.
+  // Slice 6: the extraction claims are filed and the finished glossary is mirrored into the volume's
+  // record first, so the deterministic audit below is looking at the file as it now stands.
+  fileGlossaryExtraction(ctx, allChunkedTerms);
+  await mirrorGlossaryArtifact(ctx);
   await runChunkedQaLoop(ctx);
 }
 
@@ -309,6 +314,16 @@ async function runChunkedQaLoop(ctx) {
     limitReachedLogLine: () =>
       `Volume ${n}: reached the validation iteration limit ` +
       `without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`,
+
+    // Slice 6: with a record open, the per-chapter validator agents AND the findings-merge agent are
+    // replaced by the store's queries over the whole volume.
+    deterministicValidator: ctx.refStore
+      ? async () => {
+          await mirrorGlossaryArtifact(ctx);
+          const audit = await auditGlossaryArtifact(ctx);
+          await fs.writeFile(validationOutputFile, audit.markdown, "utf8");
+        }
+      : undefined,
 
     validate: {
       name: ({ iteration, segment }) => `validator-${n}-${iteration}-${segment.id}`,

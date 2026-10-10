@@ -261,6 +261,50 @@ function resolveRunSettings(manifest) {
   };
 }
 
+/**
+ * Which validator the two stored artifacts run: the whole-document AI validator agent, or the
+ * reference store's deterministic queries plus a graded sample.
+ *
+ * `off` (the default for both) is today's pipeline, byte-for-byte: the validator agent runs, the
+ * acceptance grader is handed the whole artifact, and nothing writes to `series.db`. Turning one on
+ * changes which calls that stage makes and starts writing the volume's record; it changes no prompt
+ * file and no artifact's name, folder or shape.
+ *
+ * **This is not a knob on a guard, and it is not one.** The evidence rule, the ownership rule and
+ * the copy-forward integrity check have no off switch on either side of it (AGENTS.md rule 3). What
+ * it switches is which questions get *asked by a model* and which get answered by a query.
+ *
+ * They are per stage on purpose: the plan's rollback rule is that a stage that has not run a real
+ * volume through the new path keeps the old one.
+ *
+ * @type {{glossary: boolean, voice: boolean}}
+ */
+const STORE_VALIDATORS = Object.freeze({
+  glossary: readBoolEnv("GLOSSARY_STORE_VALIDATORS", false),
+  voice: readBoolEnv("VOICE_STORE_VALIDATORS", false),
+});
+
+/**
+ * Appended to the acceptance user prompt when the grader is shown a sample rather than the whole
+ * artifact (slice 6's graded sample).
+ *
+ * The prompt files stay mode-agnostic (AGENTS.md rule 6), so the fact that what is in the message is
+ * a sample is said here, in code, next to the code that chose it. The rubric, the score contract and
+ * the judging temperature are untouched: a grade that cannot be compared with yesterday's grade is
+ * worse than an expensive one.
+ *
+ * @type {string}
+ */
+const SAMPLED_GRADE_NOTE = `
+
+## What you are being shown
+
+The artifact in this request is a **sample**, selected by code from the volume's reference record, not
+the whole document. Score the sample by the same rubric, and treat the deterministic audit that comes
+with it as measured fact about the parts you are not shown: it was produced by querying every row of
+the volume's record, not by reading a portion of it. A finding in that audit is a defect whether or
+not the section it names appears in the sample.`;
+
 module.exports = {
   seriesArtifactFile,
   AGENT_TOOLS_NOTE,
@@ -270,6 +314,8 @@ module.exports = {
   ON_VOLUME_ERROR,
   ON_MISSING_PREVIOUS,
   ON_QA_LIMIT,
+  STORE_VALIDATORS,
+  SAMPLED_GRADE_NOTE,
   validateRequiredEnv,
   DEFAULT_SOURCE_LANGUAGE,
   DEFAULT_TARGET_LANGUAGE,

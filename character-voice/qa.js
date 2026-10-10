@@ -9,11 +9,12 @@ const fs = require("fs").promises;
 require("../types");
 const harness = require("../harness");
 const { parseAcceptanceReply, validatorMaxStepsFor } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking, acceptanceResponseFormat } = require("../configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking, acceptanceResponseFormat, SAMPLED_GRADE_NOTE } = require("../configs/shared");
 const { assertRealToolCalls } = require("../utils/agents");
 const { runSharedQaLoop, runAuthorStage } = require("../utils/qa-loop");
 
 const { maxValidationIterations } = require("./config");
+const { auditVoiceArtifact, mirrorVoiceArtifact, voiceGradeSample, VOICE_ARTIFACT_NAME } = require("./store");
 const { buildFeedbackTurnPrompt, buildValidatorTurnPrompt } = require("./prompts");
 const { assertVoiceCarryForward } = require("./carry-forward");
 const { voiceAuthorMaxSteps, voiceRecoveryPrompt } = require("./amend");
@@ -40,6 +41,19 @@ async function runQaLoop(ctx) {
     validatorRecoveryLabel: (iteration) => `character-voice-validate-recovery-${values.INSTALLMENT_NUMBER}-${iteration}`,
     validatorRecoveryPrompt: (hasContent) => hasContent ? `You were asked to write "character-voice-validation.md" using writeFile, but you replied in chat. Please rewrite the report using writeFile now with the same content.` : `You produced no output. Please write the validation report to "character-voice-validation.md" using writeFile now.`,
     assertRealToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
+    // Slice 6: with a record open, the validator agent turn is replaced by the store's queries. The
+    // report file keeps its name and its reader; the loop's grade, feedback and stall checks are
+    // untouched, and the loop makes no model call for validation.
+    deterministicValidator: ctx.refStore
+      ? async () => {
+          await mirrorVoiceArtifact(ctx);
+          const audit = await auditVoiceArtifact(ctx);
+          await fs.writeFile(validationOutputFile, audit.markdown, "utf8");
+        }
+      : undefined,
+    validatorLogLine: ctx.refStore
+      ? () => "Auditing the reference against the volume's record (no model call)..."
+      : undefined,
     acceptanceLogLine: () => "Calling the AI for the acceptance check...",
     acceptanceCheck: (iteration) => acceptanceCheck(ctx, iteration),
     // Exceptional-score confirmation re-grades (see utils/qa-loop.js).
@@ -102,7 +116,17 @@ async function runFeedback(ctx) {
  */
 async function acceptanceCheck(ctx, iteration, temperature) {
   const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt, voiceOutputFile, povOutputFile } = ctx;
-  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [{ file: voiceOutputFile, name: "character-voice.md" }, { file: povOutputFile, name: "pov-map.md" }, { file: validationOutputFile, name: "character-voice-validation.md" }, { text: acceptancePrompt }], temperature: temperature ?? judgeTemperature(), ...judgeThinking("ACCEPTANCE"), responseFormat: acceptanceResponseFormat(), label: `character-voice-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
+  // Slice 6: with a record open the grader is shown a sample chosen by code instead of the whole
+  // cumulative reference, and the deterministic audit that replaces the validator agent is already in
+  // the message as the validation file. The rubric, the score contract, the judging temperature and
+  // the response format are the same ones the whole-document grade used.
+  const sample = await voiceGradeSample(ctx);
+  const acceptanceOutput = await harness.runOneShot({ systemPrompt: acceptanceSystemPrompt, messages: [
+    sample !== null ? { text: sample, name: "character-voice.md (sample)" } : { file: voiceOutputFile, name: "character-voice.md" },
+    { file: povOutputFile, name: "pov-map.md" },
+    { file: validationOutputFile, name: "character-voice-validation.md" },
+    { text: sample !== null ? acceptancePrompt + SAMPLED_GRADE_NOTE : acceptancePrompt },
+  ], temperature: temperature ?? judgeTemperature(), ...judgeThinking("ACCEPTANCE"), responseFormat: acceptanceResponseFormat(), label: `character-voice-acceptance-${values.INSTALLMENT_NUMBER}-${iteration}` });
   const reply = parseAcceptanceReply(acceptanceOutput);
   if (reply === null) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: acceptance check: no valid score in response (got: ${JSON.stringify(acceptanceOutput.trim().slice(0, 120))}). Counting this check as a failure.`);

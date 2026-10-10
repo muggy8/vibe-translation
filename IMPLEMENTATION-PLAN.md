@@ -16,19 +16,26 @@ Phase 2 (2.1–2.4), Phase 3 (3.1–3.4), 4.1, 4.2, 4.3, 5.2, 6.1, 6.2, 6.3, 6.4
 `test/test-task-failure.js`, `test/test-translation-loop.js`, `test/test-disputes.js` and
 `test/test-wiki-orchestration.js`; `npm run calibrate` is the live grader measurement.
 
-**Deferred, on purpose — 5.1 (structured artifacts).** It is the largest item in the plan and it
-is a rewrite of the four reference pipelines, not a fix: the agents would stop writing
-`glossary.md` and start writing JSON deltas that code merges and renders. Two things had to
-happen before it was worth doing, and both now have: the correctness gates (publish gate,
-ratchet, repairable QA failures) are in place, and the truncation problem it was meant to solve
-has already been solved a cheaper way — 5.2's relevance-ordered selection plus 4.3's per-chapter
-invalidation removed the "the translator saw volume 1's state" failure without changing the
-artifact format. What is still open is the durability half: an agent re-typing a 1,200-entry
-cumulative glossary under an output cap, with another agent as the only "no regressions" check.
-That is a real risk on a 17-volume series and it is the next thing this plan should take, not
-because the gates are wrong but because the artifact format makes them work harder than they
-should. It also carries the cost the plan already names: every `contextHash` and rolling-state
-file invalidates once.
+**Scheduled — 5.1 (structured artifacts), superseded.** It was deferred on purpose: it is the largest
+item in this plan and it is a rewrite of the reference pipelines, not a fix; agents would stop writing
+`glossary.md` and start writing deltas that code merges and renders. Two things had to happen before
+it was worth doing, and both did: the correctness gates (publish gate, ratchet, repairable QA
+failures) were put in place, and the truncation problem it was meant to solve was already solved a
+cheaper way — 5.2's relevance-ordered selection plus 4.3's per-chapter invalidation removed the "the
+translator saw volume 1's state" failure without changing the artifact format.
+
+What was left open was the durability half, and **it has now failed in practice rather than in
+principle.** The run of 2026-10-09 spent 171,843,556 tokens and 13 hours on one volume's
+character-voice stage, destroyed that artifact by editing it in place, published it at 48/100, and
+never started volumes 02–17. The cause was the production of the cumulative artifact — an agent
+re-typing a growing document under an output cap, with another agent as the only "no regressions"
+check — which is exactly what 5.1 was for.
+
+5.1 is therefore scheduled, and its design is superseded by
+[`character-voice/plan/04-implementation-plan.md`](character-voice/plan/04-implementation-plan.md):
+per-volume SQLite databases copied forward instead of per-volume JSON files, with mandatory verified
+evidence and ownership-scoped writes. The deterministic-merge half of 5.1 is unchanged. See §9 of that
+plan for what changed and why the deferral no longer holds.
 
 **Not done — 6.5 (rebuild the epub).** Deliberately last: the deliverable is loose Markdown, and
 repackaging it is worth scheduling once the text is trustworthy, not before.
@@ -498,7 +505,17 @@ draft untouched.
 
 The largest refactor; do it after the correctness phases so it can be validated against real runs.
 
-### 5.1 Structured artifacts + deterministic merge — **L** (R12) — ⏸ DEFERRED (see the status note)
+### 5.1 Structured artifacts + deterministic merge — **L** (R12) — 🔧 SCHEDULED, superseded by [`character-voice/plan/04-implementation-plan.md`](character-voice/plan/04-implementation-plan.md)
+
+> **Superseded 2026-10-10.** The sketch below is kept because its merge half is still the design.
+> What changed: the store is a **per-volume SQLite database copied forward**, not per-volume JSON
+> files — a JSON file an agent must read in order to change it is the same failure in a smaller hat.
+> Two things were added that this sketch did not have: **mandatory verified evidence** (a fact is
+> refused unless its quote really occurs at the chapter and line it cites) and **ownership-scoped
+> writes** (an agent may update and delete only its own unsealed rows, and may challenge — not edit —
+> another volume's). The run of 2026-10-09 is why it is no longer deferred; §1–3 of that plan are the
+> evidence.
+
 **Files:** `glossary.js`, `character-voice.js`, `style-guide.js`, `utils/handoff.js`, new
 `utils/artifact-store.js`, `utils/translate.js` (parser becomes a loader).
 

@@ -63,6 +63,7 @@ index for working on it.
 | changing how a task runs, the agent loop, the QA loop, the processing-mode decision, the hooks | `docs/architecture.md` |
 | working on the delivery layer (post-mortem, ledger, tickets, resume triage, acceptance test, patches, manager, autopilot, run lock) | `docs/delivery-layer.md` |
 | working on a pre-production pipeline (glossary / wiki / character voice / style guide / audit / handoff) | `docs/pipelines.md` |
+| considering changing the **shape** of a cumulative artifact (one file per character, a claim store, or a database behind the references) | **`character-voice/plan/04-implementation-plan.md` is the plan of record** — why it is being done, what it preserves, the build order and the numbers to beat. It supersedes item 5.1 of `IMPLEMENTATION-PLAN.md`. The supporting analysis is `01-per-character-reference.md` (the failure), `02-compression-scheme.md` (the cost) and `03-database-backed-references.md` (the design); `05-review-slices-2-5.md` is the review of the part that has been built. **Slices 2–6 are implemented** — `utils/reference-store/` is that store, and the glossary and character-voice stages now populate it and answer their whole-document validators' questions with queries, behind `GLOSSARY_STORE_VALIDATORS` / `VOICE_STORE_VALIDATORS`, **both default off** (gotcha 97). Slice 7 — an agent tool over the store — is not built, and slice 6 was not allowed to start it. The per-character file layout docs 01–02 describe is **not** implemented: the store is what got built. The maps above describe what the code does |
 | working on the translation stage (translate / verify / retranslate / polish) | `docs/pipelines.md` §8.5 |
 | adding or renaming a setting | `docs/environment.md` |
 | putting the pipeline on a new machine, or running it in a container | `docs/docker.md` |
@@ -74,7 +75,7 @@ Each map doc ends with a table of the **implementation folders** its module was 
 
 Code comments cite `AGENTS.md gotcha N`. The numbers are unchanged from when the gotchas were
 one file: the list now lives in the five `docs/gotchas-*.md` slices (1–20, 21–45, 46–63,
-64–69, 70–94), and each slice says which part of the list it holds.
+64–69, 70–97), and each slice says which part of the list it holds.
 
 ## 3. The implementation folders
 
@@ -89,9 +90,9 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
 - keep every exported name available from the barrel, including the re-exported helpers;
 - split along the seams the file already documents (its `// ─── Section ───` banners);
 - never move a **guard table** out of its module's protected paths: `utils/tickets/`,
-  `utils/resume/`, `utils/delivery-verify`, `utils/ledger`, `utils/runlock`,
-  `utils/patches/` are banned patch paths for the dev team, exactly like the single files
-  they replaced (`utils/patches/rules.js`) — the ban covers the barrel and the folder alike,
+  `utils/resume/`, `utils/delivery-verify`, `utils/ledger`, `utils/runlock`, `utils/patches/`
+  and `utils/reference-store/` are banned patch paths for the dev team, exactly like the single
+  files they replaced (`utils/patches/rules.js`) — the ban covers the barrel and the folder alike,
   and only `utils/runlock.js` is still a single file today, so splitting one must not change what
   the ban covers;
 - `__dirname` in a subfolder is the subfolder: a root-level task module needs a
@@ -114,7 +115,7 @@ monkey-patch (`harness.runOneShot = …`) keeps working unchanged. When you spli
 | `index.js` | `index/` — and `index.js` is the package's `main`, because the pipeline is what this package *is*. It re-exports the folder and guards its own launch, so importing the package does not start a run. `harness.js` is no longer `main`; its ad-hoc one-shot CLI block is still there, but `npm run smoke` is the way to probe the endpoint |
 | `utils/source/epub.js`, `glossary/carry-forward.js` | `utils/source/epub/`, `glossary/carry-forward/` — a submodule that outgrew itself splits the same way, inside its own folder |
 | `configs/shared.js` | `configs/shared/` (4 files) |
-| `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js`, `utils/qa-loop.js`, `utils/series-run.js`, `utils/fs.js`, `utils/ledger.js`, `utils/postmortem.js`, `utils/tokens.js`, `utils/artifacts.js`, `utils/devteam.js`, `utils/delivery-verify.js` | the matching folder under `utils/` |
+| `utils/translate.js`, `utils/source.js`, `utils/context.js`, `utils/manager.js`, `utils/diagnostics.js`, `utils/patches.js`, `utils/resume.js`, `utils/tickets.js`, `utils/qa-loop.js`, `utils/series-run.js`, `utils/fs.js`, `utils/ledger.js`, `utils/postmortem.js`, `utils/tokens.js`, `utils/artifacts.js`, `utils/devteam.js`, `utils/delivery-verify.js`, `utils/reference-store.js` | the matching folder under `utils/` |
 
 `utils/delivery-audit.js` is deliberately **not** split into a folder and is deliberately a **leaf**:
 nothing under `utils/` requires it. `utils/tickets`, `utils/patches`, `utils/ledger` and `utils/runlock`

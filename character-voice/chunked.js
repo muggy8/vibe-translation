@@ -17,6 +17,7 @@ const { assertVoiceCarryForward, guardVoiceCarryForwardAgainst, seedVoiceReferen
 const { runCompile, runExtract } = require("./stages");
 const { maxValidationIterations } = require("./config");
 const { parseVoiceQuirks, voiceAuthorMaxSteps, voiceRecoveryPrompt } = require("./amend");
+const { fileVoiceExtraction, mirrorVoiceArtifact, auditVoiceArtifact } = require("./store");
 const { buildAuthorSystemPrompt, buildFeedbackTurnPrompt, buildValidatorTurnPrompt, buildVoiceFindingsMergePrompt } = require("./prompts");
 const { acceptanceCheck } = require("./qa");
 
@@ -86,6 +87,10 @@ async function runChunkedVolume(ctx) {
   } catch (err) {
     console.warn(`Volume ${values.INSTALLMENT_NUMBER}: could not persist character-voice-new.json (${err.message}) — continuing.`);
   }
+  // Slice 6, same shape as whole mode: the extraction claims are filed, then the finished reference
+  // is mirrored into the record so the audit below is looking at the file as it now stands.
+  fileVoiceExtraction(ctx, chunkedExtractions);
+  await mirrorVoiceArtifact(ctx);
   await runChunkedQaLoop(ctx);
 }
 
@@ -137,6 +142,17 @@ async function runChunkedQaLoop(ctx) {
     limitReachedLogLine: () =>
       `Volume ${n}: reached the validation iteration limit without a passing grade. ` +
       `The last feedback pass is unvalidated; re-run to validate it.`,
+
+    // Slice 6: with a record open, the per-chapter validator agents AND the findings-merge agent are
+    // replaced by the store's queries over the whole volume — which is what they were being paid to
+    // work out one chapter at a time.
+    deterministicValidator: ctx.refStore
+      ? async () => {
+          await mirrorVoiceArtifact(ctx);
+          const audit = await auditVoiceArtifact(ctx);
+          await fs.writeFile(validationOutputFile, audit.markdown, "utf8");
+        }
+      : undefined,
 
     validate: {
       name: ({ iteration, segment }) => `validator-voice-${n}-${iteration}-${segment.id}`,

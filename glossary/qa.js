@@ -13,11 +13,12 @@ const fs = require("fs").promises;
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { parseAcceptanceReply, validatorMaxStepsFor } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking, acceptanceResponseFormat } = require("../configs/shared");
+const { AGENT_TOOLS_NOTE, ACCEPTANCE_PASSING_SCORE, ON_QA_LIMIT, judgeTemperature, judgeThinking, acceptanceResponseFormat, SAMPLED_GRADE_NOTE } = require("../configs/shared");
 const { assertRealToolCalls } = require("../utils/agents");
 const { runSharedQaLoop, runAuthorStage } = require("../utils/qa-loop");
 
 const { maxValidationIterations } = require("./config");
+const { auditGlossaryArtifact, mirrorGlossaryArtifact, glossaryGradeSample } = require("./store");
 const { buildGlossaryFeedbackTurnPrompt, buildGlossaryValidatorTurnPrompt } = require("./prompts");
 const { assertGlossaryCarryForward, buildGlossaryIndex } = require("./carry-forward");
 const { glossaryAuthorMaxSteps, glossaryRecoveryPrompt } = require("./authoring");
@@ -36,12 +37,17 @@ const { glossaryAuthorMaxSteps, glossaryRecoveryPrompt } = require("./authoring"
  */
 async function acceptanceCheck(ctx, iteration, temperature) {
   const { values, validationOutputFile, acceptancePrompt, acceptanceSystemPrompt, glossaryOutputFile } = ctx;
+  // Slice 6: with a record open the grader is shown a sample chosen by code instead of the whole
+  // cumulative glossary, and the deterministic audit that replaced the validator agent is already in
+  // the message as the validation file. The rubric, the score contract, the judging temperature and
+  // the response format are the ones the whole-document grade used.
+  const sample = await glossaryGradeSample(ctx);
   const acceptanceOutput = await harness.runOneShot({
     systemPrompt: acceptanceSystemPrompt,
     messages: [
-      { file: glossaryOutputFile, name: "glossary.md" },
+      sample !== null ? { text: sample, name: "glossary.md (sample)" } : { file: glossaryOutputFile, name: "glossary.md" },
       { file: validationOutputFile, name: "glossary-validation.md" },
-      { text: acceptancePrompt },
+      { text: sample !== null ? acceptancePrompt + SAMPLED_GRADE_NOTE : acceptancePrompt },
     ],
     // A grader, not a writer: JUDGE_TEMPERATURE (the house writing temperature
     // used to apply here, which made the acceptance score needlessly noisy) and
@@ -112,6 +118,18 @@ async function runQaLoop(ctx) {
       : `You were asked to write the validation report to "glossary-validation.md" using writeFile, but you produced no output.\n\n` +
         `Please read the source materials and write the complete validation report to "glossary-validation.md" using writeFile now.`,
     assertRealToolCalls: (result, who) => assertRealToolCalls(result, who, values.INSTALLMENT_NUMBER),
+    // Slice 6: with a record open, the validator agent turn is replaced by the store's queries. The
+    // report file keeps its name and its reader; the loop makes no model call for validation.
+    deterministicValidator: ctx.refStore
+      ? async () => {
+          await mirrorGlossaryArtifact(ctx);
+          const audit = await auditGlossaryArtifact(ctx);
+          await fs.writeFile(validationOutputFile, audit.markdown, "utf8");
+        }
+      : undefined,
+    validatorLogLine: ctx.refStore
+      ? () => "Auditing the glossary against the volume's record (no model call)..."
+      : undefined,
     acceptanceCheck: (iteration) => acceptanceCheck(ctx, iteration),
     // Exceptional-score confirmation re-grades (see utils/qa-loop.js): the same
     // artifact, graded again — the loop asks for temperature 0 on the first one.

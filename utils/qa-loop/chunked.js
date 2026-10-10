@@ -75,6 +75,10 @@ const { scoreAndConfirm } = require("./acceptance");
  * @property {string} [sourceFingerprint] - Persisted with every iteration (staleness detection).
  * @property {QaStage} [validate] - The per-chapter validator stage.
  * @property {QaStage} [merge] - The findings-merge stage (one agent for the whole volume).
+ * @property {(iteration: number) => Promise<void>} [deterministicValidator] - Slice 6. When given,
+ *   it replaces **both** the per-chapter validator agents and the findings-merge agent: code writes
+ *   the consolidated `validationOutputFile` from the volume's reference store. `validate` and `merge`
+ *   are then not required.
  * @property {QaStage} [feedback] - The per-chapter feedback stage.
  * @property {(ref: QaStageRef) => Promise<void>} [feedbackRun] - Instead of `feedback`: a task whose feedback pass is already a function shared with its whole-installment loop.
  * @property {(iteration: number|string) => Promise<number|null>} acceptanceCheck - The task's grader (null = unparseable = failed check).
@@ -127,16 +131,23 @@ async function runPerChapterQaLoop(cfg) {
       `${cfg.volumeLabel}: validation iteration ${iteration}/${cfg.maxIterations} (chapter by chapter)...`
     );
 
-    // 1. Per-chapter validation partials (fresh agent per chapter).
-    for (let si = 0; si < cfg.chapters.length; si++) {
-      const ref = { iteration, segment: cfg.chapters[si], si };
-      if (cfg.validate.beforeChapter) await cfg.validate.beforeChapter(ref);
-      await runQaAgentStage(cfg.validate, ref, loop);
-      if (cfg.validate.afterChapter) await cfg.validate.afterChapter(ref);
-    }
+    // 1 + 2. The validator half: per-chapter validator agents and a findings-merge agent, or
+    // (slice 6) code that queries the volume's reference store and writes the consolidated report
+    // itself. The grade, the feedback round and the stalled-round check are identical either way.
+    if (cfg.deterministicValidator) {
+      await cfg.deterministicValidator(iteration);
+    } else {
+      // 1. Per-chapter validation partials (fresh agent per chapter).
+      for (let si = 0; si < cfg.chapters.length; si++) {
+        const ref = { iteration, segment: cfg.chapters[si], si };
+        if (cfg.validate.beforeChapter) await cfg.validate.beforeChapter(ref);
+        await runQaAgentStage(cfg.validate, ref, loop);
+        if (cfg.validate.afterChapter) await cfg.validate.afterChapter(ref);
+      }
 
-    // 2. Findings merge: consolidate the partials into the standard report.
-    await runQaAgentStage(cfg.merge, { iteration, segment: null, si: 0 }, loop);
+      // 2. Findings merge: consolidate the partials into the standard report.
+      await runQaAgentStage(cfg.merge, { iteration, segment: null, si: 0 }, loop);
+    }
 
     // 3. Grade the report, and try the cheap acceptances before paying for a rewrite.
     const graded = await scoreAndConfirm({

@@ -428,6 +428,124 @@
  * @property {boolean} found
  */
 
+// ─── Reference store (utils/reference-store.js) ───────────────────────────────
+
+/**
+ * @typedef {Object} ReferenceStoreScope
+ * The write scope a reference store was opened with. Stamped by the harness at open time
+ * and frozen: it is the only thing the ownership guard reads, so a label a caller writes
+ * into a row cannot claim someone else's row.
+ * @property {number} volume — The installment this store is writing FOR.
+ * @property {string} stage  — Which stage of that volume's work is writing (extract|merge|repair|verify|import).
+ */
+
+/**
+ * @typedef {Object} ReferenceStore
+ * One volume's open reference database, with its guards bound to it.
+ * @property {string} file          — Absolute path to the .db file.
+ * @property {string} seriesDir     — The SERIES_LOCATION it was resolved from, at call time.
+ * @property {string} volumeDir     — The volume folder the file sits in.
+ * @property {string} folder        — That volume folder's name.
+ * @property {number} volume        — The installment number.
+ * @property {ReferenceStoreScope} scope — The frozen write scope.
+ * @property {number} schemaVersion — The schema this file is on.
+ * @property {boolean} created      — True when this call created the file.
+ * @property {Object} db            — The open engine handle. Internal to the layer: nothing outside utils/reference-store/ writes SQL.
+ * @property {(citedVolume: number) => {volumeDir: string|null, chapters: Array<{id: string, file: string}>, error: string|null}} resolveVolume
+ * @property {(proposal: Object) => {ok: boolean, fact: Object|null, refusal: ReferenceRefusal|null}} insertFact
+ * @property {(id: string, patch: Object) => {ok: boolean, changed: number, fact: Object|null, refusal: ReferenceRefusal|null}} updateOwnFact
+ * @property {(id: string, reason: string) => {ok: boolean, changed: number, refusal: ReferenceRefusal|null}} deleteOwnFact
+ * @property {(id: string, proposal: Object) => {ok: boolean, fact: Object|null, target: Object|null, challengeId: number|null, supersede: boolean, refusal: ReferenceRefusal|null}} challengeFact — `proposal.supersede` defaults to false: the challenger contests the claim rather than replacing it.
+ * @property {(opts?: {openOnly?: boolean}) => Array<ReferenceChallenge>} listChallenges
+ * @property {(id: number|string, outcome: "uphold"|"accept") => {ok: boolean, challenge: Object|null, outcome: string|null, refusal: ReferenceRefusal|null}} resolveChallenge
+ * @property {(volume: number, opts?: Object) => {ok: boolean, volume: number, sealedRows: number, snapshot: number, alreadySealed: boolean}} sealVolume
+ * @property {(volume: number) => boolean} isVolumeSealed
+ * @property {(volume: number) => Array<string>} factsAtVolume — The frozen snapshot: fact ids that were showable when that volume was sealed.
+ * @property {(key: string, alias: string, reason?: string) => {ok: boolean, cast: Object|null, merged: string|null, movedFacts: number, refusal: ReferenceRefusal|null}} castAlias — A merge is supersession: the merged row stays with `merged_into` set. Refused when the merged row carries sealed facts.
+ * @property {() => Array<Object>} castMerges — The merges this store has made, with the reason each one recorded.
+ * @property {(document: string) => Array<{document: string, ord: number, kind: "title"|"preamble", text: string}>} documentProse — The document's own opening, in the order it was written.
+ * @property {(opts?: {volume?: number}) => {chapters: Array<{id: string, file: string}>, error: string|null}} listChapters — This volume's own extracted chapters, preferring the ones already registered over re-reading the folder.
+ * @property {(segments: Array<{id: string, file?: string, title?: string|null}>|null) => {ok: boolean, registered: number, error: string|null}} registerChaptersFromSource — Register this volume's chapters from the bundle segments the calling stage already has. A plain-text volume produces no bundle manifest, so a store left to find its own chapters finds none and refuses every citation.
+ * @property {(entry: {key: string, display?: string, aliases?: string[], persona?: string[], firstSeenVolume?: number}) => {ok: boolean, cast: Object|null, created: boolean, refusal: ReferenceRefusal|null}} upsertCast — Aliases union, `first_seen_volume` only ever moves earlier, and a display the entry does not supply does not erase the one on the row.
+ * @property {(factId: string) => Array<{key: string, role: string}>} factCharacters — Who a fact is about, in the roles `fact_characters` exists for: a naive per-character split loses who said it to whom.
+ * @property {(opts?: {volume?: number}) => {ok: boolean, volume: number, measured: number, present: number, absent: number, chapters: number, refusal: ReferenceRefusal|null}} recordCastPresence — Measure which cast entries this volume's own text contains. A measurement, not a claim: it lives in `cast_presence`, and a volume with no extracted source is a refusal rather than a volume where nobody appears.
+ * @property {(volume?: number) => Array<{volume: number, key: string, present: number, matched: string|null, chapter: string|null, line: number|null}>} castPresence — The measurement, including WHICH rule proved it (`verbatim` / `skeleton`).
+ * @property {(volume?: number) => boolean} presenceMeasured — False means nobody has measured this volume, which is a different answer from nobody is in it.
+ * @property {(opts?: {volume?: string, step?: string, publishedVolume?: number}) => {ok: boolean, findings: PostMortemFinding[], counts: Object<string, number>, checked: number, coverageAsked: boolean}} integrityFindings — The seven questions a store is asked before it is trusted or copied. `publishedVolume` limits the sealing question to volumes the caller calls finished; `coverageAsked` says whether the roster-coverage question was asked at all.
+ * @property {() => Object<string, number>} tableCounts — Row counts over `COUNTED_TABLES`, the ones copy-forward compares.
+ * @property {() => void} close
+ */
+
+/**
+ * @typedef {Object} ReferenceRefusal
+ * A write this layer refused, in the shape a caller can act on: the rule that fired, the
+ * state as the store sees it, and the verb that IS available (doc 03 §3.2 — a refusal that
+ * only says "not allowed" cannot be acted on).
+ * @property {true}    refused
+ * @property {string}  verb       — The operation that was refused.
+ * @property {string}  rule       — The stable rule name.
+ * @property {string}  because    — The state that caused it, with the values that decided it.
+ * @property {string[]} useInstead — The verb(s) that would work.
+ * @property {string}  fix        — The concrete edit that makes the call legal.
+ * @property {Object}  detail     — Machine-readable context (ids, owners, counts).
+ */
+
+/**
+ * @typedef {Object} ReferenceEvidence
+ * One citation: this quote, at this line of this chapter of this volume. Required — a fact
+ * with no evidence is refused at insert.
+ * @property {number} volume
+ * @property {string} chapter
+ * @property {number} line
+ * @property {string} quote
+ * @property {"quote"|"governs"} [kind] — What the citation claims. `quote`: the book prints this
+ *   string. `governs`: this row is the decision made about this passage, which is in the book.
+ *   Stamped by verification, so a caller may suggest it but cannot assert it.
+ * @property {"verbatim"|"skeleton"} [matched] — Which rule proved it: the line contains the
+ *   quote, or the line contains the same Han characters in the same order with reading aids
+ *   written between them. Recorded so an auditor can tell the two claims apart.
+ */
+
+/**
+ * @typedef {Object} ReferenceChallenge
+ * One recorded disagreement with a fact, and what was decided about it.
+ * @property {number} id
+ * @property {string} fact_id       — The fact being challenged.
+ * @property {string} challenger_id — The row the challenger wrote, owned by the challenging scope.
+ * @property {string} reason
+ * @property {string} evidence      — JSON array of ReferenceEvidence.
+ * @property {string|null} outcome  — null while open; "uphold" or "accept" once closed.
+ * @property {string|null} resolved_at
+ * @property {number|null} resolved_by_volume
+ * @property {string|null} resolved_by_stage
+ */
+
+/**
+ * @typedef {Object} CopyForwardResult
+ * The outcome of copying volume N−1's record into volume N.
+ * @property {boolean} ok
+ * @property {ReferenceRefusal|null} refusal
+ * @property {Array<Object>} findings — PostMortemFinding objects; a failed copy is HIGH, not a warning.
+ * @property {Object|null} provenance — The source hash and row counts recorded INSIDE the copy.
+ * @property {Object|null} source
+ * @property {Object|null} dest
+ */
+
+/**
+ * @typedef {Object} ReferenceImportReport
+ * What importing one artifact into the store did. A row that could not be checked is
+ * reported, never dropped. Both adapters return the same shape: `imported` is the rows that
+ * went in (an imported row is owned by the import, so the volume can still correct it —
+ * slice 5), and `importedCount` states the number instead of leaving it to be inferred.
+ * @property {boolean} ok
+ * @property {Array<Object>} imported
+ * @property {number} importedCount
+ * @property {Array<{row?: Object, character?: string, label?: string|null, because: string}>} refused
+ * @property {Array<Object>} facts — the same rows as `imported`, named the way the store names them
+ * @property {number} proseStored — Rows written to `document_prose`: the file's title line and preamble, kept so the renderer can put them back
+ */
+
+
 // ─── Exports (for IDE reference resolution) ─────────────────────────────────
 
 module.exports = {
@@ -456,5 +574,12 @@ module.exports = {
   VerificationEntry: true,
   VolumeReferences: true,
   HookContext: true,
+  ReferenceStore: true,
+  ReferenceStoreScope: true,
+  ReferenceRefusal: true,
+  ReferenceEvidence: true,
+  ReferenceChallenge: true,
+  CopyForwardResult: true,
+  ReferenceImportReport: true,
 };
 

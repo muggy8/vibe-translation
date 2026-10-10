@@ -16,7 +16,7 @@ const path = require("path");
 require("../types");
 const harness = require("../harness");
 const { transformUserPrompt, writePromptDump } = require("../utils/prompt");
-const { validateRequiredEnv } = require("../configs/shared");
+const { validateRequiredEnv, STORE_VALIDATORS } = require("../configs/shared");
 const { fileExists } = require("../utils/fs");
 const { runVolumeWithModeFallback } = require("../utils/qa-loop");
 const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifacts, volumeAlreadyAccepted, publishLatestToSeriesRoot, runVolumeSeries } = require("../utils/series-run");
@@ -33,6 +33,7 @@ const { buildVoiceIndex } = require("./reference-index");
 const { buildAuthorSystemPrompt, buildAuthorTurnPrompt, buildFeedbackTurnPrompt, buildValidatorSystemPrompt, buildValidatorTurnPrompt, buildVoiceFindingsMergePrompt } = require("./prompts");
 const { parseVoiceQuirks } = require("./amend");
 const { assertVoiceCarryForward, seedVoiceReferenceFromPrevious } = require("./carry-forward");
+const { openVoiceRecord, fileVoiceExtraction, mirrorVoiceArtifact, sealVoiceRecord } = require("./store");
 const { runCompile, runExtract } = require("./stages");
 const { runQaLoop } = require("./qa");
 const { runChunkedVolume } = require("./chunked");
@@ -157,6 +158,26 @@ async function processVoiceVolume({ folderName, index }, run) {
 
   cascade.regeneratedAny = true;
 
+  // Slice 6: the volume's reference record. Opened before anything is written, because the previous
+  // volume's published record has to be carried in first — and carrying it in is where the hard stop
+  // lives: a volume whose character-voice reference lost characters that this volume's text contains
+  // may not be copied forward, with no exception and no downgrade. Behind VOICE_STORE_VALIDATORS;
+  // with the flag off this block does not run and the volume is built exactly as it always was.
+  const previous = ctx.previousFolderName ? volumeByFolder.get(ctx.previousFolderName) : null;
+  if (STORE_VALIDATORS.voice) {
+    const attempt = openVoiceRecord(ctx, previous ? previous.installmentNumber : null);
+    if (!attempt.ok) throw new Error(`Volume ${values.INSTALLMENT_NUMBER}: ${attempt.error}`);
+    ctx.refStore = attempt.opened.store;
+    ctx.storeCarried = attempt.opened.carried;
+    if (attempt.opened.carried) {
+      const counts = attempt.opened.carried.provenance.copiedRows;
+      console.log(
+        `Volume ${values.INSTALLMENT_NUMBER}: reference record carried forward from volume ` +
+          `${previous.installmentNumber} (${counts.facts} facts, ${counts.cast} characters).`
+      );
+    }
+  }
+
   await runVolumeWithModeFallback({
     label: `Volume ${volume.installmentNumber}`,
     ctx,
@@ -173,6 +194,12 @@ async function processVoiceVolume({ folderName, index }, run) {
     ],
     attemptGlob: /^character-voice-.*\.md$/,
   });
+
+  // Sealing is the last act of a volume whose pre-production finished (review 05 §3.2: code seals,
+  // at the end of that volume's own pre-production). A volume that threw on the way here is left
+  // unsealed on purpose — an unsealed volume is what copy-forward refuses, which is the shape the
+  // "a damaged reference may not be carried forward" rule takes.
+  sealVoiceRecord(ctx);
 }
 
 
@@ -203,6 +230,7 @@ async function buildVolumeContext({ folderName, index, folders, volumeByFolder, 
     values,
     folderName,
     volumeDir,
+    seriesDir,
     sourceFile: bundle.wholePath,
     bundle,
     isFirst,
@@ -301,13 +329,19 @@ async function runVolume(ctx) {
   }
   let extractionOutput = "";
   try { extractionOutput = await runExtract(ctx); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: extraction failed: ${err.message}. Check .logs/ for details.`); throw err; }
+  let extractedEntries = [];
+  try { extractedEntries = parseVoiceQuirks(extractionOutput); } catch { extractedEntries = []; }
   // Persist the volume's extraction results (the new quirks/POV entries) so the translation handoff
   // (utils/handoff.js) can render a "what's new in this volume" section without re-calling the AI.
   try {
-    await fs.writeFile(path.join(ctx.volumeDir, NEW_ENTRIES_FILE), JSON.stringify(parseVoiceQuirks(extractionOutput), null, 2) + "\n", "utf8");
+    await fs.writeFile(path.join(ctx.volumeDir, NEW_ENTRIES_FILE), JSON.stringify(extractedEntries, null, 2) + "\n", "utf8");
   } catch (err) {
     console.warn(`Volume ${values.INSTALLMENT_NUMBER}: could not persist ${NEW_ENTRIES_FILE} (${err.message}) — continuing.`);
   }
+  // Slice 6: file the extraction results in the volume's record. This is the data the integrity
+  // queries need, and it already existed — 223 structured claims for volume 01, paid for by the
+  // extraction pass, and until now read by nothing but the handoff summary.
+  fileVoiceExtraction(ctx, extractedEntries);
   // Create fsGate BEFORE runCompile so the author agent has file tools. createGatedFsTools is async —
   // it must be awaited, otherwise fsGate is a Promise and ctx.fsGate.tools/approve are undefined, so
   // the agents are created with no tools at all (observed live: the model then emitted tool-call
@@ -319,6 +353,7 @@ async function runVolume(ctx) {
   await seedVoiceReferenceFromPrevious(ctx);
   try { await runCompile(ctx, extractionOutput); } catch (err) { console.error(`Volume ${values.INSTALLMENT_NUMBER}: compilation failed: ${err.message}. Check .logs/ for details.`); throw err; }
   await assertVoiceCarryForward(ctx, "the compile pass");
+  await mirrorVoiceArtifact(ctx);
   await runQaLoop(ctx);
 }
 

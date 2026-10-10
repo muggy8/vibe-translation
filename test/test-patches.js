@@ -282,8 +282,14 @@ async function scenarioBannedPathsNameTheirRule() {
     ["utils/patches/rules.js", "constraint-tables"],
     ["utils/tickets/banned-options.js", "constraint-tables"],
     ["utils/resume/menu.js", "constraint-tables"],
+    // The reference store's guards are the same shape of guard: the rule that decides whether a
+    // claim is allowed into the glossary lives in this layer.
+    ["utils/reference-store/evidence.js", "constraint-tables"],
+    ["utils/reference-store/facts.js", "constraint-tables"],
     ["test/test-tickets.js", "constraint-tests"],
     ["test/test-patches.js", "constraint-tests"],
+    ["test/test-reference-store-ownership.js", "constraint-tests"],
+    ["test/fixture-reference-store.js", "constraint-tests"],
     ["hooks/pre-glossary.sh", "edit-hooks"],
     ["hooks/README.md", "edit-hooks"],
     [".env", "edit-env"],

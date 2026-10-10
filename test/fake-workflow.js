@@ -359,20 +359,23 @@ function characterVoiceMarkdown(volume) {
     "",
     `現行：${volume.installment}巻まで`,
     "",
-    "## 主人公（語り手）",
+    // `### ` is the heading the character-voice reference actually uses (volume 01's real file, and
+    // the shape `character-voice/carry-forward.js` counts sections by). Written as `## ` it was
+    // invisible to that guard, so the fixture never exercised the one gate that catches a reference
+    // which lost a character.
+    "### 主人公（語り手）",
     "",
-    "- **話し癖:** 事実を短い平叙文で並べ、感情を後から一文だけ添える。",
-    "- **一人称:** 私。自由間接話法が混ざる。",
+    "- **Pronouns**: 私。自由間接話法が混ざる。「私はその輪郭を数えるのが好きだった。」",
+    "- **Sentence endings**: 事実を短い平叙文で並べ、感情を後から一文だけ添える。「霧の日は、廊下の窓が内側から曇る。」",
     "",
-    "## 灯里",
+    "### 灯里",
     "",
-    "- **話し癖:** 依頼形を避ける。命令ではなく確認の言い方。",
-    "- **例:** 「もう一度確認したい」",
+    "- **Pronouns**: 依頼形を避ける。命令ではなく確認の言い方。「その日は灯里だった。」",
+    "- **Catchphrases**: 「もう一度確認したい」",
     "",
-    "## 悠真",
+    "### 悠真",
     "",
-    "- **話し癖:** 用語を定義してから話す。比喩を嫌う。",
-    "- **例:** 「技術は反復で、魔法は依頼だ」",
+    "- **Vocabulary register**: 用語を定義してから話す。比喩を嫌う。「技術は反復で、魔法は依頼だ」",
     "",
   ].join("\n");
 }
@@ -774,7 +777,7 @@ function answer(req, ctx) {
             {
               type: "voice",
               character: "灯里",
-              quirkType: "phrasing",
+              quirkType: "pronoun",
               description: "Avoids the request form; speaks as a confirmation rather than an order.",
               examples: ["もう一度確認したい"],
               formalityLevel: "neutral",
@@ -783,7 +786,7 @@ function answer(req, ctx) {
             {
               type: "voice",
               character: "悠真",
-              quirkType: "phrasing",
+              quirkType: "vocabulary",
               description: "Defines a term before using it; rejects metaphor.",
               examples: ["技術は反復で、魔法は依頼だ"],
               formalityLevel: "formal",

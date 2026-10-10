@@ -30,6 +30,11 @@ const { scoreAndConfirm } = require("./acceptance");
  * @property {(iteration: number) => string} [iterationLogLine] - Defaults to
  *   "<volumeLabel>: validation iteration <i>/<max>...".
  * @property {() => string} [validatorLogLine] - Optional line before the validator turn.
+ * @property {(iteration: number) => Promise<void>} [deterministicValidator] - Slice 6. When given,
+ *   it **replaces** the validator agent turn: code writes `cfg.validationOutputFile` from the
+ *   volume's reference store and the loop makes no model call for validation. The grade, the feedback
+ *   pass and the stall check are unchanged. Give it together with `validatorLogLine` so the log says
+ *   what ran.
  * @property {() => string} [acceptanceLogLine] - Optional line before the acceptance check.
  * @property {(iteration: number) => import("../../types").AgentHandle} createValidatorAgent -
  *   Fresh validator agent per iteration (the task keeps its own agent naming,
@@ -90,7 +95,12 @@ async function runSharedQaLoop(cfg) {
     );
     if (cfg.validatorLogLine) console.log(cfg.validatorLogLine());
 
-    await runValidatorTurn(cfg, iteration);
+    // The validator half: either a fresh agent that reads the whole artifact and writes a report,
+    // or (slice 6) code that queries the volume's reference store and writes the same file. The
+    // loop's shape — grade, feedback, stall check — is identical either way, which is the point of
+    // putting the switch here rather than in a second loop.
+    if (cfg.deterministicValidator) await cfg.deterministicValidator(iteration);
+    else await runValidatorTurn(cfg, iteration);
 
     if (cfg.acceptanceLogLine) console.log(cfg.acceptanceLogLine());
     const graded = await scoreAndConfirm({
