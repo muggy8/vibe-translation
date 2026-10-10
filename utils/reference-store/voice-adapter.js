@@ -253,10 +253,15 @@ function findBulletEvidence(volumeDir, chapters, volume, body, key) {
 /**
  * Import a character-voice reference into a volume's store.
  *
+ * Each `### ` heading is asked of `name-resolution.js` — the same question the extraction door asks — so
+ * the two doors cannot give two answers to the same name. A heading whose primary name is a roster entry
+ * that has since been merged lands on the entry that survived the merge, and the move is reported in
+ * `rekeyed` rather than happening quietly.
+ *
  * @param {ReferenceStore} store
  * @param {string} markdown - The reference file's content.
  * @param {{volume?: number}} [opts]
- * @returns {{ok: boolean, characters: number, imported: Array<Object>, importedCount: number, refused: Array<{character: string, label: string, because: string}>}}
+ * @returns {{ok: boolean, characters: number, imported: Array<Object>, importedCount: number, carried: Array<{character: string, label: string}>, refused: Array<{character: string, label: string, because: string}>, rekeyed: Array<{heading: string, key: string, how: string}>, facts: Array<Object>, proseStored: Object}}
  */
 function importVoice(store, markdown, { volume } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -278,11 +283,30 @@ function importVoice(store, markdown, { volume } = {}) {
   const imported = [];
   const refused = [];
   const carried = [];
+  /** @type {Array<{heading: string, key: string, how: string}>} Sections whose heading resolved onto a different roster entry than its own primary name. */
+  const rekeyed = [];
 
   for (const character of parsed.characters) {
+    // The heading is a name, and this store has one module that answers "which roster entry is this
+    // name?" — the same one the extraction door uses. Without it the two doors give two different
+    // answers to the same heading, and that is how a folded character splits in two again: volume 01's
+    // published reference has a section headed `俺（如月雨露・第二章終盤）`, and volume 02's record has
+    // that entry marked as merged into 如月雨露. Filing the section's bullets under 俺 would put them on
+    // a roster entry the record has already said is the same person as another one — and `renderVoice`
+    // does not render merged entries, so those bullets would vanish from the next volume's file.
+    // Required here rather than at the top of the file: `name-resolution.js` requires this module for the
+    // primary-name rule, so a top-level require the other way round would close a cycle and hand one of
+    // the two a half-built module (gotcha 85). By the time an import runs, both are complete.
+    const { resolveExtractionName } = require("./name-resolution");
+    const resolved = resolveExtractionName(store, character.display);
+    const key = resolved.key;
+    // A heading that resolves onto an existing entry does not get to rename it.
+    const display = key === character.key ? character.display : resolved.display || character.display;
+    if (key !== character.key) rekeyed.push({ heading: character.display, key, how: resolved.how });
+
     const castResult = store.upsertCast({
-      key: character.key,
-      display: character.display,
+      key,
+      display,
       persona: character.persona,
       aliases: [],
       firstSeenVolume: vol,
@@ -300,11 +324,11 @@ function importVoice(store, markdown, { volume } = {}) {
       // The reference is cumulative and this store already carries the earlier volumes' rows from
       // copy-forward, so a bullet the record already has is counted as carried rather than
       // re-stamped as this volume's claim.
-      if (documentBulletAlreadyStored(store, character.key, body)) {
+      if (documentBulletAlreadyStored(store, key, body)) {
         carried.push({ character: character.display, label: entry.label });
         continue;
       }
-      const { evidence, tried } = findBulletEvidence(store.volumeDir, chapters, vol, body, character.key);
+      const { evidence, tried } = findBulletEvidence(store.volumeDir, chapters, vol, body, key);
       if (!evidence) {
         refused.push({
           character: character.display,
@@ -316,7 +340,7 @@ function importVoice(store, markdown, { volume } = {}) {
         continue;
       }
       const result = store.insertFact({
-        key: character.key,
+        key,
         aspect: VOICE_LABEL_TO_ASPECT[entry.label.trim().toLowerCase()] || UNKNOWN_VOICE_LABEL_ASPECT,
         label: entry.label,
         section: VOICE_SECTION,
@@ -349,6 +373,7 @@ function importVoice(store, markdown, { volume } = {}) {
     importedCount: imported.length,
     carried,
     refused,
+    rekeyed,
     facts: imported,
     proseStored,
   };
@@ -389,7 +414,8 @@ function documentBulletAlreadyStored(store, key, body) {
 function renderVoice(store, { title = VOICE_TITLE } = {}) {
   const castRows = store.db
     .prepare(
-      "SELECT c.key, c.display, MIN(f.ord) AS first_ord FROM cast c JOIN facts f ON f.key = c.key " +
+      "SELECT c.key, c.display, MIN(f.ord) AS first_ord FROM cast c JOIN facts f ON " +
+        "(f.key = c.key OR f.key IN (SELECT m.key FROM cast m WHERE m.merged_into = c.key)) " +
         "WHERE c.merged_into IS NULL AND f.source_stage != ? GROUP BY c.key ORDER BY first_ord, c.key"
     )
     .all(EXTRACTION_SOURCE_STAGE);
@@ -408,12 +434,17 @@ function renderVoice(store, { title = VOICE_TITLE } = {}) {
   // for. `merged_into` entries are not rendered: their facts were re-pointed to the entry they
   // joined, so the character appears once (review 05 §3.3).
   const out = opening.length ? [...opening] : [title, "", `## ${VOICE_SECTION}`, ""];
+  // A character is rendered with every claim filed under any name that person is filed under. The fold
+  // re-points the rows it moves, so this is a safety net rather than the normal path — but the alternative
+  // is a bullet that stops rendering because somebody filed it under a name the roster has already
+  // retired, and "published facts quietly disappear" is the failure this layer is built to prevent.
   const bulletStmt = store.db.prepare(
-    "SELECT key, label, body FROM facts WHERE key IS NOT NULL AND key = ? AND source_stage != ? ORDER BY ord, id"
+    "SELECT key, label, body FROM facts WHERE key IS NOT NULL AND " +
+      "(key = ? OR key IN (SELECT m.key FROM cast m WHERE m.merged_into = ?)) AND source_stage != ? ORDER BY ord, id"
   );
 
   for (const character of castRows) {
-    const rows = bulletStmt.all(character.key, EXTRACTION_SOURCE_STAGE);
+    const rows = bulletStmt.all(character.key, character.key, EXTRACTION_SOURCE_STAGE);
     if (rows.length === 0) continue;
     out.push(`### ${character.display}`);
     const lead = sectionProse.get(character.display);

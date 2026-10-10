@@ -18,6 +18,16 @@
  * from the volume's own text must not fire, and must not touch a claim; an extraction claim must not
  * count as coverage; and with the flag off, nothing in this layer writes anything at all.
  *
+ * The roster scenarios are the same shape applied to the roster itself. Volume 01's record carries an
+ * entry keyed `俺` with 14 of the protagonist's claims under it, and that record is sealed. So the suite
+ * plants the same split in a fixture and asks where the fold is allowed (the next volume's copy, never
+ * the published record), what it does to the presence measurement (the pronoun's occurrences stay under
+ * the pronoun; the coverage count is the union, which makes the guard stronger rather than weaker), and
+ * what it must not do (fold a character into their own nickname, or choose between two candidates).
+ *
+ * The planted damage case — a character named in three of three chapters whom the reference never
+ * mentions — is re-run here after those changes and is still HIGH, and still stops the copy-forward.
+ *
  * Every scenario runs inside `test/fixture-reference-store.js`'s throwaway series. Nothing here can
  * reach the real corpus (AGENTS.md rule 8, gotcha 69). No model, no network.
  *
@@ -65,6 +75,12 @@ const {
   COVERAGE_SIGNIFICANCE_CHAPTERS,
   EXTRACTION_SOURCE_STAGE,
   DOCUMENT_SOURCE_STAGE,
+  reconcileInheritedRoster,
+  rosterIdentityConflicts,
+  resolveExtractionName,
+  displayAliasSpans,
+  uncoveredCharacters,
+  BARE_FIRST_PERSON_PRONOUNS,
 } = require("../utils/reference-store");
 const { documentMirrored, documentRebuilt, glossaryBackfilled, DOCUMENT_VOICE } = require("../utils/reference-store/document-prose");
 const { STORE_VALIDATORS } = require("../configs/shared");
@@ -1217,6 +1233,361 @@ function scenarioExtractionRowsNeverRenderIntoADocument() {
   console.log("reference-store pipeline: extraction rows are filed but never rendered, so a published file keeps only what an agent put in it");
 }
 
+/**
+ * Append lines to a fixture volume's chapter files, before its chapters are registered.
+ *
+ * Presence is measured from the files on disk, so this is how a scenario puts a name into enough
+ * chapters to reach the significance line. It stays inside the fixture (AGENTS.md rule 8).
+ *
+ * @param {{dir: string, volumes: Array<{folder: string, base: string}>}} fx
+ * @param {number} volumeIndex
+ * @param {Object<string, string[]>} linesByChapter - `{ch1: ["…"], ch2: ["…"]}`
+ * @returns {void}
+ */
+function appendToFixtureChapters(fx, volumeIndex, linesByChapter) {
+  const volume = fx.volumes[volumeIndex];
+  for (const [id, lines] of Object.entries(linesByChapter)) {
+    const file = path.join(volume.dir, `${volume.base}-${id}.md`);
+    fs.appendFileSync(file, lines.join("\n") + "\n", "utf8");
+  }
+}
+
+/**
+ * Volume 01's actual defect, planted in a fixture: a roster entry keyed by the word for "I".
+ *
+ * The extraction named a character `俺（如月雨露・第二章終盤）`, none of the name rules could read it,
+ * and it became its own entry with the protagonist's claims under it. The claim is filed through the
+ * extraction handle, because that is where it came from — a claim filed under the document stage would
+ * count as coverage and hide the very thing this scenario is about.
+ *
+ * @param {Object} fx
+ * @param {string} stage
+ * @returns {{store: Object, phantomId: string}}
+ */
+function plantPronounPhantom(fx, stage = DOCUMENT_SOURCE_STAGE) {
+  appendToFixtureChapters(fx, 0, { ch1: ["俺は窓を見た。"], ch2: ["俺は廊下に出た。"] });
+  const store = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage });
+  assertInsideFixture(store.file, fx.dir);
+  const registered = store.registerChaptersFromSource();
+  assert.ok(registered.ok, registered.error);
+  importGlossary(store, GLOSSARY_01);
+  store.upsertCast({ key: "俺", display: "俺（如月雨露・第二章終盤）", firstSeenVolume: 1 });
+  const filed = importVolumeExtraction({
+    volume: 1,
+    folder: fx.volumes[0].folder,
+    seriesDir: fx.dir,
+    voiceEntries: [
+      {
+        type: "voice",
+        character: "俺（主人公）",
+        quirkType: "pronoun",
+        description: "First person 俺, and the narration never leaves it.",
+        examples: ["「さぁ、今日も俺の熱き血潮を迸らせるぜ！」"],
+      },
+    ],
+  }).voice;
+  assert.ok(filed.ok, JSON.stringify(filed.refused));
+  return { store, phantomId: filed.imported[0].id };
+}
+
+/**
+ * A split the earlier volume froze is folded when the next volume's record is built, and the sealed
+ * record it came from is not touched.
+ *
+ * Volume 01's record is published: it is the record a translation was already built on, and it stays
+ * byte-identical. Volume 02's record is a copy that has published nothing, and the phantom it carries is
+ * volume 01's error arriving in every volume after it. This is the only moment the fold is legal, and the
+ * merge is written down with the heading that produced it as its reason.
+ * @returns {void}
+ */
+function scenarioAPhantomRosterEntryIsFoldedByTheNextVolume() {
+  const fx = fixtureStoreSeries("pipeline-roster-merge");
+  const { store: one, phantomId } = plantPronounPhantom(fx);
+  // No character-voice document is imported here on purpose: the coverage question is not asked until
+  // this volume's reference has been read into the record, so the volume is copyable, which is the state
+  // volume 01 is actually in — a published record that passes its own audit and still carries the split.
+  const sealed = one.sealVolume(1);
+  assert.ok(sealed.ok, "the volume that made the phantom publishes it, and this test does not undo that");
+  const published = {
+    cast: one.db.prepare("SELECT key, display, merged_into AS merged FROM cast ORDER BY key").all(),
+    facts: one.db.prepare("SELECT id, key, sealed FROM facts ORDER BY id").all(),
+    merges: one.db.prepare("SELECT survivor, merged FROM cast_merges ORDER BY survivor, merged").all(),
+  };
+  one.close();
+
+  const opened = openVolumeRecord({ volume: 2, folder: "Test Story(02)", seriesDir: fx.dir, previousVolume: 1, previousFolder: "Test Story(01)" });
+  assert.ok(opened.ok, opened.refusal && opened.refusal.because);
+  const two = opened.store;
+
+  assert.deepStrictEqual(
+    opened.roster.merged.map((m) => [m.merged, m.survivor, m.movedFacts]),
+    [["俺", "如月雨露", 1]],
+    "the fold happens, and it says how many claims moved"
+  );
+  assert.match(opened.roster.merged[0].heading, /如月雨露・第二章終盤/, "and it names the heading that produced it");
+
+  assert.strictEqual(two.getCast("俺").merged_into, "如月雨露", "the phantom stays, marked with where it went");
+  assert.strictEqual(two.getCast("如月雨露").merged_into, null, "the surviving entry is the one claims are filed under");
+  const merges = two.castMerges();
+  assert.strictEqual(merges.length, 1, "and the merge is recorded, because a wrong merge is the one thing a reader must be able to find");
+  assert.match(merges[0].reason, /俺（如月雨露・第二章終盤）/, "with the reason, which is quotable rather than invented");
+
+  const moved = two.db.prepare("SELECT id, key, owner_volume AS ownerVolume, sealed FROM facts WHERE id = ?").get(phantomId);
+  assert.strictEqual(moved.key, "如月雨露", "the claim moved onto the character it was always about");
+  assert.strictEqual(moved.ownerVolume, 1, "and it still belongs to the volume that wrote it");
+  assert.strictEqual(moved.sealed, 1, "and it is still sealed: the fold re-points a copy, it does not un-publish anything");
+  assert.strictEqual(two.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE key = '俺'").get().n, 0, "nothing is left under the pronoun");
+
+  const reopened = openVolumeRecord({ volume: 2, folder: "Test Story(02)", seriesDir: fx.dir, previousVolume: 1, previousFolder: "Test Story(01)" });
+  assert.ok(reopened.ok, reopened.refusal && reopened.refusal.because);
+  assert.deepStrictEqual(reopened.roster.merged, [], "reopening the same volume does not merge it a second time");
+  assert.strictEqual(reopened.store.castMerges().length, 1, "and the record still says it happened once");
+
+  reopened.store.close();
+  two.close();
+
+  const after = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage: DOCUMENT_SOURCE_STAGE });
+  assert.deepStrictEqual(
+    after.db.prepare("SELECT key, display, merged_into AS merged FROM cast ORDER BY key").all(),
+    published.cast,
+    "volume 01's own roster is untouched: the phantom is still there, as published"
+  );
+  assert.deepStrictEqual(
+    after.db.prepare("SELECT id, key, sealed FROM facts ORDER BY id").all(),
+    published.facts,
+    "with its claim under the name it was filed under, still sealed"
+  );
+  assert.deepStrictEqual(
+    after.db.prepare("SELECT survivor, merged FROM cast_merges ORDER BY survivor, merged").all(),
+    published.merges,
+    "and volume 01's record has no merge in it: the fold happened in the copy, not in the original"
+  );
+  after.close();
+
+  console.log("reference-store pipeline: a roster entry keyed by a pronoun is folded when the next volume inherits it, and the sealed record it came from is untouched");
+}
+
+/**
+ * A record that has published cannot have its own roster reconciled.
+ *
+ * The fold is legal at one moment only: after a record is copied in and before it publishes anything.
+ * Asked of a sealed volume it is the same edit `castAlias` refuses, and it is refused here for the same
+ * reason, stated about the record rather than about the rows.
+ * @returns {void}
+ */
+function scenarioASealedRecordDoesNotReconcileItsOwnRoster() {
+  const fx = fixtureStoreSeries("pipeline-roster-sealed");
+  const { store } = plantPronounPhantom(fx);
+  assert.ok(store.sealVolume(1).ok);
+
+  const refused = store.mergeInheritedCastEntry({
+    survivor: "如月雨露",
+    merged: "俺",
+    reason: "its own heading names 如月雨露",
+  });
+  assert.strictEqual(refused.ok, false, "a sealed record is the record a translation was built on");
+  assert.strictEqual(refused.refusal.rule, "cast-merge-volume-sealed");
+  assert.strictEqual(store.getCast("俺").merged_into, null, "and nothing moved");
+
+  store.close();
+  console.log("reference-store pipeline: a sealed volume's own roster is not reconciled, and the refusal says why");
+}
+
+/**
+ * The fold moves identity, not evidence: the pronoun's occurrences stay attributed to the pronoun, and
+ * the coverage rule's chapter count is the union — which makes the guard stronger, never weaker.
+ *
+ * Before the fold the record reports the phantom as a character in 3 of 3 chapters and the protagonist as
+ * a barely-present mention in 2. After it, there is one person, present in 3 chapters, and the report
+ * names which spellings produced that number. A protagonist whose surname the book prints twice is not a
+ * bit part, and a rule that only looked at his surname would call him one.
+ * @returns {void}
+ */
+function scenarioAMergedNameStaysAttributedToTheNameThatProducedIt() {
+  const fx = fixtureStoreSeries("pipeline-roster-presence");
+  const { store } = plantPronounPhantom(fx);
+  importVoice(
+    store,
+    "# Character Voice Reference\n\n## Characters\n\n### 三色院菫子（パンジー）\n\n- **Pronouns**: 一人称は私。\n\n### 大賀太陽\n\n- **Catchphrases**: 「ドンマイだ！ ドンマイ！」\n\n### ジョーロ\n\n- **Notes**: ジョーロは窓を見た。\n"
+  );
+  recordCastPresence(store);
+
+  const before = store.integrityFindings({ volume: "01" });
+  const beforeLoss = expectFinding(before, "reference-voice-covers-fewer-characters");
+  const beforeMention = expectFinding(before, "reference-voice-mention-not-covered");
+  assert.strictEqual(beforeLoss.severity, "HIGH");
+  assert.match(beforeLoss.message, /俺/, "before the fold, the phantom is the character in 3 of 3 chapters");
+  assert.match(beforeMention.message, /如月雨露/, "and the protagonist is the soft one — a mention, because only his own surname was counted");
+
+  const merged = store.mergeInheritedCastEntry({
+    survivor: "如月雨露",
+    merged: "俺",
+    reason: "its own heading names 如月雨露 as a whole word",
+  });
+  assert.ok(merged.ok, merged.refusal && merged.refusal.because);
+
+  recordCastPresence(store);
+  const rows = castPresence(store, 1);
+  const pronounRow = rows.find((row) => row.key === "俺");
+  const protagonistRow = rows.find((row) => row.key === "如月雨露");
+  assert.ok(pronounRow && protagonistRow, "both names are still measured, each under its own key");
+  assert.strictEqual(pronounRow.chapters, 3, "the pronoun's occurrences stay attributed to the pronoun");
+  assert.strictEqual(protagonistRow.chapters, 2, "and the protagonist's own row counts only his own name, not the alias a merge handed him");
+
+  const after = store.integrityFindings({ volume: "01" });
+  const afterCoverage = expectFinding(after, "reference-voice-covers-fewer-characters");
+  assert.strictEqual(afterCoverage.severity, "HIGH", "the fold does not soften the guard: one person in 3 of 3 chapters is a loss");
+  assert.match(afterCoverage.message, /3 of this volume's 3 chapters/, "counted over every name that person is filed under");
+  assert.match(afterCoverage.message, /through 如月雨露/, "and the report says which spellings produced the count");
+  assert.match(afterCoverage.message, /through 俺/);
+
+  const uncovered = uncoveredCharacters(store, 1).map((row) => row.key);
+  assert.deepStrictEqual(uncovered, ["如月雨露"], "the phantom is no longer a character of its own, so it is not reported as one");
+  expectNoFinding(
+    after,
+    "reference-character-split-in-two",
+    "the merge put 俺 in 如月雨露's alias list, and an alias that is a merged entry is the merged state, not a split"
+  );
+
+  store.close();
+  console.log("reference-store pipeline: a merged name keeps its own presence evidence, and the coverage count is the union of the names one person is filed under");
+}
+
+/**
+ * The rule does not merge on containment alone, and it does not choose between two candidates.
+ *
+ * `如月雨露（ジョーロ）【俺人格】` contains ジョーロ, which is a roster entry: a rule that merged on
+ * containment would fold the protagonist into his own nickname and orphan every glossary row keyed with
+ * his name. `女（図書委員）` names nothing. An entry that names two entries is reported and left alone.
+ * @returns {void}
+ */
+function scenarioTheRosterRuleDoesNotMergeOnContainmentAlone() {
+  const fx = fixtureStoreSeries("pipeline-roster-narrow");
+  const store = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage: DOCUMENT_SOURCE_STAGE });
+  store.registerChaptersFromSource();
+  importGlossary(store, GLOSSARY_01);
+  store.upsertCast({ key: "女", display: "女（図書委員）", firstSeenVolume: 1 });
+  store.upsertCast({ key: "私", display: "私（如月雨露・大賀太陽）", firstSeenVolume: 1 });
+  // The shape that a containment-only rule would get wrong: the protagonist's own heading carries his
+  // nickname, and the nickname is a roster entry of its own.
+  store.upsertCast({ key: "如月雨露", display: "如月雨露（ジョーロ）【俺人格】", firstSeenVolume: 1 });
+  store.upsertCast({ key: "ジョーロ", display: "ジョーロ", firstSeenVolume: 1 });
+
+  const conflicts = rosterIdentityConflicts(store);
+  assert.deepStrictEqual([...new Set(conflicts.map((c) => c.merged))], ["私"], "a nickname inside a heading is not a conflict, and neither is a label that names nothing");
+  assert.ok(conflicts.every((c) => c.ambiguous), "and the one entry it did find names two roster entries, so every row about it is flagged");
+
+  const opened = reconcileInheritedRoster(store);
+  assert.strictEqual(opened.merged.length, 0, "and the one conflict it found is not merged");
+  assert.strictEqual(opened.ambiguous.length, 1, "because it names two entries, and picking between them is a decision");
+  assert.deepStrictEqual(opened.ambiguous[0].names, ["如月雨露", "大賀太陽"]);
+  assert.strictEqual(store.castMerges().length, 0, "so the roster is left exactly as it was, with the conflict reported");
+  assert.strictEqual(store.getCast("如月雨露").merged_into, null, "the protagonist is not folded into his own nickname");
+  assert.strictEqual(store.getCast("ジョーロ").merged_into, null);
+  assert.strictEqual(store.getCast("女").merged_into, null, "and a label that names no roster entry is left where it was");
+  assert.ok(displayAliasSpans(store.getCast("如月雨露").display).includes("ジョーロ"), "the containment is really there — it is the pronoun gate that declines it");
+
+  store.close();
+  console.log("reference-store pipeline: the roster rule needs a pronoun key and a whole-token name, and it reports an ambiguous heading instead of choosing");
+}
+
+/**
+ * A pronoun label that names a roster entry no longer creates a roster entry of its own.
+ *
+ * This is the prevention half. Without it, the fold has to run again in every later volume, because the
+ * extraction keeps producing the same phantom name.
+ * @returns {void}
+ */
+function scenarioAPronounLabelResolvesOntoTheEntryItNames() {
+  const fx = fixtureStoreSeries("pipeline-roster-prevention");
+  const store = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage: DOCUMENT_SOURCE_STAGE });
+  store.registerChaptersFromSource();
+  importGlossary(store, GLOSSARY_01);
+
+  const named = resolveExtractionName(store, "俺（如月雨露・第二章終盤）");
+  assert.strictEqual(named.key, "如月雨露", "the label names the roster entry, so the label is that entry");
+  assert.strictEqual(named.resolved, true);
+  assert.match(named.how, /its own label names 如月雨露/);
+
+  const nickname = resolveExtractionName(store, "如月雨露（ジョーロ）【俺人格】");
+  assert.strictEqual(nickname.key, "如月雨露", "and a heading that contains a nickname still resolves onto the character, not onto the nickname");
+
+  const prose = resolveExtractionName(store, "俺（如月雨露の友人）");
+  assert.strictEqual(prose.resolved, false, "a label that mentions a character in prose is not a link: the token has to BE the key");
+
+  const filed = importVolumeExtraction({
+    volume: 1,
+    folder: fx.volumes[0].folder,
+    seriesDir: fx.dir,
+    voiceEntries: [
+      {
+        type: "voice",
+        character: "俺（如月雨露・第二章終盤）",
+        quirkType: "pronoun",
+        description: "First person 俺, filed where the label says it belongs.",
+        examples: ["「さぁ、今日も俺の熱き血潮を迸らせるぜ！」"],
+      },
+    ],
+  }).voice;
+  assert.ok(filed.ok, JSON.stringify(filed.refused));
+  assert.strictEqual(store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE key = '如月雨露'").get().n, 1, "the claim lands on the protagonist");
+  assert.strictEqual(store.getCast("俺"), null, "and the phantom is never created");
+
+  store.close();
+  console.log("reference-store pipeline: a pronoun label that names a roster entry resolves onto it, so the phantom is not created in the first place");
+}
+
+/**
+ * The pronoun list is a closed vocabulary, and the test is what stops it from drifting.
+ * @returns {void}
+ */
+function scenarioThePronounListIsClosed() {
+  assert.ok(BARE_FIRST_PERSON_PRONOUNS.includes("俺"), "the word this whole rule exists for is in it");
+  assert.ok(!BARE_FIRST_PERSON_PRONOUNS.includes("如月雨露"), "a name is not");
+  assert.ok(!BARE_FIRST_PERSON_PRONOUNS.includes("俺様"), "and neither is a pronoun with a suffix on it: the rule is about the bare word");
+  assert.strictEqual(new Set(BARE_FIRST_PERSON_PRONOUNS).size, BARE_FIRST_PERSON_PRONOUNS.length, "no duplicates");
+  console.log(`reference-store pipeline: the bare first-person pronouns are a closed list of ${BARE_FIRST_PERSON_PRONOUNS.length}, pinned here`);
+}
+
+/**
+ * A document section headed by the retired name files onto the surviving entry, and still renders.
+ *
+ * Volume 01's published reference has a section headed `俺（如月雨露・第二章終盤）`, and volume 02's voice
+ * stage starts from a copy of that file. If the document door asked its own question about that heading —
+ * which it used to, separately from the extraction door — the section's bullets would be filed under a
+ * roster entry the record has already retired, and `renderVoice` does not render merged entries, so the
+ * bullets would disappear from the next volume's reference without anyone being told.
+ * @returns {void}
+ */
+function scenarioAFoldedHeadingFilesOntoTheSurvivorAndStillRenders() {
+  const fx = fixtureStoreSeries("pipeline-voice-rekey");
+  const { store } = plantPronounPhantom(fx);
+  assert.ok(
+    store.mergeInheritedCastEntry({ survivor: "如月雨露", merged: "俺", reason: "its own heading names 如月雨露" }).ok
+  );
+
+  const markdown =
+    "# Character Voice Reference\n\n## Characters\n\n### 俺（如月雨露・第二章終盤）\n\n" +
+    "- **Pronouns**: 一人称は「さぁ、今日も俺の熱き血潮を迸らせるぜ！」で語られる。\n";
+  const imported = importVoice(store, markdown);
+  assert.ok(imported.ok, JSON.stringify(imported.refused));
+  assert.deepStrictEqual(
+    imported.rekeyed.map((r) => [r.heading, r.key]),
+    [["俺（如月雨露・第二章終盤）", "如月雨露"]],
+    "the move is reported, not absorbed"
+  );
+  assert.strictEqual(store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE key = '俺' AND source_stage = 'import'").get().n, 0, "nothing is filed under the retired name");
+  assert.strictEqual(store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE key = '如月雨露' AND source_stage = 'import'").get().n, 1, "it is filed under the character it is about");
+
+  const rendered = renderVoice(store);
+  assert.match(rendered, /### 如月雨露/, "and the reference renders the character, not the pronoun");
+  assert.ok(rendered.includes("熱き血潮"), "with the bullet that would otherwise have vanished");
+  assert.ok(!rendered.includes("### 俺（"), "and the retired heading is not a section of its own");
+
+  store.close();
+  console.log("reference-store pipeline: a document section headed by a retired name files onto the survivor and still renders");
+}
+
 (async () => {
   scenarioPresenceIsMeasuredFromTheText();
   scenarioPresenceRefusesWithoutASource();
@@ -1228,6 +1599,13 @@ function scenarioExtractionRowsNeverRenderIntoADocument() {
   scenarioPresenceRecordsEveryPlaceANameOccurs();
   scenarioACharacterInEnoughChaptersIsALossWithoutTheExtraction();
   scenarioABarelyPresentCharacterIsAMentionNotALoss();
+  scenarioAPhantomRosterEntryIsFoldedByTheNextVolume();
+  scenarioASealedRecordDoesNotReconcileItsOwnRoster();
+  scenarioAMergedNameStaysAttributedToTheNameThatProducedIt();
+  scenarioTheRosterRuleDoesNotMergeOnContainmentAlone();
+  scenarioAPronounLabelResolvesOntoTheEntryItNames();
+  scenarioAFoldedHeadingFilesOntoTheSurvivorAndStillRenders();
+  scenarioThePronounListIsClosed();
   scenarioCoverageIsNotAskedBeforeTheReferenceIsMirrored();
   scenarioUnadoptedClaimsAreNamed();
   scenarioExtractionClaimsAreNotCoverage();

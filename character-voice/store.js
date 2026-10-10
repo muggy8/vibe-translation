@@ -27,6 +27,7 @@ const {
   sealVolumeRecord,
   buildGradeSample,
   voiceNewestSections,
+  rosterReconciliationLog,
 } = require("../utils/reference-store");
 
 /** The artifact this stage publishes, for the audit report's headings. */
@@ -70,6 +71,7 @@ function openVoiceRecord(ctx, previousVolume) {
           `glossary is already on disk, and it skips before its store block — this is what keeps the roster whole.`
       );
     }
+    for (const line of rosterReconciliationLog(ctx.values.INSTALLMENT_NUMBER, opened.roster)) console.log(line);
     return { ok: true, opened, error: null };
   }
   const detail = opened.findings.map((f) => `${f.severity} ${f.kind}: ${f.message}`).join("\n  ");

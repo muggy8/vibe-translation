@@ -26,6 +26,16 @@
  *      volume 01's voice reference exists, so "the end of a volume's pre-production" is not one moment.
  *      Sealing is idempotent, and the second seal marks the rows the voice stage added.
  *
+ * Two rules are asked at the open, not inside a stage, because a stage can be skipped and an open cannot:
+ *
+ *   - **the glossary completeness rule** — a volume with a published `glossary.md` and no glossary rows
+ *     in its record is an incomplete record (gotcha 103);
+ *   - **the roster rule** — an entry whose own heading names another entry on the roster is folded into
+ *     it, in the record that is *inheriting* the split, never in the sealed record that published it.
+ *     Volume 01's entry keyed `俺` with the heading `俺（如月雨露・第二章終盤）` is the case: volume 01's
+ *     record is published and stays exactly as it is, and volume 02's copy is where the split gets folded
+ *     before it becomes sixteen volumes' worth of split.
+ *
  * Where the hard stop actually lands, since it is not where it looks like it should be: a volume whose
  * character-voice reference lost characters is caught by **its own** audit (HIGH), and it is the *next*
  * volume's copy-forward that refuses to carry it — by which time the voice mirror marker is in the
@@ -47,7 +57,8 @@ const { DOCUMENT_SOURCE_STAGE } = require("./schema");
 const { importGlossary } = require("./glossary-adapter");
 const { importVoice } = require("./voice-adapter");
 const { importVoiceExtraction, importNewTerms } = require("./extraction-adapter");
-const { markGlossaryBackfilled, glossaryBackfilled } = require("./document-prose");
+const { markGlossaryBackfilled, glossaryBackfilled, markRosterReconciled, rosterReconciled } = require("./document-prose");
+const { rosterIdentityConflicts } = require("./name-resolution");
 const {
   VALIDATION_STEP,
   artifactShapeFindings,
@@ -209,7 +220,7 @@ function ensureVolumeGlossaryInRecord(store, { volume } = {}) {
  * @param {Array<{id: string, file: string, chars?: number}>} [opts.bundleSegments] - The volume's
  *   source segments as the stage resolved them (`utils/source.js`'s bundle). Passed because a
  *   plain-text volume has no bundle file on disk for `listVolumeChapters` to find.
- * @returns {{ok: boolean, store: ReferenceStore|null, carried: Object|null, toppedUp: Object|null, glossaryBackfill: Object|null, refusal: ReferenceRefusal|null, findings: PostMortemFinding[]}}
+ * @returns {{ok: boolean, store: ReferenceStore|null, carried: Object|null, toppedUp: Object|null, glossaryBackfill: Object|null, roster: Object|null, refusal: ReferenceRefusal|null, findings: PostMortemFinding[]}}
  */
 function openVolumeRecord({ volume, folder, seriesDir, previousVolume = null, previousFolder = null, stage = DOCUMENT_SOURCE_STAGE, bundleSegments = null }) {
   let carried = null;
@@ -274,7 +285,87 @@ function openVolumeRecord({ volume, folder, seriesDir, previousVolume = null, pr
    */
   const glossaryBackfill = ensureVolumeGlossaryInRecord(store, { volume: store.volume });
 
-  return { ok: true, store, carried, toppedUp, glossaryBackfill, refusal: null, findings: [] };
+  /**
+   * The roster rule, asked at the same door for the same reason: a record's roster is not only this
+   * volume's business, because the next volume inherits it. A split the earlier volume froze is carried
+   * forward by every copy after it, and the only moment it can be folded without rewriting a published
+   * record is the moment a new record is created from that published one.
+   */
+  const roster = reconcileInheritedRoster(store);
+
+  return { ok: true, store, carried, toppedUp, glossaryBackfill, roster, refusal: null, findings: [] };
+}
+
+/**
+ * Fold roster entries that their own headings say are the same person.
+ *
+ * Volume 01 left an entry keyed `俺` with the heading `俺（如月雨露・第二章終盤）` and 14 of the
+ * protagonist's claims under it. Volume 01's record is published and sealed, so it stays exactly as it
+ * is — that record is the one a translation was already built on. Volume 02's record is a copy of it,
+ * and a copy is where the split can be folded: nothing has been built from volume 02's record yet, and
+ * leaving the split in place is what would carry it into all sixteen volumes after that.
+ *
+ * The rule is `name-resolution.js`'s `rosterIdentityConflicts`, and it is as narrow as it is because a
+ * merge is the one operation in this layer that can make a character's claims vanish from a query: a
+ * bracketed span of the entry's own heading has to contain another entry's **key** as a whole token.
+ * `女（図書委員）` names nothing and stays. `俺（如月雨露の友人）` names nothing either — a heading that
+ * mentions a character in prose is a translation decision, and `castAlias` is the door for a decision.
+ *
+ * An entry whose heading names **two** roster entries is reported and never merged. Picking between two
+ * candidates is a decision, and a rule that makes a decision in silence is the bug this module's header
+ * was written about.
+ *
+ * @param {ReferenceStore} store - Opened for the volume whose roster is being reconciled.
+ * @returns {{ran: boolean, conflicts: number, merged: Array<{merged: string, survivor: string, heading: string, movedFacts: number}>, ambiguous: Array<{merged: string, heading: string, names: string[]}>, refused: Array<{merged: string, survivor: string, because: string}>}}
+ */
+function reconcileInheritedRoster(store) {
+  const conflicts = rosterIdentityConflicts(store);
+  if (conflicts.length === 0) {
+    const empty = { ran: false, conflicts: 0, merged: [], ambiguous: [], refused: [] };
+    markRosterReconciled(store, store.volume, empty);
+    return empty;
+  }
+
+  /** @type {Array<{merged: string, survivor: string, heading: string, movedFacts: number}>} */
+  const merged = [];
+  /** @type {Array<{merged: string, heading: string, names: string[]}>} */
+  const ambiguous = [];
+  /** @type {Array<{merged: string, survivor: string, because: string}>} */
+  const refused = [];
+
+  for (const conflict of conflicts) {
+    if (conflict.ambiguous) {
+      // One report per entry, not per candidate it names: `rosterIdentityConflicts` returns a row per
+      // pair, and a run that printed the same problem twice reads as two problems.
+      if (!ambiguous.some((row) => row.merged === conflict.merged)) {
+        ambiguous.push({
+          merged: conflict.merged,
+          heading: conflict.heading,
+          names: conflicts.filter((other) => other.merged === conflict.merged).map((other) => other.survivor),
+        });
+      }
+      continue;
+    }
+    const result = store.mergeInheritedCastEntry({
+      survivor: conflict.survivor,
+      merged: conflict.merged,
+      volume: store.volume,
+      reason:
+        `its own heading "${conflict.heading}" names ${conflict.survivor} as a whole word inside the label ` +
+        `this entry was given — the pass that wrote it put the real name in the bracket. Volume ${store.volume}'s ` +
+        `record inherited the split from the volume before it, and the entry it was split from is sealed there.`,
+    });
+    if (!result.ok) {
+      refused.push({ merged: conflict.merged, survivor: conflict.survivor, because: result.refusal.because });
+      continue;
+    }
+    if (result.alreadyMerged) continue;
+    merged.push({ merged: conflict.merged, survivor: conflict.survivor, heading: conflict.heading, movedFacts: result.movedFacts });
+  }
+
+  const result = { ran: true, conflicts: conflicts.length, merged, ambiguous, refused };
+  markRosterReconciled(store, store.volume, result);
+  return result;
 }
 
 /**
@@ -331,8 +422,8 @@ function importVolumeArtifacts(store, { glossaryMarkdown = null, voiceMarkdown =
  */
 function measureVolumePresence(store) {
   const result = store.recordCastPresence();
-  if (!result.ok) return { ok: false, measured: 0, present: 0, absent: 0, chapters: 0, matchRows: 0, refusal: result.refusal };
-  return { ok: true, measured: result.measured, present: result.present, absent: result.absent, chapters: result.chapters, matchRows: result.matchRows, refusal: null };
+  if (!result.ok) return { ok: false, measured: 0, present: 0, absent: 0, merged: 0, chapters: 0, matchRows: 0, refusal: result.refusal };
+  return { ok: true, measured: result.measured, present: result.present, absent: result.absent, merged: result.merged, chapters: result.chapters, matchRows: result.matchRows, refusal: null };
 }
 
 /**
@@ -399,6 +490,7 @@ function renderVolumeAuditReport(audit, { title, file, volume, refused = [], sea
     absent: audit.absent,
     presence: audit.presence,
     glossary: audit.glossary || null,
+    roster: audit.roster || null,
     refused,
     rebuilt: (audit.rebuilt || []).find((entry) => entry.document === document && entry.volume === Number(volume)) || null,
     sealed,
@@ -429,6 +521,7 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
   const terms = unadoptedTerms(store);
   const absent = absentCharacters(store);
   const glossary = glossaryContribution(store, store.volume);
+  const roster = rosterReconciled(store, store.volume);
 
   const computed = {
     findings,
@@ -441,6 +534,7 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
     absent,
     presence,
     glossary,
+    roster,
     rebuilt: audit.rebuilt || [],
   };
 
@@ -459,8 +553,43 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
     unadoptedTerms: terms,
     absent,
     glossary,
+    roster,
     rebuilt: audit.rebuilt || [],
   };
+}
+
+/**
+ * The stage-facing sentence about what the roster rule did, so the two stages that open a record say
+ * the same thing about it.
+ *
+ * A merge moves a character's claims, and a stage log is the only place a run notices a merge at all:
+ * the audit report is written per artifact, and by the time it exists the merge has already happened.
+ *
+ * @param {number|string} volume
+ * @param {{ran: boolean, conflicts: number, merged: Array<{merged: string, survivor: string, heading: string, movedFacts: number}>, ambiguous: Array<{merged: string, heading: string, names: string[]}>, refused: Array<{merged: string, survivor: string, because: string}>}|null} roster
+ * @returns {string[]} Lines to log. Empty when there is nothing to say.
+ */
+function rosterReconciliationLog(volume, roster) {
+  if (!roster) return [];
+  const out = [];
+  for (const m of roster.merged || []) {
+    out.push(
+      `Volume ${volume}: roster entry "${m.merged}" is the same person as ${m.survivor} — its own heading ` +
+        `"${m.heading}" names that name as a whole word. ${m.movedFacts} claim(s) moved onto ${m.survivor}, ` +
+        `and the merge is recorded in cast_merges.`
+    );
+  }
+  for (const a of roster.ambiguous || []) {
+    out.push(
+      `Volume ${volume}: roster entry "${a.merged}" names ${a.names.length} entries in its heading ` +
+        `(${a.names.join(", ")}) and was NOT merged — choosing between them is a decision, and this rule ` +
+        `only makes the ones the artifact already made.`
+    );
+  }
+  for (const r of roster.refused || []) {
+    out.push(`Volume ${volume}: merging "${r.merged}" into ${r.survivor} was refused — ${r.because}`);
+  }
+  return out;
 }
 
 /**
@@ -480,6 +609,8 @@ module.exports = {
   glossaryRowsInRecord,
   glossaryContribution,
   ensureVolumeGlossaryInRecord,
+  reconcileInheritedRoster,
+  rosterReconciliationLog,
   importVolumeExtraction,
   importVolumeArtifacts,
   resetDocumentMirror,

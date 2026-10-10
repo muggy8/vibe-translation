@@ -246,6 +246,43 @@ function glossaryBackfilled(ctx, volume) {
 }
 
 /**
+ * Record what the roster rule found when this volume's record was opened.
+ *
+ * The merges themselves are in `cast_merges`, which is the durable answer to "where did this character's
+ * claims go". What is not in that table is the part of the run that did **not** merge: an entry whose
+ * heading names two roster entries, or a merge the store refused. Those are the outcomes a reader needs
+ * in order to tell "there was nothing to fold" from "there was something to fold and the rule declined to
+ * fold it", and a record that cannot tell those two apart reports silence as health.
+ *
+ * @param {{db: Object}} ctx
+ * @param {number} volume
+ * @param {{conflicts: number, merged: Array<Object>, ambiguous: Array<Object>, refused: Array<Object>}} detail
+ * @returns {void}
+ */
+function markRosterReconciled(ctx, volume, detail) {
+  ctx.db
+    .prepare("INSERT INTO store_info (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(`roster_reconciled_${Number(volume)}`, JSON.stringify({ at: new Date().toISOString(), ...detail }));
+}
+
+/**
+ * Read that marker.
+ * @param {{db: Object}} ctx
+ * @param {number} volume
+ * @returns {{at: string, conflicts: number, merged: Array<Object>, ambiguous: Array<Object>, refused: Array<Object>}|null}
+ */
+function rosterReconciled(ctx, volume) {
+  const row = ctx.db.prepare("SELECT value FROM store_info WHERE key = ?").get(`roster_reconciled_${Number(volume)}`);
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.value);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The numbers half of "how this reference was written", read out of a rebuild marker.
  *
  * Two pairs of numbers live in a marker and they are not the same question. `filed` is what **this run**
@@ -298,4 +335,6 @@ module.exports = {
   rebuildProvenanceCounts,
   markGlossaryBackfilled,
   glossaryBackfilled,
+  markRosterReconciled,
+  rosterReconciled,
 };

@@ -45,7 +45,7 @@ require("../../types"); // JSDoc type definitions
  *
  * @param {{db: Object, volumeDir: string, volume: number, listChapters: Function}} ctx
  * @param {{volume?: number}} [opts] - Defaults to the volume this store is open for.
- * @returns {{ok: boolean, volume: number, measured: number, present: number, absent: number, chapters: number, matchRows: number, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, volume: number, measured: number, present: number, absent: number, merged: number, chapters: number, matchRows: number, refusal: ReferenceRefusal|null}}
  */
 function recordCastPresence(ctx, { volume } = {}) {
   const vol = Number(volume === undefined ? ctx.volume : volume);
@@ -81,9 +81,25 @@ function recordCastPresence(ctx, { volume } = {}) {
     chapters.push({ id: chapter.id, prepared: lines.map(prepareLineForQuoteSearch) });
   }
 
-  const castRows = ctx.db
-    .prepare("SELECT key, display, aliases FROM cast WHERE merged_into IS NULL ORDER BY key")
-    .all();
+  // Every roster entry is measured, including the ones marked `merged_into`.
+  //
+  // A merge says two names are the same person; it does not say the second name stopped appearing in
+  // the book. Volume 01's entry keyed 俺 occurs 789 times across all 10 chapters, and after that entry
+  // is folded into 如月雨露 the honest answer is still "the string 俺 occurs in every chapter of this
+  // volume" — recorded under 俺, where it belongs. Measuring only the unmerged entries would either
+  // lose that fact or move it onto the protagonist's row, and moving it is the thing that makes the
+  // chapter-count signal meaningless: a first-person pronoun matches every chapter of every book
+  // narrated in the first person, so a measurement that attributes it to the protagonist reports him as
+  // present everywhere on evidence that says nothing about him.
+  const castRows = ctx.db.prepare("SELECT key, display, aliases, merged_into AS mergedInto FROM cast ORDER BY key").all();
+
+  // Names that are themselves a merged roster entry are not search names for the entry they were merged
+  // into. `castAlias` records a merged key as an alias so every reader can see the two are the same
+  // person — that is the identity, and it is worth keeping. But identity and evidence are different
+  // questions: 如月雨露 is searched for as 如月雨露 and as the aliases somebody declared with a reason
+  // (ジョーロ, 俺（主人公）), and the pronoun that arrived through a merge is searched for under its own
+  // row instead.
+  const mergedKeys = new Set(castRows.filter((row) => row.mergedInto).map((row) => row.key));
 
   const insertSummary = ctx.db.prepare(
     "INSERT INTO cast_presence (volume, key, present, matched, chapter, line, chapters, matches) VALUES (?,?,?,?,?,?,?,?) " +
@@ -111,7 +127,7 @@ function recordCastPresence(ctx, { volume } = {}) {
       .run(`presence_chapters_${vol}`, String(chapters.length));
 
     for (const entry of castRows) {
-      const found = findName(entry, chapters);
+      const found = findName(entry, chapters, mergedKeys);
       if (found) {
         present += 1;
         matchRows += found.matches.length;
@@ -144,6 +160,7 @@ function recordCastPresence(ctx, { volume } = {}) {
     measured: castRows.length,
     present,
     absent: castRows.length - present,
+    merged: mergedKeys.size,
     chapters: chapters.length,
     matchRows,
     refusal: null,
@@ -156,14 +173,22 @@ function recordCastPresence(ctx, { volume } = {}) {
  * A display like `如月雨露（ジョーロ）【俺人格】` is not a string the book prints, so it is only
  * tried when it is the key itself.
  *
+ * An alias that is itself a roster entry merged into this one is skipped: it is how the record says two
+ * names are the same person, and it is measured in its own right, so counting it here would attribute
+ * another name's occurrences to this character. See `recordCastPresence`.
+ *
  * @param {{key: string, display: string|null, aliases: string}} entry
+ * @param {Set<string>} [mergedKeys] - Cast keys that have been merged into another entry.
  * @returns {Array<{name: string, prepared: Object}>}
  */
-function namesForEntry(entry) {
+function namesForEntry(entry, mergedKeys = new Set()) {
   const names = [entry.key];
   try {
     for (const alias of JSON.parse(entry.aliases || "[]")) {
-      if (typeof alias === "string" && alias.trim()) names.push(alias.trim());
+      if (typeof alias !== "string" || !alias.trim()) continue;
+      const name = alias.trim();
+      if (mergedKeys.has(name)) continue;
+      names.push(name);
     }
   } catch {
     /* an unparsable aliases column costs this entry its aliases, not the measurement */
@@ -180,10 +205,11 @@ function namesForEntry(entry) {
  *
  * @param {{key: string, display: string|null, aliases: string}} entry
  * @param {Array<{id: string, prepared: Array<Object>}>} chapters
+ * @param {Set<string>} [mergedKeys] - Cast keys merged into another entry; not searched for this one.
  * @returns {{first: {name: string, chapter: string, line: number, matched: string}|null, matches: Array<{name: string, chapter: string, line: number, matched: string}>, chapterIds: string[], rules: string[]}|null}
  */
-function findName(entry, chapters) {
-  const names = namesForEntry(entry);
+function findName(entry, chapters, mergedKeys = new Set()) {
+  const names = namesForEntry(entry, mergedKeys);
   /** @type {Array<{name: string, chapter: string, line: number, matched: string}>} */
   const matches = [];
   const chapterIds = new Set();

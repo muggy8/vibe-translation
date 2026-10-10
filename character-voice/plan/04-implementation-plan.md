@@ -535,6 +535,63 @@ validation half of the bill, not the authoring half.
 
 See gotcha 104, `docs/map-tests.md` (`test-pipeline-loop.js`, `fake-workflow.js`, `prompt-audit.js`).
 
+### 7.8 The roster fold: a pronoun is not a character, and where a split may be repaired
+
+Volume 01's record holds a cast entry keyed **俺** with the heading `俺（如月雨露・第二章終盤）` and 14 of the
+protagonist's claims under it. It also holds 如月雨露, with 172 claims. `cast_merges` was empty, so nothing in
+the record said they are the same person.
+
+**Volume 01's record is not touched.** It is sealed: it is the record a published translation was built on, and
+`castAlias` already refuses to merge a cast entry carrying sealed facts for exactly that reason. The fold happens
+when the *next* volume's record is built, by `reconcileInheritedRoster` inside `openVolumeRecord` — the same door
+the glossary completeness rule is asked at, for the same reason: a stage can be skipped and an open cannot.
+
+Measured on a copy of the real series (`/tmp/opencode/roster-merge-proof.js`, **0 model requests**):
+
+| | before | after |
+|---|---|---|
+| volume 02's `俺` | its own entry, 14 claims | `merged_into = 如月雨露`, 0 claims |
+| volume 02's 如月雨露 | 172 claims | 186 claims |
+| `cast_merges` | 0 rows | 1 row, reason quotes the heading |
+| volume 01's `series.db` | — | **byte-identical** |
+
+**The rule is narrow in two directions, and both are load-bearing.** An entry is folded when its key is a **bare
+first-person pronoun** (a closed list, `BARE_FIRST_PERSON_PRONOUNS`) *and* its bracketed label contains another
+entry's **key** as a whole token. Containment alone would fold `如月雨露（ジョーロ）【俺人格】` into **ジョーロ** —
+ジョーロ is a roster entry too — and the protagonist would end up filed under his own nickname, orphaning every
+glossary row keyed with his name. An entry whose label names **two** roster entries is reported and never merged:
+picking between candidates is a decision, and a rule that decides in silence is the bug this layer was built to
+avoid. `女（図書委員）` names nothing and stays. `俺（如月雨露の友人）` names nothing either — a label that
+mentions a character in prose needs `castAlias` and a reason.
+
+**Which presence counts the merged entry inherits: the significance signal inherits; the evidence does not.**
+Presence is measured per *name* — every roster entry, merged ones included — so 俺's occurrences stay attributed
+to 俺. On volume 02's own text: `俺` 951 matches across 7 of 7 chapters, `如月雨露` 10 across 7. The survivor's
+row does **not** inherit the pronoun's matches, because an alias that is itself a merged roster entry is not a
+search name for the entry it joined; if it were, the chapter-count fallback would be satisfied by the grammar of
+the narration rather than by the book pointing at a character. The coverage rule's chapter count **is** the union
+over the names one person is filed under, and that is the direction that matters: before the fold the record
+called the phantom a character in 7 of 7 chapters and the protagonist a barely-present mention in 2; after it
+there is one person in 7 of 7, at HIGH. The fold cannot soften the guard, and the planted damage case (a character
+named in 3 of 3 chapters whom the reference never mentions) is still HIGH and still blocks copy-forward — pinned
+by `test-reference-store-pipeline.js`.
+
+**What it means for volume 01's published file.** `character-voice.md` keeps its section
+`### 俺（如月雨露・第二章終盤）` with its 7 bullets, and volume 01's record keeps the entry that section was
+rendered from. So volume 01's document and volume 01's record still agree with each other; what they disagree
+with is volume 02's record, which says there is one person. A translator reading volume 01 sees two sections for
+one character and reads both — the heading itself names 如月雨露, so it reads as a voice-mode section, which is
+roughly what it is. From volume 02 onward there is one section: the voice stage seeds volume 02's file from
+volume 01's, and `importVoice` now resolves that heading onto 如月雨露 (measured: 0 facts under 俺, 259 under
+如月雨露, the move reported in `rekeyed`). Without that resolution the 7 bullets would have been filed back under
+the retired name and `renderVoice` — which does not render merged entries — would have dropped them.
+
+**Not built, deliberately:** the fold runs when a record is *opened*, so a phantom created later in the same
+volume is not folded until the next volume's record is opened. The prevention rule (the resolver's fifth rule)
+stops most of them from being created at all; a seal-time pass would close the one-volume lag.
+
+See gotcha 105.
+
 ---
 
 ## 8. Build order
@@ -720,6 +777,66 @@ feedback rounds.
 What is still not measured: tokens and wall time on a real volume **with the flags on**. The offline loop
 cannot produce them — its scripted endpoint returns fixed usage counts and answers instantly — so the
 honest measures it gives remain calls, prompt characters and tool calls.
+
+### 10.3 The grade, measured: one real call, and what it says about the budget
+
+One acceptance grade of volume 01's rebuilt reference, through the actual grader (`character-voice/qa.js`'s
+`acceptanceCheck` — same system prompt, same user template, same judging temperature and thinking level, same
+`response_format`, same four message parts including `pov-map.md`), on a copy under `/tmp/opencode`. **One call.**
+
+| | |
+|---|---|
+| score | **81 / 100** |
+| band | "Pass with minor edits" |
+| vs `PASSING_SCORE` 69 | meets |
+| vs `ACCEPTANCE_SAMPLE_FLOOR` 54 | above |
+| vs `ACCEPTANCE_EXCEPTIONAL_SCORE` 85 | not exceptional (so no exceptional-confirmation shortcut) |
+| prompt tokens | **48,466** (sample 17,883 chars + `pov-map.md` 24,205 + audit report 4,508 + prompt 1,117) |
+| completion tokens | 2,462 |
+
+The grader's own complaints, in its words: a drafting artifact left in the コスモス section
+(`(wait, this is パンジー — need to recheck)` — it is really there, line 156 of the published file);
+"code-rebuilt provenance without human review"; and "two genuinely minor characters (ジョージョエン・スカイウォーカー,
+山田) lacking voice entries".
+
+**Do the two verdicts agree?** On direction, yes, and on the specific characters exactly: the deterministic
+report says "revise (minor) — 2 finding(s) to correct; none of them blocks acceptance", and its two MEDIUM
+findings name ジョージョエン・スカイウォーカー and 山田 — the same two the grader named independently. The grader
+found one thing the audit cannot see: the drafting artifact. That is a defect in a *published* file that copy-forward
+will carry into volume 02, and no query in the store asks the question that would catch it. Closing that gap is a
+shape check over the artifact's bullets, not a store query, and it is not built.
+
+**What 81 buys.** `ACCEPTANCE_CONFIRM_ON_PASSING` is on: a first grade that already passes with the window short
+of `ACCEPTANCE_MIN_SAMPLES` (2) is completed by **re-grading the same artifact** — `max(2 − 1, ACCEPTANCE_CONFIRMATION_CHECKS)`
+= 2 more grades — instead of running the feedback round. So a rebuilt reference in this band is accepted for three
+grades (~145k tokens) and **zero feedback passes**. That is the whole economic argument for the rebuild path.
+
+**The worst case, with today's settings (`QA_MAX_ITERATIONS=5`, `ON_QA_LIMIT=accept`), volume 02 chunked (7 segments), flags on.**
+Per-call costs measured from volume 01's real chunked run (`166,711,658` prompt tokens, 37 calls, 12.7 h):
+
+| family | calls | tokens measured on volume 01 | volume 02, flags on |
+|---|---|---|---|
+| extract | 10 → 7 | 760,550 (76k avg) | ≈ 0.6M |
+| compile (author) | 10 → 7 | 50,062,758 (5.0M avg) | ≈ 38.5M |
+| validators + merge | 12 → **0** | 62,541,546 (5.2M avg) | **0** — replaced by the store's queries |
+| acceptance | 1 per iteration | 290,812 | ≈ 48k (measured above) |
+| feedback | 4 recorded (5 started) | 53,055,992 (**13.3M avg, 17.7M worst**) | 7 × 13–18M ≈ **93–124M per iteration** |
+
+- **Best case (grade ~81, confirmed, no feedback): ≈ 39M tokens, ~3.5–4 h.** 4.3× cheaper than volume 01's 166.7M.
+- **One feedback round then acceptance: ≈ 132M, ~5 h.**
+- **Two feedback rounds: ≈ 225M, ~9 h** — already worse than the run we are trying to beat.
+- **Five iterations, every one with a feedback round: ≈ 504M tokens, ~38 h** (≈ 659M / ~50 h at the worst observed feedback cost).
+
+So the unbounded worst case is **3–4× worse than 171,843,556 tokens / 12.7 h**, and the crossover is the **second
+feedback round**: the first one is affordable, the second is where a volume 02 run stops being cheaper than the
+volume 01 run. The store removed the 62.5M validation family; it did not touch the 13M-per-chapter repair pass, and
+the repair pass is what an unbounded loop buys five of.
+
+Also measured from the real log, and it changes how much weight to put on more iterations: **3 of volume 01's 4
+completed feedback agents hit their step cap without a final answer**, spending their budget on `grep` calls trying
+to locate their own text inside the 55k-character reference. Paying for a third and fourth round of a pass that
+does not finish is spend, not quality — which is the argument for slice 9 (repair as query-and-propose) and the
+argument for bounding the loop in the meantime.
 
 ---
 

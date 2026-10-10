@@ -238,6 +238,7 @@ function openReferenceStore({ volume, folder, seriesDir, stage = "merge", create
   ctx.listCast = (vol) => cast.listCast(ctx, vol);
   ctx.upsertCast = (entry) => cast.upsertCast(ctx, entry);
   ctx.castAlias = (key, alias, reason) => cast.castAlias(ctx, key, alias, reason);
+  ctx.mergeInheritedCastEntry = (opts) => cast.mergeInheritedCastEntry(ctx, opts);
   ctx.castMerges = () => cast.castMerges(ctx);
   ctx.factCharacters = (id) => cast.factCharacters(ctx, id);
 

@@ -126,11 +126,15 @@ function impossibleProvenance(ctx) {
  * @returns {Array<{keys: string[], problem: string}>}
  */
 function splitCharacters(ctx) {
-  const rows = ctx.db.prepare("SELECT key, display, aliases FROM cast ORDER BY key").all();
+  const rows = ctx.db.prepare("SELECT key, display, aliases, merged_into AS mergedInto FROM cast ORDER BY key").all();
   const out = [];
+  // A merged entry is not a character of its own: it is a marked trail saying these two names are one
+  // person. Judging it as a second entry would report every merge this store has ever made as the defect
+  // the merge was performed to fix.
+  const live = rows.filter((row) => !row.mergedInto);
 
   const byDisplay = new Map();
-  for (const row of rows) {
+  for (const row of live) {
     const display = String(row.display || "").trim().toLowerCase();
     if (!display) continue;
     if (!byDisplay.has(display)) byDisplay.set(display, []);
@@ -142,7 +146,7 @@ function splitCharacters(ctx) {
     }
   }
 
-  for (const row of rows) {
+  for (const row of live) {
     let aliases = [];
     try {
       aliases = JSON.parse(row.aliases || "[]");
@@ -151,15 +155,17 @@ function splitCharacters(ctx) {
     }
     for (const alias of aliases) {
       if (alias === row.key) continue;
-      const other = ctx.db.prepare("SELECT key FROM cast WHERE key = ?").get(alias);
-      if (other) {
-        out.push({
-          keys: [row.key, alias],
-          problem:
-            `"${alias}" is listed as an alias of "${row.key}" and is ALSO its own cast entry — ` +
-            "the identity was never merged (cast_alias is the verb that merges it).",
-        });
-      }
+      const other = ctx.db.prepare("SELECT key, merged_into AS mergedInto FROM cast WHERE key = ?").get(alias);
+      if (!other) continue;
+      // The alias being its own entry is the defect only while it is an entry in its own right. Once it
+      // is marked as merged into this one, that IS the merged state this check asks for.
+      if (other.mergedInto === row.key) continue;
+      out.push({
+        keys: [row.key, alias],
+        problem:
+          `"${alias}" is listed as an alias of "${row.key}" and is ALSO its own cast entry — ` +
+          "the identity was never merged (cast_alias is the verb that merges it).",
+      });
     }
   }
   return out;
@@ -315,8 +321,13 @@ function coverageChapterTotal(ctx, upTo) {
  * pun about a fictional film actor are not damage, and calling them damage is how a check gets
  * ignored.
  *
- * Merged cast entries do not count: their facts were re-pointed to the entry they joined, so the
- * character is covered under the surviving key.
+ * Merged cast entries do not count as characters of their own: their facts were re-pointed to the entry
+ * they joined, so the character is covered under the surviving key, and asking about both halves of one
+ * person is how a check reports the same character twice. But the *question* is asked about the person,
+ * not the spelling: an entry merged into this one is part of this character's presence, both for "are
+ * they in this volume at all" and for the chapter count below. A protagonist referred to by a pronoun
+ * that the record has folded into his own entry is in every chapter of the book, and a rule that only
+ * looked at his surname would report him as barely present.
  *
  * The question is only asked once this volume's record holds a mirror of its character-voice
  * document (`document-prose.js`'s marker). A glossary stage that has registered the roster but not
@@ -335,7 +346,7 @@ function coverageChapterTotal(ctx, upTo) {
  *
  * @param {{db: Object}} ctx
  * @param {number} upTo - The store's own volume.
- * @returns {Array<{key: string, display: string, measured: boolean, chapters: number, chapterIds: string[], lines: number, rules: string[], extractionClaims: number, severity: "HIGH"|"MEDIUM", why: string}>}
+ * @returns {Array<{key: string, display: string, measured: boolean, chapters: number, chapterIds: string[], identityKeys: string[], presenceNames: Array<{name: string, chapters: number, matches: number}>, lines: number, rules: string[], extractionClaims: number, severity: "HIGH"|"MEDIUM", why: string}>}
  */
 function uncoveredCharacters(ctx, upTo) {
   const limit = Number(upTo);
@@ -344,8 +355,12 @@ function uncoveredCharacters(ctx, upTo) {
   // nothing to ask about. That case is caught by the sealing check, not here.
   if (!documentMirrored(ctx, DOCUMENT_VOICE, limit)) return [];
   const measured = presenceMeasured(ctx, limit);
+  // Presence is asked at the level of the *person*, not the spelling. A character whose own key the
+  // book never prints, but whose merged-in name it prints constantly, is in the volume; excluding them
+  // because the survivor's own row says "not found" is exactly the way this check switches itself off
+  // on a first-person book.
   const presenceClause = measured
-    ? "AND EXISTS (SELECT 1 FROM cast_presence p WHERE p.volume = ? AND p.key = c.key AND p.present = 1) "
+    ? "AND EXISTS (SELECT 1 FROM cast_presence p WHERE p.volume = ? AND (p.key = c.key OR p.key IN (SELECT key FROM cast WHERE merged_into = c.key)) AND p.present = 1) "
     : "";
   const params = measured ? [limit, limit] : [limit];
   const rows = ctx.db
@@ -367,6 +382,7 @@ function uncoveredCharacters(ctx, upTo) {
   const extractionRow = ctx.db.prepare(
     "SELECT COUNT(*) AS n FROM facts WHERE key = ? AND aspect != 'term_usage' AND source_stage = ? AND status <> 'retracted'"
   );
+  const mergedIntoRow = ctx.db.prepare("SELECT key FROM cast WHERE merged_into = ? ORDER BY key");
 
   return rows.map((row) => {
     if (!measured) {
@@ -383,18 +399,42 @@ function uncoveredCharacters(ctx, upTo) {
         why: "presence has not been measured for this volume, so the stricter rule applies",
       };
     }
-    const presence = presenceRow.get(limit, row.key) || { chapters: 0, matches: 0 };
+    // The significance question is about the person, so it is answered over every name that person is
+    // filed under: the survivor's own key and every entry merged into it. Volume 01 is the case this
+    // exists for — 如月雨露's own name is printed 4 times in 10 chapters, while the entry that was his
+    // phantom twin, 俺, is printed 789 times across all 10. Counting only the survivor's row would have
+    // made the protagonist look like a bit part on the strength of a merge; counting only the pronoun
+    // would have made the chapter line measure the narration. So the *count* is the union, and the
+    // *evidence* stays attributed to the name that produced it, which is what the report prints.
+    const identityKeys = [row.key, ...mergedIntoRow.all(row.key).map((r) => r.key)];
+    const presenceNames = identityKeys
+      .map((key) => {
+        const row2 = presenceRow.get(limit, key) || { chapters: 0, matches: 0 };
+        return { name: key, chapters: Number(row2.chapters || 0), matches: Number(row2.matches || 0) };
+      })
+      .filter((entry) => entry.matches > 0);
     const extractionClaims = Number(extractionRow.get(row.key, EXTRACTION_SOURCE_STAGE).n);
-    const chapterIds = chaptersRow.all(limit, row.key).map((r) => r.chapter);
-    const rules = rulesRow.all(limit, row.key).map((r) => r.matched);
-    const inChapters = Number(presence.chapters || 0);
+    const chapterIds = [...new Set(identityKeys.flatMap((key) => chaptersRow.all(limit, key).map((r) => r.chapter)))];
+    const rules = [...new Set(identityKeys.flatMap((key) => rulesRow.all(limit, key).map((r) => r.matched)))];
+    const inChapters = chapterIds.length;
+    const lines = identityKeys.reduce((sum, key) => sum + Number((presenceRow.get(limit, key) || { matches: 0 }).matches), 0);
     const significantByChapters = inChapters >= COVERAGE_SIGNIFICANCE_CHAPTERS;
     const significantByExtraction = extractionClaims > 0;
+
+    /**
+     * Which spellings produced the chapter count, spelled out whenever there is more than one. A number
+     * in a query is not auditable; "10 of 10 chapters — 4 through 如月雨露, 10 through 俺" is, and it is
+     * the line that tells a reader whether the character is in the book or the book is in the character.
+     */
+    const nameBreakdown =
+      presenceNames.length > 1
+        ? ` (${presenceNames.map((entry) => `${entry.chapters} through ${entry.name}`).join(", ")})`
+        : "";
 
     /** @type {string[]} The signals that hold, in the order the rule states them. */
     const holds = [];
     if (significantByExtraction) holds.push(`the extraction filed ${extractionClaims} claim(s) about them and the reference took none`);
-    if (significantByChapters) holds.push(`their name occurs in ${inChapters} of this volume's ${totalLabel} chapters`);
+    if (significantByChapters) holds.push(`their name occurs in ${inChapters} of this volume's ${totalLabel} chapters${nameBreakdown}`);
     /** @type {string[]} The signals that do not, which is what a softened finding has to name. */
     const missing = [];
     if (!significantByExtraction) missing.push("the extraction found nothing about them");
@@ -406,7 +446,9 @@ function uncoveredCharacters(ctx, upTo) {
       measured: true,
       chapters: inChapters,
       chapterIds,
-      lines: Number(presence.matches || 0),
+      identityKeys,
+      presenceNames,
+      lines,
       rules,
       extractionClaims,
       severity: holds.length > 0 ? "HIGH" : "MEDIUM",

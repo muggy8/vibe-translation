@@ -272,6 +272,10 @@ function rebuildProvenance(store, { volume, document = DOCUMENT_VOICE } = {}) {
  *   How many glossary rows this volume's own record holds, and whether they arrived through the
  *   completeness rule instead of the glossary stage. Printed even when the answer is zero: the hole this
  *   rule exists to close was silent, and a report that does not print the number is the same silence.
+ * @param {{conflicts: number, merged: Array<{merged: string, survivor: string, heading: string, movedFacts: number}>, ambiguous: Array<{merged: string, heading: string, names: string[]}>, refused: Array<{merged: string, survivor: string, because: string}>} | null} [report.roster]
+ *   What the roster rule found when this volume's record was opened: entries whose own heading names
+ *   another entry on the roster. Printed even when the answer is "none", because a merge that moves a
+ *   character's claims is exactly the kind of change a reader of the record should be able to see.
  * @returns {string} Markdown, ending in a newline.
  */
 function renderAuditReport({
@@ -291,6 +295,7 @@ function renderAuditReport({
   coverage = null,
   sealed = null,
   glossary = null,
+  roster = null,
 }) {
   const out = [
     `# ${title} — deterministic audit (volume ${volume})`,
@@ -379,6 +384,28 @@ function renderAuditReport({
       glossaryAnswer = `**${glossary.rows}** — this volume's glossary stage read them in`;
     }
     out.push(`| glossary rows this volume's record holds | ${glossaryAnswer} |`);
+  }
+  if (roster) {
+    let rosterAnswer;
+    if (roster.merged.length) {
+      rosterAnswer =
+        `**${roster.merged.length} folded** — ` +
+        roster.merged
+          .map((m) => `${m.merged} → ${m.survivor} (${m.movedFacts} claim(s) moved; its heading is "${m.heading}")`)
+          .join("; ");
+    } else if (roster.ambiguous.length || roster.refused.length) {
+      const parts = [];
+      if (roster.ambiguous.length) {
+        parts.push(
+          roster.ambiguous.map((a) => `${a.merged} names ${a.names.join(" and ")} — reported, not merged`).join("; ")
+        );
+      }
+      if (roster.refused.length) parts.push(roster.refused.map((r) => `${r.merged} → ${r.survivor}: ${r.because}`).join("; "));
+      rosterAnswer = `**${roster.conflicts} conflict(s), none merged** — ${parts.join("; ")}`;
+    } else {
+      rosterAnswer = "none — no entry's own heading names another entry on the roster";
+    }
+    out.push(`| roster entries that are the same person | ${rosterAnswer} |`);
   }
   out.push(`| evidence re-checked against the source text | ${checked === undefined ? "—" : checked} |`);
   out.push(

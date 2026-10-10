@@ -41,6 +41,7 @@ const {
   sealVolumeRecord,
   buildGradeSample,
   glossaryNewestSections,
+  rosterReconciliationLog,
 } = require("../utils/reference-store");
 
 /** The artifact this stage publishes, for the audit report's headings. */
@@ -74,6 +75,7 @@ function openGlossaryRecord(ctx, previousVolume) {
           `already held from earlier volumes, ${backfill.refused.length} refused for want of a line this volume's text prints).`
       );
     }
+    for (const line of rosterReconciliationLog(ctx.values.INSTALLMENT_NUMBER, opened.roster)) console.log(line);
     return { ok: true, opened, error: null };
   }
   const detail = opened.findings.map((f) => `${f.severity} ${f.kind}: ${f.message}`).join("\n  ");
