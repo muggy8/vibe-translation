@@ -38,6 +38,7 @@
  */
 
 const fs = require("fs");
+const path = require("path");
 
 const { openReferenceStore } = require("./open");
 const { referenceStorePath } = require("./paths");
@@ -46,6 +47,7 @@ const { DOCUMENT_SOURCE_STAGE } = require("./schema");
 const { importGlossary } = require("./glossary-adapter");
 const { importVoice } = require("./voice-adapter");
 const { importVoiceExtraction, importNewTerms } = require("./extraction-adapter");
+const { markGlossaryBackfilled, glossaryBackfilled } = require("./document-prose");
 const {
   VALIDATION_STEP,
   artifactShapeFindings,
@@ -73,6 +75,121 @@ function volumeRecordExists({ volume, folder, seriesDir }) {
 }
 
 /**
+ * How many glossary rows this volume's own record holds.
+ *
+ * `aspect = 'term_usage'` is the store's existing way to say "this row is glossary content" — it is the
+ * same clause `resetDocumentMirror` uses to tell the two documents in one record apart.
+ *
+ * @param {{db: Object}} ctx
+ * @param {number|string} volume
+ * @returns {number}
+ */
+function glossaryRowsInRecord(ctx, volume) {
+  return ctx.db
+    .prepare("SELECT COUNT(*) AS n FROM facts WHERE owner_volume = ? AND aspect = 'term_usage'")
+    .get(Number(volume)).n;
+}
+
+/**
+ * What this volume's record holds of the glossary, and how it got there.
+ *
+ * The audit prints this so that a volume which contributed nothing is a number on the page rather
+ * than an absence somebody has to notice by reading the absence.
+ *
+ * @param {{db: Object}} ctx
+ * @param {number|string} volume
+ * @returns {{rows: number, backfill: Object|null}}
+ */
+function glossaryContribution(ctx, volume) {
+  return { rows: glossaryRowsInRecord(ctx, volume), backfill: glossaryBackfilled(ctx, volume) };
+}
+
+/**
+ * The completeness rule: a volume's published glossary has to be in that volume's record.
+ *
+ * Why this is a rule on the record and not a stage behaviour. The glossary stage finished for all 17
+ * volumes in a run that predates the store, and its idempotence check skips a volume whose accepted
+ * `glossary.md` is already on disk — a check that runs **before** the stage's store block. So with the
+ * flags switched on mid-series, volumes 02–17 skip the stage, never reach the import, and the record
+ * stays frozen at volume 1's 86 rows for the whole series: the roster the coverage guard asks about
+ * would be volume 1's cast plus whatever the voice extraction happens to introduce, and every later
+ * volume inherits that hole. A rule that only fires when somebody remembers to add the stage to a
+ * command line is the same hole with better documentation.
+ *
+ * So the rule is asked where every stage already goes — when the record is opened for writing — and it
+ * fires whether the stage ran, skipped, or was never invoked.
+ *
+ * Three things it will not do:
+ *   - **It never overwrites.** If the record already holds glossary rows of its own it reports them and
+ *     touches nothing (gotcha 97: carrying into a record does not erase it).
+ *   - **The evidence rule still applies at the door.** `importGlossary` refuses a term whose rendering
+ *     cites no line of this volume's text, and every refusal comes back named, because a glossary the
+ *     record cannot vouch for is information rather than an error to swallow.
+ *   - **It is not a substitute for the stage.** It imports the published document; it does not build one
+ *     and it does not claim the document was authored in this run. `markGlossaryBackfilled` records that
+ *     it happened here and the audit report prints it.
+ *
+ * @param {ReferenceStore} store - Opened with a document-scoped handle, which is what `import` rows need.
+ * @param {{volume?: number|string}} [opts]
+ * @returns {{ran: boolean, held: number, imported: number, carried: number, refused: Array<Object>, castRegistered: number, artifact: string|null, because: string}}
+ */
+function ensureVolumeGlossaryInRecord(store, { volume } = {}) {
+  const vol = Number(volume === undefined ? store.volume : volume);
+  const held = glossaryRowsInRecord(store, vol);
+  if (held > 0) {
+    return {
+      ran: false,
+      held,
+      imported: 0,
+      carried: 0,
+      refused: [],
+      castRegistered: 0,
+      artifact: null,
+      because: `this volume's record already holds ${held} glossary row(s), so nothing was imported`,
+    };
+  }
+
+  const artifact = path.join(store.volumeDir, "glossary.md");
+  let markdown = null;
+  try {
+    markdown = fs.readFileSync(artifact, "utf8");
+  } catch {
+    markdown = null;
+  }
+  if (markdown === null) {
+    return {
+      ran: false,
+      held: 0,
+      imported: 0,
+      carried: 0,
+      refused: [],
+      castRegistered: 0,
+      artifact: null,
+      because: `this volume has no published glossary.md to import, and its record holds none`,
+    };
+  }
+
+  const result = importGlossary(store, markdown);
+  markGlossaryBackfilled(store, vol, {
+    imported: result.imported.length,
+    carried: result.carried.length,
+    refused: result.refused.length,
+    artifact: path.basename(artifact),
+  });
+
+  return {
+    ran: true,
+    held,
+    imported: result.imported.length,
+    carried: result.carried.length,
+    refused: result.refused,
+    castRegistered: result.castRegistered,
+    artifact,
+    because: `this volume's record held no glossary rows, so its published glossary.md was read into it (${result.imported.length} row(s))`,
+  };
+}
+
+/**
  * Open this volume's reference record, carrying the previous volume's published record in first
  * when this volume does not have one yet.
  *
@@ -92,7 +209,7 @@ function volumeRecordExists({ volume, folder, seriesDir }) {
  * @param {Array<{id: string, file: string, chars?: number}>} [opts.bundleSegments] - The volume's
  *   source segments as the stage resolved them (`utils/source.js`'s bundle). Passed because a
  *   plain-text volume has no bundle file on disk for `listVolumeChapters` to find.
- * @returns {{ok: boolean, store: ReferenceStore|null, carried: Object|null, toppedUp: Object|null, refusal: ReferenceRefusal|null, findings: PostMortemFinding[]}}
+ * @returns {{ok: boolean, store: ReferenceStore|null, carried: Object|null, toppedUp: Object|null, glossaryBackfill: Object|null, refusal: ReferenceRefusal|null, findings: PostMortemFinding[]}}
  */
 function openVolumeRecord({ volume, folder, seriesDir, previousVolume = null, previousFolder = null, stage = DOCUMENT_SOURCE_STAGE, bundleSegments = null }) {
   let carried = null;
@@ -150,7 +267,14 @@ function openVolumeRecord({ volume, folder, seriesDir, previousVolume = null, pr
     };
   }
 
-  return { ok: true, store, carried, toppedUp, refusal: null, findings: [] };
+  /**
+   * The completeness rule, asked here because this is the one place every stage that writes to a
+   * volume's record has to come through. A volume with a published glossary and no glossary rows in its
+   * record is an incomplete record, and the stage that would have noticed is the one that skipped.
+   */
+  const glossaryBackfill = ensureVolumeGlossaryInRecord(store, { volume: store.volume });
+
+  return { ok: true, store, carried, toppedUp, glossaryBackfill, refusal: null, findings: [] };
 }
 
 /**
@@ -243,6 +367,45 @@ function resetDocumentMirror(store, { document = "voice" } = {}) {
 }
 
 /**
+ * Render the report for an audit that has already been computed.
+ *
+ * Split out because the rebuild has to render its report **after** it seals, and it cannot seal
+ * before it has published the reference and published only after the audit said whether the reference
+ * is damaged. Re-running the audit to add one line to the report would re-check every citation in the
+ * volume a second time, which on volume 01 is 514 source reads for a sentence.
+ *
+ * @param {Object} audit - What `auditVolumeRecord` returned.
+ * @param {Object} opts
+ * @param {string} opts.title
+ * @param {string} opts.file
+ * @param {number|string} opts.volume
+ * @param {Array<Object>} [opts.refused]
+ * @param {Object|null} [opts.sealed] - The sealing answer, for `renderAuditReport`.
+ * @param {string} [opts.document] - Which document's rebuild provenance to show.
+ * @returns {string}
+ */
+function renderVolumeAuditReport(audit, { title, file, volume, refused = [], sealed = null, document = "character-voice" }) {
+  return renderAuditReport({
+    title,
+    file,
+    volume,
+    findings: audit.findings,
+    counts: audit.counts,
+    checked: audit.checked,
+    coverageAsked: audit.coverageAsked,
+    coverage: audit.coverage,
+    unadopted: audit.unadopted,
+    unadoptedTerms: audit.unadoptedTerms,
+    absent: audit.absent,
+    presence: audit.presence,
+    glossary: audit.glossary || null,
+    refused,
+    rebuilt: (audit.rebuilt || []).find((entry) => entry.document === document && entry.volume === Number(volume)) || null,
+    sealed,
+  });
+}
+
+/**
  * Run the whole deterministic audit of one volume and render the report its validator used to write.
  *
  * @param {ReferenceStore} store
@@ -265,11 +428,9 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
   const unadopted = unadoptedVoiceClaims(store);
   const terms = unadoptedTerms(store);
   const absent = absentCharacters(store);
+  const glossary = glossaryContribution(store, store.volume);
 
-  const report = renderAuditReport({
-    title,
-    file,
-    volume: store.volume,
+  const computed = {
     findings,
     counts: audit.counts,
     checked: audit.checked,
@@ -279,9 +440,11 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
     unadoptedTerms: terms,
     absent,
     presence,
-    refused,
-    rebuilt: (audit.rebuilt || []).find((entry) => entry.document === "character-voice" && entry.volume === store.volume) || null,
-  });
+    glossary,
+    rebuilt: audit.rebuilt || [],
+  };
+
+  const report = renderVolumeAuditReport(computed, { title, file, volume: store.volume, refused });
 
   return {
     findings,
@@ -295,6 +458,7 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
     unadopted,
     unadoptedTerms: terms,
     absent,
+    glossary,
     rebuilt: audit.rebuilt || [],
   };
 }
@@ -313,10 +477,14 @@ function sealVolumeRecord(store) {
 module.exports = {
   volumeRecordExists,
   openVolumeRecord,
+  glossaryRowsInRecord,
+  glossaryContribution,
+  ensureVolumeGlossaryInRecord,
   importVolumeExtraction,
   importVolumeArtifacts,
   resetDocumentMirror,
   measureVolumePresence,
   auditVolumeRecord,
+  renderVolumeAuditReport,
   sealVolumeRecord,
 };

@@ -75,7 +75,7 @@ const {
   markDocumentMirrored,
   markDocumentRebuilt,
 } = require("./document-prose");
-const { auditVolumeRecord, resetDocumentMirror, volumeRecordExists } = require("./pipeline-store");
+const { auditVolumeRecord, renderVolumeAuditReport, resetDocumentMirror, volumeRecordExists } = require("./pipeline-store");
 const { refusal } = require("./refusals");
 require("../../types"); // JSDoc type definitions
 
@@ -273,7 +273,7 @@ function inspectVoiceMirrorForRebuild(store, vol) {
  *   on the **same volume's record opened with the extract stage**: the write scope is what decides
  *   which kind of row a handle may write, so the rebuild's own handle cannot file candidates and does
  *   not try to.
- * @returns {{ok: boolean, filed: Array<Object>, filedCount: number, carried: Array<Object>, refused: Array<Object>, characters: number, povAttached: number, povUnattached: number, resolved: Array<{name: string, key: string, how: string}>, unresolved: Array<{name: string, key: string}>, candidates: {filed: number, carried: number, refused: Array<Object>}, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, filed: Array<Object>, filedCount: number, carried: Array<Object>, refused: Array<Object>, characters: number, adoptedClaims: number, adoptedCharacters: number, adoptedUnkeyed: number, candidateClaims: number, povAttached: number, povUnattached: number, resolved: Array<{name: string, key: string, how: string}>, unresolved: Array<{name: string, key: string}>, candidates: {filed: number, carried: number, refused: Array<Object>}, refusal: ReferenceRefusal|null}}
  */
 function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved = 0, candidateStore = null } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -614,11 +614,39 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
   unresolved.sort((a, b) => a.name.localeCompare(b.name, "ja"));
 
   markDocumentMirrored(store, DOCUMENT_VOICE, vol);
+
+  /**
+   * What the record holds when this run is finished, as opposed to what this run added.
+   *
+   * The two are not the same number, and the report has to say the first. A rebuild that runs a second
+   * time over its own output files nothing (every claim is already there) and would otherwise report
+   * "0 claim(s) adopted, 0 character(s) with at least one claim" about a record holding 214 claims across
+   * 8 characters — a report that describes the run instead of the reference is a report nobody can act
+   * on, and this is the report a human reads before deciding whether the volume is fit to build on.
+   */
+  const adopted = store.db
+    .prepare(
+      "SELECT SUM(CASE WHEN key IS NOT NULL THEN 1 ELSE 0 END) AS claims, " +
+        "COUNT(DISTINCT key) AS characters, " +
+        "SUM(CASE WHEN key IS NULL THEN 1 ELSE 0 END) AS unkeyed " +
+        "FROM facts WHERE owner_volume = ? AND source_stage = ?"
+    )
+    .get(vol, REBUILD_SOURCE_STAGE);
+
+  /** How many candidate copies this record now holds for this volume — again the record's number, not this run's. */
+  const candidateRows = store.db
+    .prepare("SELECT COUNT(*) AS n FROM facts WHERE owner_volume = ? AND source_stage = ?")
+    .get(vol, EXTRACTION_SOURCE_STAGE).n;
+
   markDocumentRebuilt(store, DOCUMENT_VOICE, vol, {
     filed: filed.length,
     carried: carried.length,
     refused: refused.length,
     characters: new Set(filed.map((fact) => fact.key).filter(Boolean)).size,
+    adoptedClaims: adopted.claims,
+    adoptedCharacters: adopted.characters,
+    adoptedUnkeyed: adopted.unkeyed,
+    candidateClaims: candidateRows,
     povUnattached,
     mirrorRowsRemoved,
     candidatesFiled: candidates.filed,
@@ -632,6 +660,10 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
     carried,
     refused,
     characters: new Set(filed.map((fact) => fact.key).filter(Boolean)).size,
+    adoptedClaims: adopted.claims,
+    adoptedCharacters: adopted.characters,
+    adoptedUnkeyed: adopted.unkeyed,
+    candidateClaims: candidateRows,
     povAttached,
     povUnattached,
     resolved,
@@ -839,14 +871,127 @@ function planHasEarlierVolumes(seriesDir, vol) {
 }
 
 /**
+ * Publish the rebuilt reference into the volume's own folder **and seal the record that describes it**.
+ *
+ * These are one act and not two, and that is the whole point of this function. A volume's record is
+ * sealed when the artifact it describes is the artifact the volume actually publishes; sealing anything
+ * else publishes a record that does not describe the book. So the seal is not a flag a caller may set
+ * and not a step a caller may skip: it happens here, after the file is on disk, or it does not happen.
+ * A rehearsal writes a scratch copy somewhere else and never reaches this function, which is why a
+ * rehearsal cannot seal — not because the command forgot to ask, but because nothing was published.
+ *
+ * Three things have to be true before the seal runs, and each one is checked rather than trusted:
+ *
+ *   1. the artifact is written — and an existing artifact is only replaced when `moveAside` says so;
+ *   2. the file **on disk** is byte-for-byte what the record renders, read back rather than assumed,
+ *      because a record that is sealed against a file it does not match is worse than a draft;
+ *   3. the audit found no HIGH damage, because sealing is what lets the next volume build on this one
+ *      and a damaged record must not become immutable just because a rebuild finished.
+ *
+ * @param {ReferenceStore} store - Opened with `stage: REBUILD_SOURCE_STAGE`.
+ * @param {string} volumeDir - The volume folder the published artifact belongs to.
+ * @param {{markdown: string, opening?: string[]}} rendered
+ * @param {{highFindings?: Array<Object>}} audit - What the audit said about this reference.
+ * @param {{file?: string, moveAside?: boolean}} [opts]
+ * @returns {{ok: boolean, written: string|null, moved: string|null, sealed: Object|null, refusal: ReferenceRefusal|null}}
+ */
+function publishRebuiltVolume(store, volumeDir, rendered, audit, { file = "character-voice.md", moveAside = false } = {}) {
+  const written = writeRebuiltVoiceFile(store, volumeDir, rendered, { file, moveAside });
+  if (!written.ok) return { ok: false, written: null, moved: null, unchanged: false, sealed: null, refusal: written.refusal };
+
+  const target = written.written;
+  /** @type {string|null} */
+  let onDisk = null;
+  try {
+    onDisk = fs.readFileSync(target, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      written: target,
+      moved: written.moved,
+      unchanged: written.unchanged,
+      sealed: null,
+      refusal: refusal({
+        verb: "publish_rebuilt_voice",
+        rule: "published-artifact-cannot-be-read",
+        because: `${target} was written and cannot be read back: ${err.message}. A record is not sealed against a file nobody can open.`,
+        useInstead: ["fix the folder or the file name, then rebuild again"],
+        fix: "check the volume folder's permissions; the record and the rows are already in place.",
+      }),
+    };
+  }
+
+  if (onDisk !== rendered.markdown) {
+    return {
+      ok: false,
+      written: target,
+      moved: written.moved,
+      unchanged: written.unchanged,
+      sealed: null,
+      refusal: refusal({
+        verb: "publish_rebuilt_voice",
+        rule: "published-artifact-is-not-what-the-record-renders",
+        because:
+          `${target} is ${onDisk.length} character(s) and the record renders ${rendered.markdown.length}. ` +
+          "Sealing this record would publish a reference that does not describe the file the volume has.",
+        useInstead: ["rebuild again so the file and the record come from the same render"],
+        fix: "re-run the rebuild; whatever wrote that file was not this record.",
+      }),
+    };
+  }
+
+  const high = (audit && audit.highFindings) || [];
+  if (high.length) {
+    return {
+      ok: false,
+      written: target,
+      moved: written.moved,
+      unchanged: written.unchanged,
+      sealed: null,
+      refusal: refusal({
+        verb: "publish_rebuilt_voice",
+        rule: "rebuild-will-not-seal-a-damaged-record",
+        because:
+          `the audit reports ${high.length} HIGH finding(s) against this reference ` +
+          `(${high.map((f) => f.kind).join(", ")}). The file is written, but the record stays a draft: ` +
+          "sealing is what lets the next volume build on this one, and a damaged record does not get to " +
+          "become immutable because the rebuild finished.",
+        useInstead: ["fix what the HIGH finding names and rebuild again", "challengeFact on a row that is wrong but published"],
+        fix: high.map((f) => `${f.kind}: ${f.message}`).join(" | "),
+      }),
+    };
+  }
+
+  const sealed = store.sealVolume(store.volume);
+  const marker = store.db.prepare("SELECT value FROM store_info WHERE key = ?").get(`sealed_volume_${store.volume}`);
+  return {
+    ok: true,
+    written: target,
+    moved: written.moved,
+    unchanged: written.unchanged,
+    sealed: {
+      state: "sealed",
+      at: (marker && marker.value) || "unknown",
+      rows: sealed.sealedRows,
+      snapshot: sealed.snapshot,
+      alreadySealed: sealed.alreadySealed,
+      because: "the rebuilt reference was published into this volume's own folder, so the record that describes it is sealed.",
+    },
+    refusal: null,
+  };
+}
+
+/**
  * Rebuild one volume's character-voice reference, end to end, and say what happened.
  *
  * The whole flow the command runs: clear this volume's mirror of the reference being replaced, apply
- * the declared aliases, file the extraction claims as rebuild rows, render the file, and audit the
- * result. It writes the record; whether it writes the **artifact** is the caller's decision, because
- * the artifact is the thing the next volume reads. It does not carry an earlier volume's record
- * forward — `rebuildRecordIsMissingItsEarlierVolumes` refuses rather than rendering a reference that
- * has silently forgotten the volumes before this one.
+ * the declared aliases, file the extraction claims as rebuild rows (and their candidate copies), render
+ * the file, audit the result, and — when the caller says this is the real volume folder — publish the
+ * artifact and seal the record. Whether the **artifact** is published is the caller's decision, because
+ * the artifact is the thing the next volume reads; the seal is not the caller's decision, because a
+ * published reference with a draft record is exactly the state that blocks the next volume. It does not
+ * carry an earlier volume's record forward — `rebuildRecordIsMissingItsEarlierVolumes` refuses rather
+ * than rendering a reference that has silently forgotten the volumes before this one.
  *
  * @param {Object} opts
  * @param {number|string} opts.volume
@@ -855,9 +1000,13 @@ function planHasEarlierVolumes(seriesDir, vol) {
  * @param {Array<Object>} opts.entries - Parsed `character-voice-new.json`.
  * @param {Array<{key: string, alias: string, reason: string}>} [opts.aliases]
  * @param {Array<{id: string, file: string, chars?: number}>|null} [opts.bundleSegments]
- * @returns {{ok: boolean, refusal: ReferenceRefusal|null, aliases: {applied: Array<Object>, refused: Array<Object>}, cleared: {deleted: number, refused: Array<Object>}, rebuild: Object|null, rendered: Object|null, audit: Object|null, store: ReferenceStore|null}}
+ * @param {boolean} [opts.apply] - Publish the artifact into this volume's own folder and seal the record.
+ *   Without it the caller has a rehearsal: the record is built, the file is a scratch copy, and nothing
+ *   is sealed.
+ * @param {boolean} [opts.moveAside] - With `apply`: move an existing artifact to `.rejected` first.
+ * @returns {{ok: boolean, refusal: ReferenceRefusal|null, aliases: {applied: Array<Object>, refused: Array<Object>}, cleared: {deleted: number, refused: Array<Object>}, rebuild: Object|null, rendered: Object|null, audit: Object|null, published: Object|null, store: ReferenceStore|null}}
  */
-function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], bundleSegments = null }) {
+function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], bundleSegments = null, apply = false, moveAside = false }) {
   const volNumber = Number(volume);
 
   /**
@@ -878,6 +1027,7 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
     rebuild: null,
     rendered: null,
     audit: null,
+    published: null,
     store: null,
   });
 
@@ -918,6 +1068,7 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
         rebuild: null,
         rendered: null,
         audit: null,
+        published: null,
         store: null,
       };
     }
@@ -943,18 +1094,60 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
       candidateHandle.close();
     }
     if (rebuild.refusal) {
-      return { ok: false, refusal: rebuild.refusal, aliases: aliasResult, cleared, rebuild, rendered: null, audit: null, store: null };
+      return { ok: false, refusal: rebuild.refusal, aliases: aliasResult, cleared, rebuild, rendered: null, audit: null, published: null, store: null };
     }
 
     const rendered = renderRebuiltVoice(opened, { volume });
-    const audit = auditVolumeRecord(opened, {
+    let audit = auditVolumeRecord(opened, {
       title: "Character-voice reference (rebuilt from extraction)",
       file: "character-voice.md",
       markdown: rendered.markdown,
       refused: rebuild.refused,
     });
 
-    return { ok: true, refusal: null, aliases: aliasResult, cleared, rebuild, rendered, audit, store: opened };
+    /**
+     * Publish, and only then seal — and only when the caller said this is the volume's real folder.
+     *
+     * A rehearsal built a record and a scratch file in a copy; nothing was published, so nothing is
+     * sealed, and the report says so in as many words. A published reference whose record is still a
+     * draft is the state that blocks the next volume, so the seal is not offered separately.
+     */
+    let published = null;
+    /** @type {{state: "sealed"|"not-sealed", at?: string, rows?: number, snapshot?: number, alreadySealed?: boolean, because: string}} */
+    let sealedAnswer = {
+      state: "not-sealed",
+      because:
+        "this run did not publish the reference into the volume's own folder, so the record stays a draft. " +
+        "A record is sealed when the reference it describes is the one the volume actually publishes.",
+    };
+    if (apply) {
+      published = publishRebuiltVolume(opened, path.join(seriesDir, folder), rendered, audit, { file: "character-voice.md", moveAside });
+      sealedAnswer = published.ok
+        ? published.sealed
+        : {
+            state: "not-sealed",
+            because: `the reference was written but the seal was refused: ${published.refusal.rule} — ${published.refusal.because}`,
+          };
+    }
+
+    // The report is re-rendered rather than re-audited: the audit already ran, and running it again to
+    // add one line would re-check every citation in the volume for the sake of that line.
+    audit = {
+      ...audit,
+      markdown: renderVolumeAuditReport(audit, {
+        title: "Character-voice reference (rebuilt from extraction)",
+        file: "character-voice.md",
+        volume: volNumber,
+        refused: rebuild.refused,
+        sealed: sealedAnswer,
+      }),
+    };
+
+    if (apply && !published.ok) {
+      return { ok: false, refusal: published.refusal, aliases: aliasResult, cleared, rebuild, rendered, audit, published, store: opened };
+    }
+
+    return { ok: true, refusal: null, aliases: aliasResult, cleared, rebuild, rendered, audit, published, store: opened };
   } finally {
     opened.close();
   }
@@ -978,19 +1171,37 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
  * @param {{markdown: string, preamble?: string[]}} rendered
  * @param {{file?: string, moveAside?: boolean}} [opts] - `moveAside` is the explicit permission to
  *   touch an existing artifact. Without it an existing file is a refusal, not an overwrite.
- * @returns {{ok: boolean, written: string|null, moved: string|null, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, written: string|null, moved: string|null, unchanged: boolean, refusal: ReferenceRefusal|null}}
  */
 function writeRebuiltVoiceFile(store, volumeDir, rendered, { file = "character-voice.md", moveAside = false } = {}) {
   const target = path.join(volumeDir, file);
-  if (fs.existsSync(target) && !moveAside) {
+
+  /**
+   * The one case where an existing file is not something being destroyed: the file on disk is already
+   * byte-for-byte what this record renders. Re-running a rebuild over its own output is the ordinary
+   * way that happens — a rebuild that published but did not seal, run again to seal — and refusing it
+   * because `character-voice.md.rejected` is already there would lock the volume out of its own seal.
+   * Nothing is lost by writing the same bytes, so nothing has to be moved aside.
+   */
+  let unchanged = false;
+  if (fs.existsSync(target)) {
+    try {
+      unchanged = fs.readFileSync(target, "utf8") === rendered.markdown;
+    } catch {
+      unchanged = false;
+    }
+  }
+
+  if (fs.existsSync(target) && !moveAside && !unchanged) {
     return {
       ok: false,
       written: null,
       moved: null,
+      unchanged: false,
       refusal: refusal({
         verb: "write_rebuilt_voice",
         rule: "rebuild-will-not-overwrite-an-artifact",
-        because: `${target} already exists. A rebuild replaces the reference it is rebuilding, and doing that silently is how volume 01's destroyed file would have been lost without a trace.`,
+        because: `${target} already exists and is not what this record renders. A rebuild replaces the reference it is rebuilding, and doing that silently is how volume 01's destroyed file would have been lost without a trace.`,
         useInstead: ["moveArtifactAside(volumeDir, file) — the damaged file is kept as `.rejected` evidence, then write"],
         fix: "say what to do with the existing file: move it aside deliberately, or rebuild into a different folder.",
       }),
@@ -998,9 +1209,9 @@ function writeRebuiltVoiceFile(store, volumeDir, rendered, { file = "character-v
   }
 
   let moved = null;
-  if (moveAside) {
+  if (moveAside && !unchanged) {
     const aside = moveArtifactAside(volumeDir, file);
-    if (!aside.ok) return { ok: false, written: null, moved: null, refusal: aside.refusal };
+    if (!aside.ok) return { ok: false, written: null, moved: null, unchanged: false, refusal: aside.refusal };
     moved = aside.moved;
   }
 
@@ -1010,7 +1221,7 @@ function writeRebuiltVoiceFile(store, volumeDir, rendered, { file = "character-v
   // `parseVoiceMarkdown` would have produced from this file, so the record and the artifact agree.
   storeDocumentProse(store, DOCUMENT_VOICE, [{ section: null, kind: "title", lines: rendered.opening }]);
 
-  return { ok: true, written: target, moved, refusal: null };
+  return { ok: true, written: target, moved, unchanged, refusal: null };
 }
 
 /**
@@ -1059,6 +1270,7 @@ module.exports = {
   rebuildVoiceFromExtraction,
   renderRebuiltVoice,
   writeRebuiltVoiceFile,
+  publishRebuiltVolume,
   rebuildVoiceVolume,
   rebuildRecordIsMissingItsEarlierVolumes,
   planHasEarlierVolumes,

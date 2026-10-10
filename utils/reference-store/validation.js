@@ -30,7 +30,7 @@
 const { finding } = require("../postmortem");
 const { envMaxLineLength } = require("../../ai/env");
 const { EXTRACTION_SOURCE_STAGE } = require("./schema");
-const { DOCUMENT_VOICE, documentRebuilt } = require("./document-prose");
+const { DOCUMENT_VOICE, documentRebuilt, rebuildProvenanceCounts } = require("./document-prose");
 const { normalizeQuote } = require("./evidence");
 require("../../types"); // JSDoc type definitions
 
@@ -263,6 +263,15 @@ function rebuildProvenance(store, { volume, document = DOCUMENT_VOICE } = {}) {
  *   The coverage question's whole answer, one row per uncovered character with both signals measured.
  *   This is what a softened guard has to pay for visibility: every character the audit downgraded is
  *   named here, with the signal that was missing.
+ * @param {{state: "sealed"|"not-sealed", at?: string, rows?: number, snapshot?: number, alreadySealed?: boolean, because: string}} [report.sealed]
+ *   Set when this audit is the one that decides whether the volume's record becomes immutable. The
+ *   rebuild publishes a reference and seals the record that describes it in the same act, so its report
+ *   has to say which happened; the pipeline's own audits leave this out because they run before the
+ *   stage seals, and "not yet" is not a finding there.
+ * @param {{rows: number, backfill: {at: string, imported: number, carried: number, refused: number, artifact: string}|null}} [report.glossary]
+ *   How many glossary rows this volume's own record holds, and whether they arrived through the
+ *   completeness rule instead of the glossary stage. Printed even when the answer is zero: the hole this
+ *   rule exists to close was silent, and a report that does not print the number is the same silence.
  * @returns {string} Markdown, ending in a newline.
  */
 function renderAuditReport({
@@ -280,6 +289,8 @@ function renderAuditReport({
   refused = [],
   rebuilt = null,
   coverage = null,
+  sealed = null,
+  glossary = null,
 }) {
   const out = [
     `# ${title} — deterministic audit (volume ${volume})`,
@@ -290,18 +301,21 @@ function renderAuditReport({
   ];
 
   if (rebuilt) {
+    const counts = rebuildProvenanceCounts(rebuilt);
     out.push("## How this reference was written");
     out.push("");
     out.push(
       `**This volume's character-voice reference was rebuilt by code from its own extraction output** ` +
-        `on ${rebuilt.at}: ${rebuilt.filed} claim(s) adopted, ${rebuilt.refused} refused, ` +
-        `${rebuilt.characters} character(s) with at least one claim.`
+        `on ${rebuilt.at}: ${counts.claims} claim(s) adopted about ${counts.characters} character(s), ` +
+        `${counts.refused} refused` +
+        (counts.unkeyed ? `, ${counts.unkeyed} claim(s) with no character to file them under` : "") +
+        "."
     );
     out.push("");
-    if (Number.isFinite(rebuilt.candidatesFiled)) {
+    if (counts.candidates !== null) {
       out.push(
-        `${rebuilt.candidatesFiled} of those claims are also filed a second time as extraction ` +
-          `candidates${rebuilt.candidatesRefused ? ` (${rebuilt.candidatesRefused} candidate copy could not be filed)` : ""}. ` +
+        `${counts.candidates} of those claims are also filed a second time as extraction ` +
+          `candidates${counts.candidatesRefused ? ` (${counts.candidatesRefused} candidate copy could not be filed)` : ""}. ` +
           "That is the record's second reading of the same book: what the extractor found, kept beside " +
           "what this reference says, so \"the reference lost something the extraction found\" stays a question " +
           "the store can answer about a rebuilt volume instead of one it has to take on trust."
@@ -352,6 +366,20 @@ function renderAuditReport({
   out.push(`| facts in the store | ${numberOr(counts, "facts")} |`);
   out.push(`| characters in the cast | ${numberOr(counts, "cast")} |`);
   out.push(`| chapters of this volume's text | ${numberOr(counts, "chapters")} |`);
+  if (glossary) {
+    let glossaryAnswer;
+    if (glossary.backfill) {
+      glossaryAnswer =
+        `**${glossary.rows}** — read from this volume's own \`${glossary.backfill.artifact}\` when its record was opened ` +
+        `(${glossary.backfill.imported} new row(s), ${glossary.backfill.carried} already in the record from earlier volumes, ` +
+        `${glossary.backfill.refused} refused at the evidence rule)`;
+    } else if (glossary.rows === 0) {
+      glossaryAnswer = "**0** — this volume's record holds no glossary rows, and it has no published glossary to import";
+    } else {
+      glossaryAnswer = `**${glossary.rows}** — this volume's glossary stage read them in`;
+    }
+    out.push(`| glossary rows this volume's record holds | ${glossaryAnswer} |`);
+  }
   out.push(`| evidence re-checked against the source text | ${checked === undefined ? "—" : checked} |`);
   out.push(
     `| does the reference cover every character in the volume | ${
@@ -367,7 +395,46 @@ function renderAuditReport({
         : "—"
     } |`
   );
+  if (sealed) {
+    out.push(
+      `| is this volume's record sealed (published, immutable) | ${
+        sealed.state === "sealed"
+          ? `**yes** — ${sealed.rows} row(s) owned by volume ${volume} stopped being editable at ${sealed.at}`
+          : `**no** — ${sealed.because}`
+      } |`
+    );
+  }
   out.push("");
+
+  if (sealed && sealed.state === "sealed") {
+    out.push("## This volume's record is sealed");
+    out.push("");
+    out.push(
+      `Sealed at ${sealed.at}${sealed.alreadySealed ? " (it was already sealed; sealing again changed nothing)" : ""}: ` +
+        `every row volume ${volume} owns in this store is now published — it can be contested or superseded, ` +
+        `never edited or deleted, and ${sealed.snapshot} fact(s) were frozen into the snapshot of what this ` +
+        "volume actually published. The next volume's copy-forward is now allowed to build on this record; " +
+        "before this, it refused."
+    );
+    out.push("");
+    out.push(
+      "Sealing is not a claim that anybody read this reference. It is the claim that this is what the volume " +
+        "published, and the record keeps the two apart: the provenance finding above says nobody reviewed it, " +
+        "and an author pass is what would change that."
+    );
+    out.push("");
+  }
+  if (sealed && sealed.state !== "sealed") {
+    out.push("## This volume's record is not sealed");
+    out.push("");
+    out.push(sealed.because);
+    out.push("");
+    out.push(
+      "A record that is not sealed is a draft: the next volume's copy-forward refuses it with " +
+        "`reference-volume-unsealed`, which is the check that keeps \"published\" meaning published."
+    );
+    out.push("");
+  }
 
   if (presence) {
     out.push(`## Who is in this volume's text`);

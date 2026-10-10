@@ -16,9 +16,16 @@
  * runs each stage over every volume before the next stage starts, so "the end of a volume's
  * pre-production" is not one moment — volume 05's glossary is built before volume 01's voice reference
  * exists. Sealing is therefore the end of each stage's work on that volume, and it is idempotent: the
- * marker says the record is published, and the second seal marks the rows the voice stage added. What
- * keeps a half-finished volume from being carried forward is not the absence of a seal but the voice
- * mirror marker (`openVolumeRecord`'s `requiresVoiceMirrorOf`) and the coverage question.
+ * marker says the record is published, and the second seal marks the rows the voice stage added.
+ *
+ * What that sentence used to claim — that a half-finished volume is stopped by a voice-mirror marker
+ * rather than by the seal, naming an `openVolumeRecord` option that does not exist — was wrong, and it
+ * was wrong in the direction that mattered: the seal IS the gate, `reference-volume-unsealed` is HIGH,
+ * and it is the check that stopped volume 02 from starting at all when volume 01's rebuild published a
+ * record and never sealed it (gotcha 102). The voice mirror marker (`documentMirrored`) does real work
+ * too, but a different work: it decides whether the **coverage question is asked at all** for this
+ * volume, so a volume whose voice stage never ran is caught by the sealing check and not by a coverage
+ * finding that would be a false positive.
  *
  * @module glossary/store
  */
@@ -58,7 +65,17 @@ function openGlossaryRecord(ctx, previousVolume) {
     previousFolder: ctx.previousFolderName || null,
     bundleSegments: ctx.bundle && ctx.bundle.segments ? ctx.bundle.segments : null,
   });
-  if (opened.ok) return { ok: true, opened, error: null };
+  if (opened.ok) {
+    const backfill = opened.glossaryBackfill;
+    if (backfill && backfill.ran) {
+      console.log(
+        `Volume ${ctx.values.INSTALLMENT_NUMBER}: the reference record held no glossary rows of its own, so it read this ` +
+          `volume's published ${GLOSSARY_ARTIFACT_NAME} into itself (${backfill.imported} new row(s), ${backfill.carried} ` +
+          `already held from earlier volumes, ${backfill.refused.length} refused for want of a line this volume's text prints).`
+      );
+    }
+    return { ok: true, opened, error: null };
+  }
   const detail = opened.findings.map((f) => `${f.severity} ${f.kind}: ${f.message}`).join("\n  ");
   return {
     ok: false,

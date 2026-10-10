@@ -37,6 +37,8 @@ const {
   openReferenceStore,
   openVolumeRecord,
   volumeRecordExists,
+  glossaryRowsInRecord,
+  ensureVolumeGlossaryInRecord,
   importVolumeExtraction,
   importVolumeArtifacts,
   resetDocumentMirror,
@@ -64,10 +66,10 @@ const {
   EXTRACTION_SOURCE_STAGE,
   DOCUMENT_SOURCE_STAGE,
 } = require("../utils/reference-store");
-const { documentMirrored, DOCUMENT_VOICE } = require("../utils/reference-store/document-prose");
+const { documentMirrored, documentRebuilt, glossaryBackfilled, DOCUMENT_VOICE } = require("../utils/reference-store/document-prose");
 const { STORE_VALIDATORS } = require("../configs/shared");
 const { envMaxLineLength } = require("../ai/env");
-const { fixtureStoreSeries, assertInsideFixture, GLOSSARY_01, VOICE_01, VOICE_01_MISSING_CHARACTERS, EXTRACTION_01 } = require("./fixture-reference-store");
+const { fixtureStoreSeries, assertInsideFixture, GLOSSARY_01, SOURCE_02, VOICE_01, VOICE_01_MISSING_CHARACTERS, EXTRACTION_01 } = require("./fixture-reference-store");
 const voiceStore = require("../character-voice/store");
 const glossaryStore = require("../glossary/store");
 
@@ -768,6 +770,192 @@ function scenarioTopUpBringsTheMissingHalf() {
   console.log("reference-store pipeline: a record copied from a volume that has since finished is topped up, not overwritten");
 }
 
+// ─── The completeness rule: a volume's published glossary is in that volume's record ────────────
+
+/**
+ * Volume 02's published glossary, written into the fixture the way the real one is on disk: a
+ * cumulative file that carries the earlier volume's rows and adds its own.
+ *
+ * Its four rows are chosen so all three answers the rule can give appear at once: a term the record
+ * already owns and this volume's text prints (carried), a term the record already owns that this
+ * volume's text does NOT print (carried without being re-proved), a term this volume introduces
+ * (imported), and a term no volume's text prints (refused).
+ */
+const GLOSSARY_02 = `# Glossary
+
+_Canonical renderings for the fixture series._
+
+## Characters
+
+| Japanese | English | Notes |
+|---|---|---|
+| 如月雨露 | Kisaragi Amatsuyu | Protagonist; the narrator |
+| 三色院菫子 | Sanshokuin Sumireko | Library committee |
+
+## Terms
+
+| Japanese | English | Notes |
+|---|---|---|
+| 駱駝 | The Camel | 駱駝はあとがきに書いた。 |
+| 存在しない用語 | Not In The Book | This term is never printed |
+`;
+
+/** The one-row glossary used to plant a row this volume already owns. */
+const GLOSSARY_02_PLANTED = `# Glossary
+
+## Terms
+
+| Japanese | English | Notes |
+|---|---|---|
+| 駱駝 | The Camel | planted by hand before the completeness rule ever ran |
+`;
+
+/**
+ * A volume's published glossary reaches that volume's record even though the glossary stage never
+ * ran on it. This is the shape the real series is in: the stage finished for all 17 volumes before
+ * the store existed, its idempotence check skips a volume whose accepted file is on disk, and the
+ * skip happens before the stage's store block — so a rule hung on the stage would never fire.
+ */
+function scenarioAPublishedGlossaryReachesItsOwnVolumesRecord() {
+  const fx = fixtureStoreSeries("pipeline-glossary-completeness");
+
+  const one = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage: DOCUMENT_SOURCE_STAGE });
+  importGlossary(one, GLOSSARY_01);
+  importVoice(one, VOICE_01);
+  one.sealVolume(1);
+  one.close();
+
+  // Volume 2's published glossary is on disk. No glossary stage is invoked anywhere in this scenario.
+  fs.writeFileSync(path.join(fx.dir, "Test Story(02)", "glossary.md"), GLOSSARY_02, "utf8");
+
+  const opened = openVolumeRecord({ volume: 2, folder: "Test Story(02)", seriesDir: fx.dir, previousVolume: 1, previousFolder: "Test Story(01)" });
+  assert.ok(opened.ok, opened.refusal && opened.refusal.because);
+  const two = opened.store;
+
+  const backfill = opened.glossaryBackfill;
+  assert.ok(backfill.ran, `the rule ran: ${backfill.because}`);
+  assert.strictEqual(backfill.held, 0, "the record held no glossary rows of its own before it");
+  assert.strictEqual(backfill.imported, 1, "the term this volume introduces becomes this volume's row");
+  const ownRow = two.db
+    .prepare("SELECT examples FROM facts WHERE aspect = 'term_usage' AND owner_volume = 2")
+    .get();
+  assert.ok(ownRow && String(JSON.parse(ownRow.examples)[0]) === "駱駝", `volume 2's own glossary row is the one volume 2 introduced: ${ownRow && ownRow.examples}`);
+  assert.strictEqual(backfill.carried, 2, "the rows the record already owns are counted, not duplicated");
+  assert.strictEqual(backfill.refused.length, 1, "and the row no volume's text prints is refused");
+  assert.match(backfill.refused[0].because, /存在しない用語/, `the refusal names the term: ${backfill.refused[0].because}`);
+  assert.ok(backfill.castRegistered > 0, "the glossary's Characters section registers the roster, which is what the coverage guard asks about");
+
+  assert.strictEqual(glossaryRowsInRecord(two, 2), 1, "one glossary row is owned by volume 2");
+  assert.strictEqual(glossaryRowsInRecord(two, 1), 5, "volume 1's five rows are still owned by volume 1");
+  assert.ok(glossaryBackfilled(two, 2), "and the record says where volume 2's rows came from");
+
+  const audit = auditVolumeRecord(two, { title: "Glossary", file: "glossary.md", markdown: GLOSSARY_02 });
+  assert.ok(audit.glossary.rows === 1, "the audit counts this volume's glossary rows");
+  assert.ok(audit.markdown.includes("glossary rows this volume's record holds | **1**"), `the report prints the number:\n${audit.markdown}`);
+
+  two.close();
+  console.log("reference-store pipeline: a volume's published glossary is read into that volume's record when the record is opened, whether or not the glossary stage ran on it");
+}
+
+/**
+ * The rule tops up and never overwrites: a row this volume's record already owns is left exactly as
+ * it is, and the rule says so instead of quietly re-reading the published file over it.
+ */
+function scenarioTheGlossaryRuleTopsUpAndNeverOverwrites() {
+  const fx = fixtureStoreSeries("pipeline-glossary-top-up");
+
+  const one = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage: DOCUMENT_SOURCE_STAGE });
+  importGlossary(one, GLOSSARY_01);
+  importVoice(one, VOICE_01);
+  one.sealVolume(1);
+  one.close();
+
+  const first = openVolumeRecord({ volume: 2, folder: "Test Story(02)", seriesDir: fx.dir, previousVolume: 1, previousFolder: "Test Story(01)" });
+  assert.ok(first.ok, first.refusal && first.refusal.because);
+  const two = first.store;
+  assert.strictEqual(first.glossaryBackfill.ran, false, "there is no published glossary here yet, so there is nothing to import");
+
+  // Plant a row this volume owns, then put the published file on disk.
+  importGlossary(two, GLOSSARY_02_PLANTED);
+  fs.writeFileSync(path.join(fx.dir, "Test Story(02)", "glossary.md"), GLOSSARY_02, "utf8");
+
+  const before = two.db
+    .prepare("SELECT id, body, owner_volume AS ownerVolume FROM facts WHERE aspect = 'term_usage' AND owner_volume = 2 ORDER BY id")
+    .all();
+  assert.strictEqual(before.length, 1, "the planted row is this volume's only glossary row");
+
+  const again = ensureVolumeGlossaryInRecord(two, { volume: 2 });
+  assert.strictEqual(again.ran, false, `a record that already owns glossary rows is not re-imported: ${again.because}`);
+  assert.strictEqual(again.held, 1, "and the answer says how many it holds");
+
+  const after = two.db
+    .prepare("SELECT id, body, owner_volume AS ownerVolume FROM facts WHERE aspect = 'term_usage' AND owner_volume = 2 ORDER BY id")
+    .all();
+  assert.deepStrictEqual(after, before, "the planted row is byte-for-byte what it was, and nothing else arrived");
+
+  two.close();
+  console.log("reference-store pipeline: the glossary completeness rule tops up a record that holds nothing and leaves a record that holds something alone");
+}
+
+/**
+ * A row the record already owns is not asked to re-prove itself in a volume that never claimed it.
+ *
+ * The glossary is cumulative, so every later volume's file carries the earlier volumes' rows. Checking
+ * the "already stored" rule after the evidence rule made each of those rows a refusal in every volume
+ * it was merely carried through — on the real volume 02 that was 42 of its 46 refusals, for rows that
+ * were sitting in the record the whole time with volume 1's evidence behind them.
+ */
+function scenarioCarriedGlossaryRowsAreNotReProvedAgainstThisVolume() {
+  const fx = fixtureStoreSeries("pipeline-glossary-carried");
+
+  const one = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage: DOCUMENT_SOURCE_STAGE });
+  importGlossary(one, GLOSSARY_01);
+  importVoice(one, VOICE_01);
+  one.sealVolume(1);
+  one.close();
+
+  // 三色院菫子 is volume 1's character: the record owns her row, and volume 2's text never prints her.
+  const volumeTwoText = Object.values(SOURCE_02).flat().join("\n");
+  assert.ok(!volumeTwoText.includes("三色院菫子"), "the fixture's volume 02 text must not print her, or this scenario proves nothing");
+
+  fs.writeFileSync(path.join(fx.dir, "Test Story(02)", "glossary.md"), GLOSSARY_02, "utf8");
+  const opened = openVolumeRecord({ volume: 2, folder: "Test Story(02)", seriesDir: fx.dir, previousVolume: 1, previousFolder: "Test Story(01)" });
+  const carried = opened.glossaryBackfill.carried;
+  assert.strictEqual(carried, 2, `the two rows the record already owns are carried, not re-proved (refused: ${opened.glossaryBackfill.refused.map((r) => r.row.term).join(", ")})`);
+  assert.ok(!opened.glossaryBackfill.refused.some((r) => r.row.term === "三色院菫子"), "and it is not reported as damage");
+
+  const row = opened.store.db
+    .prepare("SELECT owner_volume AS ownerVolume, body FROM facts WHERE aspect = 'term_usage' AND examples LIKE '%三色院菫子%'")
+    .get();
+  assert.strictEqual(row.ownerVolume, 1, "the row is still volume 1's, with volume 1's evidence");
+
+  opened.store.close();
+  console.log("reference-store pipeline: a cumulative glossary row the record already owns is carried through a volume, not refused by it");
+}
+
+/**
+ * A volume that contributed nothing is a number on the page, not an absence somebody has to notice.
+ */
+function scenarioAVolumeThatContributedNoGlossarySaysZero() {
+  const fx = fixtureStoreSeries("pipeline-glossary-silent");
+
+  const one = openReferenceStore({ volume: 1, seriesDir: fx.dir, stage: DOCUMENT_SOURCE_STAGE });
+  importGlossary(one, GLOSSARY_01);
+  importVoice(one, VOICE_01);
+  one.sealVolume(1);
+  one.close();
+
+  const opened = openVolumeRecord({ volume: 2, folder: "Test Story(02)", seriesDir: fx.dir, previousVolume: 1, previousFolder: "Test Story(01)" });
+  assert.strictEqual(opened.glossaryBackfill.ran, false);
+  assert.match(opened.glossaryBackfill.because, /no published glossary\.md/, opened.glossaryBackfill.because);
+
+  const audit = auditVolumeRecord(opened.store, { title: "Character-voice reference", file: "character-voice.md", markdown: VOICE_01 });
+  assert.ok(audit.markdown.includes("glossary rows this volume's record holds | **0**"), `the report says zero out loud:\n${audit.markdown}`);
+
+  opened.store.close();
+  console.log("reference-store pipeline: a volume whose record holds no glossary rows is reported as holding no glossary rows");
+}
+
 // ─── The artifact's own shape, measured ───────────────────────────────────────
 
 /**
@@ -1047,6 +1235,10 @@ function scenarioExtractionRowsNeverRenderIntoADocument() {
   scenarioMirrorResetReplacesOnlyItsOwnRows();
   scenarioCarriedRowsStayTheEarlierVolumes();
   scenarioTopUpBringsTheMissingHalf();
+  scenarioAPublishedGlossaryReachesItsOwnVolumesRecord();
+  scenarioTheGlossaryRuleTopsUpAndNeverOverwrites();
+  scenarioCarriedGlossaryRowsAreNotReProvedAgainstThisVolume();
+  scenarioAVolumeThatContributedNoGlossarySaysZero();
   scenarioUnreadableLineIsHigh();
   scenarioArtifactWithoutSectionsIsMedium();
   scenarioGradedSampleIsDeterministicAndBounded();

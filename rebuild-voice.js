@@ -29,6 +29,13 @@
  *     volume's text is refused and named. That gate has no switch here.
  *   - **The result is audited by the same queries as an authored reference**, including the coverage
  *     check at HIGH. Rebuilding does not buy a volume out of covering its cast.
+ *   - **Publishing seals the record, and nothing else seals it.** `--apply` writes the reference into
+ *     the volume's own folder and then seals the volume's record, because a record is sealed when the
+ *     artifact it describes is the artifact the volume actually publishes — and without that seal the
+ *     next volume's copy-forward refuses with `reference-volume-unsealed`. A rehearsal with `--out`
+ *     publishes nothing, so it seals nothing, and its report says so. There is no flag that seals
+ *     without publishing and none that publishes without sealing; a rebuild that audits HIGH damage
+ *     writes the file and refuses to seal it.
  *
  * Usage:
  *   node rebuild-voice.js --volume=01 --out=/tmp/opencode/rehearsal   # rehearsal: work on a copy
@@ -281,12 +288,30 @@ async function main(args) {
     seriesDir: workSeriesDir,
     entries,
     aliases: args.aliases,
+    // `--apply` is the only thing that publishes, and publishing is the only thing that seals. A
+    // rehearsal builds the record and a scratch copy of the file and leaves the record a draft on
+    // purpose: sealing a record whose published artifact is somewhere else would publish a record that
+    // does not describe the book.
+    apply: args.apply,
+    moveAside: args.moveAside,
   });
+
+  /** Where the audit report goes — written even when the run is refused, because a refusal is exactly
+   *  when somebody needs to read what the audit found. */
+  const reportPath = args.report || path.join(args.apply ? workDir : rehearsalRoot, `${VOICE_FILE}-audit.md`);
 
   if (!result.ok) {
     console.log(`\nrefused: ${result.refusal.rule}`);
     console.log(`  ${result.refusal.because}`);
     console.log(`  fix: ${result.refusal.fix}`);
+    if (result.published && result.published.written) {
+      console.log(`\n  ${result.published.written} was written, and the record was NOT sealed.`);
+    }
+    if (result.audit) {
+      fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+      fs.writeFileSync(reportPath, result.audit.markdown, "utf8");
+      console.log(`  report:            ${reportPath}`);
+    }
     return 1;
   }
 
@@ -296,13 +321,16 @@ async function main(args) {
   const lines = rendered.markdown.split("\n");
 
   console.log("\nrebuild");
-  console.log(`  claims filed:      ${rebuild.filedCount}`);
-  console.log(`  already there:     ${rebuild.carried.length}`);
+  console.log(`  claims filed:      ${rebuild.filedCount} this run (${rebuild.carried.length} already in the record)`);
   console.log(`  refused:           ${rebuild.refused.length}`);
-  console.log(`  characters:        ${rebuild.characters}`);
+  console.log(
+    `  the record now:    ${rebuild.adoptedClaims} claim(s) about ${rebuild.adoptedCharacters} character(s), ` +
+      `${rebuild.candidateClaims} candidate copy(ies) beside them` +
+      (rebuild.adoptedUnkeyed ? `, ${rebuild.adoptedUnkeyed} with no character` : "")
+  );
   console.log(`  POV claims:        ${rebuild.povAttached} attached, ${rebuild.povUnattached} with no character`);
   console.log(
-    `  candidate copies:  ${rebuild.candidates.filed} filed, ${rebuild.candidates.carried} already there, ` +
+    `  candidate copies:  ${rebuild.candidates.filed} filed this run, ${rebuild.candidates.carried} already there, ` +
       `${rebuild.candidates.refused.length} could not be filed`
   );
   if (result.aliases.applied.length) console.log(`  aliases applied:   ${result.aliases.applied.map((a) => `${a.alias} → ${a.key}`).join(", ")}`);
@@ -324,31 +352,40 @@ async function main(args) {
   console.log(`  findings:          ${audit.findings.length} (${audit.highFindings.length} HIGH)`);
   for (const item of audit.findings) console.log(`    ${item.severity} ${item.kind}: ${item.message.slice(0, 240)}`);
 
-  const reportPath = args.report || path.join(args.apply ? workDir : rehearsalRoot, `${VOICE_FILE}-audit.md`);
   fs.mkdirSync(path.dirname(reportPath), { recursive: true });
   fs.writeFileSync(reportPath, audit.markdown, "utf8");
   console.log(`  report:            ${reportPath}`);
 
-  if (args.apply) {
-    const writer = rs.openReferenceStore({ volume: volumeNumber, folder: folderName, seriesDir: workSeriesDir, stage: rs.REBUILD_SOURCE_STAGE });
-    try {
-      const written = rs.writeRebuiltVoiceFile(writer, workDir, rendered, { file: VOICE_FILE, moveAside: true });
-      if (!written.ok) {
-        console.log(`\nnot written: ${written.refusal.rule}\n  ${written.refusal.because}`);
-        return 1;
-      }
-      console.log(`\n  wrote ${written.written}`);
-      if (written.moved) console.log(`  the file it replaced is kept as ${written.moved}`);
-    } finally {
-      writer.close();
-    }
+  if (result.published) {
+    const published = result.published;
+    console.log("\npublished");
+    console.log(`  wrote:             ${published.written}`);
+    if (published.unchanged) console.log("  the file already on disk is exactly what this record renders, so nothing was replaced and no new `.rejected` was made.");
+    if (published.moved) console.log(`  the file it replaced is kept as ${published.moved}`);
+    console.log(`  record sealed:    yes — ${published.sealed.rows} row(s) owned by volume ${volumeNumber} are now published and immutable`);
+    console.log(`                    (sealed at ${published.sealed.at}; ${published.sealed.snapshot} fact(s) frozen into this volume's snapshot)`);
+    console.log("  the next volume's copy-forward may now build on this record.");
   } else {
     fs.writeFileSync(path.join(workDir, VOICE_FILE), rendered.markdown, "utf8");
     console.log(`\n  rehearsal copy written to ${path.join(workDir, VOICE_FILE)} — nothing in the series folder was touched.`);
+    console.log("  the record is NOT sealed: a rehearsal publishes nothing, and only a published reference earns a sealed record.");
   }
 
   if (args.json) {
-    console.log(`\n${JSON.stringify({ rebuild, rendered: { sections: rendered.sections, characters: rendered.characters, unattached: rendered.unattached, truncated: rendered.truncated }, findings: audit.findings }, null, 2)}`);
+    console.log(
+      `\n${JSON.stringify(
+        {
+          rebuild,
+          rendered: { sections: rendered.sections, characters: rendered.characters, unattached: rendered.unattached, truncated: rendered.truncated },
+          published: result.published
+            ? { written: result.published.written, moved: result.published.moved, sealed: result.published.sealed }
+            : null,
+          findings: audit.findings,
+        },
+        null,
+        2
+      )}`
+    );
   }
 
   if (audit.highFindings.length) {

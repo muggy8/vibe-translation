@@ -24,7 +24,7 @@ const { verifyStoredEvidence } = require("./evidence");
 const { COUNTED_TABLES, EXTRACTION_SOURCE_STAGE } = require("./schema");
 const { tableCounts } = require("./queries");
 const { presenceMeasured, presenceChapterCount } = require("./presence");
-const { documentMirrored, DOCUMENT_VOICE } = require("./document-prose");
+const { documentMirrored, DOCUMENT_VOICE, rebuildProvenanceCounts } = require("./document-prose");
 // `isVolumeSealed` lives with the sealing verb itself, so the "is this volume published?"
 // question has exactly one answer in this layer. facts.js does not require this file, so the
 // edge does not close a cycle (gotcha 85).
@@ -518,6 +518,12 @@ function rebuiltDocuments(ctx, upTo) {
       carried: Number(detail.carried || 0),
       refused: Number(detail.refused || 0),
       characters: Number(detail.characters || 0),
+      // What the record holds, not what this run added. A marker written before this distinction existed
+      // has no such number, so the report falls back to `filed` rather than claiming zero.
+      adoptedClaims: Number.isFinite(detail.adoptedClaims) ? Number(detail.adoptedClaims) : null,
+      adoptedCharacters: Number.isFinite(detail.adoptedCharacters) ? Number(detail.adoptedCharacters) : null,
+      adoptedUnkeyed: Number.isFinite(detail.adoptedUnkeyed) ? Number(detail.adoptedUnkeyed) : null,
+      candidateClaims: Number.isFinite(detail.candidateClaims) ? Number(detail.candidateClaims) : null,
       // The candidate copies are part of what the rebuild did: they are the reason a later volume can
       // still ask "what did the extraction find that this reference does not say" about a rebuilt
       // record. A marker written before candidates existed has no such number, which is why these are
@@ -648,6 +654,7 @@ function integrityFindings(ctx, { volume = null, step = INTEGRITY_STEP, upTo, pu
   // pass over the rebuilt file). The damage check above still runs against a rebuilt reference, at HIGH,
   // unchanged: rebuilding does not buy a reference out of covering the cast.
   for (const rebuilt of rebuiltDocs) {
+    const counts = rebuildProvenanceCounts(rebuilt);
     findings.push(
       finding(
         "MEDIUM",
@@ -656,12 +663,14 @@ function integrityFindings(ctx, { volume = null, step = INTEGRITY_STEP, upTo, pu
         volume,
         `${rebuilt.document}.md`,
         `volume ${rebuilt.volume}'s ${rebuilt.document} reference was rebuilt by code from that volume's ` +
-          `extraction output on ${rebuilt.at}: ${rebuilt.filed} claim(s) adopted, ${rebuilt.refused} refused, ` +
-          `${rebuilt.characters} character(s) with at least one claim. No author agent wrote it and nobody has ` +
+          `extraction output on ${rebuilt.at}: ${counts.claims} claim(s) adopted about ${counts.characters} ` +
+          `character(s), ${counts.refused} refused` +
+          (counts.unkeyed ? `, ${counts.unkeyed} claim(s) with no character to file them under` : "") +
+          ". No author agent wrote it and nobody has " +
           "reviewed it. Every bullet cites a line of that volume's text, and the coverage question is asked of " +
           "it like any other reference — but a reference nobody read is a reference nobody checked." +
-          (Number.isFinite(rebuilt.candidatesFiled)
-            ? ` The record also keeps ${rebuilt.candidatesFiled} candidate copy(ies) of those claims — the ` +
+          (counts.candidates !== null
+            ? ` The record also keeps ${counts.candidates} candidate copy(ies) of those claims — the ` +
               "extraction's own reading beside the document's — so \"what did the extraction find that this " +
               "reference does not say\" is a query here, not an assumption."
             : "")

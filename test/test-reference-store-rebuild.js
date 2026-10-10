@@ -65,6 +65,8 @@ const {
   COVERAGE_SIGNIFICANCE_CHAPTERS,
   MAX_REBUILD_BULLET_CHARS,
   voicePrimaryName,
+  isVolumeSealed,
+  factsAtVolume,
 } = require("../utils/reference-store");
 const { documentRebuilt, DOCUMENT_VOICE } = require("../utils/reference-store/document-prose");
 const { startFakeBackend } = require("./fake-backend");
@@ -749,6 +751,367 @@ function scenarioRefusedClaimsAreNotCandidatesAndAnEmptyAdoptionQueryIsTheTrueAn
   console.log("  refused claims are not candidates, and 'nothing unadopted' is a measured answer");
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Run the whole rebuild through the library door, with the publishing question asked the way the
+ * command asks it.
+ *
+ * @param {ReturnType<typeof fixtureStoreSeries>} series
+ * @param {{volume?: number, entries?: Array<Object>, aliases?: Array<{alias: string, key: string, reason: string}>, apply?: boolean, moveAside?: boolean}} [opts]
+ * @returns {ReturnType<typeof rebuildVoiceVolume>}
+ */
+function rebuildFixtureVolume(series, { volume = 1, entries = EXTRACTION_01, aliases = [], apply = false, moveAside = false } = {}) {
+  const entry = series.volumes[volume - 1];
+  return rebuildVoiceVolume({
+    volume,
+    folder: entry.folder,
+    seriesDir: series.dir,
+    entries,
+    aliases,
+    apply,
+    moveAside,
+  });
+}
+
+/**
+ * Count a record's rows by kind, and whether they are sealed.
+ *
+ * @param {ReferenceStore} store
+ * @param {number} [ownerVolume] - Whose rows to count. Defaults to the volume this handle is scoped to,
+ *   which is not the same as everything the record holds: a carried row keeps the volume that wrote it.
+ * @returns {Object<string, number>}
+ */
+function rowsByStage(store, ownerVolume = store.volume) {
+  const out = {};
+  const rows = ownerVolume === null
+    ? store.db.prepare("SELECT source_stage, sealed, COUNT(*) AS n FROM facts GROUP BY source_stage, sealed").all()
+    : store.db.prepare("SELECT source_stage, sealed, COUNT(*) AS n FROM facts WHERE owner_volume = ? GROUP BY source_stage, sealed").all(ownerVolume);
+  for (const row of rows) {
+    out[`${row.source_stage}${row.sealed ? ":sealed" : ":open"}`] = row.n;
+  }
+  return out;
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Publishing seals the volume; rehearsing does not, and both say so in the report.
+ *
+ * This is the gap that stopped volume 2 from starting at all: `rebuild-voice` built a record and never
+ * published it, and a record nobody published is a draft the next volume may not build on.
+ * @returns {void}
+ */
+function scenarioAPublishedRebuildSealsItsVolumeAndARehearsalDoesNot() {
+  const rehearsal = fixtureStoreSeries("rebuild-rehearsal-unsealed");
+  withRoster(rehearsal);
+  const dry = rebuildFixtureVolume(rehearsal);
+  assert.ok(dry.ok, JSON.stringify(dry.refusal));
+  assert.strictEqual(dry.published, null, "a rehearsal publishes nothing");
+  assert.ok(!fs.existsSync(path.join(rehearsal.volumes[0].dir, "character-voice.md")), "and it writes no artifact into the volume folder");
+  assert.match(dry.audit.markdown, /## This volume's record is not sealed/, "and the report says which happened");
+
+  const dryReader = openFixture(rehearsal, 1, DOCUMENT_SOURCE_STAGE);
+  assert.strictEqual(isVolumeSealed(dryReader, 1), false, "so it seals nothing");
+  dryReader.close();
+
+  const published = fixtureStoreSeries("rebuild-published-sealed");
+  withRoster(published);
+  const run = rebuildFixtureVolume(published, { apply: true });
+  assert.ok(run.ok, JSON.stringify(run.refusal));
+  assert.ok(run.published && run.published.ok, "the published run seals");
+  assert.strictEqual(run.published.moved, null, "with nothing to move aside, nothing was moved");
+
+  const artifact = path.join(published.volumes[0].dir, "character-voice.md");
+  assert.ok(fs.existsSync(artifact), "the reference is in the volume's own folder");
+  assert.strictEqual(fs.readFileSync(artifact, "utf8"), run.rendered.markdown, "and the file on disk is byte-for-byte what the record renders — the seal was earned by that, not by the run finishing");
+
+  assert.match(run.audit.markdown, /## This volume's record is sealed/, "the report records the seal");
+  assert.match(run.audit.markdown, /is this volume's record sealed \(published, immutable\) \| \*\*yes\*\*/, "and the checked table answers it");
+  assert.ok(run.published.sealed.snapshot > 0, "and the snapshot of what this volume published was taken");
+
+  const reader = openFixture(published, 1, DOCUMENT_SOURCE_STAGE);
+  assert.strictEqual(isVolumeSealed(reader, 1), true, "and the volume's record is now immutable");
+  reader.close();
+
+  console.log("  publishing a rebuilt reference seals its volume; rehearsing one does not, and the report says which happened");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The gate the account owner hit: volume 2 cannot start on an unsealed volume 1, and publishing is
+ * what opens it.
+ * @returns {void}
+ */
+function scenarioTheCopyForwardGateOpensWhenTheRebuildPublishes() {
+  const blocked = fixtureStoreSeries("rebuild-gate-blocked");
+  withRoster(blocked);
+  const dry = rebuildFixtureVolume(blocked);
+  assert.ok(dry.ok, JSON.stringify(dry.refusal));
+
+  let carried = copyForwardStore({
+    fromVolume: 1,
+    toVolume: 2,
+    seriesDir: blocked.dir,
+    fromFolder: blocked.volumes[0].folder,
+    toFolder: blocked.volumes[1].folder,
+  });
+  assert.strictEqual(carried.ok, false, "a rebuilt record that was never published does not become the next volume's starting point");
+  assert.strictEqual(carried.refusal.rule, "reference-source-fails-integrity");
+  assert.ok(
+    carried.refusal.because.includes("reference-volume-unsealed"),
+    carried.refusal.because
+  );
+
+  const open = fixtureStoreSeries("rebuild-gate-open");
+  withRoster(open);
+  const run = rebuildFixtureVolume(open, { apply: true });
+  assert.ok(run.ok, JSON.stringify(run.refusal));
+
+  const source = openFixture(open, 1, DOCUMENT_SOURCE_STAGE);
+  const sourceRows = rowsByStage(source);
+  source.close();
+
+  carried = copyForwardStore({
+    fromVolume: 1,
+    toVolume: 2,
+    seriesDir: open.dir,
+    fromFolder: open.volumes[0].folder,
+    toFolder: open.volumes[1].folder,
+  });
+  assert.ok(carried.ok, JSON.stringify(carried.refusal));
+
+  const next = openFixture(open, 2, DOCUMENT_SOURCE_STAGE);
+  const carriedRows = rowsByStage(next, null);
+  assert.ok(isVolumeSealed(next, 1), "the carried rows arrive sealed: volume 1 is history, not a draft volume 2 can edit");
+  assert.strictEqual(
+    carriedRows["rebuild:sealed"] || 0,
+    sourceRows["rebuild:sealed"] || 0,
+    `the rebuilt rows travelled: ${JSON.stringify({ source: sourceRows, carried: carriedRows })}`
+  );
+  assert.ok((carriedRows["extract:sealed"] || 0) > 0, "and so did their candidate copies");
+  assert.ok((carriedRows["import:sealed"] || 0) > 0, "and the glossary half travelled too");
+  assert.strictEqual(
+    Object.values(carriedRows).reduce((sum, n) => sum + n, 0),
+    Object.values(sourceRows).reduce((sum, n) => sum + n, 0),
+    "every row in volume 1's record travelled into volume 2's, and none of them arrived editable"
+  );
+  next.close();
+
+  console.log("  the copy-forward gate closes on an unpublished rebuild and opens on a published one");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A damaged rebuilt reference is written and **not** sealed.
+ *
+ * Sealing is what lets the next volume build on a record, so a record the audit calls damaged does not
+ * become immutable just because the rebuild finished. The file is still written — the run is stopped at
+ * the copy-forward, which is this pipeline's shape for a bad volume — but the draft stays a draft.
+ * @returns {void}
+ */
+function scenarioARebuildRefusesToSealARecordTheAuditCallsDamaged() {
+  const series = fixtureStoreSeries("rebuild-damaged-no-seal");
+  withRoster(series);
+
+  // A thin extraction file: the rebuilt reference says nothing about 三色院菫子, who is in this volume's
+  // text and whose claims the record's extraction half does carry.
+  const thin = EXTRACTION_01.filter((entry) => entry.character !== "三色院菫子（パンジー）");
+  const opened = openFixture(series, 1, EXTRACTION_SOURCE_STAGE);
+  const filed = importVoiceExtraction(opened, EXTRACTION_01);
+  assert.ok(filed.importedCount > 0, JSON.stringify(filed.refused));
+  opened.close();
+
+  const run = rebuildFixtureVolume(series, { entries: thin, apply: true });
+  assert.strictEqual(run.ok, false, "the publish is refused");
+  assert.strictEqual(run.refusal.rule, "rebuild-will-not-seal-a-damaged-record", JSON.stringify(run.refusal));
+  assert.ok(run.published && run.published.written, "the file was still written — the stop is at the copy-forward, not a silent rollback");
+  assert.match(run.audit.markdown, /## This volume's record is not sealed/, "and the report says so, with the reason");
+
+  const reader = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  assert.strictEqual(isVolumeSealed(reader, 1), false, "and the record stays a draft");
+  reader.close();
+
+  const carried = copyForwardStore({
+    fromVolume: 1,
+    toVolume: 2,
+    seriesDir: series.dir,
+    fromFolder: series.volumes[0].folder,
+    toFolder: series.volumes[1].folder,
+  });
+  assert.strictEqual(carried.ok, false, "and volume 2 does not start on it");
+
+  console.log("  a rebuilt reference the audit calls damaged is written but never sealed");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Sealing is per-volume, and that is the right grain: publishing volume 1 publishes its glossary too.
+ *
+ * The store has no per-stage seal, and it should not: what volume 2 inherits is volume 1's *record*,
+ * and a half-published volume is the state gotcha 97 exists to describe. The asymmetry the account
+ * owner pointed at — accepted glossary rows versus a rebuilt reference nobody has read — is recorded
+ * where it belongs, as provenance, not as a second kind of seal.
+ * @returns {void}
+ */
+function scenarioSealingPublishesTheWholeVolumeNotJustTheRebuiltHalf() {
+  const series = fixtureStoreSeries("rebuild-seals-the-volume");
+  withRoster(series);
+  const run = rebuildFixtureVolume(series, { apply: true });
+  assert.ok(run.ok, JSON.stringify(run.refusal));
+
+  const reader = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  const open = reader.db
+    .prepare("SELECT source_stage, COUNT(*) AS n FROM facts WHERE owner_volume = 1 AND sealed = 0 GROUP BY source_stage")
+    .all();
+  assert.deepStrictEqual(open, [], `rows still open after sealing: ${JSON.stringify(open)}`);
+
+  const byStage = reader.db
+    .prepare("SELECT source_stage, COUNT(*) AS n FROM facts WHERE owner_volume = 1 GROUP BY source_stage ORDER BY source_stage")
+    .all();
+  assert.ok(byStage.some((row) => row.source_stage === DOCUMENT_SOURCE_STAGE), "the glossary half is in the volume's record");
+  assert.ok(byStage.some((row) => row.source_stage === REBUILD_SOURCE_STAGE), "so is the rebuilt reference");
+  assert.ok(factsAtVolume(reader, 1).length > 0, "and the snapshot says what this volume published");
+
+  reader.close();
+  console.log("  sealing a volume seals the whole volume — the rebuilt reference and the glossary it carries");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Re-running a rebuild over its own output seals the volume instead of locking it out.
+ *
+ * Volume 1 is the real case: it was published by a rebuild that predated the seal, so its folder holds
+ * `character-voice.md` **and** `character-voice.md.rejected`, and its record is a draft. The obvious
+ * repair — run the rebuild again with `--apply --move-aside` — hits `rejected-artifact-already-exists`,
+ * because a second rejection would destroy the evidence of the first. That would leave the volume
+ * permanently unpublishable. The way out is not a new flag: a rebuild that renders exactly the file
+ * already there is not overwriting anything, so it has nothing to move aside and needs no new `.rejected`.
+ * @returns {void}
+ */
+function scenarioRePublishingARebuildsOwnOutputSealsItWithoutStackingRejectedFiles() {
+  const series = fixtureStoreSeries("rebuild-republish-seals");
+  withRoster(series);
+  const volumeDir = series.volumes[0].dir;
+
+  // The pre-fix state: the record exists, the artifact was written into the volume folder, a damaged
+  // file was moved aside, and nothing was ever sealed.
+  const first = rebuildFixtureVolume(series);
+  assert.ok(first.ok, JSON.stringify(first.refusal));
+  fs.writeFileSync(path.join(volumeDir, "character-voice.md"), first.rendered.markdown, "utf8");
+  fs.writeFileSync(path.join(volumeDir, "character-voice.md.rejected"), "the destroyed reference, kept as evidence\n", "utf8");
+
+  const before = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  assert.strictEqual(isVolumeSealed(before, 1), false, "the record is a draft");
+  before.close();
+
+  const again = rebuildFixtureVolume(series, { apply: true, moveAside: true });
+  assert.ok(again.ok, JSON.stringify(again.refusal));
+  assert.strictEqual(again.published.unchanged, true, "the file on disk is exactly what the record renders, so nothing was replaced");
+  assert.strictEqual(again.published.moved, null, "and no second `.rejected` was created on top of the first");
+  assert.strictEqual(
+    fs.readFileSync(path.join(volumeDir, "character-voice.md.rejected"), "utf8"),
+    "the destroyed reference, kept as evidence\n",
+    "the evidence of the first rejection is untouched"
+  );
+
+  const after = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  assert.strictEqual(isVolumeSealed(after, 1), true, "and the volume is now sealed, which is what the next volume was waiting on");
+  after.close();
+
+  // The report describes the record, not the run. A second rebuild files nothing, and a report that
+  // quoted the run would say this reference adopted zero claims across zero characters.
+  const adopted = /(\d+) claim\(s\) adopted about (\d+) character\(s\)/.exec(again.audit.markdown);
+  assert.ok(adopted, again.audit.markdown.split("\n").slice(0, 14).join("\n"));
+  assert.strictEqual(Number(adopted[1]), again.rebuild.adoptedClaims, "the report counts what the record holds");
+  assert.ok(Number(adopted[1]) > 0, "and that is not zero just because this run added nothing");
+  assert.ok(Number(adopted[2]) > 0, "and it names the characters the reference covers");
+
+  console.log("  re-running a rebuild over its own output seals the volume and leaves the earlier rejection alone");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A recorded alias beats a primary-name collision — including on the second run, when the collision
+ * has become a roster entry.
+ *
+ * This is volume 01's real defect, found while rehearsing the seal. The extraction names the same
+ * person 俺（主人公） (which the operator linked to 如月雨露 with a reason) and 俺（如月雨露・第二章終盤）
+ * (which nothing carries, so it becomes its own entry keyed 俺). On the first run the alias decided the
+ * 48 claims. On the second run the entry keyed 俺 already existed, the "primary name is a key" rule fired
+ * first, and the same 48 claims landed on 俺 — same file, same rules, a different record. A rebuild that
+ * re-files a character's claims onto a different character is not idempotent, and it changes which
+ * character the coverage guard thinks is covered.
+ * @returns {void}
+ */
+function scenarioARecordedAliasOutlivesTheRunThatCreatedTheRosterEntry() {
+  const series = fixtureStoreSeries("rebuild-alias-beats-collision");
+  withRoster(series);
+
+  // The second spelling: nothing in the roster carries it, so it becomes its own entry keyed 俺.
+  const secondPersonality = {
+    type: "voice",
+    character: "俺（第二章の別人格）",
+    quirkType: "pronoun",
+    description: "A second register the same narrator uses late in the volume.",
+    examples: ["気にすんな！"],
+  };
+  const entries = [...EXTRACTION_01, secondPersonality];
+  const aliases = [
+    {
+      key: "如月雨露",
+      alias: "俺（主人公）",
+      reason: "the glossary's own row says the narrator switches between 僕 and 俺",
+    },
+  ];
+
+  const first = rebuildFixtureVolume(series, { entries, aliases });
+  assert.ok(first.ok, JSON.stringify(first.refusal));
+
+  const reader = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  const firstCounts = new Map(
+    reader.db
+      .prepare("SELECT key, COUNT(*) AS n FROM facts WHERE source_stage = ? AND key IS NOT NULL GROUP BY key")
+      .all(REBUILD_SOURCE_STAGE)
+      .map((row) => [row.key, row.n])
+  );
+  assert.ok((firstCounts.get("如月雨露") || 0) > 0, `the alias carried its claims: ${JSON.stringify([...firstCounts])}`);
+  assert.ok(firstCounts.has("俺"), "and the unlinked spelling became its own roster entry");
+
+  const resolved = resolveExtractionName(reader, "俺（主人公）");
+  assert.strictEqual(resolved.key, "如月雨露", JSON.stringify(resolved));
+  assert.match(resolved.how, /alias recorded on 如月雨露/, `the recorded alias has to beat the collision: ${resolved.how}`);
+  reader.close();
+
+  // Run it again over the record the first run built. The roster now holds 俺, and that must not move
+  // anybody's claims.
+  const again = rebuildFixtureVolume(series, { entries, aliases });
+  assert.ok(again.ok, JSON.stringify(again.refusal));
+
+  const second = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  const secondCounts = new Map(
+    second.db
+      .prepare("SELECT key, COUNT(*) AS n FROM facts WHERE source_stage = ? AND key IS NOT NULL GROUP BY key")
+      .all(REBUILD_SOURCE_STAGE)
+      .map((row) => [row.key, row.n])
+  );
+  second.close();
+
+  assert.deepStrictEqual(
+    [...secondCounts].sort(),
+    [...firstCounts].sort(),
+    `the second run moved a character's claims: first ${JSON.stringify([...firstCounts].sort())}, second ${JSON.stringify([...secondCounts].sort())}`
+  );
+  assert.strictEqual(again.rebuild.filedCount, 0, `and it filed nothing a second time: ${again.rebuild.filedCount}`);
+
+  console.log("  a recorded alias beats a primary-name collision, on the second run too");
+}
+
 // ─── Scenario ────────────────────────────────────────────────────────────────
 
 /**
@@ -852,9 +1215,24 @@ function scenarioTheDamagedFileIsMovedAsideAndKept() {
   assert.strictEqual(fs.readFileSync(written.moved, "utf8"), VOICE_01, "kept whole");
   assert.ok(fs.readFileSync(written.written, "utf8").includes("no author agent wrote this file"), "and the new one replaced it");
 
+  // Re-running the rebuild over its own output is not a second rejection: the file on disk is exactly
+  // what the record renders, so nothing is being destroyed and nothing has to be moved aside.
+  const sameAgain = writeRebuiltVoiceFile(store, volumeDir, rendered, { moveAside: true });
+  assert.ok(sameAgain.ok, JSON.stringify(sameAgain.refusal));
+  assert.strictEqual(sameAgain.unchanged, true, "a rebuild that renders the file already there is not overwriting it");
+  assert.strictEqual(sameAgain.moved, null, "and no second `.rejected` is stacked on the first");
+
+  // A file that is **not** what the record renders is still protected, and the evidence of the first
+  // rejection is not expendable.
+  fs.writeFileSync(path.join(volumeDir, "character-voice.md"), "somebody edited this reference by hand\n", "utf8");
   const second = writeRebuiltVoiceFile(store, volumeDir, rendered, { moveAside: true });
   assert.strictEqual(second.ok, false, "a second rejection is refused rather than stacked on the first");
   assert.strictEqual(second.refusal.rule, "rejected-artifact-already-exists", second.refusal && second.refusal.rule);
+  assert.strictEqual(
+    fs.readFileSync(path.join(volumeDir, "character-voice.md"), "utf8"),
+    "somebody edited this reference by hand\n",
+    "and the refusal destroys nothing"
+  );
 
   const aside = moveArtifactAside(volumeDir, "character-voice.md");
   assert.strictEqual(aside.ok, false, "and the refusal comes from the move itself, not only from the writer");
@@ -1054,6 +1432,12 @@ function scenarioALaterVolumeNeedsItsEarlierRecordFirst() {
   scenarioARebuiltRecordWithoutItsCandidatesCannotSeeThatLoss();
   scenarioARebuildRefusesACandidateHandleOfAnotherStage();
   scenarioRefusedClaimsAreNotCandidatesAndAnEmptyAdoptionQueryIsTheTrueAnswer();
+  scenarioAPublishedRebuildSealsItsVolumeAndARehearsalDoesNot();
+  scenarioTheCopyForwardGateOpensWhenTheRebuildPublishes();
+  scenarioARebuildRefusesToSealARecordTheAuditCallsDamaged();
+  scenarioSealingPublishesTheWholeVolumeNotJustTheRebuiltHalf();
+  scenarioRePublishingARebuildsOwnOutputSealsItWithoutStackingRejectedFiles();
+  scenarioARecordedAliasOutlivesTheRunThatCreatedTheRosterEntry();
   scenarioASealedVoiceRecordRefusesARebuild();
   scenarioARebuildClearsOnlyItsOwnMirror();
   scenarioTheDamagedFileIsMovedAsideAndKept();

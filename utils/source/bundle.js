@@ -158,11 +158,17 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
   if (!isEpubPath(originalPath)) {
     const st = await fs.stat(originalPath);
     const fingerprint = await sha256OfFile(originalPath);
-    // An oversized plain-text source (bigger than the whole-installment
-    // threshold) is split into part files in the volume folder so the
-    // chapter-by-chapter fallback can process it, exactly like a big epub.
-    // A small source stays a single "whole" segment, as before.
-    if (st.size > 0 && st.size > chunkThresholdChars()) {
+    // An oversized plain-text source is split into part files in the volume folder so the
+    // chapter-by-chapter fallback can process it, exactly like a big epub. A small source stays a
+    // single "whole" segment, as before.
+    //
+    // The floor is the smaller of the whole-installment threshold and the part target, because the
+    // parts exist FOR the fallback: with the old floor (the threshold alone), a plain-text book under
+    // 120,000 characters had no parts, and `shouldProcessChunked` refuses to chunk a single-segment
+    // bundle whatever the operator asks — so `--chunked` and `SOURCE_CHUNK_THRESHOLD_CHARS=0` were
+    // both silently impossible on a plain-text volume.
+    const splitFloor = Math.min(chunkThresholdChars(), TEXT_PART_TARGET_CHARS);
+    if (st.size > 0 && st.size > splitFloor) {
       const parts = await materializeTextParts(originalPath, volumeDir, base, st.size, fingerprint, force);
       const wholeText = await fs.readFile(originalPath, "utf8");
       return {

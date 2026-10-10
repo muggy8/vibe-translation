@@ -357,6 +357,23 @@ function importGlossary(store, markdown, { volume } = {}) {
       if (registered.ok) castRegistered += 1;
     }
 
+    // The glossary is cumulative: this file contains every row the earlier volumes published, and
+    // this store already holds those rows, because copy-forward carried them with their own
+    // provenance. Re-importing them would stamp a volume-01 term as established in volume 05 and put
+    // the same term in the store twice, so a row the record already has is counted as carried, not
+    // imported.
+    //
+    // Asked BEFORE the evidence rule, on purpose. The evidence rule decides what this store may
+    // *adopt*; a row the record already owns was adopted by the volume that owns it, and it cites
+    // that volume's text. Asking it to also appear in volume 05's text is not a check — it is the
+    // same row refused 40 times over, once per volume it is merely carried through, and it makes the
+    // report read as damage. (Measured on the real volume 02: 42 of its 46 refusals were rows the
+    // record already held from volume 1.)
+    if (documentTermAlreadyStored(store, row.term)) {
+      carried.push(row.term);
+      continue;
+    }
+
     const { evidence, kind, tried, governsTried } = findRowEvidence(store.volumeDir, chapters, vol, row);
     if (!evidence) {
       refused.push({
@@ -368,15 +385,6 @@ function importGlossary(store, markdown, { volume } = {}) {
             : "and its notes quote no passage to govern, ") +
           "so the row supports neither kind of evidence this store accepts.",
       });
-      continue;
-    }
-    // The glossary is cumulative: this file contains every row the earlier volumes published, and
-    // this store already holds those rows, because copy-forward carried them with their own
-    // provenance. Re-importing them would stamp a volume-01 term as established in volume 05 and
-    // put the same term in the store twice, so a row the record already has is counted as carried,
-    // not imported.
-    if (documentTermAlreadyStored(store, row.term)) {
-      carried.push(row.term);
       continue;
     }
     const result = store.insertFact({

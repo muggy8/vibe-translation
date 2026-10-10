@@ -106,7 +106,17 @@ const UNDECLARED_SECTION_MIN_CHARS = (() => {
 // Target size for a plain-text part (a "synthetic chapter"). A little above
 // TRANSLATE_CHUNK_CHARS so the translation stage rarely re-splits a part, while
 // keeping each cumulative-task segment comfortably inside the context window.
-const TEXT_PART_TARGET_CHARS = 30000;
+//
+// `SOURCE_TEXT_PART_TARGET_CHARS` overrides it. This is the packing rule, not a guard: it decides
+// how a plain-text book is cut into synthetic chapters, and a plain-text volume with one part has no
+// chapter-by-chapter path to fall back to at all (`shouldProcessChunked` refuses it). The offline
+// pipeline loop sets it small so the fixture reaches the chunked branch — the fallback every real
+// volume of this series takes — without anybody having to write a 30,000-character fake book.
+// The production default is unchanged.
+const TEXT_PART_TARGET_CHARS = (() => {
+  const n = parseInt(process.env.SOURCE_TEXT_PART_TARGET_CHARS, 10);
+  return Number.isFinite(n) ? Math.max(EMPTY_SEGMENT_CHARS, n) : 30000;
+})();
 
 
 module.exports = {

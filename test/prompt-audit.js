@@ -153,10 +153,17 @@ const flat = (text) => String(text || "").replace(/\s+/g, "");
  *   `checks` are the rules that passed (with the number behind them); `findings`
  *   are the problems, each with `severity` "error" or "warn".
  */
-function auditPromptLog(log, { workflow, seriesDir, firstCallCount }) {
+function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = null }) {
   const checks = [];
   const findings = [];
   const pass1 = firstCallCount ? log.slice(0, firstCallCount) : log;
+
+  /**
+   * Whether a stage took part in this run. `--stages=` narrows the loop, and a check that inspects a
+   * stage the loop never executed is not a check — it is a complaint about the command line. Null means
+   * the whole pipeline ran, which is what `npm test` does.
+   */
+  const stageRan = (name) => !Array.isArray(stagesRun) || stagesRun.includes(name);
 
   const identified = pass1.map((entry) => ({ entry, ...identify(entry) }));
   const byKind = (kind) => identified.filter((item) => item.kind === kind);
@@ -478,23 +485,27 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount }) {
   // ─── 9. Cross-volume continuity: volume 2's first chapter sees volume 1's tail
   const later = workflow.VOLUMES.slice(1);
   const continuityGaps = [];
-  for (const volume of later) {
-    const previous = workflow.VOLUMES[workflow.VOLUMES.indexOf(volume) - 1];
-    const tail = flat(workflow.draftTextOf(previous)).slice(-160, -120);
-    if (!tail) continue;
-    const call = translator.find(
-      (item) => item.kind === "translate" && workflow.volumeForText(item.entry.userText) === volume
-    );
-    if (!call) {
-      continuityGaps.push(`volume ${volume.installment} has no translate call to inspect`);
-      continue;
+  if (!stageRan("translate")) {
+    pass("cross-volume-continuity", "not asked — this run did not execute the translate stage, so there is no translation prompt to inspect.");
+  } else {
+    for (const volume of later) {
+      const previous = workflow.VOLUMES[workflow.VOLUMES.indexOf(volume) - 1];
+      const tail = flat(workflow.draftTextOf(previous)).slice(-160, -120);
+      if (!tail) continue;
+      const call = translator.find(
+        (item) => item.kind === "translate" && workflow.volumeForText(item.entry.userText) === volume
+      );
+      if (!call) {
+        continuityGaps.push(`volume ${volume.installment} has no translate call to inspect`);
+        continue;
+      }
+      if (!flat(call.entry.userText).includes(tail)) {
+        continuityGaps.push(`volume ${volume.installment}'s translate prompt does not contain the tail of volume ${previous.installment}'s published text`);
+      }
     }
-    if (!flat(call.entry.userText).includes(tail)) {
-      continuityGaps.push(`volume ${volume.installment}'s translate prompt does not contain the tail of volume ${previous.installment}'s published text`);
-    }
+    if (continuityGaps.length) fail("cross-volume-continuity", "a volume was translated without the ending of the volume before it.", continuityGaps);
+    else pass("cross-volume-continuity", `every volume after the first was translated with the previous volume's published tail in its prompt.`);
   }
-  if (continuityGaps.length) fail("cross-volume-continuity", "a volume was translated without the ending of the volume before it.", continuityGaps);
-  else pass("cross-volume-continuity", `every volume after the first was translated with the previous volume's published tail in its prompt.`);
 
   // ─── 10. Ordering: nothing ran before the thing it depends on ───────────────
   const orderGaps = [];
@@ -599,6 +610,13 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount }) {
     const index = workflow.VOLUMES.indexOf(volume);
     if (index <= 0) continue;
     const previous = workflow.VOLUMES[index - 1];
+    // Chapter-by-chapter author turns from the SECOND chapter onward are not building on the previous
+    // volume: the previous volume's copy was seeded into this volume's own file before any agent
+    // touched the folder, and chapter 1 already amended it. Those turns name the file they ARE
+    // building on, in their own folder, and naming the previous volume's folder instead would point
+    // the agent at a copy it has no reason to read. The between-chapter carry-forward gate is the
+    // guard there, not the prompt.
+    if (entry.userText.includes("state after the earlier chapters of this volume")) continue;
     if (!entry.userText.includes(previous.folder)) {
       pathGaps.push(
         `#${entry.index} ${kind} volume ${volume.installment}: the prompt never names ${previous.folder} — the agent is not told ` +
@@ -611,7 +629,7 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount }) {
 
   // ─── 15. Every stage that is supposed to call the model did ─────────────────
   const idleStages = STAGE_ORDER.filter(
-    (name) => !DETERMINISTIC_STAGES.has(name) && !identified.some((item) => item.entry.stage === name)
+    (name) => !DETERMINISTIC_STAGES.has(name) && stageRan(name) && !identified.some((item) => item.entry.stage === name)
   );
   if (idleStages.length) {
     warn("stage-made-calls", `${idleStages.join(", ")} made no model call in the first pass — either it skipped everything or it never reached its live path.`, [

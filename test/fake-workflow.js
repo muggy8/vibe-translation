@@ -757,7 +757,7 @@ function answer(req, ctx) {
 
   // ── Agent turns: the next step of that agent's scripted plan ──────────────
   if (req.tools && req.tools.length > 0) {
-    const steps = agentSteps(kind, vol, ctx);
+    const steps = agentSteps(kind, vol, { ...ctx, userText: req.userText });
     const step = steps[Math.min(toolStepsDone, steps.length - 1)];
     return step;
   }
@@ -885,13 +885,31 @@ function answer(req, ctx) {
 }
 
 /**
+ * The report file this validator turn was told to write.
+ *
+ * The whole-installment branch names the consolidated report; the chapter-by-chapter branch names a
+ * per-chapter partial, and the findings-merge turn names the consolidated one again. Hardcoding the
+ * consolidated name is why the chapter-by-chapter path has never run in this loop: the scripted brain
+ * wrote the volume's report, left the chapter's partial empty, and the "never wrote real output"
+ * guard correctly refused the volume. Reading the name out of the prompt is what a real model does.
+ *
+ * @param {string} userText - The turn's user message.
+ * @param {string} fallback - The name to use when the turn did not name one.
+ * @returns {string}
+ */
+function reportFileNamed(userText, fallback) {
+  const named = /report to the file "([^"]+)"/.exec(userText || "");
+  return named ? named[1] : fallback;
+}
+
+/**
  * The scripted plan for one agent turn: a list of assistant messages, consumed in
  * order as the turn's steps. Each entry is either tool calls (executed FOR REAL by
  * the harness, through the real approve gate) or the final chat reply.
  *
  * @param {string} kind
  * @param {object} volume
- * @param {{seriesDir: string}} ctx
+ * @param {{seriesDir: string, userText?: string}} ctx
  * @returns {import("./fake-backend").FakeReply[]}
  */
 function agentSteps(kind, volume, ctx) {
@@ -930,8 +948,8 @@ function agentSteps(kind, volume, ctx) {
     case "glossary-validator":
       return [
         { toolCalls: [read("glossary.md")], finishReason: "tool_calls" },
-        { toolCalls: [write("glossary-validation.md", validationMarkdown("glossary", volume, 1))], finishReason: "tool_calls" },
-        done("Wrote glossary-validation.md."),
+        { toolCalls: [write(reportFileNamed(ctx.userText, "glossary-validation.md"), validationMarkdown("glossary", volume, 1))], finishReason: "tool_calls" },
+        done("Wrote the validation report."),
       ];
 
     case "voice-author":
@@ -946,8 +964,8 @@ function agentSteps(kind, volume, ctx) {
     case "voice-validator":
       return [
         { toolCalls: [read("character-voice.md")], finishReason: "tool_calls" },
-        { toolCalls: [write("character-voice-validation.md", validationMarkdown("character-voice", volume, 1))], finishReason: "tool_calls" },
-        done("Wrote character-voice-validation.md."),
+        { toolCalls: [write(reportFileNamed(ctx.userText, "character-voice-validation.md"), validationMarkdown("character-voice", volume, 1))], finishReason: "tool_calls" },
+        done("Wrote the validation report."),
       ];
 
     case "style-author":
@@ -961,8 +979,8 @@ function agentSteps(kind, volume, ctx) {
     case "style-validator":
       return [
         { toolCalls: [read("style-guide.md")], finishReason: "tool_calls" },
-        { toolCalls: [write("style-guide-validation.md", validationMarkdown("style-guide", volume, 1))], finishReason: "tool_calls" },
-        done("Wrote style-guide-validation.md."),
+        { toolCalls: [write(reportFileNamed(ctx.userText, "style-guide-validation.md"), validationMarkdown("style-guide", volume, 1))], finishReason: "tool_calls" },
+        done("Wrote the validation report."),
       ];
 
     case "wiki-author":
@@ -978,10 +996,10 @@ function agentSteps(kind, volume, ctx) {
       return [
         { toolCalls: [read("shared-wiki.md")], finishReason: "tool_calls" },
         {
-          toolCalls: [write(`jump-in-wiki-validation-${volume.installment}.md`, validationMarkdown("jump-in-wiki", volume, 1))],
+          toolCalls: [write(reportFileNamed(ctx.userText, `jump-in-wiki-validation-${volume.installment}.md`), validationMarkdown("jump-in-wiki", volume, 1))],
           finishReason: "tool_calls",
         },
-        done(`Wrote jump-in-wiki-validation-${volume.installment}.md.`),
+        done("Wrote the validation report."),
       ];
 
     case "audit-agent":

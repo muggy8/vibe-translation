@@ -207,6 +207,82 @@ function rebuildMarkerKey(document, volume) {
   return `rebuilt_${document}_${Number(volume)}`;
 }
 
+/**
+ * Record that this volume's glossary rows were put into its record by the completeness rule rather
+ * than by the glossary stage working on that volume.
+ *
+ * The rows themselves are stamped `import` either way — they are read out of the published document —
+ * so the stamp cannot carry this distinction. The marker does: it says *why* the record has them, and
+ * the audit report prints it. Without it, a record whose glossary arrived because the stage skipped
+ * looks identical to one whose glossary the stage just built, and "this volume contributed nothing"
+ * is the silence this rule exists to end.
+ *
+ * @param {{db: Object}} ctx
+ * @param {number} volume
+ * @param {{imported: number, carried: number, refused: number, artifact: string}} detail
+ * @returns {void}
+ */
+function markGlossaryBackfilled(ctx, volume, detail) {
+  ctx.db
+    .prepare("INSERT INTO store_info (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(`glossary_backfilled_${Number(volume)}`, JSON.stringify({ at: new Date().toISOString(), ...detail }));
+}
+
+/**
+ * Read that marker.
+ * @param {{db: Object}} ctx
+ * @param {number} volume
+ * @returns {{at: string, imported: number, carried: number, refused: number, artifact: string}|null}
+ */
+function glossaryBackfilled(ctx, volume) {
+  const row = ctx.db.prepare("SELECT value FROM store_info WHERE key = ?").get(`glossary_backfilled_${Number(volume)}`);
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.value);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The numbers half of "how this reference was written", read out of a rebuild marker.
+ *
+ * Two pairs of numbers live in a marker and they are not the same question. `filed` is what **this run**
+ * added; `adoptedClaims` is what the **record** holds when the run is finished. A rebuild run a second
+ * time over its own output files nothing, so quoting `filed` about a record that holds 214 claims across
+ * 8 characters reports an empty reference. The record's number wins, and the run's number is the fallback
+ * for a marker written before the distinction existed.
+ *
+ * One function because the audit finding and the audit report both say this sentence, and two places that
+ * compute the same sentence drift into two answers.
+ *
+ * @param {Object} marker - A rebuild marker: `documentRebuilt`'s or `rebuiltDocuments`' row.
+ * @returns {{claims: number, characters: number, unkeyed: number, refused: number, candidates: number|null, candidatesRefused: number, fromRecord: boolean}}
+ *   `candidates: null` when the marker predates candidate copies, which is the case the report stays
+ *   silent about rather than reporting zero.
+ */
+function rebuildProvenanceCounts(marker) {
+  const adoptedClaims = Number(marker && marker.adoptedClaims);
+  const adoptedCharacters = Number(marker && marker.adoptedCharacters);
+  const candidateClaims = Number(marker && marker.candidateClaims);
+  const candidatesFiled = Number(marker && marker.candidatesFiled);
+  const fromRecord = Number.isFinite(adoptedClaims);
+  return {
+    claims: fromRecord ? adoptedClaims : Number((marker && marker.filed) || 0),
+    characters: Number.isFinite(adoptedCharacters) ? adoptedCharacters : Number((marker && marker.characters) || 0),
+    unkeyed: Number((marker && marker.adoptedUnkeyed) || 0),
+    refused: Number((marker && marker.refused) || 0),
+    candidates: Number.isFinite(candidateClaims)
+      ? candidateClaims
+      : Number.isFinite(candidatesFiled)
+        ? candidatesFiled
+        : null,
+    candidatesRefused: Number((marker && marker.candidatesRefused) || 0),
+    fromRecord,
+  };
+}
+
 module.exports = {
   DOCUMENT_GLOSSARY,
   DOCUMENT_VOICE,
@@ -219,4 +295,7 @@ module.exports = {
   documentMirrored,
   markDocumentRebuilt,
   documentRebuilt,
+  rebuildProvenanceCounts,
+  markGlossaryBackfilled,
+  glossaryBackfilled,
 };

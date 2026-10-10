@@ -60,6 +60,16 @@ function openVoiceRecord(ctx, previousVolume) {
           "voice stage finished)."
       );
     }
+    const backfill = opened.glossaryBackfill;
+    if (backfill && backfill.ran) {
+      console.log(
+        `Volume ${ctx.values.INSTALLMENT_NUMBER}: the reference record held no glossary rows of its own, so it read this ` +
+          `volume's published glossary.md into itself (${backfill.imported} new row(s), ${backfill.carried} already held ` +
+          `from earlier volumes, ${backfill.refused.length} refused for want of a line this volume's text prints, ` +
+          `${backfill.castRegistered} roster entr(ies) registered). The glossary stage skips a volume whose accepted ` +
+          `glossary is already on disk, and it skips before its store block — this is what keeps the roster whole.`
+      );
+    }
     return { ok: true, opened, error: null };
   }
   const detail = opened.findings.map((f) => `${f.severity} ${f.kind}: ${f.message}`).join("\n  ");
@@ -126,9 +136,12 @@ async function mirrorVoiceArtifact(ctx) {
 /**
  * Run the deterministic audit and write the report the validator agent used to write.
  *
- * The file keeps its name and its reader. What changed is who wrote it, and the consequence for the
- * loop: a HIGH finding is reported to the caller, which treats it as a failed check — the same way a
- * failing grade is treated — so the feedback pass runs and the volume is re-audited.
+ * What the audit does NOT do is stop the volume. The report is written and the HIGH count is logged;
+ * the QA loop's gate is still the acceptance grade, and the grader is reading the report this function
+ * just wrote, so a HIGH finding reaches the loop through the grade it drags down rather than through a
+ * check the loop runs itself. Sealing is the same shape: it is the end of the volume's pre-production,
+ * and the volume that gets there is sealed whether or not the audit found anything (the volume that
+ * *threw* on the way is the one left unsealed, and an unsealed volume is what copy-forward refuses).
  *
  * @param {{ values: Object, refStore: Object|null, voiceOutputFile: string, storeImport: Object|null }} ctx
  * @returns {Promise<Object|null>} The audit, or null when no record is open.

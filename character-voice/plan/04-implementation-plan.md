@@ -373,6 +373,168 @@ requests** to the scripted endpoint and still exits 2 with 0 HIGH / 2 MEDIUM.
 See gotcha 99, `docs/map-helpers.md` (`integrity.js`, `presence.js`, `name-resolution.js`) and
 `docs/map-preproduction.md`.
 
+### 7.5 Publishing a rebuilt reference seals its volume — the gap that stopped volume 02 from starting
+
+Volume 01 was rebuilt, applied and committed. Volume 02 then refused to start:
+
+```
+ok: false | rule: reference-source-fails-integrity
+because: volume 1's record fails 1 integrity check(s) and was not copied.
+  - reference-volume-unsealed: volume 1 is represented in this store but has not been sealed
+```
+
+The refusal was correct. A record that is still editable is a draft, and a draft is not what a later
+volume builds on. What was wrong is that **nothing in the rebuild path ever made the record
+publishable**: `rebuild-voice` built a record, wrote the artifact, and left the volume unsealed forever.
+
+**Publishing and sealing are now one act.** `publishRebuiltVolume` is the only thing that seals a rebuilt
+record and the only thing that writes the artifact into the volume's own folder. There is no `--no-seal`
+and no caller can seal without publishing or publish without sealing, because the claim a seal makes —
+*this is what the volume published* — is only true when the artifact is in place. A rehearsal with `--out`
+writes a scratch copy somewhere else and never reaches the function, so it cannot seal: not because the
+command forgot to ask, but because nothing was published.
+
+Three things are checked rather than trusted before the seal runs:
+
+1. the artifact is written, and an existing one is only replaced when `moveAside` says so;
+2. the file **on disk** is read back and is byte-for-byte what the record renders — a record sealed
+   against a file it does not match is worse than a draft;
+3. the audit reports no HIGH damage, because sealing is what lets the next volume build on a record and a
+   damaged record does not get to become immutable just because the rebuild finished. A damaged rebuilt
+   reference is still written — the pipeline's shape for a bad volume is *published, then stopped at the
+   copy-forward* — but it stays a draft, and the report says so.
+
+**The recovery path almost did not exist.** Volume 01 already holds `character-voice.md` **and**
+`character-voice.md.rejected`, so the obvious repair — run the rebuild again with `--apply --move-aside` —
+hits `rejected-artifact-already-exists`, because a second rejection would destroy the evidence of the
+first. That would have left the volume permanently unpublishable. The way out is not a flag: a rebuild
+that renders **exactly the file already there** is not overwriting anything, so it has nothing to move
+aside and creates no second `.rejected`. Measured on a throwaway copy of the real volume 01: re-running
+`rebuild-voice --volume=01 --apply --move-aside --alias=俺（主人公）=如月雨露` reports the file as
+unchanged, seals **514 rows**, and `copyForwardStore({fromVolume: 1, toVolume: 2})` then succeeds,
+carrying 214 rebuilt rows, 214 candidate copies and 86 glossary rows into volume 2's record — all of them
+arriving sealed. Before the seal the same call refuses.
+
+**Sealing is per-volume, and per-stage would have been the half-measure.** `sealVolume` publishes every
+row the volume owns, so sealing volume 1 also seals the 86 glossary rows the rebuild never touched. That
+is the right grain: what volume 2 inherits is volume 1's *record*, and a half-published volume is exactly
+the state gotcha 97 exists to describe. The asymmetry the account owner pointed at — accepted glossary
+rows versus a rebuilt reference nobody has read — is a fact about **provenance**, and the store already
+records it as one (`reference-document-rebuilt-from-extraction`, MEDIUM, on every audit of a record that
+carries rebuild rows). Sealing does not claim anybody read the reference; it claims this is what the
+volume published, and the record keeps those two claims apart.
+
+**A report that counts the run instead of the record is a report nobody can act on.** A rebuild run a
+second time files nothing, and its marker said *"0 claim(s) adopted, 0 character(s) with at least one
+claim"* about a record holding 214 claims across 8 characters. The marker now carries both numbers and
+`rebuildProvenanceCounts` prefers the record's, with the run's as the fallback for a marker written before
+the distinction existed.
+
+**And rehearsing the seal is what found a real defect in name resolution.** Re-running the rebuild over
+volume 01's own output filed 48 more claims under 俺 than the original run had — same file, same rules, a
+different record — because the "its primary name is a roster key" rule fired before the recorded alias,
+against a roster entry the first run had itself created. `resolveExtractionName` now tries a **recorded
+alias** before that inference. See gotcha 101.
+
+See gotcha 101, gotcha 102, `docs/map-helpers.md` (`rebuild.js`, `pipeline-store.js`,
+`document-prose.js`, `name-resolution.js`).
+
+### 7.6 A volume's published glossary is a completeness rule on its record, not a stage behaviour
+
+The account owner measured the hole on 2026-10-10:
+
+```
+volume 01: glossary.md 18,025 bytes, 101 table lines (87 data rows)   <- 86 rows in the record, 1 refused
+volume 02: glossary.md 28,605 bytes, 138 table lines (124 data rows)  <- 0 rows in the record, and the stage skips
+volume 03: glossary.md 38,269 bytes, 170 table lines
+... every one of the 17 volumes has a published glossary.md
+only volume 01 has a character-voice-new.json or a character-voice.md
+```
+
+The glossary stage finished for all 17 volumes in a run that predates the store. Its idempotence check
+skips a volume whose accepted `glossary.md` is already on disk, and that check runs **before** the
+stage's store block. So switching the store flags on mid-series would have left volumes 02–17 with no
+glossary rows in their records at all: the roster the coverage guard asks about would be volume 1's cast
+plus whatever the voice extraction happens to introduce, and every later volume inherits that hole. The
+accumulated reference the whole redesign exists to provide would be missing, quietly.
+
+**So the rule is on the record.** `ensureVolumeGlossaryInRecord` is asked inside `openVolumeRecord` —
+the one door every stage that writes to a volume's record already comes through — and it fires whether
+the glossary stage ran, skipped, or was never invoked. It does not depend on a stage being added to a
+command line, and there is no flag to switch it off (AGENTS.md rule 3).
+
+**Measured on the real volume 02, on a throwaway copy, with the scripted endpoint hearing nothing:**
+
+| step | volume 1's record | volume 2's record |
+|---|---|---|
+| copied as it is now (already sealed by the owner's run) | 214 `extract` + 214 `rebuild` + 86 `import`, all sealed | — |
+| `openVolumeRecord(volume 2)` copy-forward | unchanged | 514 facts, 10 cast, 10 chapters, 25 prose blocks, 960 name-occurrence rows — **0 glossary rows owned by volume 2** |
+| the completeness rule | unchanged | **34 imported**, 86 carried, 4 refused, 14 roster entries registered (cast 10 → 17) |
+| after | unchanged | 548 facts, 17 cast, 1 MEDIUM finding, 0 HIGH |
+
+Volume 02's `glossary.md` parses to **124 rows** (131 pipe lines minus one header per section). 34 of
+them are terms volume 2 introduces and its own text prints; 86 are the cumulative rows the record
+already held; **4 are refused** — ミート・ウォーズ ～ビーフの覚醒～, 夏目漱石, 太宰治, 百田尚樹 — rows
+no volume's record has ever held, because neither the term nor any passage their notes quote occurs in
+volume 2's text. Four refusals is the honest answer; the first version of this rule reported **46**.
+
+**Why 46 became 4, and why that is the finding rather than a polish.** `importGlossary` checked each
+row's evidence *before* it checked whether the record already holds that row. The glossary each volume
+publishes contains every row the earlier volumes published, so 42 of those 46 refusals were rows the
+record had held since volume 1 with volume 1's evidence behind them, being asked to also appear in
+**volume 2's** text. Nothing was lost and the report read as damage. The evidence rule decides what the
+store may *adopt*; a row the record already owns was adopted by the volume that owns it. The two checks
+are now in the other order, and a carried row keeps `owner_volume = 1` and its own citations.
+
+**Top-up, never overwrite.** A record that already owns glossary rows of its own is reported and left
+alone (`ran: false`, the planted row byte-identical, nothing else arrived) — gotcha 97's rule, tested by
+planting a row. Provenance stays honest: an imported row is stamped `import` either way, because it was
+read out of the published document, and `markGlossaryBackfilled` records *why* the record has them so
+the audit can say "read from this volume's own `glossary.md` when its record was opened" rather than
+implying the stage authored it. A volume that contributed nothing prints **0** in the report.
+
+See gotcha 103, `docs/map-helpers.md` (`pipeline-store.js`, `glossary-adapter.js`, `document-prose.js`,
+`validation.js`).
+
+### 7.7 The chapter-by-chapter store path, run end to end offline
+
+Volume 02 is chunked (7 segments), as every real volume of this series is. Until now the offline
+pipeline loop had never reached that branch — not because a scenario was missing, but for two reasons
+that each looked like something else (gotcha 104): a plain-text volume cut into one part has no fallback
+path to take at all, and the scripted model brain hardcoded the consolidated report's file name, so the
+per-chapter partial stayed empty and the "never wrote real output" guard correctly refused the volume.
+
+With both fixed, `npm run pipeline-loop-chunked` (part of `npm test`) runs `discover → glossary →
+character-voice` with the character-voice stage forced chapter-by-chapter and both store flags pinned
+on. What it shows:
+
+| character-voice stage, two fixture volumes | whole, flags off | whole, flags on | chunked, flags off | chunked, flags on |
+|---|---|---|---|---|
+| model calls | 22 | 16 | 44 | 26 |
+| prompt characters | 221,317 | 159,541 | 495,577 | 295,973 |
+| validator-family calls | 6 | 0 | 18 | 0 |
+
+**The chunked branch does run the store.** The deterministic audit fires (27 and 29 citations
+re-checked on the fixture's two volumes), the extraction claims are filed, the finished reference is
+mirrored, and the record is **sealed** (9 rows, then 0) — the seal lives at the task level, so both modes
+reach it, and the whole-mode→chunked retry is safe because `mirrorVoiceArtifact` resets this volume's
+mirror before re-importing.
+
+**What vanishes in the chunked branch specifically:** 12 per-chapter validator agents and 6
+findings-merge agents (whole mode drops 6 validator agents). The merge agent's work — consolidate the
+partials, dedupe, keep the chapter tags, produce the summary and verdict sections — is fully replaced,
+because consolidating a report checks nothing. What is **not** replaced is the per-chapter *reading*: an
+agent that read the reference against one chapter could notice the reference misdescribes a character,
+and no query in the store asks that question. That gap is not chunked-specific — whole mode pays for it
+too — and the only thing still judging it is the acceptance grade.
+
+**And the chunked branch is more expensive, which the flags do not undo.** Whole mode pays for one
+extraction and one compile pass per volume; chunked mode pays for one of each **per chapter**. On the
+fixture that is 4 authoring calls becoming 8; on volume 02 it is 2 becoming 14. The store removes the
+validation half of the bill, not the authoring half.
+
+See gotcha 104, `docs/map-tests.md` (`test-pipeline-loop.js`, `fake-workflow.js`, `prompt-audit.js`).
+
 ---
 
 ## 8. Build order
@@ -497,6 +659,67 @@ Against the targets: **0 edits to a published artifact** is met and testable —
 are byte-identical to the flag-off run's. **Under 30,000 characters handed to one grading call** is met
 on the real volume 01 (23,473). The token and wall-time targets, the re-read-to-written ratio, and the
 quality floor need a real volume run with the flags on, which has not happened.
+
+### 10.2 What volume 02 will actually cost, measured against volume 01's real run
+
+Volume 01's real character-voice run is the only real number this plan has. Read out of the run's own
+`summary.log` (each call records its prompt tokens, completion tokens, time-to-first-token and
+generation speed), it is:
+
+| family | calls | prompt tokens | wall clock | why |
+|---|---|---|---|---|
+| validators (10 chapters + 1 merge + 1 recovery) | 12 | 62,541,546 | **7.2 h** | 5.2M prompt tokens per call, prefilled cold |
+| author-compile (one per chapter) | 10 | 50,062,758 | 3.3 h | 5.0M per call |
+| feedback (4 of 10 chapters) | 4 | 53,055,992 | 1.0 h | 13.3M per call, but prefilled warm |
+| extraction | 10 | 760,550 | 0.5 h | 76k per call |
+| acceptance | 1 | 290,812 | 0.02 h | the whole 336 KB reference plus the whole 244 KB report |
+| **total** | **37** | **166,711,658** | **12.7 h** | one QA iteration, and the loop stopped there |
+
+Two facts in that table decide what volume 02 costs.
+
+**The validation half is the bill, and the store deletes it.** 12 calls, 62.5M tokens, 7.2 hours — 38%
+of the tokens and 57% of the wall clock — bought nothing that the store's queries do not answer. Volume
+02 has 7 segments, so the same family there is 8 calls (7 chapters + 1 merge) ≈ **46M tokens and ≈ 5.3
+hours per iteration**. With the flags on it is **zero**, and that is true of every *further* iteration
+too: a second iteration costs 46M tokens of validation with the flags off and none with them on.
+
+**The run stopped after one iteration because it was already 12.7 hours in — and its grade was 48.**
+The volume's own acceptance record says `results: [48]` against a passing score of 70, and the delivery
+audit already wrote the finding: *"the rolling window [48] never met the acceptance criterion, and the
+volume was published anyway (ON_QA_LIMIT=accept). No grader signed this off."* A reference that scores
+48 is a reference the loop is designed to send back for feedback, so volume 02 should be budgeted for
+**more than one iteration**, which is exactly the case where the flags pay most.
+
+Revised estimate for volume 02 (7 segments, chunked, 475,351 bytes of chapter text = 1.10× volume 01):
+
+| | flags off | flags on |
+|---|---|---|
+| extraction | 7 calls, 0.6M tokens | same |
+| author-compile | 7 calls, 38.5M tokens, ~3.3 h | same |
+| validators | 8 calls, **46M tokens, ~5.3 h** | **0** |
+| acceptance | 1–3 grades, 0.3–0.9M tokens | 1–3 grades, **0.04–0.06M** tokens (the sample is 17,456 chars and the report 4,508 — measured on volume 01's rebuilt record) |
+| one feedback round | 7 calls, ~102M tokens, ~1.1 h | same |
+| **one iteration, no feedback** | **≈ 85M tokens, ≈ 9 h** | **≈ 39M tokens, ≈ 3.5–4 h** |
+| **one iteration + one feedback round** | **≈ 187M tokens, ≈ 10 h** | **≈ 141M tokens, ≈ 4.6–5.5 h** |
+
+The saving is **~46M tokens and ~5.3 hours per QA iteration**, and the iteration is the unit that
+multiplies. The authoring half — 7 extraction calls and 7 compile calls, ~39M tokens — is not touched by
+the store at all, and it is what chunked mode makes expensive: whole mode pays for one extraction and
+one compile per volume, chunked mode pays per chapter. On the fixture that is 4 authoring calls becoming
+8; on volume 02, 2 becoming 14.
+
+**The cheap thing to do before volume 02 starts** is to grade volume 01's *rebuilt* reference once, with
+the store's sample and report. It has never been graded — the rebuild makes no model call — and the grade
+is the only part of this estimate that is a guess. The two things the grader would be shown are computable
+with no model call and are measured above: 17,456 characters of artifact sample (5 of 8 sections, from a
+50,903-character document) and a 4,508-character audit report whose own line reads **"revise (minor) — 2
+finding(s) to correct; none of them blocks acceptance."** One grading call, roughly 20k prompt tokens, a
+minute or two. If it clears 70, volume 02 is a one-iteration volume; if it lands near 48, budget the
+feedback rounds.
+
+What is still not measured: tokens and wall time on a real volume **with the flags on**. The offline loop
+cannot produce them — its scripted endpoint returns fixed usage counts and answers instantly — so the
+honest measures it gives remain calls, prompt characters and tool calls.
 
 ---
 
