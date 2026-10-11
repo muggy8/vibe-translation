@@ -592,6 +592,108 @@ stops most of them from being created at all; a seal-time pass would close the o
 
 See gotcha 105.
 
+### 7.9 The reading half as a command of its own — unbolted, and what the real book said back
+
+**The decision (account owner, 2026-10-11).** Unbolt the reading step from the writing step and produce
+volume 02 that way. Measured, same grader, same rubric: volume 01's reference **written by an agent**
+scored **48/100**; the same volume's reference **assembled by code from its own extraction** scored
+**81/100**. The costs behind those two numbers are the argument: extraction 760,550 prompt tokens across
+10 calls; the author pass 50,062,758; the validation pass 62,541,546. The assembled route pays the
+extraction and nothing else.
+
+**Command shape: a second command, not a mode.** `extract-voice.js` sits beside `rebuild-voice.js` and the
+route is the two of them in order. A mode inside the voice stage is reachable by a normal run — the
+pipeline passes flags straight through to stages, and `--stages=character-voice` is something an autopilot
+does on its own — and a route that produces a reference with no author agent and no acceptance loop must
+not be one a run can fall into. `extract-voice.js` is required by nothing, is not in `index.js`'s step
+list, and has **no environment variable in front of any of its guards**: the sealed-volume refusal, the
+evidence rule, the "a chapter that yielded nothing refuses the pass" refusal, the fact that it writes no
+`character-voice.md` and seals nothing. `--dry-run` previews; `--force` is the only way to pay for a
+chapter twice.
+
+**What the extractor's context changed, and how it is known.** The stage shows chapter 0 the previous
+volume's reference and every later chapter **this volume's in-progress reference** — the document the
+previous chapter's author pass just wrote. In this route no such document exists. Every chapter is now
+shown the previous volume's published reference, held constant, plus a bounded block naming what this
+volume's own earlier chapters already produced (`buildAlreadyExtractedNote`), because
+`chapterSegmentNote` tells every chapter that "the cumulative reference material already covers the
+chapters before it" and in a pass that never compiles that sentence is false. The seam is `runExtract`'s
+fourth argument (`stateFile`, `extraNote`), so the stage's own behaviour is unchanged and the difference
+is a named decision rather than a side effect of a missing file. **The context did change**, and it was
+not A/B-tested: measuring it properly would mean re-reading volume 01, which is sealed. What was measured
+instead is the question that matters — whether the extractor still saw enough to cover the cast. Volume
+02's extraction filed claims about **13 characters** and the audit's coverage guard found **no HIGH gap**,
+so the reading pass did not lose the cast. What it did lose is stated in gotcha 106.
+
+**Idempotence and resume.** Each chapter's answer is written to `character-voice-extract-<chapter>.json`
+the moment it arrives, tagged with a sha256 of the chapter text it was produced from. The consolidated
+`character-voice-new.json` is written only when every chapter is in hand, through a temporary name and a
+rename. A second invocation reuses every partial whose fingerprint still matches and makes **no call** for
+it; a chapter whose text changed is re-read on its own; a chapter with no partial is read. On the real
+volume 02 that meant five invocations where the later ones paid only for the chapters that had failed:
+invocation 4 re-read 2 chapters and reused 5, invocation 5 the same. The volume's record is opened through
+`openVolumeRecord` before a single chapter is read, so the previous volume's sealed record, the glossary
+completeness rule and the roster fold all fire here exactly as they fire in a run; the record is closed,
+never sealed — only publishing seals, and this command publishes nothing.
+
+**The notebook it produced:** 178 claims — 154 voice, 24 POV — spread `ch1` 48, `ch2` 22, `ch3` 32, `ch4`
+21, `ch5` 8, `ch5.1` 36, `ch5.2` 11. The two chapters whose answers came back cut off are the two thinnest
+chapters in the notebook, which is the shape of the route's remaining quality problem.
+
+**What the real book broke, in order of how much it mattered.**
+
+1. **Two of seven chapters came back cut off.** `ch4` and `ch5` produced 25,659–64,493 characters of
+   reasoning and then stopped before the JSON closed, yielding 6 and 1 claims at the default
+   `AI_THINKING_LEVEL=xhigh`. The same two chapters re-read at `medium` yielded **21 and 8**. The harness
+   was not at fault: `finish_reason=stop`, no idle deadline, no token cap.
+2. **One chapter came back malformed twice.** `ch2`'s array was valid except for a comma missing between
+   two properties. A whole chapter lost to one malformed claim is twenty-odd claims paid for and thrown
+   away, so an unparseable array is read **claim by claim**: what parses is kept, what does not is dropped
+   and named, and the answer that could not be read is kept in the partial.
+3. **The old route had the same failure and said nothing.** `character-voice/chunked.js` wraps the parse in
+   `catch {}` and hands the compile pass the raw text, so a chapter can vanish from the notebook with no
+   log line. Volume 01's 223 claims across 10 chapters is consistent with that having happened.
+4. **There is no way to re-read one chapter.** `--force` re-reads the volume. The operator's move is to
+   delete that chapter's partial, which works but is not a named capability.
+5. **The route produces no `pov-map.md`, and the acceptance check names that file.** `acceptanceCheck`
+   always sends `{ file: povOutputFile }` and the harness throws on a missing file message, so the voice
+   stage's own grader cannot run on a rebuilt volume at all (gotcha 107).
+
+**What volume 02 cost, read out of the run logs.** 14 extraction calls / **1,141,844 prompt tokens** /
+515,638 completion / **1,657,482 total** / 3,062 s of model wall clock (0.85 h). The seven chapters with
+no wasted call — the answer each chapter ended up keeping: **532,050 prompt tokens / 782,106 total**; the
+seven retries that were thrown away cost 609,794 prompt tokens on their own. One grading call: 21,316
+prompt / 2,374 completion. Against volume 01's authored run — 166,711,658 prompt tokens, 12.7 hours, 37
+calls — the route is **146× cheaper counting every call and 313× counting only the answers it kept**, and
+the plan's under-10,000,000-token target is met with the retries included.
+
+**What volume 02 published.** `character-voice.md`, 419 lines, **15 character sections**, 366 bullets,
+longest line 486 characters, zero truncated bullets. It is the **accumulated** reference: 196 claims
+established in volume 1 (carried from volume 01's sealed record) and 170 established in volume 2. The
+record was sealed in the same act that wrote the file — 442 rows owned by volume 2, 956 facts in the
+snapshot — and the next volume's copy-forward may build on it. The roster fold fired when the record
+opened (`俺` → 如月雨露, 14 claims moved, one `cast_merges` row, no `### 俺` section in the published
+file); the glossary completeness rule fired (34 imported, 86 carried, 4 refused); the evidence rule
+refused **3 of 178** claims. The audit found **0 HIGH and 3 MEDIUM**: one coverage mention naming three
+roster characters the reference says nothing about — 山田 in 2 of 7 chapters, 二の宮君 and 斗真君 in 1 each,
+all below the 3-chapter line with no claim from either pass — and two provenance rows saying volumes 1 and
+2 were assembled by code. One real grade: **80/100, "Pass with minor edits"**, above `PASSING_SCORE=69` and
+`ACCEPTANCE_SAMPLE_FLOOR=54`, below the exceptional threshold. The grader's own words: *"Reference is
+thorough and well-cited for main characters with no contradictory quirks or missed POV markers; the three
+MEDIUM findings (minor characters below threshold, no human review pass) are non-blocking nits, and some
+redundancy in the 三色院菫子 section slightly reduces polish."* The redundancy it names is **not** something
+the deterministic report reports — no query asks whether two bullets about one character say the same thing
+— so this is a defect only a model noticed, in a reference no model wrote.
+
+**What this route still does not do.** It writes no `pov-map.md`, so the POV half of the artifact is not
+produced and the stage's own acceptance loop cannot run against it. It inherits whatever the extraction
+model gets wrong, with no author agent between the notebook and the published file — including volume 01's
+drafting note, which is carried verbatim into volume 02's published reference (one occurrence, in the
+秋野桜 section) because it is stored as a claim and no deterministic check asks whether a claim's prose is
+finished writing.
+
+See gotcha 106 and gotcha 107.
+
 ---
 
 ## 8. Build order
@@ -606,10 +708,20 @@ fixture series (`test/fixture-series.js`); none may reach the real 17 volumes.
 | 3 | Copy-forward as a **guarded step** | **Done 2026-10-10; reviewed.** A planted corrupt source file is refused and reported HIGH. A clean copy has identical row counts and records its source hash |
 | 4 | Import both artifacts for one volume, **render them back** | **Done 2026-10-10; reviewed, and the review's corrections are applied.** Measured on the real volume 01: the rendered glossary is byte-identical to the file on disk except for the one row the store refused, and the character-voice reference reproduces its content (its line structure differs only where the file itself has a 54,341-character welded line) |
 | 5 | Sealing and ownership | **Done 2026-10-10; reviewed.** An agent updates and deletes its own unsealed rows. The same call against another volume's row changes **zero** rows and returns a refusal naming the real owner and pointing at `challenge_fact`. After sealing, delete is refused |
-| 6 | Replace the AI validators with queries + a graded sample | **Done 2026-10-10, behind `GLOSSARY_STORE_VALIDATORS` / `VOICE_STORE_VALIDATORS`, both default off.** Each planted defect is caught at the right severity — `test/test-reference-store-pipeline.js`, twenty scenarios, the shape `test/test-postmortem.js` uses. The whole-document validators make no model calls: on the offline fixture loop the glossary stage goes 21 → 15 calls and 186,301 → 116,602 prompt characters, the character-voice stage 22 → 16 and 221,281 → 157,828, the whole run 107 → 95 and 1,131,401 → 998,663, and the `glossary-validator` / `voice-validator` kinds (12 calls, 149,454 characters) stop existing. On the real volume 01, measured without a model call, one acceptance grade drops from 227,782 characters to 23,473 for the character-voice reference and from 31,763 to 17,472 for the glossary. **No real volume has been run through it yet**, which is why both flags default off (§12) |
+| 6 | Replace the AI validators with queries + a graded sample | **Done 2026-10-10, behind `GLOSSARY_STORE_VALIDATORS` / `VOICE_STORE_VALIDATORS`, both default off.** Each planted defect is caught at the right severity — `test/test-reference-store-pipeline.js`, twenty scenarios, the shape `test/test-postmortem.js` uses. The whole-document validators make no model calls: on the offline fixture loop the glossary stage goes 21 → 15 calls and 186,301 → 116,602 prompt characters, the character-voice stage 22 → 16 and 221,281 → 157,828, the whole run 107 → 95 and 1,131,401 → 998,663, and the `glossary-validator` / `voice-validator` kinds (12 calls, 149,454 characters) stop existing. On the real volume 01, measured without a model call, one acceptance grade drops from 227,782 characters to 23,473 for the character-voice reference and from 31,763 to 17,472 for the glossary. **No real volume has been run through the stage's flag-gated path yet** — which is why both flags default off (§12). What *has* now run on a real volume is the store itself: volume 02's record was opened, filled, audited, rendered and sealed by `extract-voice.js` + `rebuild-voice.js` with the flags off, because that route has no flag in front of its record door (§7.9, gotcha 106) |
 | 7 | Give the pre-production agents the read and write tools, with budgets | Tested against the scripted endpoint in `test/fake-backend.js`, **including a model that asks for more than the window can hold — that grant must be refused, not honoured** |
 | 8 | Two-tier injection into the translator | The card tier is never dropped. The full tier is ranked by appearance in the chapter. A volume-N translation cannot see a volume-N+1 fact. Bumped through `REFERENCE_SELECTION_VERSION` so dependent drafts invalidate deliberately (gotcha 27) |
 | 9 | The repair loop as query-and-propose | A repair agent makes **no file edits** on a published artifact |
+
+**A tenth thing got built, and it was not on the list.** `extract-voice.js` — the reading half of the voice
+stage as a command of its own (§7.9) — was added because the rebuild path had no way to produce its own
+input. It is not a slice: it changes no prompt, no stage and no call the pipeline makes, and it is reachable
+only by typing it. **And the bounded real run this plan asked for before slice 9 is decided has now happened**
+(§10.4): volume 02 read and assembled for 1.16M prompt tokens and graded 80/100 with one call. What that run
+puts on the table for slice 9 is not "the loop is too expensive" — it is that the expensive part is gone and
+what is left is a route with no repair pass at all, so the defects a repair pass used to catch (a claim whose
+prose is half-written, two bullets saying the same thing, a chapter whose answer came back cut off) now reach
+the published file untouched.
 
 **Slices 1–5 are built, and they add a parallel implementation that no agent touches** — nothing about what a prompt
 says or which calls the pipeline makes changes, so they can be merged and tested without any
@@ -699,7 +811,8 @@ Three things about those numbers, stated plainly:
 - **The fixture cannot measure tokens or wall time.** The scripted endpoint returns fixed usage counts
   (`prompt=200` or `prompt=600`) and answers instantly, so the honest measures it gives are **calls,
   prompt characters and tool calls**. The 171,843,556-tokens-per-volume and 13-hours figures in the
-  table above are real-run numbers, and slice 6 has not been run on a real volume. They stay open.
+  table above are real-run numbers, and slice 6's **stage** path has not been run on a real volume — though the
+   store itself now has, on volume 02 through `extract-voice.js` + `rebuild-voice.js` (§10.4). They stay open.
 - **Acceptance got more expensive, not less.** The deterministic audit report is longer than the
   validator agent's report, and the acceptance grade is shown that report. On the fixture that is
   +16,194 characters across 24 grades; on the real volume 01 the same change *reduces* the grade
@@ -837,6 +950,44 @@ completed feedback agents hit their step cap without a final answer**, spending 
 to locate their own text inside the 55k-character reference. Paying for a third and fourth round of a pass that
 does not finish is spend, not quality — which is the argument for slice 9 (repair as query-and-propose) and the
 argument for bounding the loop in the meantime.
+
+### 10.4 Volume 02, actually run: the branch that was priced as "best case" and what it really cost
+
+Volume 02 was not run through the stage. It was run through the pair `extract-voice.js` → `rebuild-voice.js
+--apply` (§7.9), which is the branch §10.3 priced at "≈ 39M tokens, ~3.5–4 h". It cost **1,163,160 prompt
+tokens and 1,681,172 tokens total** — 14 extraction calls plus one grading call, 0.85 h of model wall clock.
+
+| | volume 01, authored (real) | volume 02, read-and-assemble (real) |
+|---|---|---|
+| model calls | 37 | **15** (14 extraction + 1 grade) |
+| prompt tokens | 166,711,658 | **1,163,160** |
+| total tokens | 171,843,556 | **1,681,172** |
+| model wall clock | 12.7 h | **0.85 h** |
+| author (compile) calls | 10 | **0** |
+| validator / merge calls | 12 | **0** |
+| feedback calls | 4 | **0** |
+| grade | 48/100, published anyway via `ON_QA_LIMIT=accept` | **80/100, "Pass with minor edits"** |
+| artifact | 8 sections, 227 lines, one 54,341-character line | 15 sections, 419 lines, longest line 486 characters |
+
+**The estimate was wrong in the direction that matters.** §10.3's "best case" assumed the stage's own
+chapter-by-chapter path with the store flags on — 7 extraction calls *and 7 compile calls*. The compile
+calls are not in this route at all, so the real number is not 4.3× cheaper than volume 01, it is **143×**
+on prompt tokens. The estimate also assumed one grading call; the extraction needed seven retries it did
+not predict, and those retries are 609,794 prompt tokens — 52% of the extraction spend, and the single
+largest thing the plan did not foresee.
+
+**What the two grades are and are not comparing.** Volume 01's 81 was taken with its `pov-map.md` in the
+grader's materials (24,205 of 48,466 prompt tokens); volume 02's 80 had to be taken without one, because
+this route writes no POV map and the harness throws on a missing file message (gotcha 107). Same grader,
+same rubric, same temperature, same sample rule — different amount of evidence shown. The honest reading is
+"the assembled reference graded 81 and 80 in two runs, the second with one of its inputs missing", not
+"quality held".
+
+**What the run did not buy.** No `pov-map.md`, so the POV half of the artifact is missing for volume 02;
+no acceptance loop, so the score is a measurement and not a gate; and no author agent between the notebook
+and the published file, which is why volume 01's drafting note is now in volume 02's published reference
+verbatim. The next slice's question is whether the route is finished enough to be the default, and §7.9's
+list of what broke is the evidence for answering it.
 
 ---
 

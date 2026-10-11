@@ -255,6 +255,20 @@ async function main(args) {
     const staged = stageCopy(sourceDir, workDir);
     console.log(`\n  copied ${staged.copied} file(s) into ${workDir}`);
     console.log(`  not copied: ${staged.skipped.join(", ") || "nothing"} — the reference this command replaces is not an input to it.`);
+    // The copy deliberately has no record: `stageCopy` skips `series.db*`, and the rehearsal folder holds
+    // this volume only. So a rehearsal of a volume that has volumes before it renders **this volume's own
+    // claims** — the published file is that plus everything the previous volume's sealed record carries in,
+    // and the roster fold that fires when a record is opened never fires here. Measured on the real volume
+    // 02: the rehearsal rendered 12 sections; the published file renders 15. Saying so is the difference
+    // between a preview and a number dressed as a preview.
+    if (volumeNumber > 1) {
+      console.log(
+        `\n  note: this rehearsal starts with an empty record — ${VOICE_FILE} and series.db* are not copied, and ` +
+          `${workSeriesDir} holds only ${folderName}. What it renders is volume ${args.volume}'s own claims, not the ` +
+          `accumulated file it would publish, which also carries every earlier volume's sealed record in. Read it as ` +
+          `this volume's contribution, not as the artifact.`
+      );
+    }
   }
 
   /** @type {Array<Object>} */

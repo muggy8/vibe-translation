@@ -33,15 +33,31 @@ const { buildAuthorSystemPrompt, buildAuthorTurnPrompt } = require("./prompts");
  * @param {CharacterVoiceVolumeCtx} ctx
  * @param {SourceSegment|null} [seg] - The chapter being extracted (fallback).
  * @param {number} [si] - Zero-based position in reading order.
+ * @param {{stateFile?: string|null, extraNote?: string|null}} [opts] - What this pass is shown as the
+ *   cumulative reference, and what else it is told.
+ *
+ *   `stateFile`, when the key is present (a path, or `null` for "show nothing"), replaces the stage's
+ *   chain — chapter 0 sees the previous volume's file and every later chapter sees **this volume's
+ *   in-progress** one. `extract-voice.js` passes the previous volume's file for every chapter, because
+ *   in that route there is no in-progress document to show: nothing writes `character-voice.md` until
+ *   `rebuild-voice.js` does, and handing chapter 4 a file the previous chapter's author pass wrote
+ *   would be handing it a file that does not exist. The name the reference is given follows the file,
+ *   not the chapter number, so an overridden pass is not labelled as a document it is not.
+ *
+ *   `extraNote` is appended after the chapter segment note. It exists because that note asserts "the
+ *   cumulative reference material already covers the chapters before it", which is only true of a pass
+ *   that has been compiling as it went; a reading-only pass has to say what its own earlier chapters
+ *   produced instead, or the instruction it gives the extractor is false.
  * @returns {Promise<string>}
  */
-async function runExtract(ctx, seg = null, si = null) {
+async function runExtract(ctx, seg = null, si = null, opts = {}) {
   const { values } = ctx;
   const labelSuffix = seg ? `-${seg.id}` : "";
   if (seg) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV extraction for chapter ${seg.id}...`);
     const messages = [{ file: path.join(ctx.volumeDir, seg.file), name: seg.file }];
-    const stateFile = si === 0 ? ctx.previousVoiceRefFile : ctx.voiceOutputFile;
+    const chained = si === 0 ? ctx.previousVoiceRefFile : ctx.voiceOutputFile;
+    const stateFile = Object.prototype.hasOwnProperty.call(opts, "stateFile") ? opts.stateFile : chained;
     if (stateFile) {
       // Inlined (not readFile) — so the cumulative reference is bounded here.
       // Relevance-ordered: the characters this chapter actually contains are
@@ -50,12 +66,13 @@ async function runExtract(ctx, seg = null, si = null) {
       messages.push(
         await inlineReferenceMessage(
           stateFile,
-          si === 0 ? "character-voice-previous.md" : "character-voice-current.md",
+          stateFile === ctx.previousVoiceRefFile ? "character-voice-previous.md" : "character-voice-current.md",
           { truncate: (raw) => truncateVoiceRef(raw, chapterSource) }
         )
       );
     }
     messages.push({ text: ctx.extractPrompt }, { text: chapterSegmentNote(ctx.bundle, seg, si) });
+    if (opts.extraNote) messages.push({ text: opts.extraNote });
     return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `character-voice-extract-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
   }
   const { sourceFile } = ctx;
