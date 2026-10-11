@@ -24,9 +24,11 @@ const { buildVoiceIndex, parseVoiceSections } = require("./reference-index");
  * makes `voiceWriteInstruction` able to say "edit it in place", which is the only
  * instruction that works once the reference is bigger than one reply.
  *
- * Only `character-voice.md` is seeded. `pov-map.md` is PER-VOLUME (this volume's
- * POV map), not cumulative, so it is written fresh every volume and a stale copy
- * of the previous volume's map would be worse than none.
+ * Only `character-voice.md` is seeded, and only on the author route. `pov-map.md` is not seeded
+ * because the agent that writes it writes it whole, and a stale copy of the previous volume's map
+ * would be worse than none. The stage's default route seeds nothing at all — it renders both
+ * artifacts from the volume's record — and the map it renders **is** cumulative, which is a change to
+ * what the file means: see `utils/reference-store/pov-map.js` and the note on `voiceWriteInstruction`.
  *
  * @param {CharacterVoiceVolumeCtx} ctx - The volume context.
  * @returns {Promise<boolean>} True when the volume's reference now starts from the
@@ -99,9 +101,16 @@ async function seedVoiceReferenceFromPrevious(ctx) {
  *
  * @param {string} previousMarkdown - The previous volume's reference content.
  * @param {string} currentMarkdown - The reference just produced for this volume.
- * @returns {{previousCount: number, currentCount: number, missing: Array<{name: string, expected: number, found: number}>, added: string[], restructured: number}}
+ * @param {{merged?: Array<{merged: string, survivor: string}>}} [opts] - The roster folds **the record
+ *   itself recorded**: `[{merged: "俺", survivor: "如月雨露"}]`. A name the store folded into another
+ *   entry is not a character the reference lost — its claims moved, and the fold carries the reason the
+ *   pass that made it gave. Counting it as a loss would make the store's own roster rule and this guard
+ *   contradict each other; counting it as carried without checking that the survivor is present would
+ *   let a real disappearance hide behind a rename. Both are checked: the fold has to be one the record
+ *   made, and the survivor's section has to be there.
+ * @returns {{previousCount: number, currentCount: number, missing: Array<{name: string, expected: number, found: number}>, merged: Array<{name: string, survivor: string, expected: number, found: number}>, added: string[], restructured: number}}
  */
-function compareVoiceCarryForward(previousMarkdown, currentMarkdown) {
+function compareVoiceCarryForward(previousMarkdown, currentMarkdown, { merged = [] } = {}) {
   const previous = parseVoiceSections(previousMarkdown);
   const current = parseVoiceSections(currentMarkdown);
 
@@ -114,7 +123,15 @@ function compareVoiceCarryForward(previousMarkdown, currentMarkdown) {
   const currentCounts = countBy(current);
   const currentNames = new Set(current.map((s) => s.primary));
 
+  /** @type {Map<string, string>} retired primary name → the entry it was folded into, from the record. */
+  const folded = new Map();
+  for (const row of merged || []) {
+    if (row && row.merged && row.survivor) folded.set(String(row.merged), String(row.survivor));
+  }
+
   const missing = [];
+  /** @type {Array<{name: string, survivor: string, expected: number, found: number}>} */
+  const mergedAway = [];
   let restructured = 0;
   for (const [primary, expected] of previousCounts) {
     const found = currentCounts.get(primary) || 0;
@@ -123,6 +140,12 @@ function compareVoiceCarryForward(previousMarkdown, currentMarkdown) {
       // the section was reworded — legitimate, and worth reporting separately so
       // a mass rename is visible rather than silently counted as a loss.
       if (!current.some((s) => s.name === previous.find((p) => p.primary === primary)?.name)) restructured++;
+      continue;
+    }
+    const survivor = folded.get(primary);
+    const survivorFound = survivor ? currentCounts.get(survivor) || 0 : 0;
+    if (survivor && survivorFound > 0) {
+      mergedAway.push({ name: primary, survivor, expected, found: survivorFound });
       continue;
     }
     missing.push({ name: primary, expected, found });
@@ -135,6 +158,7 @@ function compareVoiceCarryForward(previousMarkdown, currentMarkdown) {
     previousCount: previous.length,
     currentCount: current.length,
     missing,
+    merged: mergedAway,
     added,
     restructured,
   };
@@ -181,6 +205,27 @@ async function assertVoiceCarryForward(ctx, stageLabel = "the compile pass") {
 
 
 /**
+ * The roster folds this volume's own record has recorded, for the carry-forward comparison.
+ *
+ * Read from the record rather than passed in by the caller, because the point of the fold is that
+ * *the store decided it* — with a name, a reason, and the claims it moved. A guard that accepted a
+ * disappearance because a caller said "that one is fine" would be the guard off.
+ *
+ * @param {{ refStore?: Object|null }} ctx
+ * @returns {Array<{merged: string, survivor: string}>}
+ */
+function recordedRosterFolds(ctx) {
+  if (!ctx || !ctx.refStore || typeof ctx.refStore.castMerges !== "function") return [];
+  try {
+    return ctx.refStore.castMerges() || [];
+  } catch {
+    // A record that cannot answer the question does not get to excuse a missing character.
+    return [];
+  }
+}
+
+
+/**
  * The same gate against an arbitrary baseline — the previous volume's reference,
  * or this volume's own reference as of the previous chapter.
  *
@@ -210,11 +255,14 @@ async function guardVoiceCarryForwardAgainst(ctx, baselineText, stageLabel, base
     return;
   }
 
-  const diff = compareVoiceCarryForward(baselineText, currentText);
+  const diff = compareVoiceCarryForward(baselineText, currentText, { merged: recordedRosterFolds(ctx) });
   if (diff.missing.length === 0) {
     console.log(
       `Volume ${values.INSTALLMENT_NUMBER}: carry-forward check passed ` +
-        `(${diff.previousCount} character section(s) carried${diff.restructured ? `, ${diff.restructured} reworded` : ""}, ${diff.added.length} added).`
+        `(${diff.previousCount} character section(s) carried` +
+        (diff.restructured ? `, ${diff.restructured} reworded` : "") +
+        (diff.merged.length ? `, ${diff.merged.length} folded into another entry by the record (${diff.merged.map((m) => `${m.name} → ${m.survivor}`).join(", ")})` : "") +
+        `, ${diff.added.length} added).`
     );
     return;
   }

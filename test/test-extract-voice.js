@@ -226,12 +226,38 @@ function fixtureReadingSeries(label) {
  * @param {{unverifiable?: boolean}} [opts]
  * @returns {void}
  */
-function stubHarness(calls, { unverifiable = false, malformed = false } = {}) {
-  harness.runOneShot = async ({ systemPrompt, messages, label }) => {
+function stubHarness(calls, { unverifiable = false, malformed = false, cutOffChapter = null, alwaysCutOff = false } = {}) {
+  /** @type {Map<string, number>} How many times each chapter has been asked, so a retry can answer differently. */
+  const seen = new Map();
+  harness.runOneShot = async ({ systemPrompt, messages, label, thinkingLevel }) => {
     const fileMessage = messages.find((m) => m && m.file);
     const text = fileMessage ? fs.readFileSync(fileMessage.file, "utf8") : "";
     const line = (text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"))[0] || "").trim();
-    calls.push({ label, messages });
+    calls.push({ label, messages, thinkingLevel });
+    const chapter = cutOffChapter || (alwaysCutOff ? "*" : null);
+    if (chapter) {
+      const key = label;
+      const times = (seen.get(key) || 0) + 1;
+      seen.set(key, times);
+      const matches = alwaysCutOff || label.endsWith(`-${cutOffChapter}`);
+      const claim = (tag) => ({
+        type: "voice",
+        character: "如月雨露",
+        quirkType: "catchphrase",
+        description: `Cut-off chapter claim ${tag} (${label}).`,
+        examples: [line],
+        formalityLevel: "casual",
+      });
+      if (matches && (alwaysCutOff || times === 1)) {
+        // The real volume 02 failure: the answer stops in the middle of the array, so the closing
+        // bracket never arrives and whatever the model had not written yet is simply not there.
+        return `[\n${JSON.stringify(claim("a"), null, 2)},\n${JSON.stringify(claim("b"), null, 2).replace(/\n  "formalityLevel": "casual"\n}/, "\n  \"formalityLevel\": \"casual\"\n}")}`;
+      }
+      if (matches) {
+        // The re-read: a whole answer, and a bigger one.
+        return JSON.stringify([claim("a"), claim("b"), claim("c"), claim("d")]);
+      }
+    }
     if (unverifiable) {
       // Neither the name nor the quote is anywhere in this volume's text: the shape
       // `EXTRACTION_01_UNVERIFIABLE` has, which is the fixture's proven refusal case.
@@ -310,7 +336,7 @@ async function sealVolumeOne(series) {
  * Run the command against a fixture series.
  *
  * @param {{dir: string}} series
- * @param {{volume?: string, force?: boolean, dryRun?: boolean}} [opts]
+ * @param {{volume?: string, force?: boolean, dryRun?: boolean, chapters?: string[]}} [opts]
  * @returns {Promise<Object>}
  */
 function readVolume(series, opts = {}) {
@@ -319,6 +345,7 @@ function readVolume(series, opts = {}) {
     volumeArg: opts.volume || "02",
     dryRun: Boolean(opts.dryRun),
     force: Boolean(opts.force),
+    chapters: opts.chapters || null,
     log: () => {},
   });
 }
@@ -600,10 +627,159 @@ async function scenarioDryRunAndListTouchNothing() {
   assert.deepStrictEqual(wrote, [], "and the volume folder gained no notebook, no partial, no record");
   assert.strictEqual(preview.extractionFile, null);
 
-  assert.deepStrictEqual(ev.readArgs(["--volume=02", "--dry-run"]), { volume: "02", series: null, dryRun: true, force: false, list: false, error: null });
+  assert.deepStrictEqual(ev.readArgs(["--volume=02", "--dry-run"]), { volume: "02", series: null, dryRun: true, force: false, chapters: [], list: false, error: null });
   assert.strictEqual(ev.readArgs(["--volume=02", "--wat"]).error, "unrecognised flag: --wat", "an unknown flag is refused, not ignored");
+  assert.deepStrictEqual(
+    ev.readArgs(["--volume=02", "--chapter=ch4", "--chapter=ch5"]).chapters,
+    ["ch4", "ch5"],
+    "--chapter is repeatable, and it names chapters rather than a whole volume"
+  );
+  assert.ok(
+    /contradict/.test(ev.readArgs(["--volume=02", "--chapter=ch4", "--force"]).error || ""),
+    "--chapter and --force are refused together rather than silently resolved"
+  );
 
   console.log("extract-voice: --dry-run previews the prompts and writes nothing into the volume folder");
+}
+
+
+// ─── A cut-off chapter ────────────────────────────────────────────────────────
+
+/**
+ * An answer whose array never closed is half an answer, and the pass does not accept it.
+ *
+ * The real volume 02 failure, reproduced: a chapter came back cut off with 6 claims for 33,541
+ * characters of text, and the pass kept it. Here the same chapter is re-read at the retry level, the
+ * re-read's answer is the one the notebook gets, and the partial says which level produced what.
+ */
+async function scenarioACutOffChapterIsRetriedAndTheBetterAnswerWins() {
+  const series = fixtureReadingSeries("reading-cut-off");
+  await sealVolumeOne(series);
+  const bundle = await bundleOf(series, 1);
+  const target = bundle.segments[1].id;
+  stubHarness(series.calls, { cutOffChapter: target });
+
+  const result = await readVolume(series);
+  assert.ok(result.ok, "a cut-off chapter does not stop the pass — it is re-read");
+
+  const forChapter = series.calls.filter((c) => c.label.endsWith(`-${target}`));
+  assert.strictEqual(forChapter.length, 2, "the chapter is paid for twice: the run's level, then the retry level");
+  assert.strictEqual(forChapter[0].thinkingLevel, undefined, "the first attempt runs at the run's own level");
+  assert.strictEqual(forChapter[1].thinkingLevel, ev.EXTRACTION_RETRY_THINKING_LEVEL, "the retry names the level it ran at, in the call itself");
+
+  const otherChapters = series.calls.filter((c) => !c.label.endsWith(`-${target}`));
+  assert.strictEqual(otherChapters.length, bundle.segments.length - 1, "every other chapter is read once");
+
+  const partial = JSON.parse(fs.readFileSync(path.join(series.volumes[1].dir, `${ev.PARTIAL_PREFIX}${target}.json`), "utf8"));
+  assert.strictEqual(partial.attempts.length, 2, "the partial records both paid reads");
+  assert.strictEqual(partial.attempts[0].cutOff, true, "and it records that the first one was cut off");
+  assert.strictEqual(partial.cutOff, false, "the answer the volume kept is the complete one");
+  assert.strictEqual(partial.entries.length, 4, "the re-read's answer is the one that won");
+
+  const kept = result.chapters.find((c) => c.id === target);
+  assert.strictEqual(kept.incomplete, false, "a chapter that was fixed by its re-read is not reported as incomplete");
+  assert.deepStrictEqual(result.incompleteChapters, [], "and nothing is named as incomplete");
+
+  console.log("extract-voice: a cut-off chapter is detected, re-read at the retry level, and the better answer wins");
+}
+
+
+/**
+ * A chapter still cut off after both paid reads is kept, named, and said out loud — in the log, in
+ * the partial, in the exit code, and in the report the grader reads.
+ *
+ * Refusing the whole volume for one stubborn chapter would make the volume unfinishable; accepting it
+ * quietly is the failure this file exists for. The middle path is a volume that says what it is.
+ */
+async function scenarioAChapterStillCutOffIsNamedNotHidden() {
+  const series = fixtureReadingSeries("reading-still-cut-off");
+  await sealVolumeOne(series);
+  stubHarness(series.calls, { alwaysCutOff: true });
+
+  const result = await readVolume(series);
+  assert.ok(result.ok, "the pass completes — a cut-off chapter is kept, not a reason to abandon the volume");
+
+  const paid = series.calls.length;
+  assert.strictEqual(paid, 12, "two paid reads for each of six chapters, and no third attempt");
+
+  assert.strictEqual(result.incompleteChapters.length, 6, "every chapter is named as incomplete");
+  for (const chapter of result.chapters) {
+    assert.strictEqual(chapter.paidReads, 2, `${chapter.id}: the budget is two reads, not a loop`);
+    assert.strictEqual(chapter.incomplete, true);
+  }
+
+  const reportFile = path.join(series.volumes[1].dir, "character-voice-reading.md");
+  assert.ok(fs.existsSync(reportFile), "and the volume carries a report saying how it was read");
+  const report = fs.readFileSync(reportFile, "utf8");
+  assert.ok(report.includes("INCOMPLETE"), "the report names the incomplete chapters");
+  assert.ok(report.includes("cut off"), "and says what cut off means: the rest was never written");
+
+  console.log("extract-voice: a chapter still cut off after both reads is kept and named, not hidden");
+}
+
+
+/**
+ * Re-reading one chapter is a named capability, not a workaround involving deleting a file.
+ *
+ * The operator's move after a volume is assembled from a thin chapter is to read that chapter again —
+ * one chapter, one call, the rest of the volume reused for free.
+ */
+async function scenarioOneChapterCanBeReReadByName() {
+  const series = fixtureReadingSeries("reading-one-chapter");
+  await sealVolumeOne(series);
+  const bundle = await bundleOf(series, 1);
+  stubHarness(series.calls);
+
+  const first = await readVolume(series);
+  assert.ok(first.ok);
+  const firstCalls = series.calls.length;
+  assert.strictEqual(firstCalls, bundle.segments.length, "the first pass pays once per chapter");
+
+  const target = bundle.segments[2].id;
+  const again = await readVolume(series, { chapters: [target] });
+  assert.ok(again.ok);
+  assert.strictEqual(series.calls.length - firstCalls, 1, "one chapter named means exactly one new call");
+  const reused = again.chapters.filter((c) => c.reused).length;
+  assert.strictEqual(reused, bundle.segments.length - 1, "every other chapter is reused and costs nothing");
+
+  const unknown = await readVolume(series, { chapters: ["chapter-that-does-not-exist"] });
+  assert.strictEqual(unknown.ok, false);
+  assert.strictEqual(unknown.refusal.rule, "unknown-chapter", "a name that is not a chapter here is refused, not ignored");
+  assert.ok(unknown.refusal.fix.includes(target), "and the refusal names the chapters that do exist");
+  assert.strictEqual(series.calls.length - firstCalls, 1, "a refused chapter name costs nothing");
+
+  console.log("extract-voice: --chapter=<id> re-reads exactly one chapter and reuses the rest for free");
+}
+
+
+/**
+ * A partial from the older shape cannot say whether its answer was complete, so it is not trusted.
+ *
+ * Volume 02's first pass wrote schema-1 partials, three of which hold cut-off answers. A resume that
+ * accepted them would reuse half an answer forever.
+ */
+async function scenarioAnOlderPartialIsReReadRatherThanTrusted() {
+  const series = fixtureReadingSeries("reading-old-partial");
+  await sealVolumeOne(series);
+  const bundle = await bundleOf(series, 1);
+  const seg = bundle.segments[0];
+  const file = path.join(series.volumes[1].dir, `${ev.PARTIAL_PREFIX}${seg.id}.json`);
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ schema: 1, volume: "02", segmentId: seg.id, segmentFile: seg.file, sourceSha: ev.segmentFingerprint(path.join(series.volumes[1].dir, seg.file)), entries: [] }, null, 2),
+    "utf8"
+  );
+  stubHarness(series.calls);
+
+  const partial = ev.readPartial(series.volumes[1].dir, seg, ev.segmentFingerprint(path.join(series.volumes[1].dir, seg.file)));
+  assert.strictEqual(partial.usable, false);
+  assert.ok(/schema 2/.test(partial.because), "the refusal says what is missing: the shape cannot say whether the answer closed");
+
+  const result = await readVolume(series);
+  assert.ok(result.ok);
+  assert.strictEqual(series.calls.length, bundle.segments.length, "the old partial is re-read, and every other chapter is still read once");
+
+  console.log("extract-voice: a schema-1 partial is re-read rather than trusted, because it cannot say it was complete");
 }
 
 
@@ -636,6 +812,10 @@ function scenarioItIsNotPartOfARun() {
   await scenarioAMalformedClaimDoesNotCostTheChapterTheRest();
   await scenarioTheRecordDoorIsThePipelineDoor();
   await scenarioDryRunAndListTouchNothing();
+  await scenarioACutOffChapterIsRetriedAndTheBetterAnswerWins();
+  await scenarioAChapterStillCutOffIsNamedNotHidden();
+  await scenarioOneChapterCanBeReReadByName();
+  await scenarioAnOlderPartialIsReReadRatherThanTrusted();
   scenarioItIsNotPartOfARun();
   console.log("\nextract-voice: all scenarios passed");
 })().catch((err) => {

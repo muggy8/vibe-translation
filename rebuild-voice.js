@@ -54,6 +54,10 @@
  *   --alias=<a>=<key>    declare that a name the extraction used belongs to a roster entry (repeatable)
  *   --alias-reason=<txt> why that link is right; the store records the reason or refuses the link
  *   --report=<path>      where the audit report goes (default: beside the rebuilt file)
+ *   --render-only        render this volume's `pov-map.md` from the record its volume already has,
+ *                        and file nothing: no claim is read, no row is added, changed, or deleted,
+ *                        and nothing is sealed. This is the door for publishing a map the record's
+ *                        own published rows already describe — including for a sealed volume.
  *   --json               also print the machine-readable result
  *
  * Exit codes: 0 nothing found, 2 findings that do not block acceptance, 1 refused or HIGH damage.
@@ -65,6 +69,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { chosenSeriesLocation, loadEnv } = require("./configs/env-defaults");
+const { resolveRunSettings } = require("./configs/shared");
 const rs = require("./utils/reference-store");
 require("./types"); // JSDoc type definitions
 
@@ -81,7 +86,7 @@ const DEFAULT_REHEARSAL_ROOT = "/tmp/opencode/rebuild-voice";
  * Parse this command's flags.
  *
  * @param {string[]} argv
- * @returns {{volume: string|null, series: string|null, out: string|null, apply: boolean, moveAside: boolean, aliases: Array<{alias: string, key: string, reason: string}>, report: string|null, json: boolean, list: boolean, error: string|null}}
+ * @returns {{volume: string|null, series: string|null, out: string|null, apply: boolean, moveAside: boolean, renderOnly: boolean, aliases: Array<{alias: string, key: string, reason: string}>, report: string|null, json: boolean, list: boolean, error: string|null}}
  */
 function readArgs(argv) {
   const out = {
@@ -90,6 +95,7 @@ function readArgs(argv) {
     out: null,
     apply: false,
     moveAside: false,
+    renderOnly: false,
     aliases: [],
     report: null,
     json: false,
@@ -99,6 +105,7 @@ function readArgs(argv) {
   for (const arg of argv) {
     if (arg === "--apply") out.apply = true;
     else if (arg === "--move-aside") out.moveAside = true;
+    else if (arg === "--render-only") out.renderOnly = true;
     else if (arg === "--json") out.json = true;
     else if (arg === "--list") out.list = true;
     else if (arg.startsWith("--volume=")) out.volume = arg.slice("--volume=".length);
@@ -142,9 +149,11 @@ function readArgs(argv) {
  *
  * @param {string} fromDir - The real volume folder.
  * @param {string} toDir - The rehearsal volume folder.
+ * @param {{keepStore?: boolean}} [opts] - `keepStore` copies `series.db*` too. A rebuild must not
+ *   inherit the record it is rebuilding; a render-only rehearsal has nothing else to render from.
  * @returns {{copied: number, skipped: string[]}}
  */
-function stageCopy(fromDir, toDir) {
+function stageCopy(fromDir, toDir, { keepStore = false } = {}) {
   fs.mkdirSync(toDir, { recursive: true });
   let copied = 0;
   /** @type {string[]} */
@@ -155,7 +164,12 @@ function stageCopy(fromDir, toDir) {
       skipped.push(`${name}/`);
       continue;
     }
-    if (name === VOICE_FILE || name.startsWith(`${VOICE_FILE}.`) || name.startsWith("series.db")) {
+    // The artifact this command renders is not an input to rendering it.
+    if (name === rs.POV_MAP_FILE || name.startsWith(`${rs.POV_MAP_FILE}.`)) {
+      skipped.push(name);
+      continue;
+    }
+    if (!keepStore && (name === VOICE_FILE || name.startsWith(`${VOICE_FILE}.`) || name.startsWith("series.db"))) {
       skipped.push(name);
       continue;
     }
@@ -175,12 +189,92 @@ function printPlan(plan) {
   console.log("rebuild-voice — what this command does\n");
   console.log(`  volume:              ${plan.volume}`);
   console.log(`  reads its source in: ${plan.sourceDir}`);
+  if (plan.renderOnly) {
+    console.log(`  mode:                render-only — this volume's ${rs.POV_MAP_FILE} is rendered from the record it already has`);
+    console.log(`  writes and seals:    ${plan.apply ? `${rs.POV_MAP_FILE} in ${plan.workDir}; no row added, changed, or deleted; nothing sealed` : `a copy under ${plan.workDir}; nothing in the series folder touched`}`);
+    console.log("");
+    console.log(`  It reads no extraction file, files no claim, and makes no model call.`);
+    return;
+  }
   console.log(`  extraction file:     ${plan.extractionFile} ${plan.extractionExists ? "" : "(MISSING)"}`);
   console.log(`  works and writes in: ${plan.workDir}`);
   console.log(`  replaces the volume's ${VOICE_FILE}: ${plan.apply ? `yes — the old file moves to ${VOICE_FILE}.rejected` : "no — the rebuilt file is written into the copy only"}`);
+  console.log(`  also writes:         ${rs.POV_MAP_FILE} — the point-of-view claims this record holds, rendered by chapter (the acceptance check names this file)`);
   console.log(`  aliases declared:    ${plan.aliases.length ? plan.aliases.map((a) => `${a.alias} → ${a.key}`).join(", ") : "none"}`);
   console.log("");
   console.log(`  It does not read the volume's existing ${VOICE_FILE}, and it makes no model call.`);
+}
+
+/**
+ * Render one volume's POV map from the record it already has, and publish it.
+ *
+ * This is the half of the command that touches **no row**. A rebuild files claims, re-renders the
+ * reference, and seals; none of that is legal against a sealed record, and none of it is needed to
+ * publish a map the record's own published claims already describe. So this path opens the store
+ * with `create: false`, reads, writes one file, and closes. It is the answer to "may a sealed volume
+ * gain an artifact?" — yes, when the artifact is rendered from rows that are already published and
+ * nothing in the record moves.
+ *
+ * @param {Object} opts
+ * @param {ReturnType<typeof readArgs>} opts.args
+ * @param {number} opts.volumeNumber
+ * @param {string} opts.folderName
+ * @param {string} opts.workSeriesDir
+ * @param {string} opts.workDir
+ * @param {string} opts.seriesName
+ * @returns {Promise<number>} 0 written, 1 refused.
+ */
+async function runRenderOnly({ args, volumeNumber, folderName, workSeriesDir, workDir, seriesName }) {
+  const result = rs.renderPovMapFromRecord({
+    volume: volumeNumber,
+    folder: folderName,
+    seriesDir: workSeriesDir,
+    render: { volume: volumeNumber, seriesName },
+  });
+  if (!result.ok) {
+    console.log(`\nrefused: ${result.refusal.rule}`);
+    console.log(`  ${result.refusal.because}`);
+    console.log(`  instead: ${(result.refusal.useInstead || []).join(" | ")}`);
+    console.log(`  fix: ${result.refusal.fix}`);
+    return 1;
+  }
+
+  const rendered = result.rendered;
+  const lines = rendered.markdown.split("\n");
+  console.log("\nrendered POV map");
+  console.log(`  claims:            ${rendered.claims} (${rendered.attached} about a character, ${rendered.unattached} with no character to file them under)`);
+  console.log(`  carried forward:   ${rendered.carriedClaims} claim(s) from volumes ${rendered.volumes.filter((v) => v !== volumeNumber).join(", ") || "—"}, ${rendered.ownClaims} from volume ${volumeNumber}`);
+  console.log(`  chapters:          ${rendered.chapters.length}`);
+  console.log(`  lines:             ${lines.length}`);
+  console.log(`  longest line:      ${Math.max(0, ...lines.map((line) => line.length))} characters`);
+  console.log(`  truncated bullets: ${rendered.truncated}`);
+  console.log(`  markers named:     ${rendered.markers.length ? rendered.markers.map((m) => `${m.marker} (${m.claims})`).join(", ") : "none"}`);
+
+  if (!args.apply) {
+    fs.mkdirSync(workDir, { recursive: true });
+    const file = path.join(workDir, rs.POV_MAP_FILE);
+    fs.writeFileSync(file, rendered.markdown, "utf8");
+    console.log(`\n  written to ${file} — nothing in the series folder was touched.`);
+    console.log(`  the record is ${result.sealed ? "sealed and stays sealed" : "a draft and stays a draft"}: rendering a map files no claim and seals nothing.`);
+    if (args.json) console.log(`\n${JSON.stringify({ rendered, sealed: result.sealed, written: file }, null, 2)}`);
+    return 0;
+  }
+
+  const written = rs.writePovMapFile(workDir, rendered, { file: rs.POV_MAP_FILE, moveAside: args.moveAside });
+  if (!written.ok) {
+    console.log(`\nrefused: ${written.refusal.rule}`);
+    console.log(`  ${written.refusal.because}`);
+    console.log(`  fix: ${written.refusal.fix}`);
+    return 1;
+  }
+  console.log("\npublished");
+  console.log(`  wrote:             ${written.written}`);
+  if (written.unchanged) console.log("  the file already on disk is exactly what this record renders, so nothing was replaced.");
+  if (written.moved) console.log(`  the map it replaced is kept as ${written.moved}`);
+  console.log(`  record:            ${result.sealed ? `sealed — unchanged. ${volumeNumber}'s rows were already published, and rendering a map added, changed, and deleted none of them.` : "a draft — unchanged. Rendering a map does not seal a volume; publishing its reference does."}`);
+  console.log("  no row was added, changed, or deleted, and no model call was made.");
+  if (args.json) console.log(`\n${JSON.stringify({ rendered, sealed: result.sealed, written }, null, 2)}`);
+  return 0;
 }
 
 /**
@@ -230,6 +324,7 @@ async function main(args) {
     extractionExists: fs.existsSync(extractionFile),
     workDir,
     apply: args.apply,
+    renderOnly: args.renderOnly,
     aliases: args.aliases,
   };
   printPlan(plan);
@@ -239,6 +334,32 @@ async function main(args) {
     return 1;
   }
   if (args.list) return 0;
+
+  if (args.renderOnly) {
+    // A render-only rehearsal renders from the record the volume already has, so the copy has to
+    // carry the record — the one thing a rebuild rehearsal deliberately leaves out.
+    if (!args.apply) {
+      const staged = stageCopy(sourceDir, workDir, { keepStore: true });
+      console.log(`\n  copied ${staged.copied} file(s) into ${workDir}, including this volume's record`);
+      console.log(`  not copied: ${staged.skipped.join(", ") || "nothing"} — the map this command renders is not an input to rendering it.`);
+    }
+    /** The manifest, for the series name in the map's title. Absent is fine: the title drops the name. */
+    let manifest = null;
+    try {
+      manifest = JSON.parse(fs.readFileSync(path.join(seriesDir, "translation-target.json"), "utf8"));
+    } catch {
+      manifest = null;
+    }
+    return await runRenderOnly({
+      args,
+      volumeNumber,
+      folderName,
+      workSeriesDir,
+      workDir,
+      seriesName: resolveRunSettings(manifest).seriesName,
+    });
+  }
+
   if (!plan.extractionExists) {
     console.error(`\nrebuild-voice: ${EXTRACTION_FILE} is not there. This command rebuilds from the extraction output; it has nothing else to rebuild from.`);
     return 1;
@@ -360,7 +481,17 @@ async function main(args) {
   console.log(`  characters:        ${lines.filter((line) => line.startsWith("### ")).length}`);
   console.log(`  longest line:      ${Math.max(0, ...lines.map((line) => line.length))} characters`);
   console.log(`  truncated bullets: ${rendered.truncated}`);
-  console.log(`  not rendered:      ${rendered.unattached} POV claim(s) with no character to file them under (they stay in the record)`);
+  console.log(`  not rendered here: ${rendered.unattached} POV claim(s) with no character to file them under — they are rendered in ${rs.POV_MAP_FILE}, which is organised by chapter and does not need a character to hang one on`);
+
+  const pov = result.povRendered;
+  const povLines = (pov && pov.markdown ? pov.markdown : "").split("\n");
+  console.log("\nrendered POV map");
+  console.log(`  claims:            ${pov ? pov.claims : 0} (${pov ? pov.attached : 0} about a character, ${pov ? pov.unattached : 0} with no character to file them under)`);
+  console.log(`  carried forward:   ${pov ? pov.carriedClaims : 0} from earlier volumes, ${pov ? pov.ownClaims : 0} from volume ${volumeNumber}`);
+  console.log(`  chapters:          ${pov ? pov.chapters.length : 0}`);
+  console.log(`  lines:             ${povLines.length}`);
+  console.log(`  longest line:      ${Math.max(0, ...povLines.map((line) => line.length))} characters`);
+  console.log(`  truncated bullets: ${pov ? pov.truncated : 0}`);
 
   console.log("\naudit");
   console.log(`  findings:          ${audit.findings.length} (${audit.highFindings.length} HIGH)`);
@@ -374,6 +505,7 @@ async function main(args) {
     const published = result.published;
     console.log("\npublished");
     console.log(`  wrote:             ${published.written}`);
+    if (published.povMap && published.povMap.written) console.log(`  wrote:             ${published.povMap.written}${published.povMap.moved ? ` (the map it replaced is kept as ${published.povMap.moved})` : ""}`);
     if (published.unchanged) console.log("  the file already on disk is exactly what this record renders, so nothing was replaced and no new `.rejected` was made.");
     if (published.moved) console.log(`  the file it replaced is kept as ${published.moved}`);
     console.log(`  record sealed:    yes — ${published.sealed.rows} row(s) owned by volume ${volumeNumber} are now published and immutable`);
@@ -381,7 +513,8 @@ async function main(args) {
     console.log("  the next volume's copy-forward may now build on this record.");
   } else {
     fs.writeFileSync(path.join(workDir, VOICE_FILE), rendered.markdown, "utf8");
-    console.log(`\n  rehearsal copy written to ${path.join(workDir, VOICE_FILE)} — nothing in the series folder was touched.`);
+    if (pov && pov.markdown) fs.writeFileSync(path.join(workDir, rs.POV_MAP_FILE), pov.markdown, "utf8");
+    console.log(`\n  rehearsal copy written to ${path.join(workDir, VOICE_FILE)}${pov && pov.markdown ? ` and ${path.join(workDir, rs.POV_MAP_FILE)}` : ""} — nothing in the series folder was touched.`);
     console.log("  the record is NOT sealed: a rehearsal publishes nothing, and only a published reference earns a sealed record.");
   }
 

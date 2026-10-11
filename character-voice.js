@@ -1,11 +1,21 @@
 /**
  * character-voice.js — the character voice reference task.
  *
- * Per volume it extracts speech quirks and POV analysis, then compiles two files: the
- * CUMULATIVE character-voice.md (every character entry from every previous volume,
- * amended in place with editFile) and the PER-VOLUME pov-map.md (written whole, because
- * it describes only this volume — which is also why the seed deliberately does not copy
- * it).
+ * A volume is built on one of two routes, chosen by `--route=` and defaulting to `assemble`.
+ *
+ * `--route=assemble` (the default) reads the volume chapter by chapter, files what it found in the
+ * volume's reference record, and **renders** both artifacts from that record: the CUMULATIVE
+ * `character-voice.md` and `pov-map.md`, organised by chapter and carrying every earlier volume's
+ * sealed point-of-view claims. No author agent, no feedback pass, one acceptance grade.
+ *
+ * `--route=author` is the older flow: extract, then an author agent compiles the CUMULATIVE
+ * `character-voice.md` (amended in place with `editFile`) and writes the PER-VOLUME `pov-map.md`
+ * whole — which is why the seed deliberately does not copy that one file. The whole-installment /
+ * chapter-by-chapter mode decision belongs to this route.
+ *
+ * The acceptance gate runs on both routes; a route is a choice, the gate is not. The two routes now
+ * produce a file with the same name and a different contract, and that divergence is unresolved —
+ * see `character-voice/amend.js`, `character-voice/carry-forward.js` and gotcha 109.
  *
  * This is the stage where both QA-loop rules were measured (AGENTS.md gotcha 65): volume
  * 01's feedback turn made 46 tool calls — 29 reads, 15 searches, ZERO writes — spent

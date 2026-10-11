@@ -22,6 +22,13 @@ const { VOICE_REF_TRUNCATION_MAX_ENTRIES, VOICE_REF_TRUNCATION_THRESHOLD } = req
  * broke the stage: the whole-file demand put the only write at the END of the
  * turn, so a pass that ran out of steps produced nothing at all.
  *
+ * **This instruction belongs to the author route** (`--route=author`). The stage's default route
+ * renders both artifacts from the volume's record and never hands either to an agent, and the map it
+ * renders is **cumulative** — every earlier volume's sealed point-of-view claims, in chapter order
+ * (`utils/reference-store/pov-map.js`). So the same file name means two different things depending on
+ * which route built the volume, and that divergence is real and unresolved: an author-route volume's
+ * map describes one volume, an assembled volume's map describes the series so far.
+ *
  * @param {boolean} hasExistingFile - Whether "character-voice.md" already holds the
  *   document to change. Read it off the FILE (utils/fs/current-artifact.js), not off whether the
  *   cross-volume seed ran: on the per-chapter path of the first volume there is nothing to seed

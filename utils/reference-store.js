@@ -56,6 +56,7 @@ const __extraction = require("./reference-store/extraction-adapter");
 const __validation = require("./reference-store/validation");
 const __pipeline = require("./reference-store/pipeline-store");
 const __rebuild = require("./reference-store/rebuild");
+const __povmap = require("./reference-store/pov-map");
 
 const __open = require("./reference-store/open");
 
@@ -80,5 +81,6 @@ module.exports = {
   ...__validation,
   ...__pipeline,
   ...__rebuild,
+  ...__povmap,
   openReferenceStore: __open.openReferenceStore,
 };

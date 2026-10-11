@@ -16,6 +16,7 @@
  */
 require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
+const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
@@ -347,6 +348,35 @@ assert.strictEqual(
   for (const [key, value] of Object.entries(saved)) {
     if (value !== undefined) process.env[key] = value;
   }
+}
+
+// ─── the voice stage's route selector: a flag, not a variable ─────────────────
+{
+  const { readVoiceRoute, VOICE_ROUTES, DEFAULT_VOICE_ROUTE } = require("../character-voice");
+
+  assert.deepStrictEqual(VOICE_ROUTES, ["assemble", "author"], "the closed menu: the assembled route and the author route, nothing else");
+  assert.strictEqual(DEFAULT_VOICE_ROUTE, "assemble", "read-then-assemble is what a run does when nobody says otherwise");
+  assert.strictEqual(readVoiceRoute(["node", "index.js", "--stage=character-voice"]), "assemble", "no flag, the default route");
+  assert.strictEqual(readVoiceRoute(["node", "index.js", "--route=assemble"]), "assemble");
+  assert.strictEqual(readVoiceRoute(["node", "index.js", "--route=author"]), "author", "the older route stays selectable");
+
+  // A typo must not quietly build volumes a different way from the one asked for. This is the same
+  // shape as the banned-option filter (gotcha 70): the refusal sits on the thing that reads the
+  // choice, not on a comment telling somebody to type it correctly.
+  for (const typo of ["--route=autor", "--route=asemble", "--route=", "--route=AUTHOR"]) {
+    assert.throws(
+      () => readVoiceRoute(["node", "index.js", typo]),
+      /is not a character-voice route/,
+      `${typo} is refused rather than resolved to something nearby`
+    );
+  }
+
+  // And it is not an environment variable: switching a route from .env would change what a run does
+  // underneath a run, which is the thing AGENTS.md rule 3 exists to prevent.
+  const src = fs.readFileSync(path.join(__dirname, "..", "character-voice", "task.js"), "utf8");
+  const routeBlock = src.slice(src.indexOf("function readVoiceRoute"), src.indexOf("function readVoiceRoute") + 1400);
+  assert.ok(/process\.argv/.test(routeBlock), "the route is read from the command line");
+  assert.ok(!/process\.env\.[A-Z_]*ROUTE/.test(routeBlock), "and no variable is in front of it");
 }
 
 console.log("config: all checks passed.");

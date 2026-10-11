@@ -190,6 +190,41 @@ async function voiceGradeSample(ctx) {
 }
 
 /**
+ * The deterministic audit for the **assembled** route: audit the record against the artifacts this
+ * route rendered, say how the volume was read, and write the report the grader is handed.
+ *
+ * It deliberately does **not** mirror the artifacts back into the record. On the author route the file
+ * is what an agent wrote and the record has to be made to agree with it; on the assembled route the
+ * file *is* the record's own render, and mirroring it would file the same claims twice under two
+ * different provenances — and the second copy would be the one the audit then reported on.
+ *
+ * @param {{ values: Object, refStore: Object|null, voiceOutputFile: string, validationOutputFile: string, readingReport?: string }} ctx
+ * @param {{refused?: Array<Object>}} [opts] - What the adoption step refused, so the report names it.
+ * @returns {Promise<Object|null>} The audit, or null when no record is open.
+ */
+async function auditAssembledArtifacts(ctx, { refused = [] } = {}) {
+  if (!ctx.refStore) return null;
+  const markdown = await fs.readFile(ctx.voiceOutputFile, "utf8").catch(() => "");
+  const audit = auditVolumeRecord(ctx.refStore, {
+    title: "Character-voice reference (assembled from the volume's reading pass)",
+    file: VOICE_ARTIFACT_NAME,
+    markdown,
+    refused,
+  });
+  ctx.storeAudit = audit;
+  ctx.storeImport = { refused };
+
+  const report = ctx.readingReport || "";
+  const full = report ? `${audit.markdown}\n${report}` : audit.markdown;
+  await fs.writeFile(ctx.validationOutputFile, full, "utf8");
+  console.log(
+    `Volume ${ctx.values.INSTALLMENT_NUMBER}: deterministic audit — ${audit.findings.length} finding(s), ` +
+      `${audit.highFindings.length} at HIGH; ${audit.checked} citation(s) re-checked against the source text.`
+  );
+  return audit;
+}
+
+/**
  * Seal this volume's record: the last act of its pre-production.
  *
  * @param {{ values: Object, refStore: Object|null }} ctx
@@ -212,6 +247,7 @@ module.exports = {
   fileVoiceExtraction,
   mirrorVoiceArtifact,
   auditVoiceArtifact,
+  auditAssembledArtifacts,
   voiceGradeSample,
   sealVoiceRecord,
 };

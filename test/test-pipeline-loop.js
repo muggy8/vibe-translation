@@ -460,7 +460,14 @@ function digestOf(output) {
 function runStageAsync(name, env, timeoutMs) {
   return new Promise((resolve) => {
     const argv = [__filename, `--stage=${name}`];
-    if (chunkedStages().includes(name)) argv.push("--chunked");
+    if (chunkedStages().includes(name)) {
+      argv.push("--chunked");
+      // The chapter-by-chapter fallback is a property of the **author** route: the assembled route
+      // reads chapter by chapter whatever the volume's size, so `--chunked` means nothing to it.
+      // This variant exists to keep the author route's fallback path covered offline, so it says which
+      // route it is testing instead of letting the flag mean different things in different routes.
+      if (name === "character-voice") argv.push("--route=author");
+    }
     const child = spawn(process.execPath, argv, { cwd: ROOT, env });
     let output = "";
     let killed = false;
@@ -861,6 +868,11 @@ async function main() {
   console.log(`series: ${SERIES_DIR} (${workflow.VOLUMES.length} volumes, plain text)`);
   if (chunkedStages().length > 0) {
     console.log(`forced chapter-by-chapter: ${chunkedStages().join(", ")} (fixture parts cut to 200 chars so the fallback path exists)`);
+    if (chunkedStages().includes("character-voice")) {
+      console.log("character-voice route: author — the chapter-by-chapter fallback belongs to that route; the default assembled route reads chapter by chapter already.");
+    }
+  } else {
+    console.log("character-voice route: assemble (the default) — read chapter by chapter, render both artifacts from the record, no author agent.");
   }
   if (!reportSelfCheck()) {
     console.error("The scripted answers would fail the pipeline's own checks. Fix the fixture before running.");

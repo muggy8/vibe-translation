@@ -696,6 +696,109 @@ See gotcha 106 and gotcha 107.
 
 ---
 
+### 7.10 The map the record already had, the route that became the default, and the cut-off answer
+
+**What this section records.** Three things landed together, and each one was a gate the previous
+section left standing: §7.9 named the missing `pov-map.md` as unfinished work (gotcha 107), the
+read-then-assemble route was a command the account owner typed rather than what a run does, and a
+chapter whose answer arrived cut off was accepted.
+
+**The POV map, rendered from the record.** The acceptance check names `pov-map.md` in its message
+list and the harness throws on a named file that is absent, so the stage's own grader could not run
+on an assembled volume at all. The fix that was on the table — drop the file from the grader's
+messages, or let the check tolerate its absence — was refused: the rubric scores "the character voice
+reference **and POV map**", and a grader handed one of the two prints a number about something it did
+not look at. The claims were already in the record. Volume 02's holds **61 adopted point-of-view
+rows** — 40 carried from volume 1's sealed record, 21 established in volume 2 — and `renderVoice`
+drops the 23 with no character to file them under, because a character section needs a character. A
+POV map is organised by **chapter**, which is the shape that does not need a person to hang a claim
+on. `utils/reference-store/pov-map.js` renders them with `renderRebuiltVoice`'s filter unchanged
+(adopted rows only, no folded roster keys) and renders the unattached ones labelled
+`chapter-level observation` rather than inventing a name.
+
+Measured: **61 claims over 11 chapter sections, 37,334 bytes, longest line 582 characters, 0
+truncated bullets**, `series.db` byte-identical afterwards. Re-graded through the stage's own
+`acceptanceCheck` with the map present: **82/100** for one call (38,214 prompt / 1,862 completion /
+40,076 total), against **80** for the same artifact without the map (21,316 prompt) and volume 01's
+**81** with its authored map (24,205 characters of prompt). The grader's own note: *"Comprehensive
+voice coverage for all main characters with extensive textual citations and a thorough POV map; the
+only findings are three throwaway characters below the 3-chapter threshold and the process note that
+the reference was code-generated without human review, none of which blocks acceptance."* **82 and 81
+are now comparable in a way 80 and 81 were not**: same rubric, same grader, same sampling of the
+reference, and a POV map of a similar size in both.
+
+**What changed about the artifact's meaning, and what did not get fixed.** `character-voice/carry-forward.js`
+and `character-voice/amend.js` both stated that `pov-map.md` describes **only this volume**. The
+rendered map is cumulative, because it renders the record and the record is cumulative. Translation
+context is not the objection — `utils/translate/references.js` injects at most 2,000 characters,
+chosen by which sections the chapter being translated matches — the objection is meaning, and the
+honest statement is that **the two routes now produce files with the same name and different
+contracts**: an author-route map describes one book, an assembled map describes the series so far.
+That divergence is written into both files and is unresolved. What the rendered map also does **not**
+produce is the per-chapter marker census an author agent wrote for volume 01; `povMarkersNamed` counts
+the marker symbols the record's own claims quote and the file says that is what it counted.
+
+**Publishing a map for a sealed volume is a read.** Volume 02 is sealed, so `extract-voice` and
+`rebuild-voice` both refuse it. `rebuild-voice.js --render-only` opens the store with `create: false`,
+renders, writes one file, closes: no claim filed, nothing sealed, the sealed state reported rather
+than altered. That is a different question from "may a rebuild run against a sealed record", which is
+still refused. The probe that sharpened this ran `--apply --move-aside` against a sealed record and
+found the rebuild **ran anyway** — byte-identical output, zero new rows — while
+`resetDocumentMirror`'s `rebuild-refuses-a-sealed-voice-record` refusal sat there counting only
+`source_stage = "document"` rows. A guard whose counter misses the rows a route writes is not
+covering that route; it is worth knowing that before trusting the guard.
+
+**Read-then-assemble is what a run does.** `character-voice/assemble.js` is the voice stage's default
+route (`--route=assemble`; `--route=author` selects the older one). The route selector is a command
+line flag, not an environment variable, and an unrecognised value is an error rather than a fallback.
+On this route the stage opens the volume's record whether or not `VOICE_STORE_VALIDATORS` is on,
+because the record *is* the artifact's source; the author route keeps the flag exactly where it was,
+and with the flag off it is byte-for-byte the pipeline that has always run.
+
+The gate is unchanged on both routes — the deterministic audit, the same rubric, the same three files
+handed to the grader, `pov-map.md` included. What the assembled route drops is the **feedback pass**,
+because there is no author to ask: `maxIterations: 1`, one grade per volume instead of five, and a
+failing grade moves both artifacts to `.rejected`, leaves the record a draft (which is what the next
+volume's copy-forward refuses), and throws, so the step runner's post-mortem and ticket machinery see
+it like any other failed step. `test/test-task-failure.js` pins that shape end to end.
+
+The offline loop's numbers moved, and the honest reading is that they moved for the right reason: the
+whole-pipeline default loop is **93 calls** where it was 107, with the character-voice stage alone
+going from 24 to 8; the chapter-by-chapter store variant is **47**, unchanged, because it now says
+`--route=author` explicitly — the whole-installment → chunked *fallback* belongs to the author route,
+and the assembled route is chapter-by-chapter already, so leaving the flag to mean two things would
+have stopped that variant covering the path it exists to cover.
+
+**A cut-off chapter is a different failure from a malformed one.** Volume 02's own partials, read
+after the fact: `ch2`, `ch4` and `ch5` each already carried `cutOff: true`. The scanner had noticed
+the array never closed; the pass printed the claim counts and kept going. A malformed claim is one bad
+object in a readable array — keep the rest, name the one. A cut-off answer is **half an answer**: the
+model stopped mid-list and whatever it was about to write is not in the file, so no downstream rule
+can say which claims are missing. `character-voice/reading.js` (shared by the stage route and
+`extract-voice.js`) retries one cut-off chapter once at `EXTRACTION_RETRY_THINKING_LEVEL` — a
+constant, chosen by the measurement (6 and 1 claims at `xhigh`, 21 and 8 at `medium`) — the better
+answer wins, both attempts are recorded in the partial with the level each ran at, and a chapter still
+cut off after `MAX_ATTEMPTS_PER_CHAPTER` is kept, printed as **INCOMPLETE**, named in
+`character-voice-reading.md`, appended to the validation report the grader reads, and given exit code
+2. `PARTIAL_SCHEMA` 2 added the `attempts` array and `readPartial` now answers *may this be reused*
+and *is it complete* separately, because resume was the quiet half of the bug: a cut-off partial whose
+fingerprint matches is reused forever. `--chapter=<id>` re-reads one chapter by name.
+
+**How much of volume 02's published reference came from the thin chapters.** Chapter 4 contributed
+**21** bullets and chapter 5 **8** — **29 of the 366 bullets in the published file (7.9%), or 17.1%
+of the 170 claims volume 2 itself established**. Chapter 2 was cut off too and contributed 21. Those
+numbers are the re-read answers; the first answers would have contributed 6 and 1.
+
+**What this slice did not do.** Volume 02 is sealed, so `extract-voice --chapter=ch4` is refused for
+the one volume where re-reading is most wanted; getting those chapters read again means the challenge
+path or an unseal decision, and neither was taken. Volume 01's authored `pov-map.md` (54,923 bytes)
+was not replaced by a rendered one, and volume 01's six baseline files are byte-identical. The
+author route's map is still per-volume. And the rendered map is not the marker census: an author agent
+reading a chapter could notice a viewpoint break the extraction never filed, and no query in the store
+asks that question — the same gap §7.3 names for the coverage guard, in a different artifact.
+
+---
+
 ## 8. Build order
 
 Nine slices. Each keeps `npm test` green on its own. Per gotcha 69, every test uses a throwaway

@@ -1415,6 +1415,34 @@ assert.deepStrictEqual(voiceGrown.missing, [], "a grown reference loses nothing"
 assert.deepStrictEqual(voiceGrown.added, ["山田"], "and the guard reports what the volume added");
 assert.deepStrictEqual(compareVoiceCarryForward("", voiceRefPrev).missing, [], "no baseline, nothing to carry");
 
+// The roster fold: the store retired one heading into another and moved its claims, and the render
+// does not print a retired entry. Without this the store's own roster rule and this guard contradict
+// each other — volume 02's real render loses exactly the heading `俺` and nothing else.
+const foldPrev =
+  "# Character Voice Reference\n\n## Characters\n\n" +
+  "### 如月雨露（ジョーロ）\n- quirk A\n\n" +
+  "### 俺（如月雨露・第二章終盤）\n- quirk E\n\n" +
+  "### 日向葵（ひまわり）\n- quirk C\n";
+const foldCurrent =
+  "# Character Voice Reference\n\n## Characters\n\n" +
+  "### 如月雨露（ジョーロ）\n- quirk A\n- quirk E\n\n" +
+  "### 日向葵（ひまわり）\n- quirk C\n";
+
+const foldUnknown = compareVoiceCarryForward(foldPrev, foldCurrent);
+assert.deepStrictEqual(foldUnknown.missing.map((m) => m.name), ["俺"], "a heading that vanished with no record of why is still a loss");
+
+const foldKnown = compareVoiceCarryForward(foldPrev, foldCurrent, { merged: [{ merged: "俺", survivor: "如月雨露" }] });
+assert.deepStrictEqual(foldKnown.missing, [], "a fold the record made is not a disappearance");
+assert.deepStrictEqual(foldKnown.merged.map((m) => `${m.name} → ${m.survivor}`), ["俺 → 如月雨露"], "and it is reported as a fold, so the rename is visible in the log");
+
+// The survivor has to actually be there. A fold name is not a licence for a section to disappear.
+const bothGone =
+  "# Character Voice Reference\n\n## Characters\n\n" +
+  "### 日向葵（ひまわり）\n- quirk C\n";
+const survivorGone = compareVoiceCarryForward(foldPrev, bothGone, { merged: [{ merged: "俺", survivor: "如月雨露" }] });
+assert.ok(survivorGone.missing.some((m) => m.name === "如月雨露"), "the survivor's own absence is still a loss");
+assert.ok(survivorGone.missing.some((m) => m.name === "俺"), "and the folded name is a loss too, because nothing survived into");
+
 // The write instruction follows the file, exactly as glossaryWriteInstruction does.
 const voiceSeeded = voiceWriteInstruction(true, "amend");
 assert.ok(voiceSeeded.includes("ALREADY holds"), "a seeded reference is described as already there");

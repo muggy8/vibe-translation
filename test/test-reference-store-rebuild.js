@@ -51,6 +51,12 @@ const {
   renderRebuiltVoice,
   writeRebuiltVoiceFile,
   rebuildVoiceVolume,
+  renderPovMap,
+  writePovMapFile,
+  renderPovMapFromRecord,
+  povClaimsInRecord,
+  POV_MAP_FILE,
+  POV_UNATTACHED_LABEL,
   moveArtifactAside,
   resolveExtractionName,
   applyAliasDeclarations,
@@ -1412,6 +1418,249 @@ function scenarioALaterVolumeNeedsItsEarlierRecordFirst() {
   console.log("  rebuilding a later volume into an empty record is refused, not silently truncated");
 }
 
+// ─── The POV map ─────────────────────────────────────────────────────────────
+
+/**
+ * The claims a character section cannot hold are not lost: they are rendered in the POV map.
+ *
+ * `renderVoice` drops a POV claim that has no character to file it under and reports how many it
+ * dropped. That was honest but it left the claims nowhere — and the acceptance check names
+ * `pov-map.md`, so a route that published the reference without the map could not be graded at all.
+ * A map is organised by chapter, which is exactly the shape that does not need a person to hang a
+ * claim on.
+ * @returns {void}
+ */
+function scenarioThePovMapRendersWhatTheCharacterReferenceCannot() {
+  const series = fixtureStoreSeries("povmap-renders-unattached");
+  withRoster(series);
+  const { store } = rebuildFixture(series);
+
+  const voice = renderRebuiltVoice(store);
+  const map = renderPovMap(store);
+
+  assert.strictEqual(map.claims, 2, "the fixture files two adopted POV claims: one about a character, one about a chapter");
+  assert.strictEqual(map.attached, 1);
+  assert.strictEqual(map.unattached, 1);
+  assert.strictEqual(voice.unattached, 1, "the reference reports one POV claim it has no section to put in");
+  assert.ok(!voice.markdown.includes("Narration borrows the protagonist's vocabulary"), "and it really is not in the reference");
+  assert.ok(map.markdown.includes("Narration borrows the protagonist's vocabulary"), "while the map renders it");
+  assert.ok(map.markdown.includes(POV_UNATTACHED_LABEL), "and the unattached one is labelled as what it is, not invented a name");
+  assert.ok(!map.markdown.includes("## Characters"), "a POV map is not a character reference: it has no character sections");
+
+  // The candidate rule is the same filter, spelled the same way: extraction-only rows do not render.
+  // A separate fixture, because "only candidates" is a fact about the record, not about the handle.
+  const candidatesSeries = fixtureStoreSeries("povmap-candidates-only");
+  withRoster(candidatesSeries);
+  const candidatesOnly = openFixture(candidatesSeries, 1, EXTRACTION_SOURCE_STAGE);
+  try {
+    importVoiceExtraction(candidatesOnly, EXTRACTION_01);
+    const empty = renderPovMap(candidatesOnly);
+    assert.strictEqual(empty.claims, 0, "a record whose only POV rows are candidates renders an empty map, not the candidates");
+    assert.ok(empty.markdown.includes("0 point-of-view claim"), "and the map says so in its own header rather than looking like a map");
+  } finally {
+    candidatesOnly.close();
+    store.close();
+  }
+
+  console.log("  the POV map renders the point-of-view claims the record adopted, including the ones a character section has no room for");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The map is cumulative, in the order the chapters it cites appear.
+ *
+ * This is a change to the artifact's contract: `character-voice/carry-forward.js` and
+ * `character-voice/amend.js` both used to say `pov-map.md` describes only this volume. The claims
+ * being carried are sealed rows of the same record the cumulative reference is rendered from, so a
+ * per-volume map would drop the point-of-view history the reference keeps.
+ * @returns {void}
+ */
+function scenarioThePovMapCarriesEarlierVolumesForwardInChapterOrder() {
+  const series = fixtureStoreSeries("povmap-cumulative");
+  withRoster(series);
+  const first = rebuildFixtureVolume(series, { apply: true });
+  assert.ok(first.ok, JSON.stringify(first.refusal));
+
+  const carried = copyForwardStore({
+    fromVolume: 1,
+    toVolume: 2,
+    seriesDir: series.dir,
+    fromFolder: series.volumes[0].folder,
+    toFolder: series.volumes[1].folder,
+  });
+  assert.ok(carried.ok, JSON.stringify(carried.refusal));
+
+  const second = rebuildFixtureVolume(series, {
+    volume: 2,
+    entries: [
+      {
+        type: "pov",
+        povCategory: "distance",
+        assignedCharacter: "如月雨露",
+        sectionDescription: "Volume 2 stays inside the protagonist, closer than volume 1 ever got.",
+        examples: ["如月雨露は「気にすんな！」と言った。"],
+      },
+    ],
+  });
+  assert.ok(second.ok, JSON.stringify(second.refusal));
+
+  const map = second.povRendered;
+  assert.ok(map, "the rebuild renders the map in the same breath as the reference");
+  assert.strictEqual(map.claims, 3, "two carried from volume 1 plus this volume's own");
+  assert.strictEqual(map.carriedClaims, 2);
+  assert.strictEqual(map.ownClaims, 1);
+  assert.deepStrictEqual(map.volumes, [1, 2], "and the map says which volumes it is carrying");
+
+  const headings = map.markdown.split("\n").filter((line) => line.startsWith("## "));
+  assert.deepStrictEqual(
+    headings,
+    ["## Volume 01 · chapter ch0", "## Volume 01 · chapter ch1", "## Volume 02 · chapter ch0"],
+    "volume 1's chapters come first, in volume 1's own chapter order, then this volume's"
+  );
+
+  const lines = map.markdown.split("\n");
+  const own = lines.findIndex((line) => line.includes("closer than volume 1 ever got"));
+  const carriedLine = lines.findIndex((line) => line.includes("keeps the same narrator"));
+  assert.ok(carriedLine < own, "and the bullets are in that order inside the file, not just in the counts");
+
+  const store = openFixture(series, 2, DOCUMENT_SOURCE_STAGE);
+  const rows = povClaimsInRecord(store, { volume: 2 });
+  store.close();
+  assert.strictEqual(rows.length, 3, "the query the renderer uses is the whole cumulative set");
+  assert.ok(rows.every((row) => row.established_volume <= 2), "and it never reaches past the volume it was asked for");
+
+  console.log("  the POV map is cumulative: earlier volumes' sealed claims first, in the order their own chapters appear");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Rendering a map for a **sealed** volume files nothing and leaves it sealed.
+ *
+ * This is the door that makes publishing a map for an already-published volume a read rather than a
+ * workaround. The store is opened with `create: false`, so a volume with no record is a refusal
+ * instead of a freshly created empty one; the render is a query; the only write is the artifact file.
+ * @returns {void}
+ */
+function scenarioRenderingAMapForASealedRecordFilesNothingAndKeepsItSealed() {
+  const series = fixtureStoreSeries("povmap-sealed-record");
+  withRoster(series);
+  const run = rebuildFixtureVolume(series, { apply: true });
+  assert.ok(run.ok, JSON.stringify(run.refusal));
+
+  const before = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  const countsBefore = {
+    facts: before.db.prepare("SELECT COUNT(*) n FROM facts").get().n,
+    cast: before.db.prepare("SELECT COUNT(*) n FROM cast").get().n,
+    chapters: before.db.prepare("SELECT COUNT(*) n FROM chapters").get().n,
+    sealed: isVolumeSealed(before, 1),
+  };
+  before.close();
+  assert.strictEqual(countsBefore.sealed, true, "the volume is published, which is the situation this is about");
+
+  const rendered = renderPovMapFromRecord({ volume: 1, folder: series.volumes[0].folder, seriesDir: series.dir });
+  assert.ok(rendered.ok, JSON.stringify(rendered.refusal));
+  assert.strictEqual(rendered.sealed, true, "and it reports the sealed state instead of changing it");
+  assert.strictEqual(rendered.rendered.claims, 2);
+
+  const after = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  assert.strictEqual(isVolumeSealed(after, 1), true, "still sealed");
+  assert.strictEqual(after.db.prepare("SELECT COUNT(*) n FROM facts").get().n, countsBefore.facts, "no row added");
+  assert.strictEqual(after.db.prepare("SELECT COUNT(*) n FROM cast").get().n, countsBefore.cast, "no roster entry added");
+  assert.strictEqual(after.db.prepare("SELECT COUNT(*) n FROM chapters").get().n, countsBefore.chapters, "and no chapter registered: rendering does not read the book");
+  after.close();
+
+  // And the other half of `create: false`: a volume with no record is a refusal, not an empty file.
+  const empty = renderPovMapFromRecord({ volume: 2, folder: series.volumes[1].folder, seriesDir: series.dir });
+  assert.strictEqual(empty.ok, false);
+  assert.strictEqual(empty.refusal.rule, "pov-map-needs-a-record");
+  assert.ok(!fs.existsSync(path.join(series.volumes[1].dir, "series.db")), "and it did not create one on the way past");
+
+  console.log("  rendering a map for a sealed record adds, changes and deletes no row, and a volume with no record is a refusal");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * An authored POV map is somebody's work, and a rendered one does not silently replace it.
+ *
+ * Volume 01's map was written by an author agent over 12 hours. A renderer that overwrote it because
+ * the operator typed the wrong flag would destroy the more expensive artifact of the two.
+ * @returns {void}
+ */
+function scenarioAnAuthoredPovMapIsNotOverwrittenSilently() {
+  const series = fixtureStoreSeries("povmap-authored");
+  withRoster(series);
+  const { store } = rebuildFixture(series);
+  const map = renderPovMap(store);
+  const target = path.join(series.volumes[0].dir, POV_MAP_FILE);
+  const authored = "# POV Map\n\n_A written by an author agent, with a marker census no renderer writes._\n";
+  fs.writeFileSync(target, authored, "utf8");
+
+  const refused = writePovMapFile(series.volumes[0].dir, map, { file: POV_MAP_FILE });
+  assert.strictEqual(refused.ok, false);
+  assert.strictEqual(refused.refusal.rule, "pov-map-will-not-overwrite-an-artifact");
+  assert.strictEqual(fs.readFileSync(target, "utf8"), authored, "the authored file is untouched");
+  assert.ok(!fs.existsSync(`${target}.rejected`), "and nothing was moved either");
+
+  const moved = writePovMapFile(series.volumes[0].dir, map, { file: POV_MAP_FILE, moveAside: true });
+  assert.ok(moved.ok, JSON.stringify(moved.refusal));
+  assert.strictEqual(fs.readFileSync(target, "utf8"), map.markdown, "with the operator's say-so the render goes in");
+  assert.strictEqual(fs.readFileSync(`${target}.rejected`, "utf8"), authored, "and the authored map is kept as evidence, not deleted");
+
+  const again = writePovMapFile(series.volumes[0].dir, map, { file: POV_MAP_FILE, moveAside: true });
+  assert.ok(again.ok, JSON.stringify(again.refusal));
+  assert.strictEqual(again.unchanged, true, "re-rendering identical bytes is not a second rejection");
+  assert.strictEqual(fs.readdirSync(series.volumes[0].dir).filter((name) => name.startsWith(POV_MAP_FILE)).length, 2, "and it does not stack `.rejected` files");
+
+  store.close();
+  console.log("  a rendered map replaces an authored one only when told to, and the authored file survives as .rejected");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The map goes down **before** the seal, and a refusal to write it stops the publish.
+ *
+ * The acceptance check names `pov-map.md` and the harness throws on a named file that is not there,
+ * so a volume published without its map is a volume the stage's own gate cannot run on. Sealing first
+ * and failing on the map afterwards would hand the next volume a record built on an ungradeable
+ * artifact.
+ * @returns {void}
+ */
+function scenarioAPublishedRebuildWritesTheMapBeforeItSeals() {
+  const series = fixtureStoreSeries("povmap-publish-order");
+  withRoster(series);
+  const run = rebuildFixtureVolume(series, { apply: true });
+  assert.ok(run.ok, JSON.stringify(run.refusal));
+
+  const target = path.join(series.volumes[0].dir, POV_MAP_FILE);
+  assert.ok(fs.existsSync(target), "publishing a rebuilt reference publishes its map with it");
+  assert.strictEqual(fs.readFileSync(target, "utf8"), run.povRendered.markdown, "byte-for-byte the render");
+
+  const reader = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  assert.strictEqual(isVolumeSealed(reader, 1), true);
+  reader.close();
+
+  // Now put an authored map in front of it and publish again: the refusal must arrive before the seal.
+  const blocked = fixtureStoreSeries("povmap-publish-blocked");
+  withRoster(blocked);
+  fs.writeFileSync(path.join(blocked.volumes[0].dir, POV_MAP_FILE), "# POV Map\n\n_authored_\n", "utf8");
+  const refused = rebuildFixtureVolume(blocked, { apply: true });
+  assert.strictEqual(refused.ok, false);
+  assert.strictEqual(refused.published.ok, false);
+  assert.strictEqual(refused.published.refusal.rule, "pov-map-will-not-overwrite-an-artifact");
+  assert.strictEqual(refused.published.sealed, null, "and the seal did not happen: the map refusal stopped the publish, not just the map");
+
+  const blockedReader = openFixture(blocked, 1, DOCUMENT_SOURCE_STAGE);
+  assert.strictEqual(isVolumeSealed(blockedReader, 1), false, "the record stays a draft, so the next volume still refuses to build on it");
+  blockedReader.close();
+  assert.strictEqual(fs.readFileSync(path.join(blocked.volumes[0].dir, POV_MAP_FILE), "utf8"), "# POV Map\n\n_authored_\n", "and the authored map is still there");
+
+  console.log("  publishing writes the map before it seals, and a map refusal stops the publish rather than leaving a sealed, ungradeable volume");
+}
+
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
 (async () => {
@@ -1444,6 +1693,11 @@ function scenarioALaterVolumeNeedsItsEarlierRecordFirst() {
   scenarioTheRebuiltFileRoundTrips();
   scenarioTheProvenanceCarriesForward();
   scenarioALaterVolumeNeedsItsEarlierRecordFirst();
+  scenarioThePovMapRendersWhatTheCharacterReferenceCannot();
+  scenarioThePovMapCarriesEarlierVolumesForwardInChapterOrder();
+  scenarioRenderingAMapForASealedRecordFilesNothingAndKeepsItSealed();
+  scenarioAnAuthoredPovMapIsNotOverwrittenSilently();
+  scenarioAPublishedRebuildWritesTheMapBeforeItSeals();
   await scenarioTheWholePathMakesNoModelCall();
   console.log("reference-store rebuild: all checks passed.");
 })().catch((err) => {

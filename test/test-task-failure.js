@@ -36,6 +36,13 @@ process.env.PASSING_SCORE = "70";
 process.env.ACCEPTANCE_PASSING_SCORE = "70";
 process.env.ACCEPTANCE_WINDOW_SIZE = "2";
 process.env.QA_MAX_ITERATIONS = "2";
+// The gate's confirmation path, pinned rather than inherited from whatever .env says: the live
+// scenarios below depend on a graded artifact actually being accepted, and which scores confirm an
+// acceptance is the one part of the gate that changes how many stub calls a scenario makes.
+process.env.ACCEPTANCE_EXCEPTIONAL_SCORE = "85";
+process.env.ACCEPTANCE_CONFIRMATION_CHECKS = "2";
+process.env.ACCEPTANCE_CONFIRMATION_MIN_SCORE = "82";
+process.env.ACCEPTANCE_MIN_SAMPLES = "2";
 process.env.RESEARCH_ENABLED = "false";
 process.env.AGENT_RECOVERY_ENABLED = "false";
 process.env.ON_VOLUME_ERROR = "skip";
@@ -230,7 +237,7 @@ function makeSeries() {
  * @param {{failInstallments?: string[]}} opts - Installment numbers whose model calls throw.
  * @returns {void}
  */
-function installStubs(manifest, { failInstallments = [] } = {}) {
+function installStubs(manifest, { failInstallments = [], acceptanceScore = 88 } = {}) {
   const gtt = require("../get-translation-target");
   gtt.getTranslationTarget = async () => manifest;
 
@@ -277,11 +284,26 @@ function installStubs(manifest, { failInstallments = [] } = {}) {
         throw new Error(`stubbed model failure on ${label}`);
       }
     }
-    if (label.startsWith("character-voice-extract-")) return "[]";
+    // The assembled route's reading pass. The claim quotes a line this fixture's book really
+    // prints, so the evidence rule adopts it and the render has something to render — which is what
+    // lets these scenarios exercise the failure policy on the route a run actually takes.
+    if (label.startsWith("character-voice-extract-")) {
+      return JSON.stringify([
+        {
+          type: "voice",
+          character: "如月雨露",
+          quirkType: "catchphrase",
+          description: "A catchphrase this fixture prints once.",
+          examples: ["本文テキスト。"],
+          formalityLevel: "plain",
+        },
+      ]);
+    }
     if (label.startsWith("character-voice-acceptance-")) {
-      // 80: passing, and below the exceptional floor (85) so the confirmation
-      // path is not part of this scenario.
-      return '{"score": 80, "band": "Pass with minor edits", "note": "fixture"}';
+      // 88: passing, and in the top band so the gate's own confirmation path runs and accepts it.
+      // (80 would pass the floor but sit below the confirmation minimum, which is a decision about the
+      // rubric this file does not own — the thresholds are pinned below for that reason.)
+      return `{"score": ${acceptanceScore}, "band": ${acceptanceScore >= 85 ? "Pass" : "Requires revision"}, "note": "fixture"}`;
     }
     throw new Error(`Unexpected one-shot label: ${label}`);
   };
@@ -365,6 +387,55 @@ async function scenarioCumulativeCascadeStillFailsTheRun() {
 }
 
 /**
+ * Scenario A3 — the assembled route's acceptance gate refuses, and the refusal has the shape the
+ * other guards have: the artifacts are moved aside, the record stays a draft, the run fails.
+ *
+ * This is the guarantee the new default route has to earn. Removing the author agent must not remove
+ * the gate with it, and a gate that fails while leaving a published-looking reference in the volume
+ * folder is worse than no gate: the next volume would build on it.
+ */
+async function scenarioAssembledGateRefusalQuarantinesAndFails() {
+  const { seriesDir, manifest } = makeSeries();
+  process.env.SERIES_LOCATION = seriesDir;
+  process.env.SERIES_ARTIFACTS_DIR = seriesDir;
+  installStubs(manifest, { failInstallments: [], acceptanceScore: 40 });
+  const { characterVoice } = require("../character-voice");
+  const { openReferenceStore, isVolumeSealed } = require("../utils/reference-store");
+
+  let err = null;
+  try {
+    await characterVoice();
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err, "a volume the gate refused fails the run rather than being reported as processed");
+  assert.ok(/the acceptance gate did not accept the assembled reference/.test(err.message), err.message);
+
+  const volumeDir = path.join(seriesDir, "Book(01)");
+  assert.ok(!fs.existsSync(path.join(volumeDir, "character-voice.md")), "the refused reference is not left where the next volume would read it");
+  assert.ok(!fs.existsSync(path.join(volumeDir, "pov-map.md")), "and neither is the refused map");
+  assert.ok(fs.existsSync(path.join(volumeDir, "character-voice.md.rejected")), "the reference is kept as evidence");
+  assert.ok(fs.existsSync(path.join(volumeDir, "pov-map.md.rejected")), "and so is the map");
+  assert.ok(fs.existsSync(path.join(volumeDir, "character-voice-validation.md")), "and the report that refused them is still there to read");
+
+  const store = openReferenceStore({ volume: 1, folder: "Book(01)", seriesDir, stage: "render", create: false });
+  try {
+    assert.strictEqual(isVolumeSealed(store, 1), false, "the record stays a draft, because sealing is the last act of a volume that finished");
+  } finally {
+    store.close();
+  }
+
+  assert.ok(
+    !fs.existsSync(path.join(seriesDir, "Book(02)", "character-voice.md")),
+    "and the next volume cascaded: an unsealed volume is what copy-forward refuses"
+  );
+  assert.ok(!fs.existsSync(path.join(seriesDir, "character-voice.md")), "nothing was published at the series root");
+
+  fs.rmSync(seriesDir, { recursive: true, force: true });
+}
+
+
+/**
  * Scenario B — the failure is STRUCTURAL (a source that is not a book). No skip
  * policy walks past it: the task fails immediately, and the error is the
  * structural one rather than the end-of-run summary.
@@ -417,6 +488,7 @@ function runInChild(name, scenario) {
 const CHILD_SCENARIOS = {
   "rejects": scenarioTaskRejectsAfterSkippedVolume,
   "cascade": scenarioCumulativeCascadeStillFailsTheRun,
+  "gate-refusal": scenarioAssembledGateRefusalQuarantinesAndFails,
   "structural": scenarioStructuralFailureAborts,
 };
 

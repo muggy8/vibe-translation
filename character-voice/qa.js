@@ -14,7 +14,7 @@ const { assertRealToolCalls } = require("../utils/agents");
 const { runSharedQaLoop, runAuthorStage } = require("../utils/qa-loop");
 
 const { maxValidationIterations } = require("./config");
-const { auditVoiceArtifact, mirrorVoiceArtifact, voiceGradeSample, VOICE_ARTIFACT_NAME } = require("./store");
+const { auditVoiceArtifact, mirrorVoiceArtifact, auditAssembledArtifacts, voiceGradeSample, VOICE_ARTIFACT_NAME } = require("./store");
 const { buildFeedbackTurnPrompt, buildValidatorTurnPrompt } = require("./prompts");
 const { assertVoiceCarryForward } = require("./carry-forward");
 const { voiceAuthorMaxSteps, voiceRecoveryPrompt } = require("./amend");
@@ -28,9 +28,21 @@ const { voiceAuthorMaxSteps, voiceRecoveryPrompt } = require("./amend");
  */
 async function runQaLoop(ctx) {
   const { values, volumeDir, sourceFile, validationOutputFile, fsGate } = ctx;
+  /**
+   * The assembled route runs the same loop with one difference and one absence.
+   *
+   * The difference: the validator half audits the record against the artifacts this route just
+   * rendered, and does **not** mirror them back — on this route the file *is* the record's render, and
+   * mirroring it would file the same claims twice under two provenances.
+   *
+   * The absence: the feedback pass. There is no author to ask, so a failing grade cannot be answered
+   * by re-typing the same claims. One iteration, one grade, and the loop stops — which is also the
+   * cheap direction: five grades over a document nothing can change is sampling noise, not QA.
+   */
+  const assembled = ctx.voiceRoute === "assemble";
   const result = await runSharedQaLoop({
     volumeLabel: `Volume ${values.INSTALLMENT_NUMBER}`,
-    maxIterations: maxValidationIterations,
+    maxIterations: assembled ? 1 : maxValidationIterations,
     onQaLimit: ON_QA_LIMIT,
     validationOutputFile,
     stateFile: validationOutputFile.replace(".md", "-rolling-state.json"),
@@ -46,24 +58,39 @@ async function runQaLoop(ctx) {
     // untouched, and the loop makes no model call for validation.
     deterministicValidator: ctx.refStore
       ? async () => {
+          if (assembled) {
+            await auditAssembledArtifacts(ctx, { refused: (ctx.storeImport && ctx.storeImport.refused) || [] });
+            return;
+          }
           await mirrorVoiceArtifact(ctx);
           const audit = await auditVoiceArtifact(ctx);
           await fs.writeFile(validationOutputFile, audit.markdown, "utf8");
         }
       : undefined,
     validatorLogLine: ctx.refStore
-      ? () => "Auditing the reference against the volume's record (no model call)..."
+      ? () =>
+          assembled
+            ? "Auditing the assembled reference against the volume's record (no model call)..."
+            : "Auditing the reference against the volume's record (no model call)..."
       : undefined,
     acceptanceLogLine: () => "Calling the AI for the acceptance check...",
     acceptanceCheck: (iteration) => acceptanceCheck(ctx, iteration),
     // Exceptional-score confirmation re-grades (see utils/qa-loop.js).
     confirmationCheck: ({ index, temperature }) => acceptanceCheck(ctx, `confirm${index + 1}`, temperature),
-    feedbackLogLine: () => "Calling the AI to apply the validation feedback (author agent)...",
-    runFeedback: (iteration) => runFeedback(ctx),
+    feedbackLogLine: () =>
+      assembled
+        ? "No feedback pass: this route has no author agent, so the grade is the decision."
+        : "Calling the AI to apply the validation feedback (author agent)...",
+    runFeedback: (iteration) => (assembled ? Promise.resolve(runAssembledFeedbackNote(ctx)) : runFeedback(ctx)),
     // The loop stops when a feedback pass leaves these byte-identical: a turn
     // that only read is not an iteration (see fingerprintFiles in utils/fs.js).
-    feedbackArtifactFiles: [ctx.voiceOutputFile, ctx.povOutputFile],
-    limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`,
+    // The assembled route writes nothing in its feedback turn by design, so it does not claim to be
+    // watching for a change that could never happen — the loop ends at its one iteration instead.
+    feedbackArtifactFiles: assembled ? [] : [ctx.voiceOutputFile, ctx.povOutputFile],
+    limitReachedLogLine: () =>
+      assembled
+        ? `Volume ${values.INSTALLMENT_NUMBER}: the acceptance gate did not accept the assembled reference. This route has no rewrite pass, so the volume stops here.`
+        : `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit (${maxValidationIterations}) without a passing grade.`,
   });
   ctx.limitReached = result.limitReached;
   return result;
@@ -102,6 +129,25 @@ async function runFeedback(ctx) {
   // that rewrote the reference from memory is how characters disappear from it
   // (see assertVoiceCarryForward).
   await assertVoiceCarryForward(ctx, "the feedback pass");
+}
+
+
+/**
+ * The assembled route's feedback turn: a sentence, not an agent.
+ *
+ * The shared loop always runs a feedback pass between grades. On this route there is nothing to run —
+ * the reference is a render of claims the record already holds, and the only way to change it is to
+ * read the book again or contest a row. Saying that out loud is what keeps the loop's shape identical
+ * between the two routes instead of forking a second loop that could drift from the first.
+ *
+ * @param {CharacterVoiceVolumeCtx} ctx
+ * @returns {void}
+ */
+function runAssembledFeedbackNote(ctx) {
+  console.log(
+    `Volume ${ctx.values.INSTALLMENT_NUMBER}: nothing was rewritten — ${VOICE_ARTIFACT_NAME} and pov-map.md are ` +
+      "rendered from the volume's record, so the claims they hold are the claims the record holds."
+  );
 }
 
 

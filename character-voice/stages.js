@@ -48,11 +48,17 @@ const { buildAuthorSystemPrompt, buildAuthorTurnPrompt } = require("./prompts");
  *   cumulative reference material already covers the chapters before it", which is only true of a pass
  *   that has been compiling as it went; a reading-only pass has to say what its own earlier chapters
  *   produced instead, or the instruction it gives the extractor is false.
+ *
+ *   `thinkingLevel`, when given, is the reasoning level THIS call runs at. It exists for the reading
+ *   pass's retry of a cut-off chapter (`character-voice/reading.js`): the level is chosen by code and
+ *   recorded beside the attempt it produced, not left to the operator to remember to set. Omitted, the
+ *   call runs at the run's own `AI_THINKING_LEVEL`, exactly as before.
  * @returns {Promise<string>}
  */
 async function runExtract(ctx, seg = null, si = null, opts = {}) {
   const { values } = ctx;
   const labelSuffix = seg ? `-${seg.id}` : "";
+  const thinking = opts.thinkingLevel ? { thinkingLevel: opts.thinkingLevel } : {};
   if (seg) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV extraction for chapter ${seg.id}...`);
     const messages = [{ file: path.join(ctx.volumeDir, seg.file), name: seg.file }];
@@ -73,7 +79,7 @@ async function runExtract(ctx, seg = null, si = null, opts = {}) {
     }
     messages.push({ text: ctx.extractPrompt }, { text: chapterSegmentNote(ctx.bundle, seg, si) });
     if (opts.extraNote) messages.push({ text: opts.extraNote });
-    return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `character-voice-extract-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
+    return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `character-voice-extract-${values.INSTALLMENT_NUMBER}${labelSuffix}`, ...thinking });
   }
   const { sourceFile } = ctx;
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV extraction...`);

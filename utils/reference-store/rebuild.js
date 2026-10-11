@@ -76,6 +76,7 @@ const {
   markDocumentRebuilt,
 } = require("./document-prose");
 const { auditVolumeRecord, renderVolumeAuditReport, resetDocumentMirror, volumeRecordExists } = require("./pipeline-store");
+const { renderPovMap, writePovMapFile, POV_MAP_FILE } = require("./pov-map");
 const { refusal } = require("./refusals");
 require("../../types"); // JSDoc type definitions
 
@@ -892,10 +893,13 @@ function planHasEarlierVolumes(seriesDir, vol) {
  * @param {string} volumeDir - The volume folder the published artifact belongs to.
  * @param {{markdown: string, opening?: string[]}} rendered
  * @param {{highFindings?: Array<Object>}} audit - What the audit said about this reference.
- * @param {{file?: string, moveAside?: boolean}} [opts]
+ * @param {{file?: string, moveAside?: boolean, pov?: {markdown: string}|null}} [opts] - `pov`, when
+ *   given, is the map rendered from the same record: it is written **before** the seal, because a
+ *   volume published without the file its own acceptance check asks for is a volume that cannot be
+ *   graded, and a seal that hides that is worse than no seal.
  * @returns {{ok: boolean, written: string|null, moved: string|null, sealed: Object|null, refusal: ReferenceRefusal|null}}
  */
-function publishRebuiltVolume(store, volumeDir, rendered, audit, { file = "character-voice.md", moveAside = false } = {}) {
+function publishRebuiltVolume(store, volumeDir, rendered, audit, { file = "character-voice.md", moveAside = false, pov = null } = {}) {
   const written = writeRebuiltVoiceFile(store, volumeDir, rendered, { file, moveAside });
   if (!written.ok) return { ok: false, written: null, moved: null, unchanged: false, sealed: null, refusal: written.refusal };
 
@@ -940,6 +944,32 @@ function publishRebuiltVolume(store, volumeDir, rendered, audit, { file = "chara
     };
   }
 
+  /**
+   * The map goes down before the seal does.
+   *
+   * The acceptance check names `pov-map.md`, and the harness refuses a named-file message whose file
+   * is missing — so a volume published without it is a volume the stage's own gate cannot run on.
+   * Sealing first and failing on the map afterwards would leave exactly that volume with a record
+   * the next volume is allowed to build on. Writing it here means a refusal to overwrite an authored
+   * map stops the publish, not just the map.
+   */
+  let povMap = null;
+  if (pov) {
+    const mapWritten = writePovMapFile(volumeDir, pov, { file: POV_MAP_FILE, moveAside });
+    if (!mapWritten.ok) {
+      return {
+        ok: false,
+        written: target,
+        moved: written.moved,
+        unchanged: written.unchanged,
+        sealed: null,
+        povMap: null,
+        refusal: mapWritten.refusal,
+      };
+    }
+    povMap = { written: mapWritten.written, moved: mapWritten.moved, unchanged: mapWritten.unchanged };
+  }
+
   const high = (audit && audit.highFindings) || [];
   if (high.length) {
     return {
@@ -969,6 +999,7 @@ function publishRebuiltVolume(store, volumeDir, rendered, audit, { file = "chara
     written: target,
     moved: written.moved,
     unchanged: written.unchanged,
+    povMap,
     sealed: {
       state: "sealed",
       at: (marker && marker.value) || "unknown",
@@ -1004,7 +1035,7 @@ function publishRebuiltVolume(store, volumeDir, rendered, audit, { file = "chara
  *   Without it the caller has a rehearsal: the record is built, the file is a scratch copy, and nothing
  *   is sealed.
  * @param {boolean} [opts.moveAside] - With `apply`: move an existing artifact to `.rejected` first.
- * @returns {{ok: boolean, refusal: ReferenceRefusal|null, aliases: {applied: Array<Object>, refused: Array<Object>}, cleared: {deleted: number, refused: Array<Object>}, rebuild: Object|null, rendered: Object|null, audit: Object|null, published: Object|null, store: ReferenceStore|null}}
+ * @returns {{ok: boolean, refusal: ReferenceRefusal|null, aliases: {applied: Array<Object>, refused: Array<Object>}, cleared: {deleted: number, refused: Array<Object>}, rebuild: Object|null, rendered: Object|null, povRendered: Object|null, audit: Object|null, published: Object|null, store: ReferenceStore|null}}
  */
 function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], bundleSegments = null, apply = false, moveAside = false }) {
   const volNumber = Number(volume);
@@ -1026,6 +1057,7 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
     cleared: { deleted: 0, refused: [] },
     rebuild: null,
     rendered: null,
+    povRendered: null,
     audit: null,
     published: null,
     store: null,
@@ -1067,6 +1099,7 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
         cleared,
         rebuild: null,
         rendered: null,
+        povRendered: null,
         audit: null,
         published: null,
         store: null,
@@ -1094,10 +1127,19 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
       candidateHandle.close();
     }
     if (rebuild.refusal) {
-      return { ok: false, refusal: rebuild.refusal, aliases: aliasResult, cleared, rebuild, rendered: null, audit: null, published: null, store: null };
+      return { ok: false, refusal: rebuild.refusal, aliases: aliasResult, cleared, rebuild, rendered: null, povRendered: null, audit: null, published: null, store: null };
     }
 
     const rendered = renderRebuiltVoice(opened, { volume });
+    /**
+     * The POV map, rendered from the same record in the same breath.
+     *
+     * It is not a bonus artifact: the stage's acceptance check names `pov-map.md`, and the harness
+     * throws on a named file that is not there, so a route that publishes the reference without the
+     * map cannot be graded by the gate at all. The record already holds the point-of-view claims —
+     * this renders them instead of leaving them where nobody reads them.
+     */
+    const povRendered = renderPovMap(opened, { volume });
     let audit = auditVolumeRecord(opened, {
       title: "Character-voice reference (rebuilt from extraction)",
       file: "character-voice.md",
@@ -1121,7 +1163,7 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
         "A record is sealed when the reference it describes is the one the volume actually publishes.",
     };
     if (apply) {
-      published = publishRebuiltVolume(opened, path.join(seriesDir, folder), rendered, audit, { file: "character-voice.md", moveAside });
+      published = publishRebuiltVolume(opened, path.join(seriesDir, folder), rendered, audit, { file: "character-voice.md", moveAside, pov: povRendered });
       sealedAnswer = published.ok
         ? published.sealed
         : {
@@ -1144,10 +1186,10 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
     };
 
     if (apply && !published.ok) {
-      return { ok: false, refusal: published.refusal, aliases: aliasResult, cleared, rebuild, rendered, audit, published, store: opened };
+      return { ok: false, refusal: published.refusal, aliases: aliasResult, cleared, rebuild, rendered, povRendered, audit, published, store: opened };
     }
 
-    return { ok: true, refusal: null, aliases: aliasResult, cleared, rebuild, rendered, audit, published, store: opened };
+    return { ok: true, refusal: null, aliases: aliasResult, cleared, rebuild, rendered, povRendered, audit, published, store: opened };
   } finally {
     opened.close();
   }

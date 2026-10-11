@@ -34,6 +34,7 @@ const { buildAuthorSystemPrompt, buildAuthorTurnPrompt, buildFeedbackTurnPrompt,
 const { parseVoiceQuirks } = require("./amend");
 const { assertVoiceCarryForward, seedVoiceReferenceFromPrevious } = require("./carry-forward");
 const { openVoiceRecord, fileVoiceExtraction, mirrorVoiceArtifact, sealVoiceRecord } = require("./store");
+const { runAssembledVolume } = require("./assemble");
 const { runCompile, runExtract } = require("./stages");
 const { runQaLoop } = require("./qa");
 const { runChunkedVolume } = require("./chunked");
@@ -43,6 +44,36 @@ const VOICE_FILE = "character-voice.md";
 const POV_FILE = "pov-map.md";
 const VALIDATION_FILE = "character-voice-validation.md";
 const NEW_ENTRIES_FILE = "character-voice-new.json";
+
+/** The two ways this stage builds a volume, and which one a run takes when nobody says otherwise. */
+const VOICE_ROUTES = Object.freeze(["assemble", "author"]);
+const DEFAULT_VOICE_ROUTE = "assemble";
+
+/**
+ * Which route this run builds volumes with.
+ *
+ * `--route=assemble` is the default and needs no flag: read the volume chapter by chapter, file what
+ * was found, render both artifacts from the record. `--route=author` selects the route that was the
+ * default until the numbers came in — an author agent compiles the reference and rewrites it on
+ * feedback. It stays reachable because it is still better at some things (see the stage's own docs),
+ * and it is selectable from the command line rather than from the environment: a route chosen by a
+ * variable nobody typed is a route that changes underneath a run.
+ *
+ * An unrecognised value is an error, not a fallback. `--route=autor` must not quietly build volumes a
+ * different way from the one the operator asked for.
+ *
+ * @param {string[]} [argv]
+ * @returns {string}
+ */
+function readVoiceRoute(argv = process.argv) {
+  const arg = argv.find((a) => a.startsWith("--route="));
+  if (!arg) return DEFAULT_VOICE_ROUTE;
+  const value = arg.slice("--route=".length);
+  if (!VOICE_ROUTES.includes(value)) {
+    throw new Error(`--route=${value} is not a character-voice route. Choose one: ${VOICE_ROUTES.join(", ")}.`);
+  }
+  return value;
+}
 
 /**
  * Read the voice stage's prompt pair for each of its five roles.
@@ -72,14 +103,15 @@ async function loadPromptFiles() {
  */
 async function characterVoice() {
   const { dryRun, force, chunked, volumeArg } = readRunArgs();
-  console.log("character-voice task starting...");
+  const voiceRoute = readVoiceRoute();
+  console.log(`character-voice task starting... (route: ${voiceRoute})`);
   validateRequiredEnv({ dryRun });
 
   const prompts = await loadPromptFiles();
   const { runSettings, folders, volumes, volumeByFolder } = await openSeriesRun({ seriesDir, dryRun, volumeArg });
 
   const cascade = { regeneratedAny: false };
-  const run = { folders, volumeByFolder, runSettings, prompts, dryRun, force, chunked, cascade };
+  const run = { folders, volumeByFolder, runSettings, prompts, dryRun, force, chunked, voiceRoute, cascade };
   await runVolumeSeries("character-voice", {
     volumes,
     folders,
@@ -112,12 +144,13 @@ async function characterVoice() {
  *   dryRun: boolean,
  *   force: boolean,
  *   chunked: boolean,
+ *   voiceRoute: string,
  *   cascade: { regeneratedAny: boolean },
  * }} run - What every volume of this run shares.
  * @returns {Promise<void>}
  */
 async function processVoiceVolume({ folderName, index }, run) {
-  const { folders, volumeByFolder, runSettings, prompts, dryRun, force, chunked, cascade } = run;
+  const { folders, volumeByFolder, runSettings, prompts, dryRun, force, chunked, voiceRoute, cascade } = run;
   const volume = volumeByFolder.get(folderName);
   const volumeDir = path.join(seriesDir, folderName);
   const values = {
@@ -133,7 +166,7 @@ async function processVoiceVolume({ folderName, index }, run) {
   const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
 
   const { ctx, proceed } = await buildVolumeContext({
-    folderName, index, folders, volumeByFolder, runSettings, prompts, values, bundle, volumeDir, volume, dryRun, chunked,
+    folderName, index, folders, volumeByFolder, runSettings, prompts, values, bundle, volumeDir, volume, dryRun, chunked, voiceRoute,
   });
   if (!proceed) return;
 
@@ -161,10 +194,16 @@ async function processVoiceVolume({ folderName, index }, run) {
   // Slice 6: the volume's reference record. Opened before anything is written, because the previous
   // volume's published record has to be carried in first — and carrying it in is where the hard stop
   // lives: a volume whose character-voice reference lost characters that this volume's text contains
-  // may not be copied forward, with no exception and no downgrade. Behind VOICE_STORE_VALIDATORS;
-  // with the flag off this block does not run and the volume is built exactly as it always was.
+  // may not be copied forward, with no exception and no downgrade.
+  //
+  // The assembled route needs the record for a different reason too: the record **is** the artifact's
+  // source. A route that renders the reference from the record cannot run without one, so opening it is
+  // not behind `VOICE_STORE_VALIDATORS` on that route — a guard with an env knob on it is not a guard
+  // (AGENTS.md rule 3), and here the knob would not turn a check off, it would turn the volume off.
+  // The author route keeps the flag exactly where it was: with the flag off that route is byte-for-byte
+  // the pipeline that has always run.
   const previous = ctx.previousFolderName ? volumeByFolder.get(ctx.previousFolderName) : null;
-  if (STORE_VALIDATORS.voice) {
+  if (STORE_VALIDATORS.voice || ctx.voiceRoute === "assemble") {
     const attempt = openVoiceRecord(ctx, previous ? previous.installmentNumber : null);
     if (!attempt.ok) throw new Error(`Volume ${values.INSTALLMENT_NUMBER}: ${attempt.error}`);
     ctx.refStore = attempt.opened.store;
@@ -178,22 +217,30 @@ async function processVoiceVolume({ folderName, index }, run) {
     }
   }
 
-  await runVolumeWithModeFallback({
-    label: `Volume ${volume.installmentNumber}`,
-    ctx,
-    volumeDir,
-    run: () => runVolume(ctx),
-    // Everything a whole-installment pass writes, removed before the chapter-by-chapter retry so it
-    // cannot inherit a half-written attempt.
-    attemptFiles: [
-      VOICE_FILE,
-      POV_FILE,
-      NEW_ENTRIES_FILE,
-      VALIDATION_FILE,
-      "character-voice-validation-rolling-state.json",
-    ],
-    attemptGlob: /^character-voice-.*\.md$/,
-  });
+  if (ctx.voiceRoute === "assemble") {
+    // No mode fallback on this route: it reads chapter by chapter whatever the volume's size, because
+    // the thing it is buying is a per-chapter notebook, not a single reply that has to contain the
+    // whole book. The whole-installment/chunked decision belongs to the author route, where a reply
+    // really does have to hold the reference.
+    await runAssembledVolume(ctx);
+  } else {
+    await runVolumeWithModeFallback({
+      label: `Volume ${volume.installmentNumber}`,
+      ctx,
+      volumeDir,
+      run: () => runVolume(ctx),
+      // Everything a whole-installment pass writes, removed before the chapter-by-chapter retry so it
+      // cannot inherit a half-written attempt.
+      attemptFiles: [
+        VOICE_FILE,
+        POV_FILE,
+        NEW_ENTRIES_FILE,
+        VALIDATION_FILE,
+        "character-voice-validation-rolling-state.json",
+      ],
+      attemptGlob: /^character-voice-.*\.md$/,
+    });
+  }
 
   // Sealing is the last act of a volume whose pre-production finished (review 05 §3.2: code seals,
   // at the end of that volume's own pre-production). A volume that threw on the way here is left
@@ -213,7 +260,7 @@ async function processVoiceVolume({ folderName, index }, run) {
  * @returns {Promise<{ ctx: CharacterVoiceVolumeCtx, proceed: boolean }>} `proceed` false when the
  *   run policy said to skip this volume (a missing base).
  */
-async function buildVolumeContext({ folderName, index, folders, volumeByFolder, runSettings, prompts, values, bundle, volumeDir, volume, dryRun, chunked }) {
+async function buildVolumeContext({ folderName, index, folders, volumeByFolder, runSettings, prompts, values, bundle, volumeDir, volume, dryRun, chunked, voiceRoute }) {
   const { isFirst, previousFolderName } = locatePreviousVolume({ folders, index, volumeByFolder });
 
   const previous = await requirePreviousArtifacts({
@@ -231,6 +278,7 @@ async function buildVolumeContext({ folderName, index, folders, volumeByFolder, 
     folderName,
     volumeDir,
     seriesDir,
+    voiceRoute: voiceRoute || DEFAULT_VOICE_ROUTE,
     sourceFile: bundle.wholePath,
     bundle,
     isFirst,
@@ -284,6 +332,43 @@ async function buildVolumeContext({ folderName, index, folders, volumeByFolder, 
  */
 async function dumpVolumePreview(ctx) {
   const { values } = ctx;
+  /**
+   * The preview has to show the prompts THIS route sends, because a dry run is how an operator checks
+   * what a run will ask the model — and on the assembled route that is a per-chapter extraction call
+   * and one grade, with no author, validator or feedback turn anywhere in it. Dumping the author
+   * prompts for a route that never sends them is a preview of a run that is not going to happen.
+   */
+  if (ctx.voiceRoute === "assemble") {
+    const segments = ctx.bundle && ctx.bundle.segments && ctx.bundle.segments.length ? ctx.bundle.segments : [];
+    const sections = [
+      { title: "One-shot — extraction system prompt", prompt: ctx.extractSystemPrompt },
+      { title: "One-shot — extraction user prompt", prompt: ctx.extractPrompt },
+    ];
+    for (let si = 0; si < segments.length; si++) {
+      const seg = segments[si];
+      sections.push({
+        title: `ASSEMBLED — per-chapter extraction user prompt (${seg.id})`,
+        prompt:
+          `${ctx.extractPrompt}\n\n${chapterSegmentNote(ctx.bundle, seg, si)}\n\n` +
+          (si === 0
+            ? "(first chapter of the pass: nothing extracted yet)"
+            : `(${segments.slice(0, si).map((s) => s.id).join(", ")} would be listed here in a live run, from the partials already on disk.)`),
+      });
+    }
+    sections.push({ title: "One-shot — acceptance user prompt", prompt: ctx.acceptancePrompt });
+    sections.push({
+      title: "What this route does NOT send",
+      prompt:
+        `No author turn, no validator agent turn, no feedback turn: --route=assemble reads the volume chapter by chapter, ` +
+        `files what it found in this volume's reference record, and renders ${VOICE_FILE} and ${POV_FILE} from that record. ` +
+        `The validator half is queries against the record (no prompt), and the one model call after the reading pass is the ` +
+        `acceptance grade above it. Run --route=author to see the author, validator and feedback turns instead.`,
+    });
+    const assembledDump = await writePromptDump("character-voice", values.INSTALLMENT_NUMBER, "assemble", sections);
+    console.log(`Volume ${values.INSTALLMENT_NUMBER}: --dry-run (route: assemble): prompts dumped to ${assembledDump}`);
+    return;
+  }
+
   ctx.voiceSeeded = !ctx.isFirst && Boolean(ctx.previousVoiceRefFile) && (await fileExists(ctx.previousVoiceRefFile));
   ctx.voiceIndex = ctx.voiceSeeded
     ? buildVoiceIndex(await fs.readFile(ctx.previousVoiceRefFile, "utf8").catch(() => ""))
@@ -322,6 +407,13 @@ async function dumpVolumePreview(ctx) {
  */
 async function runVolume(ctx) {
   const { values } = ctx;
+  // The assembled route is a different flow, not a variant of this one: it never hands the reference to
+  // an agent, so the extract → compile → QA shape below does not describe it. Dispatched here as well
+  // as in `processVoiceVolume` so a caller that reaches `runVolume` directly gets the route the ctx says.
+  if (ctx.voiceRoute === "assemble") {
+    await runAssembledVolume(ctx);
+    return;
+  }
   // Chunked (fallback) volumes take the per-chapter flow instead.
   if (ctx.chunked) {
     await runChunkedVolume(ctx);
@@ -370,4 +462,7 @@ async function runVolume(ctx) {
 module.exports = {
   characterVoice,
   runVolume,
+  readVoiceRoute,
+  VOICE_ROUTES,
+  DEFAULT_VOICE_ROUTE,
 };
