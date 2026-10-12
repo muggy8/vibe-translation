@@ -87,18 +87,49 @@ failure this repository has actually had, or to the fix it has just made.
 | MEDIUM | a bundle whose pronunciation-guide harvest file is missing | a cache that certifies a hole |
 | info | per volume: chapters, characters, guide annotations set aside, images, packaging excluded | the line a human reads to decide whether this looks like a real book |
 
-### The one check that reaches outside the extraction layer
+### Which checks are actually computable here
 
-The name-split check cannot be answered by the extraction layer alone. "Is this a character name?" and
-"does this name appear only in broken-apart form?" are questions the **reference store** already
-answers — `utils/reference-store/presence.js` is what measures whether a name occurs in a volume's
-text, and it is the rule that tripped on 蒲かま田た and led to the whole extraction fix.
+Measured while preparing slice 1, and it changed the list. Two of the seven cannot be answered by
+the extraction layer at all, and pretending otherwise would hand a worker a check it cannot write.
 
-So the extraction step **imports that rule rather than inventing its own**. This is deliberate and it
-has to stay that way: a second name-matching rule inside the extraction step would be a second answer
-to the same question, and the two would drift exactly the way the two QA loops used to. If the check
-needs a name rule the store does not expose, that is a signal the check is wrong — not an invitation
-to write a new matcher.
+**Computable from what the extraction layer already produces** — these are the audit:
+
+| severity | check | what answers it |
+|---|---|---|
+| **HIGH** | the volume's source is not the book archive | the plan of record's `sourceFile` against what the bundle actually opened |
+| **HIGH** | a volume with no usable chapter, or every chapter empty | the bundle's segment list |
+| **HIGH** | a chapter that extracted to nothing, beyond the pages the book declares as packaging | a segment with no body that is **not** marked packaging |
+| MEDIUM | a chapter title that is only the file's name | the segment titles against the archive's own name |
+| MEDIUM | a bundle whose pronunciation-guide harvest file is missing | does the file exist beside the bundle |
+| info | chapters, characters, guides set aside, images, packaging excluded | the counts the extraction already writes |
+
+**Deferred, with the reason said plainly:**
+
+1. **A guide-split string still present in extracted text (HIGH).** The obvious way to check it is to
+   rebuild the old broken string from the harvest and look for it. **The harvest cannot do that as it
+   is shaped today.** A row is `{word, reading, count, chapters, script}` — 蒲田 / かまた — but the
+   defect interleaved the reading *per annotated character* (蒲→かま, 田→た), producing 蒲かま田た.
+   From a word-and-reading pair you cannot reconstruct which character carried which guide, so you
+   cannot build the string you are hunting for. A pattern-match instead ("kanji followed by its own
+   reading") fires on ordinary Japanese constantly, which is a guard that cries wolf until somebody
+   switches it off.
+   **What would make it exact:** the harvest recording the annotation's own base-and-reading sequence
+   as it was annotated, not just the joined pair. That is a change to the harvest row shape — a
+   schema decision with a cost (it re-extracts all 17 volumes again) — so it is a decision to make,
+   not a slice to write.
+2. **A character-name candidate that only ever appears in guide-split form (MEDIUM).** This one has a
+   simpler problem: **at extraction time there is no roster.** "Is this a character name?" is a
+   question something must first propose a name for, and nothing has. The reference store has the
+   roster, the presence rule and the coverage guard, and it already catches the 蒲田 class — that is
+   the rule that found the defect in the first place. This check belongs there, and moving it here
+   would put a second, weaker answer to a question the store already answers.
+
+**And the coupling this plan used to claim is not available.** `utils/reference-store/presence.js`
+exports six functions, and every one of them takes a database record (`ctx.db`) — the text-level
+matcher underneath, `findName(entry, chapters)`, is **not exported** and needs a cast entry that does
+not exist before a roster exists. So the extraction step imports nothing from the reference store. If
+a future slice needs it, the correct move is to export the matcher, not to open a record from the
+extraction layer.
 
 ### What the severities do
 
@@ -157,10 +188,14 @@ One worker session per slice, each ending with `npm test` green and checked agai
 
 | # | slice | what it has to prove |
 |---|---|---|
-| 1 | The audit as a pure function over a bundle: every check in §3, against fixtures. | Each HIGH check fires on a planted fixture and stays silent on a clean one. No stage runs, no model is called. |
+| 1 | The audit as a pure function over a bundle: the five computable checks in §3, against fixtures. | Each HIGH check fires on a planted fixture and stays silent on a clean one. No stage runs, no model is called, nothing from `utils/reference-store/` is imported. |
 | 2 | The step itself: `extract` in the pipeline order, running the audit over every volume, writing the per-volume report and the series summary. | `--stages=extract` runs alone; a warm cache re-verifies rather than re-extracts and says so; a planted HIGH finding stops the run before `glossary` is reached. |
-| 3 | The regression tripwire made real: the guide-split check, the name-split check, and the missing-harvest check. | A fixture carrying a guide-split string produces HIGH, and the real 17 archives produce zero. |
-| 4 | The docs and the maps: `docs/map-core.md`, the step list, and a gotcha if the build teaches one. | The maps describe the step that exists, not the one that was planned. |
+| 3 | The first real numbers: run the step over all 17 archives and read what it says. | Per volume: chapters, characters, guides set aside, images, packaging excluded, findings. **This is the extraction layer's first measurement ever**, and it is what the glossary plan is waiting for. |
+| 4 | The deferred tripwire, **only if** the harvest row shape is changed to record each annotation's own base-and-reading sequence (§3). | A fixture carrying a guide-split string produces HIGH **exactly** — no pattern matching, no false positives. If the shape change is refused, this slice is not built and the deferral stands. |
+| 5 | The docs and the maps: `docs/map-core.md`, the step list, and a gotcha if the build teaches one. | The maps describe the step that exists, not the one that was planned. |
+
+**Slice 3 is the one that pays for itself.** Slices 1–2 build a thing nobody has ever run; slice 3 is
+the first time anybody learns what the extraction layer actually produces across the series.
 
 ---
 
