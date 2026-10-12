@@ -47,6 +47,7 @@ const path = require("path");
 const { openReferenceStore } = require("./open");
 const { EXTRACTION_SOURCE_STAGE } = require("./schema");
 const { refusal } = require("./refusals");
+const { moveArtifactAside } = require("./quarantine");
 require("../../types"); // JSDoc type definitions
 
 /** The artifact this file renders, and the name the acceptance check asks the harness for. */
@@ -116,8 +117,12 @@ function povClaimsInRecord(store, { volume } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
   /** @type {Map<string, number>} */
   const chapterOrder = new Map();
-  for (const row of store.db.prepare("SELECT volume, chapter_id, ord FROM chapters").all()) {
-    chapterOrder.set(`${row.volume}:${row.chapter_id}`, row.ord);
+  /** @type {Map<string, string|null>} */
+  const chapterTitles = new Map();
+  for (const row of store.db.prepare("SELECT volume, chapter_id, ord, title FROM chapters").all()) {
+    const key = `${row.volume}:${row.chapter_id}`;
+    chapterOrder.set(key, row.ord);
+    chapterTitles.set(key, row.title === null || row.title === undefined || row.title === "" ? null : String(row.title));
   }
 
   const rows = store.db
@@ -149,6 +154,7 @@ function povClaimsInRecord(store, { volume } = {}) {
       })(),
       established_volume: Number(row.established_volume),
       established_chapter: row.established_chapter === null ? null : String(row.established_chapter),
+      chapter_title: chapterTitles.get(`${row.established_volume}:${row.established_chapter}`) || null,
       source_stage: String(row.source_stage),
       _order: povRowOrderKey(row, chapterOrder),
     }))
@@ -214,12 +220,31 @@ function povMarkersNamed(claims) {
 }
 
 /**
+ * One chapter's heading in the rendered map.
+ *
+ * The chapter's own title when the record has one — `第二章 僕と俺のバトンタッチ` is what the book
+ * calls it, and a reader tracing a viewpoint break is looking for that, not for a filename. The id is
+ * kept beside it because it is the handle every evidence citation uses, and a map that dropped it
+ * would be easier to read and impossible to check.
+ *
+ * @param {{volume: number, chapterId: string|null, title?: string|null}} chapter
+ * @returns {string}
+ */
+function povChapterHeading(chapter) {
+  const volume = `Volume ${String(chapter.volume).padStart(2, "0")}`;
+  if (chapter.chapterId === null) return `## ${volume} · (no chapter recorded)`;
+  const title = String(chapter.title || "").replace(/\s+/g, " ").trim();
+  const base = `## ${volume} · chapter ${chapter.chapterId}`;
+  return title ? `${base} — ${title}` : base;
+}
+
+/**
  * Render this volume's POV map from its record: every adopted point-of-view claim, grouped by the
  * chapter it cites, chapters in reading order, earlier volumes first.
  *
  * @param {ReferenceStore} store
  * @param {{volume?: number, seriesName?: string|null, preamble?: string[]}} [opts]
- * @returns {{markdown: string, claims: number, attached: number, unattached: number, carriedClaims: number, ownClaims: number, chapters: Array<{volume: number, chapterId: string|null, claims: number, characters: number}>, volumes: number[], markers: Array<{marker: string, claims: number}>, truncated: number}}
+ * @returns {{markdown: string, claims: number, attached: number, unattached: number, carriedClaims: number, ownClaims: number, chapters: Array<{volume: number, chapterId: string|null, title: string|null, claims: number, characters: number}>, volumes: number[], markers: Array<{marker: string, claims: number}>, truncated: number}}
  */
 function renderPovMap(store, { volume, seriesName = null, preamble = null } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -232,7 +257,12 @@ function renderPovMap(store, { volume, seriesName = null, preamble = null } = {}
   for (const claim of claims) {
     const id = `${claim.established_volume}:${claim.established_chapter}`;
     if (!byChapter.has(id)) {
-      const entry = { volume: claim.established_volume, chapterId: claim.established_chapter, claims: [] };
+      const entry = {
+        volume: claim.established_volume,
+        chapterId: claim.established_chapter,
+        title: claim.chapter_title,
+        claims: [],
+      };
       byChapter.set(id, entry);
       chapters.push(entry);
     }
@@ -264,7 +294,7 @@ function renderPovMap(store, { volume, seriesName = null, preamble = null } = {}
   /** @type {Array<{volume: number, chapterId: string|null, claims: number, characters: number}>} */
   const chapterReports = [];
   for (const chapter of chapters) {
-    const heading = `## Volume ${String(chapter.volume).padStart(2, "0")} · chapter ${chapter.chapterId === null ? "(no chapter recorded)" : chapter.chapterId}`;
+    const heading = povChapterHeading(chapter);
     out.push(heading, "");
     const names = new Set();
     for (const claim of chapter.claims) {
@@ -278,6 +308,7 @@ function renderPovMap(store, { volume, seriesName = null, preamble = null } = {}
     chapterReports.push({
       volume: chapter.volume,
       chapterId: chapter.chapterId,
+      title: chapter.title || null,
       claims: chapter.claims.length,
       characters: names.size,
     });
@@ -321,7 +352,7 @@ function defaultPovPreamble(vol) {
  * @param {string} volumeDir
  * @param {{markdown: string}} rendered
  * @param {{file?: string, moveAside?: boolean}} [opts]
- * @returns {{ok: boolean, written: string|null, moved: string|null, unchanged: boolean, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, written: string|null, moved: string|null, unchanged: boolean, asideSlot: number, keptAside: string[], refusal: ReferenceRefusal|null}}
  */
 function writePovMapFile(volumeDir, rendered, { file = POV_MAP_FILE, moveAside = false } = {}) {
   const target = path.join(volumeDir, file);
@@ -350,33 +381,23 @@ function writePovMapFile(volumeDir, rendered, { file = POV_MAP_FILE, moveAside =
   }
 
   let moved = null;
-  // The guard `moveArtifactAside` has and this function must not lose: "move the old file aside" is
-  // not a statement that an old file exists, and on a volume's first run it does not.
+  /** @type {{slot: number, keptAside: string[]}} */
+  let asideReport = { slot: 0, keptAside: [] };
+  // The shared door: "move the old file aside" is not a statement that an old file exists (on a volume's
+  // first run it does not), and a second rejection must not spend the first one.
   if (moveAside && !unchanged && fs.existsSync(target)) {
-    const aside = path.join(volumeDir, `${file}.rejected`);
-    if (fs.existsSync(aside)) {
-      return {
-        ok: false,
-        written: null,
-        moved: null,
-        unchanged: false,
-        refusal: refusal({
-          verb: "write_pov_map",
-          rule: "rejected-artifact-already-exists",
-          because: `${aside} is already there. Replacing it would destroy the evidence of an earlier rejection.`,
-          useInstead: ["remove or rename the existing .rejected file deliberately"],
-          fix: `decide what to do with ${path.basename(aside)} first — it is the record of a previous rejection.`,
-        }),
-      };
+    const aside = moveArtifactAside(volumeDir, file);
+    if (!aside.ok) {
+      return { ok: false, written: null, moved: null, unchanged: false, asideSlot: 0, keptAside: [], refusal: aside.refusal };
     }
-    fs.renameSync(target, aside);
-    moved = aside;
+    moved = aside.moved;
+    asideReport = { slot: aside.slot, keptAside: aside.keptAside.map((p) => path.basename(p)) };
   }
 
   const temp = `${target}.writing`;
   fs.writeFileSync(temp, rendered.markdown, "utf8");
   fs.renameSync(temp, target);
-  return { ok: true, written: target, moved, unchanged, refusal: null };
+  return { ok: true, written: target, moved, unchanged, asideSlot: asideReport.slot, keptAside: asideReport.keptAside, refusal: null };
 }
 
 /**
@@ -437,6 +458,7 @@ module.exports = {
   POV_UNATTACHED_LABEL,
   MAX_POV_BULLET_CHARS,
   POV_MARKER_SYMBOLS,
+  povChapterHeading,
   povClaimsInRecord,
   renderPovMap,
   writePovMapFile,

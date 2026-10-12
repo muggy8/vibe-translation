@@ -140,17 +140,18 @@ function reopenRecordForStage(ctx) {
 async function quarantineAssembledArtifacts(ctx) {
   const moved = [];
   for (const file of [ctx.voiceOutputFile, ctx.povOutputFile]) {
-    try {
-      await fs.access(file);
-    } catch {
+    const aside = rs.moveArtifactAside(ctx.volumeDir, path.basename(file));
+    if (!aside.ok) {
+      console.warn(`Volume ${ctx.values.INSTALLMENT_NUMBER}: could not move ${path.basename(file)} aside (${aside.refusal.because}) — it is still a failure.`);
       continue;
     }
-    const aside = `${file}.rejected`;
-    try {
-      await fs.rename(file, aside);
-      moved.push(path.basename(aside));
-    } catch (err) {
-      console.warn(`Volume ${ctx.values.INSTALLMENT_NUMBER}: could not move ${path.basename(file)} aside (${err.message}) — it is still a failure.`);
+    if (!aside.moved) continue;
+    moved.push(path.basename(aside.moved));
+    if (aside.keptAside.length) {
+      console.log(
+        `Volume ${ctx.values.INSTALLMENT_NUMBER}: this volume has now been quarantined ${aside.slot} times. ` +
+          `The earlier rejection(s) are kept: ${aside.keptAside.map((p) => path.basename(p)).join(", ")}.`
+      );
     }
   }
   return moved;

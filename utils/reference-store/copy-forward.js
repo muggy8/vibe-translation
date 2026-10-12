@@ -35,6 +35,7 @@ const { integrityFindings, INTEGRITY_STEP } = require("./integrity");
 const { COUNTED_TABLES, SCHEMA_VERSION, readSchemaVersion } = require("./schema");
 const { refusal } = require("./refusals");
 const { listCast } = require("./cast");
+const { countReopenRows } = require("./reopen");
 require("../../types"); // JSDoc type definitions
 
 /**
@@ -225,6 +226,11 @@ function copyForwardStore({ fromVolume, toVolume, seriesDir, fromFolder, toFolde
       ]
     );
   }
+  // The source's reopen count is read HERE, while the source handle is still open. Read after
+  // `source.close()` it throws (`database is not open`), `countReopenRows` swallows that as 0, and the copy
+  // gets stamped as though its source had never been reopened — which is what happened on the real volume
+  // 02 on 2026-10-12, and it made a copy that was perfectly fresh look stale.
+  const sourceReopens = countReopenRows(source.db, Number(fromVolume));
   source.close();
 
   let dest = null;
@@ -306,12 +312,17 @@ function copyForwardStore({ fromVolume, toVolume, seriesDir, fromFolder, toFolde
 
   // §7.3's second bullet: the source's hash and counts, recorded INSIDE the copy, so
   // "which record did volume 5 work from?" is answerable from the file itself.
+  //
+  // `source_reopens` is how many times the source volume had been reopened at the moment this copy was
+  // made. It is recorded as provenance — the staleness decision itself is made from the reopen history the
+  // copy carries, which needs no stamp to be right (see `recordIsStale`).
   const provenance = {
     volume: Number(toVolume),
     sourceVolume: Number(fromVolume),
     sourceFile: sourcePath.file,
     sourceSha256,
     sourceRows: sourceCounts,
+    sourceReopens,
     copiedRows: copiedCounts,
     copiedAt: new Date().toISOString(),
     ok: findings.length === 0 ? 1 : 0,
@@ -319,8 +330,8 @@ function copyForwardStore({ fromVolume, toVolume, seriesDir, fromFolder, toFolde
   };
   dest.db
     .prepare(
-      "INSERT INTO copy_provenance (volume, source_volume, source_file, source_sha256, source_rows, copied_rows, copied_at, ok, note) " +
-        "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(volume) DO UPDATE SET copied_rows = excluded.copied_rows, ok = excluded.ok, note = excluded.note"
+      "INSERT INTO copy_provenance (volume, source_volume, source_file, source_sha256, source_rows, source_reopens, copied_rows, copied_at, ok, note) " +
+        "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(volume) DO UPDATE SET copied_rows = excluded.copied_rows, source_reopens = excluded.source_reopens, ok = excluded.ok, note = excluded.note"
     )
     .run(
       provenance.volume,
@@ -328,6 +339,7 @@ function copyForwardStore({ fromVolume, toVolume, seriesDir, fromFolder, toFolde
       provenance.sourceFile,
       provenance.sourceSha256,
       JSON.stringify(sourceCounts),
+      provenance.sourceReopens,
       JSON.stringify(copiedCounts),
       provenance.copiedAt,
       provenance.ok,
@@ -495,9 +507,14 @@ function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFold
       total += n;
     }
     dest.exec("DETACH DATABASE src");
+    // The stamp travels with the top-up: this record has now been brought up to date with the source as
+    // it stands, so the reopen count it was stamped with is the source's count now. `record_reopens` is in
+    // `COUNTED_TABLES`, so the rows just arrived in this file. Without this, a record legitimately topped
+    // up after its source was reopened would stay marked stale forever.
+    const sourceReopens = countReopenRows(dest, Number(fromVolume));
     dest
-      .prepare("UPDATE copy_provenance SET source_sha256 = ?, copied_at = ? WHERE volume = ?")
-      .run(sourceSha256, new Date().toISOString(), Number(toVolume));
+      .prepare("UPDATE copy_provenance SET source_sha256 = ?, source_reopens = ?, copied_at = ? WHERE volume = ?")
+      .run(sourceSha256, sourceReopens, new Date().toISOString(), Number(toVolume));
   } catch (err) {
     dest.close();
     return {

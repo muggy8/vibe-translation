@@ -1228,23 +1228,42 @@ function scenarioTheDamagedFileIsMovedAsideAndKept() {
   assert.strictEqual(sameAgain.unchanged, true, "a rebuild that renders the file already there is not overwriting it");
   assert.strictEqual(sameAgain.moved, null, "and no second `.rejected` is stacked on the first");
 
-  // A file that is **not** what the record renders is still protected, and the evidence of the first
-  // rejection is not expendable.
+  // A file that is **not** what the record renders is still protected — and the second rejection does not
+  // spend the first one. Volume 01's folder already holds the original damaged reference, and redoing
+  // volume 01 has to set aside its current file without touching that.
   fs.writeFileSync(path.join(volumeDir, "character-voice.md"), "somebody edited this reference by hand\n", "utf8");
   const second = writeRebuiltVoiceFile(store, volumeDir, rendered, { moveAside: true });
-  assert.strictEqual(second.ok, false, "a second rejection is refused rather than stacked on the first");
-  assert.strictEqual(second.refusal.rule, "rejected-artifact-already-exists", second.refusal && second.refusal.rule);
+  assert.ok(second.ok, JSON.stringify(second.refusal));
+  assert.strictEqual(second.asideSlot, 2, "the second rejection lands in the second slot");
+  assert.deepStrictEqual(second.keptAside, ["character-voice.md.rejected"], "and it names the rejection it kept");
+  assert.strictEqual(path.basename(second.moved), "character-voice.md.rejected.2");
   assert.strictEqual(
-    fs.readFileSync(path.join(volumeDir, "character-voice.md"), "utf8"),
+    fs.readFileSync(path.join(volumeDir, "character-voice.md.rejected"), "utf8"),
+    VOICE_01,
+    "the first rejection's evidence is byte-for-byte what it was"
+  );
+  assert.strictEqual(
+    fs.readFileSync(path.join(volumeDir, "character-voice.md.rejected.2"), "utf8"),
     "somebody edited this reference by hand\n",
-    "and the refusal destroys nothing"
+    "the second rejection's evidence is kept beside it"
   );
 
   const aside = moveArtifactAside(volumeDir, "character-voice.md");
-  assert.strictEqual(aside.ok, false, "and the refusal comes from the move itself, not only from the writer");
+  assert.strictEqual(aside.ok, true, "and the move door no longer refuses a volume out of its own redo");
+  assert.strictEqual(aside.slot, 3, JSON.stringify(aside));
+  assert.deepStrictEqual(aside.keptAside.map((p) => path.basename(p)), ["character-voice.md.rejected", "character-voice.md.rejected.2"]);
+
+  // The quarantine family is written with an ignore rule in the folder that holds it, because nothing in
+  // the series repository ignores these files and the rule has to travel with the books.
+  const ignore = fs.readFileSync(path.join(volumeDir, ".gitignore"), "utf8");
+  assert.ok(ignore.includes("*.rejected*"), "the numbered family is covered by one pattern");
+  assert.ok(
+    !ignore.split("\n").some((line) => line.trim() === "series.db" || line.startsWith("series.db*")),
+    "and the reference record is deliberately NOT ignored — it is the run's memory"
+  );
 
   store.close();
-  console.log("  the reference being replaced is moved aside, kept, and never overwritten silently");
+  console.log("  the reference being replaced is moved aside, kept, and never overwritten silently; rejects stack");
 }
 
 // ─── Scenario ────────────────────────────────────────────────────────────────
@@ -1515,9 +1534,20 @@ function scenarioThePovMapCarriesEarlierVolumesForwardInChapterOrder() {
   const headings = map.markdown.split("\n").filter((line) => line.startsWith("## "));
   assert.deepStrictEqual(
     headings,
-    ["## Volume 01 · chapter ch0", "## Volume 01 · chapter ch1", "## Volume 02 · chapter ch0"],
+    [
+      "## Volume 01 · chapter ch0 — プロローグ",
+      "## Volume 01 · chapter ch1 — 第一章",
+      "## Volume 02 · chapter ch0 — 第二章",
+    ],
     "volume 1's chapters come first, in volume 1's own chapter order, then this volume's"
   );
+  // The id survives the title. Every evidence citation in this layer names a chapter by id, and a map
+  // that replaced `ch0` with a heading would be easier to read and impossible to check against a report.
+  assert.ok(
+    headings.every((h) => /· chapter \S+ — /.test(h)),
+    "each heading still names the chapter id before the title, so the old heading is a prefix of the new one"
+  );
+  assert.ok(map.chapters.every((c) => c.title), "and the render reports the title it used, not only printed it");
 
   const lines = map.markdown.split("\n");
   const own = lines.findIndex((line) => line.includes("closer than volume 1 ever got"));
@@ -1531,6 +1561,64 @@ function scenarioThePovMapCarriesEarlierVolumesForwardInChapterOrder() {
   assert.ok(rows.every((row) => row.established_volume <= 2), "and it never reaches past the volume it was asked for");
 
   console.log("  the POV map is cumulative: earlier volumes' sealed claims first, in the order their own chapters appear");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * A POV claim written under the other field name keeps its prose instead of degenerating.
+ *
+ * The extraction prompt asks for `sectionDescription`. Volume 01's real prologue answered with
+ * `description` instead, and the POV row builder read only the prompt's spelling: four of the five
+ * observations were filed as the body "POV marker ※" and the fifth — no marker, so nothing left — was
+ * refused. Volume 1's published map has nine chapter sections for a ten-chapter volume, and the prologue
+ * is not one of them. This is the shape that lost it.
+ *
+ * @returns {void}
+ */
+function scenarioAPovClaimWrittenWithTheOtherFieldNameKeepsItsProse() {
+  const series = fixtureStoreSeries("povmap-field-name");
+  withRoster(series);
+  const first = rebuildFixtureVolume(series, { apply: true });
+  assert.ok(first.ok, JSON.stringify(first.refusal));
+
+  const carried = copyForwardStore({
+    fromVolume: 1,
+    toVolume: 2,
+    seriesDir: series.dir,
+    fromFolder: series.volumes[0].folder,
+    toFolder: series.volumes[1].folder,
+  });
+  assert.ok(carried.ok, JSON.stringify(carried.refusal));
+
+  const PROSE = "The prologue is the protagonist's, start to finish, and the girl is only ever seen through him.";
+  const second = rebuildFixtureVolume(series, {
+    volume: 2,
+    entries: [
+      {
+        type: "pov",
+        povCategory: "narrationType",
+        assignedCharacter: "如月雨露",
+        description: PROSE,
+        marker: null,
+        examples: ["如月雨露は「気にすんな！」と言った。"],
+      },
+    ],
+  });
+  assert.ok(second.ok, JSON.stringify(second.refusal));
+
+  const store = openFixture(series, 2, DOCUMENT_SOURCE_STAGE);
+  const rows = povClaimsInRecord(store, { volume: 2 }).filter((row) => row.established_volume === 2);
+  store.close();
+
+  assert.strictEqual(rows.length, 1, `the claim was filed, not refused: ${JSON.stringify(second.refused || [])}`);
+  assert.strictEqual(rows[0].body, PROSE, "with the prose the model wrote, not a marker standing in for it");
+  assert.ok(!/^POV marker /.test(rows[0].body), "and the degenerate fallback body was not used, because there was something to say");
+
+  const map = second.povRendered;
+  assert.ok(map.markdown.includes(PROSE), "and it reaches the published map");
+
+  console.log("  a POV claim the model wrote under the other field name keeps its prose and reaches the map");
 }
 
 // ─── Scenario ────────────────────────────────────────────────────────────────
@@ -1695,6 +1783,7 @@ function scenarioAPublishedRebuildWritesTheMapBeforeItSeals() {
   scenarioALaterVolumeNeedsItsEarlierRecordFirst();
   scenarioThePovMapRendersWhatTheCharacterReferenceCannot();
   scenarioThePovMapCarriesEarlierVolumesForwardInChapterOrder();
+  scenarioAPovClaimWrittenWithTheOtherFieldNameKeepsItsProse();
   scenarioRenderingAMapForASealedRecordFilesNothingAndKeepsItSealed();
   scenarioAnAuthoredPovMapIsNotOverwrittenSilently();
   scenarioAPublishedRebuildWritesTheMapBeforeItSeals();

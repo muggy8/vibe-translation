@@ -61,6 +61,8 @@ const { openReferenceStore } = require("./open");
 const { readPlanOfRecord, installmentKey } = require("./paths");
 const { REBUILD_SOURCE_STAGE, EXTRACTION_SOURCE_STAGE, DOCUMENT_SOURCE_STAGE } = require("./schema");
 const { resolveExtractionName } = require("./name-resolution");
+const { screenClaim } = require("./drafting");
+const { moveArtifactAside, ensureArtifactRejectIgnoreRule } = require("./quarantine");
 const {
   findEntryEvidence,
   QUIRK_TYPE_TO_ASPECT,
@@ -201,29 +203,68 @@ function rebuildClaimAlreadyStored(store, { key, aspect, body }) {
  * The third case is a refusal that names the legal verb: `resetDocumentMirror`, run from a handle opened
  * with the import stage. `rebuildVoiceVolume` does exactly that before it files anything.
  *
+ * **The sealing question is asked about the volume, not about one kind of row.** It used to be asked as
+ * "does this volume hold sealed rows whose `source_stage` is the document mirror", which was true of the
+ * author route's record and false of the read-then-assemble route's: that route files its adopted claims
+ * as `rebuild` rows and its extraction copies as `extract` rows, so a volume sealed by it had zero sealed
+ * `document` rows and a full `--apply --move-aside` rebuild ran straight over its published record
+ * (gotcha 109). Asking "is this volume sealed" is both narrower and wider than the row query: narrower
+ * because it is one fact the store already keeps, wider because it does not care which stage wrote the
+ * rows the seal froze. The row counts are still taken, over every stage, so the refusal can name what it
+ * is refusing to overwrite rather than only that it is refusing.
+ *
  * @param {ReferenceStore} store
  * @param {number} vol
- * @returns {{ok: boolean, sealed: number, unsealed: number, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, sealed: number, sealedStages: Object<string, number>, volumeSealed: boolean, unsealed: number, refusal: ReferenceRefusal|null}}
  */
 function inspectVoiceMirrorForRebuild(store, vol) {
-  const sealed = store.db
-    .prepare("SELECT COUNT(*) AS n FROM facts WHERE owner_volume = ? AND source_stage = ? AND sealed = 1 AND aspect != 'term_usage'")
-    .get(vol, DOCUMENT_SOURCE_STAGE).n;
-  if (sealed > 0) {
+  /** @type {Object<string, number>} */
+  const sealedStages = {};
+  let sealedTotal = 0;
+  for (const row of store.db
+    .prepare(
+      "SELECT source_stage, COUNT(*) AS n FROM facts " +
+        "WHERE owner_volume = ? AND sealed = 1 AND aspect != 'term_usage' GROUP BY source_stage"
+    )
+    .all(vol)) {
+    sealedStages[row.source_stage] = row.n;
+    sealedTotal += row.n;
+  }
+  const volumeSealed = store.isVolumeSealed(vol);
+
+  if (volumeSealed || sealedTotal > 0) {
+    const kinds = Object.entries(sealedStages)
+      .sort((a, b) => b[1] - a[1])
+      .map(([stage, n]) => `${n} ${stage}`)
+      .join(", ");
     return {
       ok: false,
-      sealed,
+      sealed: sealedTotal,
+      sealedStages,
+      volumeSealed,
       unsealed: 0,
       refusal: refusal({
         verb: "rebuild_voice",
         rule: "rebuild-refuses-a-sealed-voice-record",
-        because: `volume ${vol}'s record holds ${sealed} sealed row(s) mirrored from its published character-voice document. Sealed rows are published; a rebuild does not replace them.`,
-        useInstead: ["challenge_fact", `delete the volume's series.db deliberately and rebuild from the first unrecorded volume`],
-        fix: `contest those rows with challenge_fact, or re-derive volume ${vol}'s record deliberately before rebuilding it.`,
+        because:
+          `volume ${vol}'s record is ${volumeSealed ? "sealed" : "holds sealed rows"}: ` +
+          `${sealedTotal} sealed row(s) of its own (${kinds || "no stage counted, only the seal"}). ` +
+          "Sealed rows are published; a rebuild does not replace them, whatever stage wrote them.",
+        useInstead: [
+          "challenge_fact",
+          "reopenVolumeRecord({ volume, reason, cascade: \"retire\" }) — the recorded door that retires a published record and re-derives it",
+        ],
+        fix:
+          `contest those rows with challenge_fact, or reopen volume ${vol}'s record deliberately with a reason ` +
+          "(npm run reopen -- --volume=NN --reason=\"…\") and let the next run re-derive it from the beginning.",
       }),
     };
   }
 
+  // The unsealed half keeps its `source_stage` filter, and that is deliberate: this half of the rule is
+  // not about sealing, it is about rows a rebuild handle cannot delete and would therefore duplicate in
+  // the render. `resetDocumentMirror` clears the document mirror, and the rebuild's own rows are already
+  // caught by `rebuildClaimAlreadyStored`, which carries an identical claim instead of filing it twice.
   const unsealed = store.db
     .prepare("SELECT COUNT(*) AS n FROM facts WHERE owner_volume = ? AND source_stage = ? AND sealed = 0 AND aspect != 'term_usage'")
     .get(vol, DOCUMENT_SOURCE_STAGE).n;
@@ -231,6 +272,8 @@ function inspectVoiceMirrorForRebuild(store, vol) {
     return {
       ok: false,
       sealed: 0,
+      sealedStages,
+      volumeSealed,
       unsealed,
       refusal: refusal({
         verb: "rebuild_voice",
@@ -242,7 +285,7 @@ function inspectVoiceMirrorForRebuild(store, vol) {
     };
   }
 
-  return { ok: true, sealed: 0, unsealed, refusal: null };
+  return { ok: true, sealed: 0, sealedStages, volumeSealed, unsealed, refusal: null };
 }
 
 /**
@@ -388,6 +431,14 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
   const carried = [];
   /** @type {Array<Object>} */
   const refused = [];
+  /**
+   * Claims that were filed, but not with everything the extraction handed over: an example whose text
+   * has the writer's note glued to it is a citation that is not a citation, so it is dropped and named
+   * here rather than published.
+   *
+   * @type {Array<{kind: string, character: string|null, dropped: Array<{example: string, because: string}>}>}
+   */
+  const screened = [];
   /** @type {Map<string, {key: string, display: string, resolved: boolean, how: string, registered?: boolean}>} */
   const nameMap = new Map();
   let povAttached = 0;
@@ -507,13 +558,28 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
       carried.push({ kind: "pov", character: aspectKey });
       return;
     }
+
+    const screen = screenClaim({
+      body,
+      examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string"),
+    });
+    if (!screen.ok) {
+      refused.push({
+        kind: "pov",
+        character: aspectKey,
+        because: `this POV claim's own prose is not finished writing: ${screen.because}`,
+      });
+      return;
+    }
+    if (screen.dropped.length) screened.push({ kind: "pov", character: aspectKey, dropped: screen.dropped });
+
     const result = store.insertFact({
       key: aspectKey,
       aspect: "pov",
       label: POV_VOICE_LABEL,
       section: null,
       body,
-      examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string").slice(0, REBUILT_EXAMPLES_PER_BULLET),
+      examples: screen.examples.slice(0, REBUILT_EXAMPLES_PER_BULLET),
       evidence,
       establishedVolume: vol,
       appliesFromVolume: vol,
@@ -570,12 +636,34 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
     if (!registerName(name).registered) return;
 
     // The candidate first, then the adoption: the candidate is the extraction's reading of this claim
-    // and it exists whether or not this rebuild goes on to adopt it.
+    // and it exists whether or not this rebuild goes on to adopt it. It keeps the extractor's own text
+    // — including a drafting note — because the point of keeping it is that the gap between what the
+    // extractor wrote and what the reference published is a query the audit can run.
     fileCandidate(candidate, evidence);
     if (adoptedAlready) {
       carried.push({ kind: "voice", character: who.key, label });
       return;
     }
+
+    /**
+     * The adoption is held to a stricter standard than the candidate: a claim whose own prose is
+     * unfinished, or that quotes the same span three times while saying it is not there, is the writer's
+     * work rather than a claim about the book, and it does not get to become a published bullet.
+     */
+    const screen = screenClaim({
+      body,
+      examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string"),
+    });
+    if (!screen.ok) {
+      refused.push({
+        kind: "voice",
+        character: who.key,
+        label,
+        because: `the claim's own prose is not finished writing: ${screen.because}`,
+      });
+      return;
+    }
+    if (screen.dropped.length) screened.push({ kind: "voice", character: who.key, label, dropped: screen.dropped });
 
     const result = store.insertFact({
       key: who.key,
@@ -583,7 +671,7 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
       label,
       section: null,
       body,
-      examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string").slice(0, REBUILT_EXAMPLES_PER_BULLET),
+      examples: screen.examples.slice(0, REBUILT_EXAMPLES_PER_BULLET),
       formality: typeof entry.formalityLevel === "string" && entry.formalityLevel.trim() ? entry.formalityLevel.trim() : null,
       evidence,
       establishedVolume: vol,
@@ -670,6 +758,7 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
     resolved,
     unresolved,
     candidates,
+    screened,
     refusal: null,
   };
 }
@@ -1213,7 +1302,7 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
  * @param {{markdown: string, preamble?: string[]}} rendered
  * @param {{file?: string, moveAside?: boolean}} [opts] - `moveAside` is the explicit permission to
  *   touch an existing artifact. Without it an existing file is a refusal, not an overwrite.
- * @returns {{ok: boolean, written: string|null, moved: string|null, unchanged: boolean, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, written: string|null, moved: string|null, unchanged: boolean, asideSlot: number, keptAside: string[], refusal: ReferenceRefusal|null}}
  */
 function writeRebuiltVoiceFile(store, volumeDir, rendered, { file = "character-voice.md", moveAside = false } = {}) {
   const target = path.join(volumeDir, file);
@@ -1251,10 +1340,13 @@ function writeRebuiltVoiceFile(store, volumeDir, rendered, { file = "character-v
   }
 
   let moved = null;
+  /** @type {{slot: number, keptAside: string[]}} */
+  let asideReport = { slot: 0, keptAside: [] };
   if (moveAside && !unchanged) {
     const aside = moveArtifactAside(volumeDir, file);
-    if (!aside.ok) return { ok: false, written: null, moved: null, unchanged: false, refusal: aside.refusal };
+    if (!aside.ok) return { ok: false, written: null, moved: null, unchanged: false, asideSlot: 0, keptAside: [], refusal: aside.refusal };
     moved = aside.moved;
+    asideReport = { slot: aside.slot, keptAside: aside.keptAside.map((p) => path.basename(p)) };
   }
 
   fs.writeFileSync(target, rendered.markdown, "utf8");
@@ -1263,40 +1355,17 @@ function writeRebuiltVoiceFile(store, volumeDir, rendered, { file = "character-v
   // `parseVoiceMarkdown` would have produced from this file, so the record and the artifact agree.
   storeDocumentProse(store, DOCUMENT_VOICE, [{ section: null, kind: "title", lines: rendered.opening }]);
 
-  return { ok: true, written: target, moved, unchanged, refusal: null };
+  return {
+    ok: true,
+    written: target,
+    moved,
+    unchanged,
+    asideSlot: asideReport.slot,
+    keptAside: asideReport.keptAside,
+    refusal: null,
+  };
 }
 
-/**
- * Move a damaged artifact aside, the way the carry-forward gate does: kept as evidence, never read by
- * the next volume. Refuses rather than overwrite, and refuses when the destination is already taken.
- *
- * @param {string} volumeDir
- * @param {string} file - The artifact's file name, e.g. `character-voice.md`.
- * @param {{rejectedFile?: string}} [opts]
- * @returns {{ok: boolean, moved: string|null, refusal: ReferenceRefusal|null}}
- */
-function moveArtifactAside(volumeDir, file, { rejectedFile } = {}) {
-  const from = path.join(volumeDir, file);
-  const to = path.join(volumeDir, rejectedFile || `${file}.rejected`);
-  if (!fs.existsSync(from)) {
-    return { ok: true, moved: null, refusal: null };
-  }
-  if (fs.existsSync(to)) {
-    return {
-      ok: false,
-      moved: null,
-      refusal: refusal({
-        verb: "move_artifact_aside",
-        rule: "rejected-artifact-already-exists",
-        because: `${to} is already there. Replacing it would destroy the evidence of an earlier rejection.`,
-        useInstead: ["remove or rename the existing .rejected file deliberately"],
-        fix: `decide what to do with ${path.basename(to)} first — it is the record of a previous rejection.`,
-      }),
-    };
-  }
-  fs.renameSync(from, to);
-  return { ok: true, moved: to, refusal: null };
-}
 
 module.exports = {
   REBUILD_SOURCE_STAGE,
@@ -1316,5 +1385,4 @@ module.exports = {
   rebuildVoiceVolume,
   rebuildRecordIsMissingItsEarlierVolumes,
   planHasEarlierVolumes,
-  moveArtifactAside,
 };

@@ -82,6 +82,10 @@ function corpusIsNamedArtifact(rel) {
     rel.startsWith("test-series/") ||
     rel.includes("/test_story") ||
     rel.endsWith(".rejected") ||
+    // The numbered quarantine family (`character-voice.md.rejected.2`, …) is the same kind of file as
+    // the first rejection, and a second rejection of a volume is exactly the case where a patch would be
+    // tempted to "fix" the evidence.
+    /\.rejected\.\d+$/.test(rel) ||
     rel.endsWith(".rejected.md") ||
     rel.endsWith(".rejected-passage.md") ||
     rel.endsWith(".provenance.json") ||

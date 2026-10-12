@@ -53,6 +53,8 @@ const path = require("path");
 const { openReferenceStore } = require("./open");
 const { referenceStorePath } = require("./paths");
 const { copyForwardStore, topUpVolumeRecord } = require("./copy-forward");
+const { volumeRecordIsStale, readReopenHistory } = require("./reopen");
+const { pronounKeyedRosterEntries } = require("./integrity");
 const { DOCUMENT_SOURCE_STAGE } = require("./schema");
 const { importGlossary } = require("./glossary-adapter");
 const { importVoice } = require("./voice-adapter");
@@ -243,6 +245,42 @@ function openVolumeRecord({ volume, folder, seriesDir, previousVolume = null, pr
       // starts.
       if (typeof carried.closeDest === "function") carried.closeDest();
     } else {
+      /**
+       * The staleness guard, asked before anything is carried or topped up.
+       *
+       * This volume's record exists, which for every volume after the first means it was made by copying
+       * an earlier volume's record at a moment in time. If that volume has since been reopened — its
+       * published record thrown away and redone — this file is a copy of a record that no longer describes
+       * the book, and the door that would otherwise run here (`topUpVolumeRecord`) only ever ADDS rows.
+       * Topping up a stale record would pour the new volume 1's claims into a file that still holds the old
+       * volume 1's claims and report success. So a stale record is refused, and the fix it names is the act
+       * that made it stale.
+       */
+      const stale = volumeRecordIsStale({ seriesDir, volume, folder });
+      if (stale.stale) {
+        return {
+          ok: false,
+          store: null,
+          carried: null,
+          toppedUp: null,
+          refusal: {
+            verb: "open_volume_record",
+            rule: "record-copy-is-stale",
+            because:
+              `volume ${volume}'s record was copied from volume ${stale.sourceVolume} at ${stale.copiedAt || "an unrecorded time"}, ` +
+              `and volume ${stale.sourceVolume} was reopened at ${stale.reopenedAt} for the reason ` +
+              `"${stale.reason}". This record is therefore a copy of a record that no longer describes the book, and it ` +
+              "still holds the claims the redo threw away.",
+            useInstead: [
+              `reopenVolumeRecord({ volume: ${stale.sourceVolume}, reason, cascade: "retire" }) — retires this record with the same reason recorded`,
+              `then run volume ${volume} normally: its record is rebuilt from the beginning, copied forward from volume ${stale.sourceVolume}'s new one`,
+            ],
+            fix: "retire this volume's record and re-derive it. A top-up is not a fix here: it adds rows and never removes one.",
+          },
+          findings: [],
+        };
+      }
+
       // The record is already here — which, for every volume after the first, means it was made by
       // an earlier stage, from a source that has since been finished. Top it up rather than leave it
       // holding an earlier volume's unfinished half.
@@ -471,11 +509,12 @@ function resetDocumentMirror(store, { document = "voice" } = {}) {
  * @param {string} opts.file
  * @param {number|string} opts.volume
  * @param {Array<Object>} [opts.refused]
+ * @param {Array<Object>} [opts.screened] - Claims adopted with an offered quotation dropped; see `renderAuditReport`.
  * @param {Object|null} [opts.sealed] - The sealing answer, for `renderAuditReport`.
  * @param {string} [opts.document] - Which document's rebuild provenance to show.
  * @returns {string}
  */
-function renderVolumeAuditReport(audit, { title, file, volume, refused = [], sealed = null, document = "character-voice" }) {
+function renderVolumeAuditReport(audit, { title, file, volume, refused = [], screened = [], sealed = null, document = "character-voice" }) {
   return renderAuditReport({
     title,
     file,
@@ -492,6 +531,8 @@ function renderVolumeAuditReport(audit, { title, file, volume, refused = [], sea
     glossary: audit.glossary || null,
     roster: audit.roster || null,
     refused,
+    screened: screened.length ? screened : audit.screened || [],
+    reopens: audit.reopens || [],
     rebuilt: (audit.rebuilt || []).find((entry) => entry.document === document && entry.volume === Number(volume)) || null,
     sealed,
   });
@@ -509,7 +550,7 @@ function renderVolumeAuditReport(audit, { title, file, volume, refused = [], sea
  * @param {string} [opts.step]
  * @returns {{findings: PostMortemFinding[], highFindings: PostMortemFinding[], markdown: string, counts: Object<string, number>, checked: number, coverageAsked: boolean, coverage: Object, presence: Object, unadopted: Array<Object>, unadoptedTerms: Array<Object>, absent: Array<Object>}}
  */
-function auditVolumeRecord(store, { title, file, markdown, refused = [], step = VALIDATION_STEP }) {
+function auditVolumeRecord(store, { title, file, markdown, refused = [], screened = [], step = VALIDATION_STEP }) {
   // Presence first: the coverage question is refined by it, and running the audit before the
   // measurement would answer the strict version of the question and report characters who are
   // simply not in the book.
@@ -522,6 +563,15 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
   const absent = absentCharacters(store);
   const glossary = glossaryContribution(store, store.volume);
   const roster = rosterReconciled(store, store.volume);
+  // The fold's answer and the split the fold could not see, side by side: "no entry's heading names
+  // another" is a true answer to the narrow question and a misleading one on its own.
+  if (roster) roster.pronounEntries = pronounKeyedRosterEntries(store);
+  // Read out of the record itself, so a redo is visible to whoever opens the audit report months later
+  // even if the run that did it is long gone and its console output with it.
+  // Every reopen row, not just this volume's: the copy-forward carries its source's reopen history in,
+  // and the report has to say which of these rows are this volume's act and which are the foundation it
+  // was rebuilt on. Filtering here is what left volume 02's report silent about its own record being a redo.
+  const reopens = readReopenHistory(store);
 
   const computed = {
     findings,
@@ -535,10 +585,11 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
     presence,
     glossary,
     roster,
+    reopens,
     rebuilt: audit.rebuilt || [],
   };
 
-  const report = renderVolumeAuditReport(computed, { title, file, volume: store.volume, refused });
+  const report = renderVolumeAuditReport(computed, { title, file, volume: store.volume, refused, screened, reopens });
 
   return {
     findings,
@@ -554,6 +605,7 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], step = 
     absent,
     glossary,
     roster,
+    reopens,
     rebuilt: audit.rebuilt || [],
   };
 }

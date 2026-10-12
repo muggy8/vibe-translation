@@ -36,8 +36,17 @@ async function runQaLoop(ctx) {
    * mirroring it would file the same claims twice under two provenances.
    *
    * The absence: the feedback pass. There is no author to ask, so a failing grade cannot be answered
-   * by re-typing the same claims. One iteration, one grade, and the loop stops — which is also the
-   * cheap direction: five grades over a document nothing can change is sampling noise, not QA.
+   * by re-typing the same claims. One iteration, and the loop stops — which is also the cheap direction:
+   * five grades over a document nothing can change is sampling noise, not QA.
+   *
+   * One iteration is NOT one grade, and this is worth knowing before reading the loop's log: acceptance
+   * needs `ACCEPTANCE_MIN_SAMPLES` scores in its rolling window, and `ACCEPTANCE_CONFIRM_ON_PASSING`
+   * (default on) collects the missing ones by re-grading the same artifact rather than paying for a
+   * feedback round that would change nothing. Measured on the real volume 01 on 2026-10-12: a first grade
+   * of 81 printed "the window needs 2 sample(s) and has 1 — collecting 2 more grade(s) from the same
+   * artifact", took two more grades (82, and 82 at temperature 0), and accepted at a rolling average of
+   * 82.0 for 102k tokens. A grade below the passing score is the case with no answer on this route, and
+   * it quarantines.
    */
   const assembled = ctx.voiceRoute === "assemble";
   const result = await runSharedQaLoop({

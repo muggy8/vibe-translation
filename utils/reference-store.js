@@ -57,6 +57,9 @@ const __validation = require("./reference-store/validation");
 const __pipeline = require("./reference-store/pipeline-store");
 const __rebuild = require("./reference-store/rebuild");
 const __povmap = require("./reference-store/pov-map");
+const __drafting = require("./reference-store/drafting");
+const __quarantine = require("./reference-store/quarantine");
+const __reopen = require("./reference-store/reopen");
 
 const __open = require("./reference-store/open");
 
@@ -82,5 +85,8 @@ module.exports = {
   ...__pipeline,
   ...__rebuild,
   ...__povmap,
+  ...__drafting,
+  ...__quarantine,
+  ...__reopen,
   openReferenceStore: __open.openReferenceStore,
 };

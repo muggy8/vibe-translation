@@ -475,14 +475,31 @@ async function readVolumeChapters({ ctx, segments, volumeDir, installmentNumber,
 
     let best = first;
     let retried = false;
-    if (first.cutOff || first.entries.length === 0) {
+    /**
+     * A chapter is re-read when its answer did not arrive whole, and there are three ways that happens.
+     * The array never closed (cut off). The answer yielded nothing. Or — the one this door used to miss —
+     * the array closed but one element inside it was malformed, so the tolerant reader recovered the rest
+     * and named the claim it could not read.
+     *
+     * Measured on the real volume 01 on 2026-10-12: chapter ch2 closed its array cleanly and still lost
+     * one claim to `Expected ',' or ']' after array element in JSON at position 13345`. Under the old
+     * condition that chapter had its one paid read and the lost claim was only ever visible in the partial.
+     * A named loss is better than a swallowed one, which is the whole reason this file exists — but a named
+     * loss that could have been paid for and wasn't is still a loss.
+     *
+     * The budget is unchanged: `MAX_ATTEMPTS_PER_CHAPTER` is two paid reads per chapter per pass, and the
+     * better answer still wins, so a re-read that comes back worse does not replace the first one.
+     */
+    const answerIncomplete = first.cutOff || first.entries.length === 0 || first.lost.length > 0;
+    if (answerIncomplete) {
       if (first.entries.length === 0) log(`  chapter ${segment.id}: the answer yielded no claims at all — re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
-      else log(`  chapter ${segment.id}: a cut-off answer is half an answer. Re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
+      else if (first.cutOff) log(`  chapter ${segment.id}: a cut-off answer is half an answer. Re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
+      else log(`  chapter ${segment.id}: ${first.lost.length} claim(s) could not be read out of a closed array. Re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
       const second = await readOneChapter({ ctx, segment, si, extraNote: buildNote(chapters), thinkingLevel: EXTRACTION_RETRY_THINKING_LEVEL, log });
       retried = true;
       if (second.ok) {
         attempts.push({ at: new Date().toISOString(), thinkingLevel: second.thinkingLevel, claims: second.entries.length, cutOff: second.cutOff, lostClaims: second.lost.length, parseError: second.recovered ? second.error : null });
-        log(`  chapter ${segment.id}: re-read at ${EXTRACTION_RETRY_THINKING_LEVEL} → ${second.entries.length} claim(s)${second.cutOff ? " — still cut off" : ", complete"}.`);
+        log(`  chapter ${segment.id}: re-read at ${EXTRACTION_RETRY_THINKING_LEVEL} → ${second.entries.length} claim(s), ${second.cutOff ? "still cut off" : "the array closed"}${second.lost.length ? `, ${second.lost.length} unreadable` : ""}.`);
         if (second.entries.length > best.entries.length || (!second.cutOff && best.cutOff)) best = second;
       } else {
         attempts.push({ at: new Date().toISOString(), thinkingLevel: second.thinkingLevel, claims: 0, cutOff: true, lostClaims: 0, parseError: second.error });

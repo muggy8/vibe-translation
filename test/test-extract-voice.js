@@ -572,6 +572,14 @@ async function scenarioAMalformedClaimDoesNotCostTheChapterTheRest() {
   assert.match(partial.lostClaims[0].because, /Expected ',' or '\}' after property value/, "with the parse error that dropped it");
   assert.ok(partial.rawAnswer.includes("formalityLevel"), "and the answer it could not read is kept, so it can be re-read without paying for the chapter again");
 
+  // A named loss is paid for, not just recorded. The chapter closed its array cleanly and still lost a
+  // claim, and the reading pass re-read it once more for that claim — the same budget a cut-off answer
+  // gets, and no more.
+  assert.strictEqual(partial.attempts.length, ev.MAX_ATTEMPTS_PER_CHAPTER, "a closed array that lost a claim is re-read, like a cut-off one");
+  assert.strictEqual(partial.attempts[1].claims, partial.attempts[0].claims, "and the re-read losing the same claim does not make the chapter worse");
+  const asked = series.calls.filter((c) => c.label.endsWith(`-${bundle.segments[0].id}`)).length;
+  assert.strictEqual(asked, ev.MAX_ATTEMPTS_PER_CHAPTER, `the chapter was asked exactly ${ev.MAX_ATTEMPTS_PER_CHAPTER} times, not once: ${asked}`);
+
   const store = rs.openReferenceStore({ volume: 2, folder: series.volumes[1].folder, seriesDir: series.dir, stage: rs.EXTRACTION_SOURCE_STAGE });
   try {
     const filed = store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE owner_volume = 2 AND source_stage = 'extract'").get().n;

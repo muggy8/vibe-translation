@@ -24,6 +24,7 @@ const { verifyStoredEvidence } = require("./evidence");
 const { COUNTED_TABLES, EXTRACTION_SOURCE_STAGE } = require("./schema");
 const { tableCounts } = require("./queries");
 const { presenceMeasured, presenceChapterCount } = require("./presence");
+const { isBareFirstPersonPronoun, spanTokens } = require("./name-resolution");
 const { documentMirrored, DOCUMENT_VOICE, rebuildProvenanceCounts } = require("./document-prose");
 // `isVolumeSealed` lives with the sealing verb itself, so the "is this volume published?"
 // question has exactly one answer in this layer. facts.js does not require this file, so the
@@ -167,6 +168,62 @@ function splitCharacters(ctx) {
           "the identity was never merged (cast_alias is the verb that merges it).",
       });
     }
+  }
+  return out;
+}
+
+/**
+ * Roster entries that are keyed by a bare first-person pronoun and carry claims.
+ *
+ * Why this is a question the store has to ask. The extraction names a character however the book names
+ * them in the passage it is reading, and in a first-person novel that is often just the pronoun: the real
+ * volume 01 reading pass wrote `俺（主人公）` for ten claims and `如月雨露（ジョーロ／俺）` for sixteen, and
+ * the name door kept the base of each label — so the roster ended up with `俺` (15 claims) beside
+ * `如月雨露` (215), and volume 02's copy carries the split forward with 262 claims on the pronoun side.
+ *
+ * The fold that is supposed to close this cannot see it. `rosterIdentityConflicts` asks whether an entry's
+ * **own heading** names another entry's key, and that heading used to come from an authored artifact whose
+ * author wrote `### 俺（如月雨露・第二章終盤）` — a heading that names 如月雨露 outright. On the
+ * read-then-assemble route the heading is the key, verbatim, so the signal the fold reads no longer exists
+ * anywhere in the record. The guard is intact; the fact it was written to notice stopped being written.
+ *
+ * This is therefore a **report, not a merge**. Deciding that `俺` is 如月雨露 is a decision about a person,
+ * and the door for a decision in this layer is `castAlias`, asked by somebody who has read the book. What
+ * this adds is that the split is named — with the claim counts on each side — in the report a human reads,
+ * instead of surfacing only as a reference whose protagonist is in two places at once.
+ *
+ * @param {{db: Object, volume: number}} ctx
+ * @returns {Array<{key: string, claims: number, establishedVolumes: number[], candidates: string[]}>}
+ */
+function pronounKeyedRosterEntries(ctx) {
+  const out = [];
+  for (const row of ctx.db.prepare("SELECT key, display, merged_into AS mergedInto FROM cast ORDER BY key").all()) {
+    if (row.mergedInto) continue;
+    if (!isBareFirstPersonPronoun(row.key)) continue;
+    const claims = ctx.db
+      .prepare("SELECT COUNT(*) AS n, COUNT(DISTINCT established_volume) AS vols FROM facts WHERE key = ? AND aspect != 'term_usage' AND status != 'retracted'")
+      .get(row.key);
+    if (!claims || claims.n === 0) continue;
+    // Who else on this roster could be the same person: an entry whose key or alias contains the pronoun
+    // as a whole token. Reported as candidates, never acted on.
+    /** @type {string[]} */
+    const candidates = [];
+    for (const other of ctx.db.prepare("SELECT key, display, aliases, merged_into AS mergedInto FROM cast WHERE key != ? ORDER BY key").all(row.key)) {
+      if (other.mergedInto) continue;
+      let aliases = [];
+      try {
+        aliases = JSON.parse(other.aliases || "[]");
+      } catch {
+        aliases = [];
+      }
+      const tokens = [other.key, other.display, ...aliases].flatMap((label) => spanTokens(String(label || "")));
+      if (tokens.includes(row.key)) candidates.push(other.key);
+    }
+    const vols = ctx.db
+      .prepare("SELECT DISTINCT established_volume AS v FROM facts WHERE key = ? AND aspect != 'term_usage' AND status != 'retracted' ORDER BY v")
+      .all(row.key)
+      .map((r) => r.v);
+    out.push({ key: row.key, claims: claims.n, establishedVolumes: vols, candidates });
   }
   return out;
 }
@@ -633,6 +690,28 @@ function integrityFindings(ctx, { volume = null, step = INTEGRITY_STEP, upTo, pu
     );
   }
 
+  // A roster entry keyed by a bare first-person pronoun, reported rather than merged. MEDIUM, and
+  // deliberately not HIGH: the claims in it are real and cited, and what is wrong is the name over them.
+  // It is also deliberately not a fold — see `pronounKeyedRosterEntries` for why the fold's own signal is
+  // gone on the assembled route, and why closing the split by guessing is worse than naming it.
+  for (const item of pronounKeyedRosterEntries(ctx)) {
+    findings.push(
+      finding(
+        "MEDIUM",
+        "reference-character-keyed-by-a-pronoun",
+        step,
+        volume,
+        "series.db",
+        `"${item.key}" is a roster entry with ${item.claims} character-voice claim(s) of its own, established in volume(s) ${item.establishedVolumes.join(", ")}. ` +
+          `A pronoun is not a name: the reference's section for this character is headed 「${item.key}」, which tells a translator who is speaking only if they already know. ` +
+          (item.candidates.length
+            ? `The roster does carry ${item.candidates.join(", ")} — the entry that names the same pronoun in its own label — and the fold that closes a split like this refused to merge them because neither entry's heading names the other as a whole token. `
+            : "No other roster entry names this pronoun, so nothing here can say who this is. ") +
+          `The door that decides it is cast_alias (or a merge recorded by somebody who read the book), not a rule that picks a person for you.`
+      )
+    );
+  }
+
   for (const item of brokenSupersession(ctx)) {
     findings.push(
       finding("MEDIUM", "reference-broken-supersession", step, volume, "series.db", `${item.id}: ${item.problem}`)
@@ -748,6 +827,7 @@ module.exports = {
   unclassifiedFacts,
   uncoveredCharacters,
   coverageFindings,
+  pronounKeyedRosterEntries,
   rebuiltDocuments,
   integrityFindings,
 };

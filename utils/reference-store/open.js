@@ -165,12 +165,14 @@ function openReferenceStore({ volume, folder, seriesDir, stage = "merge", create
     const vol = Number(entry.volume === undefined ? ctx.volume : entry.volume);
     const ord = Number(entry.ord === undefined ? 0 : entry.ord);
     db.prepare(
-      "INSERT INTO chapters (volume, chapter_id, ord, file, char_count, source_fingerprint) VALUES (?,?,?,?,?,?) " +
+      "INSERT INTO chapters (volume, chapter_id, ord, file, char_count, source_fingerprint, title) VALUES (?,?,?,?,?,?,?) " +
         "ON CONFLICT(volume, chapter_id) DO UPDATE SET ord = excluded.ord, file = excluded.file, " +
-        "char_count = excluded.char_count, source_fingerprint = excluded.source_fingerprint"
+        "char_count = excluded.char_count, source_fingerprint = excluded.source_fingerprint, " +
+        "title = COALESCE(excluded.title, chapters.title)"
     ).run(vol, String(entry.chapterId), ord, entry.file === undefined ? null : String(entry.file),
       entry.charCount === undefined ? null : Number(entry.charCount),
-      entry.sourceFingerprint === undefined ? null : String(entry.sourceFingerprint));
+      entry.sourceFingerprint === undefined ? null : String(entry.sourceFingerprint),
+      entry.title === undefined || entry.title === null || entry.title === "" ? null : String(entry.title));
     return db.prepare("SELECT * FROM chapters WHERE volume = ? AND chapter_id = ?").get(vol, String(entry.chapterId));
   };
 
@@ -212,6 +214,7 @@ function openReferenceStore({ volume, folder, seriesDir, stage = "merge", create
         ord: index,
         file: chapter.file,
         charCount: chapter.chars === null ? null : chapter.chars,
+        title: chapter.title === null ? null : chapter.title,
       });
     });
     return { ok: true, chapters: listed.chapters.length, error: null };
@@ -223,13 +226,18 @@ function openReferenceStore({ volume, folder, seriesDir, stage = "merge", create
    * Every evidence search in this layer starts here, so it has to answer for the source the stage
    * actually read — including a plain-text volume that never produced a bundle file on disk.
    *
-   * @returns {{chapters: Array<{id: string, file: string}>, error: string|null}}
+   * @returns {{chapters: Array<{id: string, file: string, title: string|null}>, error: string|null}}
    */
   ctx.listChapters = () => {
     const rows = ctx.db
-      .prepare("SELECT chapter_id, file FROM chapters WHERE volume = ? AND file IS NOT NULL ORDER BY ord, chapter_id")
+      .prepare("SELECT chapter_id, file, title FROM chapters WHERE volume = ? AND file IS NOT NULL ORDER BY ord, chapter_id")
       .all(ctx.volume);
-    if (rows.length > 0) return { chapters: rows.map((row) => ({ id: row.chapter_id, file: row.file })), error: null };
+    if (rows.length > 0) {
+      return {
+        chapters: rows.map((row) => ({ id: row.chapter_id, file: row.file, title: row.title === null ? null : row.title })),
+        error: null,
+      };
+    }
     const listed = listVolumeChapters(ctx.volumeDir);
     return { chapters: listed.chapters, error: listed.error };
   };

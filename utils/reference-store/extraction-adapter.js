@@ -179,9 +179,23 @@ function voiceCandidateRow(entry, key) {
  *   Null when the entry carries neither a description nor a marker, which is not a claim.
  */
 function povCandidateRow(entry, key) {
-  const description = typeof entry.sectionDescription === "string" ? entry.sectionDescription.trim() : "";
+  /**
+   * The prompt asks for `sectionDescription`. The model does not always write that word: volume 01's
+   * prologue answered with `description` instead, and under the single-field read every one of its five
+   * POV observations lost its prose — the four that carried a marker were filed as the degenerate body
+   * "POV marker ※" and the one without a marker was refused outright, so the published map has nine
+   * chapter sections for a ten-chapter volume and the prologue is not one of them.
+   *
+   * This is not a wider rule, it is the same rule reading the field the entry actually has. The voice
+   * builder two functions above already reads `description`; a POV builder that reads only the other
+   * spelling is a typo with a data loss attached to it. The order is the prompt's field first, so a model
+   * that writes both is read the way the prompt asked.
+   */
+  const described = ["sectionDescription", "description"]
+    .map((field) => (typeof entry[field] === "string" ? entry[field].trim() : ""))
+    .find((text) => text.length > 0);
   const marker = typeof entry.marker === "string" && entry.marker.trim() ? entry.marker.trim() : null;
-  const body = description || (marker ? `POV marker ${marker}` : "");
+  const body = described || (marker ? `POV marker ${marker}` : "");
   if (!body) return null;
   return {
     key,

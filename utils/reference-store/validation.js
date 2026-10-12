@@ -32,6 +32,7 @@ const { envMaxLineLength } = require("../../ai/env");
 const { EXTRACTION_SOURCE_STAGE } = require("./schema");
 const { DOCUMENT_VOICE, documentRebuilt, rebuildProvenanceCounts } = require("./document-prose");
 const { normalizeQuote } = require("./evidence");
+const { unfinishedProseFindings } = require("./drafting");
 require("../../types"); // JSDoc type definitions
 
 /** The step name findings from this audit are filed under. */
@@ -66,6 +67,11 @@ function sectionHeading(lines, preferred) {
  *   - **Sections fewer than the roster.** The artifact's own `### ` headings, counted, against the
  *     cast the store holds. This is the deferred check from review 05 §4 — the one whose absence made
  *     volume 01's voice numbers look small instead of alarming.
+ *   - **Prose the writer never finished.** `utils/reference-store/drafting.js` names every line that
+ *     carries a drafting aside or a claim arguing with itself. Volume 01's reference carries
+ *     `(wait, this is パンジー — need to recheck)` and volume 02's quotes `'〜Fantastic'` five times
+ *     while saying it is not present; `Fantastic` is in neither book. See that module's header for what
+ *     the rule is not, and for the 700 false positives the obvious version of it produced.
  *
  * @param {string} markdown - The artifact as it is on disk.
  * @param {{file: string, volume: number|string, step?: string}} opts
@@ -114,6 +120,8 @@ function artifactShapeFindings(markdown, { file, volume, step = VALIDATION_STEP 
       )
     );
   }
+
+  findings.push(...unfinishedProseFindings(text, { file, volume, step }));
 
   return findings;
 }
@@ -273,6 +281,8 @@ function rebuildProvenance(store, { volume, document = DOCUMENT_VOICE } = {}) {
  *   completeness rule instead of the glossary stage. Printed even when the answer is zero: the hole this
  *   rule exists to close was silent, and a report that does not print the number is the same silence.
  * @param {{conflicts: number, merged: Array<{merged: string, survivor: string, heading: string, movedFacts: number}>, ambiguous: Array<{merged: string, heading: string, names: string[]}>, refused: Array<{merged: string, survivor: string, because: string}>} | null} [report.roster]
+ * @param {Array<{kind: string, character: string|null, label?: string|null, dropped: Array<{example: string, because: string}>}>} [report.screened] - Claims that were adopted with one or more of their offered quotations dropped, because the span carried the writer's own note inside it.
+ * @param {Array<{reopened_at: string, reason: string, was_sealed: boolean, sealed_at: string|null, copies_affected: number[]}>} [report.reopens] - This record's reopen history, read out of `record_reopens`.
  *   What the roster rule found when this volume's record was opened: entries whose own heading names
  *   another entry on the roster. Printed even when the answer is "none", because a merge that moves a
  *   character's claims is exactly the kind of change a reader of the record should be able to see.
@@ -296,6 +306,8 @@ function renderAuditReport({
   sealed = null,
   glossary = null,
   roster = null,
+  screened = [],
+  reopens = [],
 }) {
   const out = [
     `# ${title} — deterministic audit (volume ${volume})`,
@@ -404,6 +416,20 @@ function renderAuditReport({
       rosterAnswer = `**${roster.conflicts} conflict(s), none merged** — ${parts.join("; ")}`;
     } else {
       rosterAnswer = "none — no entry's own heading names another entry on the roster";
+    }
+    // The fold's answer is only half the question. On the read-then-assemble route every heading is the
+    // key verbatim, so the signal the fold reads is never there, and a roster can hold a character under a
+    // bare pronoun beside the same character under their name while this row still says "none".
+    if (Array.isArray(roster.pronounEntries) && roster.pronounEntries.length) {
+      rosterAnswer +=
+        `; **but ${roster.pronounEntries.length} entr(ies) keyed by a bare first-person pronoun** — ` +
+        roster.pronounEntries
+          .map(
+            (p) =>
+              `${p.key} (${p.claims} claim(s)${p.candidates.length ? `; the roster also carries ${p.candidates.join(", ")}` : ""})`
+          )
+          .join("; ") +
+        ". See the finding of the same name.";
     }
     out.push(`| roster entries that are the same person | ${rosterAnswer} |`);
   }
@@ -553,6 +579,58 @@ function renderAuditReport({
     out.push("that could not be checked.");
     out.push("");
     out.push(...listLines(refused, (item) => `- ${item.character ? `**${item.character}**` : ""}${item.label ? ` (${item.label})` : ""} — ${item.because}`));
+    out.push("");
+  }
+
+  if (screened.length) {
+    const dropped = screened.reduce((sum, item) => sum + item.dropped.length, 0);
+    out.push("## Citations the store refused to publish");
+    out.push("");
+    out.push(`${dropped} span(s) across ${screened.length} claim(s) were offered as quotations but carry the`);
+    out.push("writer's own note inside them — a citation with `(wait, … — need to recheck)` glued to it is");
+    out.push("not a citation. The claim stands on the quote that did verify; these spans were dropped from");
+    out.push("the published bullet and are named here. The extraction's own copy of the claim keeps them,");
+    out.push("so the record still shows what the extractor wrote.");
+    out.push("");
+    out.push(...listLines(screened, (item) =>
+      `- ${item.character ? `**${item.character}**` : "unattached"}${item.label ? ` (${item.label})` : ""} — ${item.dropped.map((d) => `dropped: ${d.example.replace(/\s+/g, " ").slice(0, 120)} (${d.because})`).join("; ")}`));
+    out.push("");
+  }
+
+  // Two different facts, and the record holds both. `record_reopens` is a counted table, so a copy-forward
+  // carries its source's reopen history into the copy — which is what makes the staleness guard answerable
+  // (see `reopen.js`). It also means a volume that was never reopened itself can be sitting on a record
+  // that was thrown away and rebuilt because the volume it was copied from was. Saying only "this volume
+  // was redone" would leave volume 2 silent about the fact that its entire record is a redo.
+  const ownReopens = reopens.filter((item) => Number(item.volume) === Number(volume));
+  const inheritedReopens = reopens.filter((item) => Number(item.volume) !== Number(volume));
+
+  if (ownReopens.length) {
+    out.push("## This volume's record was reopened");
+    out.push("");
+    out.push("A sealed record is a record later volumes were built on. Reopening one is a deliberate act,");
+    out.push("recorded in the record itself (`record_reopens`) rather than only in a log, so whoever reads");
+    out.push("this file months from now can see that this volume was redone, when, and why.");
+    out.push("");
+    out.push(...listLines(ownReopens, (item) =>
+      `- volume ${item.volume}: reopened ${item.reopened_at}${item.was_sealed ? ` (it was sealed since ${item.sealed_at || "unknown"})` : ""} — reason given: ${item.reason}` +
+      (item.copies_affected && item.copies_affected.length
+        ? `; the record(s) copied from it that this act marked: ${item.copies_affected.map((c) => `volume ${c}`).join(", ")}`
+        : "")));
+    out.push("");
+  }
+
+  if (inheritedReopens.length) {
+    out.push("## This record was rebuilt from a volume that was reopened");
+    out.push("");
+    out.push("These reopen rows are not this volume's — they travelled in with the copy-forward, because a");
+    out.push("copy copies the record whole and `record_reopens` is one of the counted tables. They are the");
+    out.push("evidence the staleness guard reads: a record copied **before** a redo holds fewer of its");
+    out.push("source's reopen rows than the source holds now. Read them as a warning about the foundation,");
+    out.push("not as damage to this volume.");
+    out.push("");
+    out.push(...listLines(inheritedReopens, (item) =>
+      `- volume ${item.volume} (this record was copied from it): reopened ${item.reopened_at}${item.was_sealed ? " (it had been sealed)" : ""} — reason given: ${item.reason}`));
     out.push("");
   }
 

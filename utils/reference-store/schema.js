@@ -144,7 +144,7 @@ const FACT_CHARACTER_ROLES = ["subject", "agent", "patient", "witness"];
 // ─── Version ──────────────────────────────────────────────────────────────────
 
 /** The schema this build of the code writes. */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 /**
  * The migrations, oldest first. Version 1 is the whole design as built.
@@ -385,6 +385,44 @@ const MIGRATIONS = [
       `ALTER TABLE cast_presence ADD COLUMN matches INTEGER NOT NULL DEFAULT 0`,
     ],
   },
+  {
+    version: 5,
+    name: "slice 8 — the chapter's own title, and the record's reopen history",
+    // Two things this slice needs the record to answer by itself, rather than by a log file somebody
+    // has to still have.
+    //
+    // **A chapter's title.** The chapter list the extraction wrote (`*-bundle.meta.json`) has always
+    // carried the real heading — `第二章 僕と俺のバトンタッチ` — and `listVolumeChapters` has always
+    // read it, but `registerChapter` threw it away. Every artifact that cites a chapter has therefore
+    // been naming it `ch2`, which is a filename, not a name. The rendered POV map is the artifact where
+    // that hurts most: a reader tracing a viewpoint break wants the chapter the book calls something,
+    // and the volume's own table of contents is sitting in a file next to the record.
+    //
+    // **The reopen history.** A sealed volume is a volume a later volume was built on. Reopening one is
+    // therefore an act with consequences beyond itself, and `copy_provenance` already records the hash
+    // of the file each copy was made from — which answers "has the source changed?" but not "was the
+    // source *redone*, and why?". A reason that only exists in a console log is not answerable from the
+    // record years later (doc 03 §2.2), and the staleness question — is this volume's copy built on a
+    // volume that has since been rebuilt? — has to be answerable from the two tables together.
+    up: [
+      `ALTER TABLE chapters ADD COLUMN title TEXT`,
+
+      `ALTER TABLE copy_provenance ADD COLUMN source_reopens INTEGER NOT NULL DEFAULT 0`,
+
+      `CREATE TABLE IF NOT EXISTS record_reopens (
+         volume         INTEGER NOT NULL,
+         reopened_at    TEXT NOT NULL,
+         reason         TEXT NOT NULL,
+         was_sealed     INTEGER NOT NULL DEFAULT 0,
+         sealed_at      TEXT,
+         rows_at_reopen TEXT NOT NULL DEFAULT '{}',
+         copies_affected TEXT NOT NULL DEFAULT '[]',
+         PRIMARY KEY (volume, reopened_at)
+       )`,
+
+      `CREATE INDEX IF NOT EXISTS idx_record_reopens_volume ON record_reopens(volume, reopened_at)`,
+    ],
+  },
 ];
 
 /**
@@ -410,6 +448,7 @@ const COUNTED_TABLES = [
   "document_prose",
   "cast_presence",
   "cast_presence_match",
+  "record_reopens",
 ];
 
 // ─── Applying it ──────────────────────────────────────────────────────────────
