@@ -20,9 +20,9 @@ const path = require("path");
 const { PIPELINE_STEPS } = require("../../gulpfile");
 const { specForStep } = require("../artifacts");
 
-const { maxInterventionsPerStep, resolveDeclaredName } = require("./state");
+const { maxInterventionsPerStep, resolveDeclaredName, LEVEL_FIX_SIZE } = require("./state");
 const { CHAPTER_STATE_STEPS, CUMULATIVE_STEPS, ESCALATION_HEADLINES } = require("./menu");
-const { renderResumePlanMarkdown } = require("./report");
+const { renderResumePlanMarkdown, formatRanges } = require("./report");
 const {
   indexStepStates,
   indexRecurringFindings,
@@ -166,7 +166,12 @@ function nothingToResume(state, order, stateByStep) {
 function resumeHere(state, { order, stateByStep, recurringFor, resume }) {
   const resumeStep = order[resume.index];
   const resumeState = stateByStep.get(resumeStep);
-  const fromVolume = resumeState.volumes.length ? resumeState.volumes[0] : null;
+  // A step that HALTED is a different shape from a step that broke. The halt record says which book it
+  // stopped after and which books it never attempted, so the resume volume comes from the record rather
+  // than from "the earliest volume with something missing" — which, for a halted step, is the same book
+  // only because the after-step assessment suppressed the never-attempted ones (utils/postmortem/halt.js).
+  const halt = resumeState.status === "paused" ? resumeState.halt || null : null;
+  const fromVolume = halt ? halt.haltedAfterVolume : resumeState.volumes.length ? resumeState.volumes[0] : null;
   const notes = [];
 
   /** @type {ResumeStepPlan} */
@@ -175,9 +180,10 @@ function resumeHere(state, { order, stateByStep, recurringFor, resume }) {
     actionName: "resume-here",
     reasons: [resume.reason, ...resumeState.damageKinds.map((k) => `finding: ${k}`)],
     fromVolume,
+    paused: halt,
     // The finding this action is a response to. It is what the ledger keys the anti-spin check on,
     // so it has to be named by the triage rather than guessed at by whoever acts.
-    finding: resumeState.damageKinds[0] || null,
+    finding: resumeState.damageKinds[0] || (halt && halt.trigger && halt.trigger[0] ? halt.trigger[0].kind : null),
   });
   // Only the resume step carries these two: they record what the escalation decided about THIS step,
   // and a step that is merely in the plan because its inputs changed has no escalation to report.
@@ -194,6 +200,20 @@ function resumeHere(state, { order, stateByStep, recurringFor, resume }) {
     // which one it is overriding and why that override no longer holds.
     chooseRepair(plan, { state, fromVolume });
     raiseStructuralTells(plan, notes, { state, resumeState, resumeStep, fromVolume, recurringFor });
+  }
+
+  if (halt) {
+    notes.push(
+      `${resumeStep} is PAUSED, not broken: it stopped itself after volume ${halt.haltedAfterVolume} and volumes ` +
+        `${formatRanges(halt.unattemptedVolumes || []) || "none"} were never attempted. The move is to answer the finding ` +
+        `and pick the step up again at volume ${halt.haltedAfterVolume} — and not the step as it stands, because the ` +
+        `same assessment would stop it in the same place.` +
+        (plan.cascade
+          ? ` For a cumulative step "from volume ${halt.haltedAfterVolume}" is the whole-series run: the cascade is what ` +
+            `rebuilds every volume after it, and the accepted volumes before it are kept free by the skip-checks rather ` +
+            `than re-paid for (gotcha 66 — a filtered run would leave the later volumes built on the broken one).`
+          : "")
+    );
   }
 
   const steps = [
@@ -455,6 +475,26 @@ function spendInterventions(plan, notes, { state, resumeStep }) {
  * @returns {string}
  */
 function headlineFor(plan, resumeStep, fromVolume) {
+  if (plan.paused) {
+    const unattempted = plan.paused.unattemptedVolumes || [];
+    const head =
+      `${resumeStep} is paused after volume ${plan.paused.haltedAfterVolume}` +
+      `${unattempted.length ? `: volume(s) ${formatRanges(unattempted)} were never attempted` : ""}`;
+    if (plan.action === "ticket") {
+      return (
+        `${head}, and ${ESCALATION_HEADLINES[plan.escalation] || "the answer is a question, not a re-run"}` +
+        `${plan.existingTicket ? ` Already ticket ${plan.existingTicket.id} (${plan.existingTicket.status}).` : ""}`
+      );
+    }
+    return (
+      `${head}. Pick ${resumeStep} up again at volume ${fromVolume}${
+        plan.cascade
+          ? ` — which for a cumulative step means the step runs over the whole series again, and the volumes before ` +
+            `${fromVolume} are accepted and the skip-checks keep them free (they are not re-paid for)`
+          : ` — the volumes before it are accepted and the skip-checks keep them free`
+      }.`
+    );
+  }
   if (plan.action === "ticket") {
     return (
       `The run stops at ${resumeStep}${fromVolume ? ` volume ${fromVolume}` : ""}: ` +
@@ -466,6 +506,67 @@ function headlineFor(plan, resumeStep, fromVolume) {
     return `The run stops at ${resumeStep}, and the next move is not mine.`;
   }
   return `Pick up at ${resumeStep}${fromVolume ? ` volume ${fromVolume}` : ""}${plan.cascade ? ", then let the cascade rebuild the tail" : ""}.`;
+}
+
+
+/**
+ * The investigations this run proposes, batched per (kind, step).
+ *
+ * **Proposed, not run.** Slice 2 adds no model call: the triage names the question, the level, the
+ * number of occurrences it batched and the size of fix that level implies, and the manager decides
+ * whether to spend a diagnostics turn on it (slice 3 bounds how many it may spend). Nothing here opens
+ * a ticket, runs a step, or touches a file.
+ *
+ * Two routes arrive here. A `MINOR` gap batch is one entry per (kind, step) however many volumes it
+ * fired in — a stray file in seventeen books is one question about one kind on one step. A step that
+ * HALTED contributes one entry per trigger finding, because the pause exists precisely to get that
+ * question answered before the next volume is built on the broken thing.
+ *
+ * @param {Object} state - The working state.
+ * @returns {Array<{step: string, kind: string, level: string, route: string, occurrences: number, volumes: string[], files: string[], sizeOfFix: string, question: string, actedOn: boolean}>}
+ */
+function investigationsFor(state) {
+  /** @type {Array<{step: string, kind: string, level: string, route: string, occurrences: number, volumes: string[], files: string[], sizeOfFix: string, question: string, actedOn: boolean}>} */
+  const out = [];
+  for (const st of state.stepStates || []) {
+    for (const b of st.gapBatches || []) {
+      const volumes = b.volumes.length ? b.volumes.join(", ") : "the series";
+      out.push({
+        step: st.step,
+        kind: b.kind,
+        level: b.level,
+        route: "batched-minor",
+        occurrences: b.count,
+        volumes: b.volumes,
+        files: b.files,
+        sizeOfFix: LEVEL_FIX_SIZE[b.level] || "unknown",
+        question:
+          `Why does ${b.kind} appear in ${st.step} in volume(s) ${volumes}, and what is producing it ` +
+          `there — a rule the step applies, or something about these volumes specifically?`,
+        actedOn: false,
+      });
+    }
+    if (st.status === "paused" && st.halt) {
+      for (const t of st.halt.trigger || []) {
+        const level = t.level || "MAJOR";
+        out.push({
+          step: st.step,
+          kind: t.kind,
+          level,
+          route: "volume-halt",
+          occurrences: 1,
+          volumes: [st.halt.haltedAfterVolume],
+          files: t.file ? [t.file] : [],
+          sizeOfFix: LEVEL_FIX_SIZE[level] || LEVEL_FIX_SIZE.MAJOR,
+          question:
+            `Why did ${st.step} halt after volume ${st.halt.haltedAfterVolume} on a ${level} ${t.kind}, ` +
+            `and what is producing that finding in the volume the step finished?`,
+          actedOn: false,
+        });
+      }
+    }
+  }
+  return out;
 }
 
 
@@ -489,6 +590,10 @@ function finishPlan({ state, verdict, headline, steps, notes }) {
     interventionsByStep: state.interventionsByStep || {},
     interventionBudget: state.interventionBudget || maxInterventionsPerStep(),
     deliverable: state.deliverable,
+    // The investigations this run PROPOSES (batched per kind and step). Nothing in this slice runs one:
+    // the diagnostics role is summoned by the manager, in act mode, and how many it may summon is
+    // slice 3's bound.
+    investigations: investigationsFor(state),
     markdown: "",
   };
   plan.markdown = renderResumePlanMarkdown(plan);
@@ -497,6 +602,7 @@ function finishPlan({ state, verdict, headline, steps, notes }) {
 
 module.exports = {
   declaredOutputsFor,
+  investigationsFor,
   planResume,
   finishPlan,
 };

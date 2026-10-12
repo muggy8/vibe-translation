@@ -63,6 +63,10 @@
  *   volume inherits it), MINOR (one file of one volume, or one record of one run), NOTE (a measurement).
  *   A different axis from severity — `reference-evidence-does-not-verify` is HIGH and MAJOR, and
  *   `closed-without-outcome` is HIGH and MINOR. An unknown kind gets MINOR and says so in its message.
+ * @property {boolean} levelDeclared - False when `level` is the default rather than a row in the table.
+ *   The resume triage routes an undeclared kind as **damage** on the strength of this flag, because the
+ *   default level (MINOR) is the one level the triage may batch without opening the run — a default the
+ *   reader cannot see is a finding that disappears (plan §1, and `utils/resume/state.js` `classifyFindings`).
  * @property {string} kind - The stable machine-readable class (`missing-required`,
  *   `wrong-shape`, `unexpected-file`, …). A future diagnosis agent selects on this.
  * @property {string} step - The step being assessed.

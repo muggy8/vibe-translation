@@ -180,11 +180,16 @@ function assertFindings(auditResult, expected, label) {
   for (const f of auditResult.findings) {
     assert.deepStrictEqual(
       Object.keys(f).sort(),
-      ["file", "kind", "level", "message", "severity", "step", "volume"],
-      `${label}: a finding must be exactly the post-mortem's own shape (severity, kind, level, step, volume, file, message)`
+      ["file", "kind", "level", "levelDeclared", "message", "severity", "step", "volume"],
+      `${label}: a finding must be exactly the post-mortem's own shape (severity, kind, level, levelDeclared, step, volume, file, message)`
     );
     assert.strictEqual(f.step, EXTRACTION_STEP, `${label}: findings belong to the extract step`);
     assert.strictEqual(f.volume, "01", `${label}: a finding names the volume it is about`);
+    assert.strictEqual(
+      f.levelDeclared,
+      true,
+      `${label}: "${f.kind}" has a row in the level table, so its level is a decision and not the default the triage would fail closed on`
+    );
     assert.strictEqual(typeof f.file, "string");
     assert.strictEqual(typeof f.message, "string");
     assert.ok(f.file, `${label}: a finding names the file or folder it is about`);

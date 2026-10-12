@@ -578,6 +578,19 @@ async function testTriggerFollowsTheLevel() {
     "and a MAJOR kind can"
   );
   ok(FINDING_LEVELS["wrong-shape"].level === "MAJOR", "the row the gate read is the row slice 1 wrote");
+
+  // The two halves must fail closed the same way. `finding()` defaults an undeclared kind to MINOR;
+  // the resume triage treats that as damage (utils/resume/state.js). If the gate trusted the defaulted
+  // label, the same finding would be damage to the resume decision while the step walked straight past
+  // the volume it fired in.
+  const { finding } = require("../utils/postmortem/rules");
+  const undeclared = finding("HIGH", "a-kind-nobody-declared-in-the-table", "glossary", "01", "x", "y");
+  ok(undeclared.levelDeclared === false, "the finding says its own level was defaulted, which is what both halves read");
+  same(
+    haltTriggerFor([undeclared]).map((f) => f.kind),
+    ["a-kind-nobody-declared-in-the-table"],
+    "and a kind the level table does not know about halts the walk, not a silent MINOR"
+  );
 }
 
 // ─── 10. No environment knob ──────────────────────────────────────────────────

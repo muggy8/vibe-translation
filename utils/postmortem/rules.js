@@ -1,10 +1,16 @@
 /**
  * utils/postmortem/rules.js — what a finding is, and what a shape means.
  *
- * The one constructor for a finding (severity, kind, level, step, volume, file, message) and the shape
- * vocabulary the checks compare artifacts against. Nothing here reads a file: it is the vocabulary the
- * file checks speak in. The level comes from ./levels.js, which is data in a closed path so the role
- * being investigated cannot re-grade the finding it is investigated for.
+ * The one constructor for a finding (severity, kind, level, levelDeclared, step, volume, file, message)
+ * and the shape vocabulary the checks compare artifacts against. Nothing here reads a file: it is the
+ * vocabulary the file checks speak in. The level comes from ./levels.js, which is data in a closed path
+ * so the role being investigated cannot re-grade the finding it is investigated for.
+ *
+ * `levelDeclared` is the fail-closed marker the triage reads (`utils/resume/state.js`): the default
+ * level for an unknown kind is `MINOR`, and `MINOR` is the one level the triage is allowed to batch
+ * without opening the run. A default that the reader cannot see is therefore a kind that disappears,
+ * which is the exact failure `utils/postmortem/plan/01-finding-levels.md` §1 was written about. So the
+ * finding carries the fact that its level was defaulted, beside the message that says so.
  */
 
 const path = require("path");
@@ -141,6 +147,11 @@ function matchesShape(content, shape) {
  * investigated, never a halt — **and its message says so**, because a default that is invisible is how
  * an unclassified kind ends up reported as a small one.
  *
+ * `levelDeclared` is the same fact as data. Under level routing (`utils/resume/state.js`) `MINOR` is
+ * the level the triage may batch without opening the run, so an unclassified kind that only *said*
+ * MINOR in prose would land in the channel this plan exists to close. The triage reads the flag and
+ * routes an undeclared kind as damage instead.
+ *
  * @param {"HIGH"|"MEDIUM"|"LOW"} severity
  * @param {string} kind
  * @param {string} step
@@ -156,6 +167,7 @@ function finding(severity, kind, step, volume, file, message) {
     severity,
     kind,
     level,
+    levelDeclared: declared,
     step,
     volume,
     file,

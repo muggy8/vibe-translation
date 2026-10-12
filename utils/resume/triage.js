@@ -7,8 +7,19 @@
  * patch. Keeping the two halves apart is what lets a test hand `planResume` a hand-built state and
  * be sure it is not silently reading the real series' correspondence.
  *
+ * **What opens the run is a level, not a severity** (`utils/postmortem/plan/01-finding-levels.md`
+ * slice 2). `state.js` routes every finding through `LEVEL_ROUTES`: `STOP` and `MAJOR` are damage and
+ * open the run, `MINOR` is a batched gap that is reported and proposed for investigation, `NOTE` is
+ * reported only, and `quarantine-present` keeps its exact evidence treatment. This half then reads the
+ * resulting status: `incomplete` and `unknown` open the run at their earliest damaged volume, `paused`
+ * opens it at the volume the halt record names, and `gaps` / `quarantined` never open it at all.
+ *
  * Part of the resume.js layer (split out of the original single file).
  */
+
+// `formatRanges` is the layer's own volume-list wording (`01–03, 07`). A note that lists seventeen
+// volumes one by one is a line nobody reads, and the compact form is the same fact.
+const { formatRanges } = require("./report");
 
 /**
  * Index the per-step assessments by step name.
@@ -44,9 +55,15 @@ function indexRecurringFindings(state) {
 /**
  * The first step in run order that did not finish what it claims to have.
  *
- * Only `incomplete` and `unknown` open the run. `gaps` and `quarantined` are findings beside work
- * that is finished, and choosing a resume point from *evidence that a gate once fired* proposes
- * throwing away completed volumes (see menu.js, and volume 15 of the live series).
+ * Only `incomplete`, `unknown` and `paused` open the run. `gaps` and `quarantined` are findings beside
+ * work that is finished — a MINOR gap batched across a series, and evidence that a gate once fired, are
+ * both reported — and choosing a resume point from either proposes throwing away completed volumes (see
+ * menu.js, and volume 15 of the live series).
+ *
+ * `paused` is the state slice 4's gate produces: the step stopped after volume *n* on a STOP or MAJOR
+ * finding and never attempted the rest. It opens the run, and it opens it AT volume *n* — which is a
+ * different question from "which volumes are missing", because the volumes after *n* are missing
+ * precisely because the step stopped, not because they broke.
  *
  * @param {string[]} order - The steps in run order.
  * @param {Map<string, Object>} stateByStep
@@ -57,7 +74,20 @@ function findResumePoint(order, stateByStep) {
     const name = order[index];
     const st = stateByStep.get(name);
     if (!st) continue;
-    if (st.status !== "incomplete" && st.status !== "unknown") continue;
+    if (st.status !== "incomplete" && st.status !== "unknown" && st.status !== "paused") continue;
+    if (st.status === "paused" && st.halt) {
+      const halt = st.halt;
+      const kinds = (halt.trigger || []).map((f) => `${f.level} ${f.kind}`).join(", ") || "a volume-boundary finding";
+      const unattempted = halt.unattemptedVolumes || [];
+      return {
+        index,
+        reason:
+          `${name} halted after volume ${halt.haltedAfterVolume} on ${kinds}; ${unattempted.length} volume(s)` +
+          `${unattempted.length ? ` (${formatRanges(unattempted)})` : ""} were never attempted. The step resumes from ` +
+          `volume ${halt.haltedAfterVolume} once the finding is answered — the idempotent skip-checks keep the ` +
+          `volumes before it free.`,
+      };
+    }
     return {
       index,
       reason: st.error
@@ -66,6 +96,24 @@ function findResumePoint(order, stateByStep) {
     };
   }
   return { index: -1, reason: "" };
+}
+
+/**
+ * One readable line about a step's MINOR and NOTE findings, batched rather than counted.
+ *
+ * "3 non-blocking gap(s)" is the sentence this plan exists to retire: it is true, it is cheap to read,
+ * and it names neither the kinds that fired nor the fact that somebody is supposed to go and look into
+ * them.
+ *
+ * @param {Object} st - One step state.
+ * @returns {string} `""` when the step has none.
+ */
+function describeGaps(st) {
+  const batches = st.gapBatches || [];
+  if (!batches.length) return st.notes.length ? `${st.notes.length} reported finding(s)` : "";
+  return batches
+    .map((b) => `${b.level} ${b.kind} in volume(s) ${formatRanges(b.volumes) || "the series"} (${b.count})`)
+    .join("; ");
 }
 
 /**
@@ -82,7 +130,12 @@ function priorStepPlans(order, stateByStep, resumeAt) {
   for (let i = 0; i < resumeAt; i += 1) {
     const name = order[i];
     const st = stateByStep.get(name);
-    const reasons = [st.status === "complete" ? "finished" : `finished with ${st.notes.length} non-blocking gap(s)`];
+    const gaps = describeGaps(st);
+    const reasons = [
+      st.status === "complete" || !gaps
+        ? "finished"
+        : `finished with ${gaps} — reported, and proposed for investigation, not acted on`,
+    ];
     if (st.status === "quarantined") {
       reasons.push(
         `gate evidence in volume(s) ${st.evidenceVolumes.join(", ")} beside output this step finished — worth reading, not worth rebuilding`
@@ -125,9 +178,15 @@ function laterStepPlans(order, stateByStep, resumeAt, resumeStep, recurringFor, 
     /** @type {string[]} */
     const reasons = blocked
       ? ["the translation stage refuses to start on a FAIL consistency verdict, and re-auditing unchanged artifacts produces the same FAIL — bypassing that gate is Tier C"]
-      : st.status === "incomplete"
-        ? [`also unfinished, most likely because ${resumeStep} was: fix the earlier step first, then re-assess this one`]
-        : [`its inputs are about to change, so it runs after ${resumeStep}`];
+      : st.status === "paused" && st.halt
+        ? [
+            `also stopped at a volume boundary — it halted after volume ${st.halt.haltedAfterVolume} and never attempted ` +
+              `${formatRanges(st.halt.unattemptedVolumes || []) || "any further volume"}. It picks up at that volume: the ` +
+                `books before it are accepted and the skip-checks keep them free.`,
+          ]
+        : st.status === "incomplete"
+          ? [`also unfinished, most likely because ${resumeStep} was: fix the earlier step first, then re-assess this one`]
+          : [`its inputs are about to change, so it runs after ${resumeStep}`];
     if (!blocked && TRANSLATION_STEPS.has(name) && auditReportMissing) {
       reasons.push("it cannot start until `consistency-report.md` exists and says PASS — that entry gate is not mine to bypass");
     }
@@ -142,6 +201,10 @@ function laterStepPlans(order, stateByStep, resumeAt, resumeStep, recurringFor, 
         `gate evidence in volume(s) ${st.evidenceVolumes.join(", ")} — read it; it is not by itself a reason to rebuild a volume this step finished`
       );
     }
+    const gaps = describeGaps(st);
+    if (!blocked && gaps) {
+      reasons.push(`${gaps} — reported, and proposed for investigation, not acted on here`);
+    }
     steps.push(
       stepPlan(name, {
         action: blocked ? "blocked" : "after",
@@ -149,8 +212,10 @@ function laterStepPlans(order, stateByStep, resumeAt, resumeStep, recurringFor, 
         reasons,
         // Each step picks up at its own earliest damaged volume, which is usually NOT the same one
         // the resume step picked up at: glossary may be whole through 14 while the voice reference
-        // stopped at 02.
-        fromVolume: st.volumes.length ? st.volumes[0] : null,
+        // stopped at 02. For a step that HALTED, the resume volume is the one the halt record names —
+        // the volumes after it are absent because the step never reached them, not because they broke.
+        fromVolume: st.halt ? st.halt.haltedAfterVolume : st.volumes.length ? st.volumes[0] : null,
+        paused: st.halt || null,
         // A step with its own damage names its own finding. A step that is complete and is only in
         // the plan because the resume step's fix invalidates it inherits the finding the whole plan
         // is a response to — otherwise the ledger has nothing to key on, and "have I already run
@@ -184,7 +249,10 @@ function finishedRunStepPlans(order, stateByStep) {
     const st = stateByStep.get(name);
     if (!st) continue;
     if (st.status === "gaps") {
-      notes.push(`${name}: ${st.notes.length} non-blocking gap(s) — reported, not acted on.`);
+      const gaps = describeGaps(st);
+      if (gaps) {
+        notes.push(`${name}: ${gaps} — reported, and proposed for investigation, not acted on.`);
+      }
     }
     if (st.status === "quarantined") {
       quarantined.push(name);
@@ -232,6 +300,10 @@ function stepPlan(step, fields) {
     flags: fields.flags ?? [],
     countsAsIntervention: fields.countsAsIntervention ?? false,
     finding: fields.finding ?? null,
+    // The slice-4 halt record, when this step stopped at a volume boundary on purpose. Null for every
+    // other step, so "paused" is a state the plan states rather than one the reader infers from a
+    // missing tail. utils/postmortem/halt.js.
+    paused: fields.paused ?? null,
   };
 }
 
@@ -239,6 +311,7 @@ module.exports = {
   indexStepStates,
   indexRecurringFindings,
   findResumePoint,
+  describeGaps,
   priorStepPlans,
   laterStepPlans,
   finishedRunStepPlans,

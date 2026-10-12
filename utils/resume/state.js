@@ -1,5 +1,5 @@
 /**
- * Reading the half-built run without reading the code: the plan of record, what each volume folder actually holds, and the HIGH findings split into DAMAGE (work is missing — this decides where to pick up) and EVIDENCE (a gate refused something — read it, it is not a reason to rebuild). A quarantine belongs to the artifact it NAMES, not to every step that declares the pattern, and a declared name is a template, not a file name.
+ * Reading the half-built run without reading the code: the plan of record, what each volume folder actually holds, and the findings split by their declared **level** into DAMAGE (STOP or MAJOR — this decides where to pick up), GAPS (MINOR — batched per kind and step, proposed for investigation, never opens the run) and NOTES (NOTE — reported only), with EVIDENCE (a gate refused something and kept its proof — read it, it is never a reason to rebuild) kept exactly as it was. A quarantine belongs to the artifact it NAMES, not to every step that declares the pattern, and a declared name is a template, not a file name.
  *
  * Part of the resume.js layer (split out of the original single file).
  */
@@ -9,6 +9,7 @@ const path = require("path");
 const { PIPELINE_STEPS } = require("../../gulpfile");
 const { STEP_ARTIFACT_SPECS, specForStep } = require("../artifacts");
 const { runPostMortem } = require("../postmortem");
+const { FINDING_LEVELS } = require("../postmortem/levels");
 const { readLedger, recurringFindings } = require("../ledger");
 const { readTickets } = require("../tickets");
 const { readPatches } = require("../patches");
@@ -17,6 +18,139 @@ const { validateManifest } = require("../../get-translation-target");
 const { readTranslationReport, summarizeReportRows } = require("../translation-report");
 
 const { EVIDENCE_KINDS, actionByName } = require("./menu");
+
+// ─── Level routing ────────────────────────────────────────────────────────────
+
+/** @typedef {import("../postmortem").PostMortemFinding} PostMortemFinding */
+/** @typedef {import("../postmortem/levels").FindingLevel} FindingLevel */
+
+/**
+ * What each declared level MEANS to the triage, as data.
+ *
+ * This is the table `utils/postmortem/plan/01-finding-levels.md` slice 2 is: the triage used to filter
+ * on **severity** first, so four kinds the menu itself calls damage (`wrong-shape`,
+ * `chapter-without-draft`, `accepted-without-acceptance`, `audit-verdict-missing`) were emitted at
+ * MEDIUM and could never reach the decision. Routing on the level is what makes them visible; routing
+ * on severity is what made them invisible.
+ *
+ * `damage` decides where the run picks up. `gap` is collected, reported and proposed for investigation
+ * — it may not open the run. `note` is a line in the report and nothing else.
+ *
+ * **Frozen.** The file is closed to the dev team, but a table any module can reassign at runtime is a
+ * dial whoever imports it can turn (`AGENTS.md` rule 3). `classifyFindings` reads its route out of this
+ * object, so freezing it is what makes the routing un-turnable from inside a process.
+ *
+ * @type {Record<FindingLevel, "damage" | "gap" | "note">}
+ */
+const LEVEL_ROUTES = Object.freeze({
+  STOP: "damage",
+  MAJOR: "damage",
+  MINOR: "gap",
+  NOTE: "note",
+});
+
+/**
+ * The size of fix each level expects, in the plan's own words (§3). Carried onto an investigation so
+ * the role that answers it knows whether it is being asked for a one-file change or a rule change —
+ * and so the triage is not the one deciding that. Frozen for the same reason as `LEVEL_ROUTES` above:
+ * it is the other half of the same decision, and a half that can be edited from a process is a dial.
+ *
+ * @type {Record<FindingLevel, string>}
+ */
+const LEVEL_FIX_SIZE = Object.freeze({
+  STOP: "anything; the run is already halted",
+  MAJOR: "major: a rule, a converter, a stage's code",
+  MINOR: "minor: one file, one volume, a re-run",
+  NOTE: "none",
+});
+
+/**
+ * The level one finding is routed by, and whether the level table actually declares its kind.
+ *
+ * The TABLE is the authority, not the object. A finding object can carry any `level` string whoever
+ * built it chose; the table can only be edited by the account owner (`utils/postmortem/` is a banned
+ * patch path). So a kind with no row is undeclared whatever its object claims, and an undeclared kind
+ * is routed as damage rather than into the MINOR batch the default would have hidden it in.
+ *
+ * @param {PostMortemFinding|{kind?: string, level?: FindingLevel, levelDeclared?: boolean}} f
+ * @returns {{level: FindingLevel, declared: boolean}}
+ */
+function levelOf(f) {
+  const row = f && f.kind ? FINDING_LEVELS[f.kind] : null;
+  if (row) return { level: row.level, declared: true };
+  return { level: "MINOR", declared: false };
+}
+
+/**
+ * Split one step's findings into the four classes the triage acts on.
+ *
+ * Fail closed, twice over: a kind the level table does not declare is **damage**, and a finding with
+ * no kind at all is damage too — an unnamed finding is the most invisible one there is. That is the
+ * intent of the comment this replaced ("a new finding kind must not become invisible here by not being
+ * listed"): the old version achieved it by treating every HIGH finding as damage, which also made
+ * every MEDIUM one invisible.
+ *
+ * `EVIDENCE_KINDS` keeps its exact current treatment: a HIGH `quarantine-present` is evidence, a MEDIUM
+ * one is the note it already was, and neither is ever damage — Tier C, evidence is never a reason to
+ * wipe accepted work.
+ *
+ * @param {PostMortemFinding[]|null} findings - One step's post-mortem findings.
+ * @returns {{damage: PostMortemFinding[], gaps: PostMortemFinding[], notes: PostMortemFinding[], evidence: PostMortemFinding[]}}
+ */
+function classifyFindings(findings) {
+  /** @type {{damage: PostMortemFinding[], gaps: PostMortemFinding[], notes: PostMortemFinding[], evidence: PostMortemFinding[]}} */
+  const out = { damage: [], gaps: [], notes: [], evidence: [] };
+  for (const f of findings || []) {
+    if (!f || !f.kind) {
+      out.damage.push(f);
+      continue;
+    }
+    if (EVIDENCE_KINDS.has(f.kind)) {
+      if (f.severity === "HIGH") out.evidence.push(f);
+      else out.notes.push(f);
+      continue;
+    }
+    const { level, declared } = levelOf(f);
+    // The route comes FROM the table. A chain of `if (level === "STOP")` here would let the table and
+    // the behaviour drift apart, and the table is the half in a closed path.
+    const route = declared ? LEVEL_ROUTES[level] : "damage";
+    if (route === "damage") out.damage.push(f);
+    else if (route === "gap") out.gaps.push(f);
+    else out.notes.push(f);
+  }
+  return out;
+}
+
+/**
+ * Collect one step's MINOR findings into **one entry per kind**, with every volume it fired in.
+ *
+ * Batched, not per occurrence: a stray file in seventeen volumes is one question about one kind on one
+ * step, not seventeen questions. The count and the volume list are kept so nothing is lost by grouping
+ * — and so the bound slice 3 puts on investigations has a number to bound.
+ *
+ * @param {PostMortemFinding[]} gaps - The MINOR findings of one step.
+ * @returns {Array<{kind: string, level: FindingLevel, count: number, volumes: string[], files: string[], message: string}>}
+ */
+function batchGaps(gaps) {
+  /** @type {Map<string, {kind: string, level: FindingLevel, count: number, volumes: string[], files: string[], message: string}>} */
+  const byKind = new Map();
+  for (const f of gaps || []) {
+    let batch = byKind.get(f.kind);
+    if (!batch) {
+      batch = { kind: f.kind, level: levelOf(f).level, count: 0, volumes: [], files: [], message: f.message || "" };
+      byKind.set(f.kind, batch);
+    }
+    batch.count += 1;
+    if (f.volume) {
+      const v = String(f.volume);
+      if (!batch.volumes.includes(v)) batch.volumes.push(v);
+    }
+    if (f.file && batch.files.length < 5 && !batch.files.includes(f.file)) batch.files.push(f.file);
+  }
+  return [...byKind.values()]
+    .map((b) => ({ ...b, volumes: b.volumes.sort() }))
+    .sort((a, b) => a.kind.localeCompare(b.kind));
+}
 
 /**
  * Read the plan of record straight off the disk.
@@ -59,14 +193,6 @@ function readPlanOfRecord(seriesDir) {
 
 
 /**
- * What one volume folder actually holds, against what every step that runs on a volume is
- * declared to leave there.
- *
- * @param {string} seriesDir
- * @param {import("../types").TranslationTargetVolume} volume
- * @returns {VolumeInventory}
- */
-/**
  * A declared artifact name, with its `{installment}` placeholder filled in — because the
  * declaration in `utils/artifacts.js` is a template (`jump-in-wiki-validation-{installment}.md`)
  * and the disk holds the real file name. Comparing the two without resolving the placeholder
@@ -107,6 +233,20 @@ function quarantineBelongsToStep(step, name, installment) {
 }
 
 
+/**
+ * What one volume folder actually holds, against what every step that runs on a volume is
+ * declared to leave there.
+ *
+ * The `missingForStep` / `quarantinedForStep` halves are what the triage reads, and both are
+ * per step: the first is the declared `required` output that is not on disk (with `{installment}`
+ * resolved, because a template is not a file name), and the second attributes each `.rejected` to
+ * the step whose artifact it NAMES rather than to every step that declares the same quarantine
+ * pattern.
+ *
+ * @param {string} seriesDir
+ * @param {import("../types").TranslationTargetVolume} volume
+ * @returns {VolumeInventory}
+ */
 function inventoryVolume(seriesDir, volume) {
   const volumeDir = path.join(seriesDir, volume.folder);
   /** @type {VolumeInventory} */
@@ -282,6 +422,13 @@ function unhelpfulInterventions(entries, run) {
 /**
  * Read everything a resume decision needs. No model call, no network, no writes.
  *
+ * Each step state's `status` is one of six, and the difference between them is the whole point of the
+ * level routing: `complete` (nothing found), `gaps` (MINOR and NOTE findings beside finished work —
+ * reported, batched, never a resume point), `quarantined` (gate evidence beside finished work — read it,
+ * never rebuild it), `incomplete` (STOP/MAJOR damage — this is where the run picks up), `paused` (the
+ * step stopped at a volume boundary on purpose, and `halt` says after which book and which books were
+ * never attempted), and `unknown` (the assessment itself could not run).
+ *
  * @param {Object} [opts]
  * @param {string} [opts.seriesDir] - Defaults to `SERIES_LOCATION`.
  * @param {Object} [opts.manifest] - Pass a plan of record to use instead of reading one.
@@ -304,48 +451,67 @@ async function readWorkingState({ seriesDir, manifest } = {}) {
     for (const { name } of PIPELINE_STEPS) {
       const report = await runPostMortem({ step: name, seriesDir: dir, manifest: plan.manifest });
       const findings = report.findings || [];
-      const high = findings.filter((f) => f.severity === "HIGH");
-      // Fail closed: a HIGH finding is damage unless it is explicitly the "a gate left its
-      // evidence" class. A new finding kind added to utils/postmortem.js must not become
-      // invisible here by not being listed in DAMAGE_KINDS.
-      const damage = high.filter((f) => !EVIDENCE_KINDS.has(f.kind));
-      const evidence = high.filter((f) => EVIDENCE_KINDS.has(f.kind));
+      // Route on the DECLARED LEVEL, not on severity. `utils/postmortem/plan/01-finding-levels.md` §1
+      // measured what the old severity-first filter cost: four kinds this layer calls damage were
+      // emitted at MEDIUM and so could never reach the decision — a real defect reported in a channel
+      // nobody reads.
+      //
+      // Fail closed the same way the old comment asked, and better: a kind with no row in the level
+      // table is DAMAGE, not the MINOR the runtime default hands it. A new finding kind still cannot
+      // become invisible by not being listed anywhere; now it cannot become invisible by being listed
+      // nowhere *and* defaulted quietly either.
+      const { damage, gaps, notes, evidence } = classifyFindings(findings);
       const namedVolumes = (list) =>
         [...new Set(list.filter((f) => f.volume).map((f) => String(f.volume)))].sort();
+      const cite = (list) =>
+        list.map((f) => ({
+          kind: f.kind,
+          level: levelOf(f).level,
+          levelUndeclared: !levelOf(f).declared,
+          severity: f.severity,
+          file: f.file,
+          volume: f.volume,
+          message: f.message,
+        }));
+      // A step that HALTED at a volume boundary is a distinct state from a step that failed. The halt
+      // record (utils/postmortem/halt.js) is already folded into the report by `runPostMortem`, so the
+      // triage reads the same record the after-step assessment read — including the count of missing
+      // output that halt accounts for.
+      const halt = report.halt || null;
       stepStates.push({
         step: name,
         status: report.error
           ? "unknown"
-          : damage.length
-            ? "incomplete"
-            : evidence.length
-              ? "quarantined"
-              : findings.some((f) => f.severity === "MEDIUM" || f.severity === "LOW")
-                ? "gaps"
-                : "complete",
+          : halt
+            ? "paused"
+            : damage.length
+              ? "incomplete"
+              : evidence.length
+                ? "quarantined"
+                : findings.length
+                  ? "gaps"
+                  : "complete",
         damageKinds: [...new Set(damage.map((f) => f.kind))],
         evidenceKinds: [...new Set(evidence.map((f) => f.kind))],
+        gapKinds: [...new Set(gaps.map((f) => f.kind))],
+        noteKinds: [...new Set(notes.map((f) => f.kind))],
         // The findings themselves, not just their classes. When act mode has to open a ticket it
         // must cite what it looked at, and the only thing it looked at is this assessment — so
         // the citation has to come from here rather than be re-derived from a file that a triage
         // does not write.
-        damageFindings: damage.map((f) => ({
-          kind: f.kind,
-          file: f.file,
-          volume: f.volume,
-          message: f.message,
-        })),
-        evidenceFindings: evidence.map((f) => ({
-          kind: f.kind,
-          file: f.file,
-          volume: f.volume,
-          message: f.message,
-        })),
+        damageFindings: cite(damage),
+        evidenceFindings: cite(evidence),
+        gapFindings: cite(gaps),
+        noteFindings: cite(notes),
+        // MINOR is batched per kind, with every volume it fired in, so one kind across a series is one
+        // question rather than seventeen.
+        gapBatches: batchGaps(gaps),
         volumes: namedVolumes(damage),
         evidenceVolumes: namedVolumes(evidence),
-        notes: findings
-          .filter((f) => f.severity !== "HIGH")
-          .map((f) => `${f.severity} ${f.kind}${f.volume ? ` volume ${f.volume}` : ""}: ${f.message}`),
+        halt,
+        notes: [...gaps, ...notes].map(
+          (f) => `${levelOf(f).level} (${f.severity}) ${f.kind}${f.volume ? ` volume ${f.volume}` : ""}: ${f.message}`
+        ),
         error: report.error || null,
       });
     }
@@ -426,4 +592,9 @@ module.exports = {
   interventionsUsed,
   unhelpfulInterventions,
   readWorkingState,
+  LEVEL_ROUTES,
+  LEVEL_FIX_SIZE,
+  levelOf,
+  classifyFindings,
+  batchGaps,
 };

@@ -185,13 +185,19 @@ function haltsForStep(step) {
  * and looked up from the kind when it does not — so a caller cannot supply its own level and a kind
  * the level table calls `NOTE` can never halt whatever severity it was emitted at.
  *
+ * **A kind the table does not know about halts.** `finding()` defaults an undeclared kind to MINOR, and
+ * the resume triage fails closed on exactly that (`utils/resume/state.js`): an unknown kind is damage.
+ * If the gate trusted the defaulted label, the same finding would be damage to the resume decision
+ * while a step walked straight past the volume it fired in. `levelDeclared === false` is the finding
+ * saying "this label was defaulted", and both halves now read that the same way.
+ *
  * @param {Array<PostMortemFinding|{kind: string, level?: FindingLevel}>} findings
  * @returns {Array<PostMortemFinding|{kind: string, level: FindingLevel}>} The triggering findings, in the order found.
  */
 function haltTriggerFor(findings) {
   return (findings || [])
     .map((f) => (f && f.level ? f : { ...f, level: levelFor(f && f.kind) }))
-    .filter((f) => HALT_LEVELS.includes(f.level));
+    .filter((f) => f.levelDeclared === false || HALT_LEVELS.includes(f.level));
 }
 
 // ─── The halt itself ──────────────────────────────────────────────────────────

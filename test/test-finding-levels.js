@@ -9,9 +9,14 @@
  *      suite rather than quietly defaulting.
  *   2. **The level is on the finding.** `finding()` looks the kind up and records it, so the level is
  *      decided once, by code, in a closed path — not re-derived by whoever reads the report.
- *   3. **The ratchet on the four blind kinds.** The plan exists because four kinds the triage calls
- *      damage are emitted at MEDIUM and can therefore never reach its decision. That number is pinned
- *      at exactly 4. It is a ratchet: it may go down, never up.
+ *   3. **The ratchet on the damage kinds the triage can see.** The plan exists because four kinds the
+ *      triage calls damage were emitted at MEDIUM and, with the triage filtering on severity first,
+ *      could never reach its decision. Slice 2 routed the triage on the declared level instead, so the
+ *      ratchet is now "how many damage kinds never land in the damage list" — and that number is **0**.
+ *      The four kinds are pinned separately, still emitted below HIGH, because the failure they
+ *      measured was the routing dial and not the severity.
+ *
+ * The behavioural half — what a level actually does to a plan — is `test/test-finding-routing.js`.
  *
  * Nothing here reads a volume, a database or the endpoint. It reads source text and calls pure
  * functions. (AGENTS.md rule 8, gotcha 69.)
@@ -26,7 +31,7 @@ const path = require("path");
 const { readModuleLayer } = require("./module-layer");
 const { LEVELS, FINDING_LEVELS, levelFor } = require("../utils/postmortem/levels");
 const { finding } = require("../utils/postmortem/rules");
-const { DAMAGE_KINDS, EVIDENCE_KINDS } = require("../utils/resume");
+const { DAMAGE_KINDS, EVIDENCE_KINDS, classifyFindings } = require("../utils/resume");
 const { BANNED_PATCH_PATHS, PROJECT_SOURCE_DIRS } = require("../utils/patches");
 
 const ROOT = path.join(__dirname, "..");
@@ -253,23 +258,49 @@ for (const kind of emitted) {
   ok(!f.message.includes("level undeclared"), `${kind}: emitted by the repository, so it must be classified`);
 }
 
-// ─── 3. The ratchet on the four blind kinds ────────────────────────────────────
+// ─── 3. The ratchet on the damage kinds the triage cannot see ─────────────────
 
 /**
- * The kinds `utils/resume/menu.js` calls damage that are NOT emitted at HIGH, and therefore cannot
- * reach the triage's damage decision today (`utils/resume/state.js:307` filters on severity first).
+ * The kinds `utils/resume/menu.js` calls damage that **cannot reach the triage's damage decision**.
  *
- * RATCHET — LOWER THIS NUMBER, NEVER RAISE IT. Slice 2 of `utils/postmortem/plan/01-finding-levels.md`
- * is what lowers it, by routing on `level` instead of `severity`. Exact equality is deliberate:
- * whoever lowers it edits this test in the same commit, and whoever makes a damage kind quieter edits
- * it too, in the open.
+ * It used to be measured through severity: `utils/resume/state.js` filtered on `severity === "HIGH"`
+ * first, so a damage kind emitted at MEDIUM was invisible no matter what the menu said about it. Four
+ * were. Slice 2 of `utils/postmortem/plan/01-finding-levels.md` replaced that filter with
+ * `classifyFindings`, which routes on the declared level — so the honest measurement is no longer
+ * "which kinds are emitted below HIGH" but "which kinds never land in the damage list".
+ *
+ * RATCHET — **this number is 0 and stays 0.** Exact equality is deliberate: whoever makes a damage kind
+ * invisible edits this test in the open, and whoever makes one visible edits it too.
  */
-const blindDamageKinds = [...DAMAGE_KINDS].filter((k) => !alwaysHigh(k)).sort();
+const blindDamageKinds = [...DAMAGE_KINDS]
+  .filter((k) => classifyFindings([finding("MEDIUM", k, "glossary", "02", "glossary.md", `planted ${k}`)]).damage.length === 0)
+  .sort();
 same(
   blindDamageKinds,
-  ["accepted-without-acceptance", "audit-verdict-missing", "chapter-without-draft", "wrong-shape"],
-  `exactly 4 of the ${DAMAGE_KINDS.size} kinds the triage calls damage are emitted below HIGH and can never reach its decision`
+  [],
+  `every one of the ${DAMAGE_KINDS.size} kinds the triage calls damage must reach its decision, whatever severity it is emitted at`
 );
+
+/**
+ * The four kinds §1 was written about, pinned as still being emitted below HIGH.
+ *
+ * They stay pinned because the blindness they measured was a ROUTING failure, not a severity failure:
+ * quietly raising all four to HIGH would satisfy the old test while leaving the triage routing on the
+ * wrong dial. What makes them visible is the level, and the assertion above is the one that proves it.
+ */
+const emittedBelowHigh = [...DAMAGE_KINDS].filter((k) => !alwaysHigh(k)).sort();
+same(
+  emittedBelowHigh,
+  ["accepted-without-acceptance", "audit-verdict-missing", "chapter-without-draft", "wrong-shape"],
+  `these 4 of the ${DAMAGE_KINDS.size} damage kinds are still emitted below HIGH — which is the exact shape that made them invisible when the triage filtered on severity, and why it routes on level instead`
+);
+
+// And each of the four is routed to damage by level, at the severity it is really emitted at.
+for (const kind of emittedBelowHigh) {
+  const routed = classifyFindings([finding("MEDIUM", kind, "glossary", "02", "glossary.md", `planted ${kind}`)]);
+  same(routed.damage.map((f) => f.kind), [kind], `${kind} is now reachable: it lands in the damage list at MEDIUM`);
+  same(routed.notes, [], `${kind} is no longer a line in a report nobody acts on`);
+}
 
 // Every damage kind must have a level, and no damage kind may be a NOTE: a NOTE is "report only",
 // which is the exact thing this plan exists to stop.
@@ -283,6 +314,12 @@ for (const kind of DAMAGE_KINDS) {
 for (const kind of EVIDENCE_KINDS) {
   same(FINDING_LEVELS[kind].level, "NOTE", `${kind} is evidence a gate left behind, not damage — it is reported, never rebuilt`);
 }
+
+// Fail closed: a kind the table does not declare is damage, because the default (MINOR) is the one
+// level the triage may batch without opening the run.
+const undeclared = classifyFindings([finding("MEDIUM", "a-kind-nobody-declared", "glossary", "02", "glossary.md", "planted")]);
+same(undeclared.damage.map((f) => f.kind), ["a-kind-nobody-declared"], "an undeclared kind is damage, never a batched gap");
+same(undeclared.gaps, [], "and it is not swept into the MINOR batch the default level would have hidden it in");
 
 // ─── 4. STOP means it really stops ─────────────────────────────────────────────
 

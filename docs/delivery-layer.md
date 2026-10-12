@@ -46,7 +46,10 @@ catches most of them, for free.
 
 **Findings, not exceptions.** `runPostMortem` returns data (`HIGH` / `MEDIUM` /
 `LOW`, each with a stable `kind`), and `index.js` decides what to do with it.
-`POSTMORTEM_FAIL_ON` (default `high`) sets which levels fail the run; `never` reports
+`POSTMORTEM_FAIL_ON` (default `high`) sets which **severities** fail the run — it is not the level
+below, and it is not what the resume triage reads: the triage re-runs the assessment itself and routes
+on the level, so making a MEDIUM fail a step changes how loudly the run complains and not what anybody
+does about it (`utils/postmortem/plan/01-finding-levels.md` §1). `never` reports
 everything and exits 0 — use it while the check is new and you are learning which
 findings are real. Reports go to `<SERIES_LOCATION>/.run/postmortem/<step>.md` (for a human)
 and `<step>.json` beside it (for whatever reads them next). → `docs/environment.md`, gotcha 94.
@@ -65,17 +68,66 @@ and carried into both report halves. The four levels (`utils/postmortem/plan/01-
 | `NOTE` | a measurement, or a leftover that is doing its job | none |
 
 The two axes are deliberately not the same word: `reference-evidence-does-not-verify` is HIGH **and**
-MAJOR, `closed-without-outcome` is HIGH **and** MINOR. **Nothing about what a run does has changed
-yet** — the triage still routes on severity (`utils/resume/state.js`), and routing on level is slice 2
-of that plan. An unknown kind gets `MINOR` and its message says `level undeclared for kind "…"` out
-loud, so an unclassified kind is visible rather than quietly downgraded.
+MAJOR, `closed-without-outcome` is HIGH **and** MINOR.
+
+**The resume triage routes on the level, not on the severity** (`utils/resume/state.js`,
+`LEVEL_ROUTES` + `classifyFindings`). That is the whole of slice 2 of this plan, and it is the half
+that decides what a finding *does*:
+
+| level | what the triage does with it | the step's status |
+|---|---|---|
+| `STOP` | **damage** — the run picks up at the volume it names, and the step already halted the walk at that volume | `incomplete` |
+| `MAJOR` | **damage** — same, and when the halt record says the step stopped itself at a volume boundary the plan reports it as **paused**: which book it stopped after, which books were **never attempted**, and that the step picks up at *that* book (for a cumulative step that is the whole-series run — the cascade is what rebuilds the tail, and the accepted books before it are kept free by the skip-checks rather than re-paid for, gotcha 66) | `paused` (halt record present) or `incomplete` |
+| `MINOR` | a **gap**: batched per (kind, step) whatever number of volumes it fired in, reported, and **proposed** for investigation. It never opens the run, never wipes, never spends the intervention budget | `gaps` |
+| `NOTE` | a line in the report and nothing else | `gaps` |
+| `quarantine-present` and its cousins (`EVIDENCE_KINDS`) | unchanged: a HIGH one is **evidence** beside finished output — read it, never rebuild it, never delete it (Tier C); a MEDIUM one is still the note it always was | `quarantined` |
+
+Severity survives in exactly one place in the triage: that evidence branch. `classifyFindings` looks the
+route **up in `LEVEL_ROUTES`** rather than re-deciding it in a chain of `if`s — and both tables are
+`Object.freeze`d, pinned by a check that tries to re-route `MINOR` into damage from inside a process and
+requires the attempt to **throw**: a table nobody reads is a decoration next to the real logic, and a
+table anybody can turn is a dial. The filter it replaced —
+`findings.filter((f) => f.severity === "HIGH")` — is what made four kinds this layer calls damage
+(`wrong-shape`, `chapter-without-draft`, `accepted-without-acceptance`, `audit-verdict-missing`)
+invisible, because all four are emitted at MEDIUM. Measured on a fixture before the change: a chapter
+the translation stage never drafted produced `status=gaps`, `verdict: nothing-to-do`, and the sentence
+*"translate: 1 non-blocking gap(s) — reported, not acted on."* After it: `status=incomplete`,
+`verdict: resume`, and a concrete move (`re-translate-volume`, from volume 02).
+
+**It fails closed.** The default level for an unknown kind is `MINOR`, and `MINOR` is the one level the
+triage may batch without opening the run — so a default the reader cannot see is a kind that
+disappears. `finding()` therefore stamps `levelDeclared: false` beside the message that says
+`level undeclared for kind "…"`, and `classifyFindings` routes an undeclared kind — and a finding with
+no kind at all — as **damage**. The authority is the **table**, not the object: a finding carrying a
+`level` string for a kind `utils/postmortem/levels.js` does not name is undeclared whatever it claims,
+because the table is in a closed path and a finding is not.
+
+**Investigations are proposed, not run.** `plan.investigations` (built by `investigationsFor` in
+`utils/resume/plan.js`) names one entry per (kind, step) — a
+`MINOR` gap batch, plus one entry per trigger finding of a step that halted — each with its level, how
+many occurrences the batch folded together, the volumes it fired in, the size of fix the level implies
+(`LEVEL_FIX_SIZE`), and the question to ask. **Slice 2 makes no model call and opens no ticket**: the
+manager decides whether to spend a diagnostics turn, and how many it may spend is slice 3's bound.
+Measured on a 17-volume fixture with one `MINOR` kind in every book: **119 findings → 7 investigations**
+(one per kind-and-step across glossary, character-voice, style-guide, jump-in-wiki, translate,
+translate-qa, polish), and the verdict stays `nothing-to-do`. The batched line reaches the manager's
+brief through `plan.notes` (`MINOR unexpected-file in volume(s) 01–17 (17) — reported, and proposed for
+investigation, not acted on`); the structured entry — the question and the size of fix — reaches
+`plan.markdown`, and `utils/manager/brief.js` does not render `plan.investigations` itself yet.
 
 Two tests hold the table honest. `test/test-finding-levels.js` enumerates every finding kind the
 repository emits from the source text (67 today) and fails the suite if any of them has no declared
-level, if a `STOP` kind is not emitted at HIGH, or if the number of damage kinds the triage cannot see
-rises above the 4 it pins. `test/test-source-audit.js` pins the finding's own field list, so a finding
-that loses its level fails too. The table has no environment variable and must not get one: the level
-is what the investigated role is investigated *for*, and a grade it can switch off is not a grade.
+level, if a `STOP` kind is not emitted at HIGH, or if **any** damage kind fails to reach the triage's
+damage decision — that number is now pinned at **0**, where it was pinned at 4 while the triage routed
+on severity. The four kinds §1 was written about stay pinned separately as still emitted below HIGH,
+because the failure they measured was the routing dial and not the severity: quietly raising all four
+to HIGH would have satisfied the old test and left the dial wrong.
+`test/test-finding-routing.js` is the behavioural half — it plants each shape on a throwaway fixture
+series and asks what the plan *does*. `test/test-source-audit.js` pins the finding's own field list, so
+a finding that loses its level fails too. The table has no environment variable and must not get one:
+the level is what the investigated role is investigated *for*, and a grade it can switch off is not a
+grade. Nothing in `utils/resume/` reads a new one either — it reads exactly the two it already read
+(`DELIVERY_MAX_INTERVENTIONS`, `SERIES_LOCATION`), pinned by a test.
 Both the table and that test are closed to the dev team: `utils/postmortem/` and
 `test/test-finding-levels.js` are in `BANNED_PATCH_PATHS` (`utils/patches/rules.js`), which is what the
 plan's §6 assumed was already true and measured was not — the folder was missing from the ban until the
@@ -304,7 +356,7 @@ the nine `runPostMortem` assessments, the ledger, and `translation-report.json` 
 itself). It costs nothing and calls no model, which is what makes it safe to run before every
 decision.
 
-Four rules in it are load-bearing, and each one is a mistake this module actually made on the live
+Six rules in it are load-bearing, and each one is a mistake this module actually made on the live
 17-volume series:
 
 - **Evidence is not damage.** A `.rejected` file says a gate fired at some point. It does not say
@@ -314,6 +366,17 @@ Four rules in it are load-bearing, and each one is a mistake this module actuall
   findings split into **damage** (work missing: decides the resume point) and **evidence** (a gate
   refused something: reported, never acted on), and a step whose outputs are complete but whose
   evidence survives gets verdict `evidence` — *read it before running anything*.
+- **A step that stopped itself is not a step that broke.** When the per-volume gate halted a step
+  after volume *n*, `runPostMortem` folds `last-volume-halt.json` into the assessment and the triage
+  reads it as status `paused`: the plan names the book it stopped after, names the books that were
+  **never attempted**, counts the missing-output findings the halt accounts for
+  (`halt.suppressedMissing`) instead of reporting them as broken books, and says the step picks up at
+  volume *n*. For a **cumulative** step "picks up at volume *n*" is not a `--volume` run — gotcha 66
+  forbids that, because a filtered run leaves the later volumes built on the broken one — it is the
+  whole-series run, where the cascade rebuilds the tail and the accepted volumes before *n* are kept
+  free by the skip-checks rather than re-paid for. Without the `paused` state the two shapes print as
+  the same fourteen `missing-required` findings and the reader cannot tell "stopped after book 3 on
+  purpose" from "broke on books 4–17".
 - **A quarantine belongs to the artifact it names, not to every step that declares the pattern.**
   `utils/artifacts.js` declares one pattern for all three cumulative gates, so pattern-matching
   attributes a `character-voice.md.rejected` to glossary — which then justifies "glossary's own

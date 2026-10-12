@@ -1,6 +1,12 @@
 /**
  * The human-facing half: 'glossary is whole through 14, missing 15–17' instead of seventeen folders of file names.
  *
+ * It also renders the two things slice 2 of `utils/postmortem/plan/01-finding-levels.md` added: a step
+ * that **paused** at a volume boundary (which book it stopped after, which books were never attempted,
+ * and where it resumes), and the **investigations the run proposes** — one per (kind, step), with the
+ * level and the size of fix that level implies. Both are named because a state a machine knows and a
+ * human cannot read is how a run ends up reported as fine.
+ *
  * Part of the resume.js layer (split out of the original single file).
  */
 
@@ -147,6 +153,18 @@ function renderResumePlanMarkdown(plan) {
     const label =
       s.action === "none" ? "leave alone" : s.action === "after" ? "run after" : s.action === "blocked" ? "blocked" : s.action === "ticket" ? "open a ticket" : "run now";
     lines.push(`### ${label}: \`${s.step}\`${s.fromVolume ? ` — from volume ${s.fromVolume}` : ""}`);
+    if (s.paused) {
+      const unattempted = s.paused.unattemptedVolumes || [];
+      const kinds = (s.paused.trigger || []).map((f) => `${f.level} ${f.kind}`).join(", ") || "a volume-boundary finding";
+      lines.push(
+        `- **paused after volume ${s.paused.haltedAfterVolume}** (${s.paused.haltedAfterFolder || "folder unknown"}) on ${kinds}. ` +
+          (unattempted.length
+            ? `Volume(s) ${formatRanges(unattempted)} were **never attempted** — their missing output is the halt, not a broken book ` +
+              `(${s.paused.suppressedMissing || 0} finding(s) the assessment accounted for that way).`
+            : "No volume was left unattempted.") +
+          ` Resume from volume ${s.paused.haltedAfterVolume}.`
+      );
+    }
     if (s.actionName) {
       const action = actionByName(s.actionName);
       lines.push(
@@ -170,6 +188,24 @@ function renderResumePlanMarkdown(plan) {
           ? `  - (and nothing else — ${w.quarantinesKept.map((n) => `\`${n}\``).join(", ")} beside them stays)`
           : `  - (and nothing else in that volume folder is touched)`
       );
+    }
+    lines.push(``);
+  }
+
+  if (plan.investigations && plan.investigations.length) {
+    lines.push(`## Investigations proposed (not run)`);
+    lines.push(``);
+    lines.push(
+      `_One entry per (finding kind, step), whatever number of volumes it fired in. Nothing here was ` +
+        `investigated: the diagnostics role is summoned by the manager in act mode, and the level says ` +
+        `what size of fix the finding implies._`
+    );
+    for (const i of plan.investigations) {
+      lines.push(
+        `- **${i.level}** \`${i.kind}\` on \`${i.step}\` — ${i.occurrences} occurrence(s) in volume(s) ` +
+          `${formatRanges(i.volumes) || "the series"} (${i.route}). Expected fix: ${i.sizeOfFix}.`
+      );
+      lines.push(`  Question: ${i.question}`);
     }
     lines.push(``);
   }

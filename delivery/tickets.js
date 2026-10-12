@@ -40,8 +40,24 @@ function evidenceForStep(step, state, reason) {
     if (step.fromVolume && f.volume && String(f.volume) !== String(step.fromVolume)) return;
     evidence.push({ file: f.file, note: `${label} ${f.kind}: ${f.message}` });
   };
-  for (const f of stepState.damageFindings || []) cite(f, `[HIGH]`);
-  for (const f of stepState.evidenceFindings || []) cite(f, `[HIGH]`);
+  /**
+   * The label a ticket cites beside a finding.
+   *
+   * It used to be the literal `[HIGH]`, which was true by construction only while "damage" meant
+   * "severity HIGH". Damage is now decided by the finding's LEVEL, so a MAJOR finding emitted at MEDIUM
+   * was being stamped `[HIGH]` on the ticket — a claim about the finding that the routing no longer
+   * makes. Cite the level, with the severity beside it, and say so out loud when the level was defaulted
+   * because the kind is not in the table.
+   *
+   * @param {Object} f - A post-mortem finding.
+   * @returns {string}
+   */
+  const citeLabel = (f) => {
+    const level = f.levelDeclared === false ? "UNDECLARED" : f.level;
+    return level && f.severity ? `[${level}/${f.severity}]` : `[${level || f.severity || "unknown"}]`;
+  };
+  for (const f of stepState.damageFindings || []) cite(f, citeLabel(f));
+  for (const f of stepState.evidenceFindings || []) cite(f, citeLabel(f));
   if (!evidence.length) {
     evidence.push({
       file: `${step.step}.md (post-mortem report)`,

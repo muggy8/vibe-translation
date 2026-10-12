@@ -86,6 +86,27 @@ const DOC = `# Report
 - nothing wrong here
 `;
 
+/**
+ * A translated volume that satisfies the shape `translation.md` declares (`prose`,
+ * `utils/artifacts/translation.js`): ordinary paragraphs, and the warning banner the merge prints
+ * above a chapter that did not pass verification. No heading, because the merge prints none for a
+ * synthetic or source-language title.
+ *
+ * This is the same text `test/fixture-series.js` holds. It was missing here, and the post-mortem has
+ * been reporting `wrong-shape` on this fixture's `translation.md` ever since the declaration moved
+ * from `document` to `prose` — a MEDIUM the severity-first triage threw away, and therefore invisible
+ * until the triage routed on level. Fixing the fixture is the honest half: the file really was not
+ * the document it claims to be.
+ */
+const PROSE = `> **⚠ UNVERIFIED** — fixture banner.
+
+Mornings at the academy always began in fog, and the ginkgo trees on either side of
+the main gate sank into it at this time of year and kept only their outlines.
+
+That day it was Akari. She walked three paces faster than me, and in front of the
+schoolhouse door she turned around and brought up the Pact.
+`;
+
 const PASS_DOC = `${DOC}
 
 **PASS**
@@ -120,6 +141,12 @@ function contentFor(name, shape) {
   if (shape === "table") return TABLE;
   if (shape === "json") return JSON.stringify({ fixture: true }, null, 2) + "\n";
   if (shape === "document") return DOC;
+  // `prose` was missing from this private copy of the helper, so every `translation.md` this fixture
+  // writes was 8 bytes of the word "fixture" — which the post-mortem has been calling `wrong-shape`
+  // (MAJOR) since the declaration moved from `document` to `prose`. The severity-first triage filed it
+  // as a note and threw it away; the level routing reports it, because it is a real finding about a
+  // real file. The fixture is fixed, not the check.
+  if (shape === "prose") return PROSE;
   return "fixture\n";
 }
 
