@@ -133,6 +133,38 @@ than the per-volume work each call already performs, and it is corrected here.
 **The account owner's decision (2026-10-12): every volume of every step is assessed after that volume,
 not after the step.** No step is exempt, and no step is exempted because its output is not inherited.
 
+**Which steps the gate is for — measured, not assumed.** A per-volume pause earns its
+keep in two situations only: the stage **copies the previous book's work into the next one**, so damage
+in book 3 is inside book 4 before anybody notices; and the stage **pays per book**, so stopping at book
+3 stops fourteen payments. Measured against the tree (grep for `carryForward` / `carry-forward` /
+`copyForward` / `previousVolume` / `lastGoodVolume` per stage folder, and for which stages call
+`walkVolumes` / `runVolumeSeries`):
+
+| stage | carries the previous book forward | uses the shared volume loop | model calls per book |
+|---|---|---|---|
+| `glossary` | yes — 12 files | yes | yes |
+| `character-voice` | yes — 4 (the record is copied forward) | yes | yes |
+| `style-guide` | yes — 4 | yes | yes |
+| `jump-in-wiki` | yes — 1 | yes | yes |
+| `translate` | yes — `previousVolumeTail` seeds each volume's continuity from the volume before it | yes | yes |
+| `translate-qa`, `retranslate` | yes — 6 and 2 | yes / no | yes |
+| `polish`, `consistency-audit` | no | yes / no | yes |
+| **`extract`** | **no — 0 files reference any earlier volume** | **no — it has its own `extractVolumes`** | **no — 0 calls, 190 ms** |
+
+**`extract` is exempt, and the exemption is not a loophole.** Three separate facts point the same way.
+It carries nothing: each book's bundle lives in its own folder and nothing in the step reads a previous
+book's output. It costs nothing, so there is no spending to stop. And running *past* a broken book is
+the behaviour the step was designed for — it audits all 17 volumes before it fails, precisely so that
+one run answers "what is wrong with my books?" for all of them; halting at book 3 would deliver less
+information for free. Its damage is real but it travels **across steps**, not across volumes, and the
+between-step assessment (`index/assess.js`: "a broken glossary is found before the translation stage
+has already paid for it") is already the right place to catch it — which is what slice 7 made possible
+for its own records.
+
+So the gate belongs in `walkVolumes`, which `extract`, `retranslate`, `consistency-audit` and
+`discover` do not even call. Naming them as exceptions is not a gap in the gate; for `extract` it is
+the correct design.
+
 **What "continue" means.** The runner restarts a **step**, not a volume, and `--volume` already
 exists. So resuming means: the step exits at volume *n*, the answer is obtained, and the step is
 re-run for volume *n* onward. The idempotent skip-checks are what make that cheap — a volume already
@@ -248,7 +280,7 @@ it is reported as done.
 | 1 | The level table as data, and the test that pins emitted severity against declared level. | The four blind kinds fail the test **before** any behaviour changes — the slice is proven by a red test it makes green. No routing changes yet. |
 | 2 | The triage routes on level instead of severity: `STOP` halts, `MAJOR` pauses, `MINOR` batches, `NOTE` reports. | A planted `chapter-without-draft` fixture becomes a pause and an investigation, not a note. A planted `unexpected-file` does **not** stop a run. |
 | 3 | The investigation bound: one per (kind, step, run), the answer filed on the ticket, a second occurrence reusing it. | A finding present in every volume of the fixture produces **one** model turn, and the offline loop's call count records the number. |
-| 4 | **The per-volume gate in the shared volume loop** (§3.2) — the thing that makes a pause possible at all. | `walkVolumes` stops after the volume that tripped the gate and exits with its own code; the stages that do not use the shared loop are named out loud rather than silently ungated. Nothing is assessed mid-chapter. |
+| 4 | **The per-volume gate in the shared volume loop** (§3.2) — the thing that makes a pause possible at all. | `walkVolumes` stops after the volume that tripped the gate and exits with its own code; the stages that do not use the shared loop are named out loud rather than silently ungated. Nothing is assessed mid-chapter. **Scoped by §3.2's table**: the gate is for the stages that carry the previous book forward *and* pay per book, so `extract` is exempt on three independent grounds and `retranslate` / `consistency-audit` / `discover` do not use the shared loop at all. |
 | 5 | The pause is executable end to end: the run halts at volume *n*, the answer is obtained, the step resumes from volume *n*. | The offline loop shows a MAJOR finding halting at volume *n* and resuming at volume *n* — not *n+1* — and the resumed pass does not pay for the volumes already accepted. |
 | 6 | The docs and the maps: `docs/delivery-layer.md`, `docs/environment.md` if any knob moves, and a gotcha for the four-blind-kinds finding. | The maps describe the routing that exists. |
 | 7 | **The extraction step declares its own output** (§10), and the run-scope guard is amended to name that one exception instead of banning all of them. | **BUILT 2026-10-12.** `extract` declares four `required` run expectations — `extraction-{installment}.md` / `.json` per volume (the new `perInstallment` shape) plus `extraction-summary.md` / `.json` — and the post-mortem checks them after the step: measured on the real corpus, `extract post-mortem — CLEAN (0 HIGH, 0 MEDIUM, 0 LOW, 36 expectation(s) checked)` with 0 findings across 17 legitimate books. A planted missing per-book report is a HIGH `missing-required` naming that volume; a run limited to one volume expects that volume's record and not the other sixteen; the other twelve pipeline steps are still asserted to declare nothing, with `extract` named as the single exception and the reason written in the test. `test/test-extract-run-scope.js` (19 checks) is the behavioural half; gotcha 127 records the reversal. Independent of slices 2–6. |
@@ -304,6 +336,10 @@ wrong and this plan is wrong, and that is the cheapest possible way to find out.
    a volume's assessment should also run the checks that only make sense once the whole step is finished
    (the series-root publish, the cross-volume coverage rules), which cannot move earlier and stay where
    they are.
+   **Refined the same day (see §3.2):** the *checking* stays everywhere, because it is free.
+   The *pause* is scoped to the stages that carry the previous book forward and pay per book — which
+   excludes `extract` on three independent grounds, one of them that it does not use the shared volume
+   loop at all.
 
 ---
 
