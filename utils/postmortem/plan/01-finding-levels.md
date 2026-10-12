@@ -133,10 +133,12 @@ than the per-volume work each call already performs, and it is corrected here.
 **The account owner's decision (2026-10-12): every volume of every step is assessed after that volume,
 not after the step.** No step is exempt, and no step is exempted because its output is not inherited.
 
-**Which steps the gate is for — measured, not assumed.** A per-volume pause earns its
-keep in two situations only: the stage **copies the previous book's work into the next one**, so damage
-in book 3 is inside book 4 before anybody notices; and the stage **pays per book**, so stopping at book
-3 stops fourteen payments. Measured against the tree (grep for `carryForward` / `carry-forward` /
+**Which steps the gate is for — measured, not assumed.** A per-volume pause earns its keep when
+**both** hold: the stage **copies the previous book's work into the next one**, so damage in book 3 is
+inside book 4 before anybody notices; **and** the stage **pays per book**, so stopping at book 3 stops
+fourteen payments that were built on the broken thing. Cost alone is not enough — pausing a stage whose
+later books do NOT inherit the damage skips work that would have been perfectly good. Inheritance is
+what makes stopping correct; cost is what makes it worth something. Measured against the tree (grep for `carryForward` / `carry-forward` /
 `copyForward` / `previousVolume` / `lastGoodVolume` per stage folder, and for which stages call
 `walkVolumes` / `runVolumeSeries`):
 
@@ -164,6 +166,11 @@ for its own records.
 So the gate belongs in `walkVolumes`, which `extract`, `retranslate`, `consistency-audit` and
 `discover` do not even call. Naming them as exceptions is not a gap in the gate; for `extract` it is
 the correct design.
+
+Reading the table with both tests applied: `glossary`, `character-voice`, `style-guide`,
+`jump-in-wiki`, `translate` and `translate-qa` are the gate's customers — they inherit and they pay.
+`polish` pays but inherits nothing, so a pause there would skip work that was going to be fine, and it
+is out.
 
 **What "continue" means.** The runner restarts a **step**, not a volume, and `--volume` already
 exists. So resuming means: the step exits at volume *n*, the answer is obtained, and the step is
