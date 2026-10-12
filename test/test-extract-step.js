@@ -268,13 +268,19 @@ async function scenarioRegistered() {
   assert.strictEqual(spec.perVolume, false, "it owes nothing to a volume folder");
   assert.deepStrictEqual(spec.volume, [], "it owes nothing to a volume folder");
   assert.deepStrictEqual(spec.series, [], "it owes nothing to the series root");
-  assert.strictEqual(
-    spec.run,
-    undefined,
-    "and it declares no run scope either — test/test-delivery-audit.js pins that no pipeline step does, " +
-      "so the corpus half is assessed exactly as it was. The step proves its own reports with assertWrote."
+  assert.deepStrictEqual(
+    (spec.run || []).map((e) => e.name),
+    [
+      "extraction-{installment}.md",
+      "extraction-{installment}.json",
+      "extraction-summary.md",
+      "extraction-summary.json",
+    ],
+    "its declared output is the record pair it writes for every volume plus the series summary pair — " +
+      "the run scope the account owner granted it in utils/postmortem/plan/01-finding-levels.md §10 " +
+      "(gotcha 127), and test/test-delivery-audit.js pins it to be the ONLY pipeline step with one"
   );
-  ok("its declared output is nothing in the corpus, and it does not breach the run-scope invariant");
+  ok("its declared output is its own reports, and it is the one pipeline step granted a run scope");
 
   const parsed = parseArgs(["--stages=extract"]);
   assert.deepStrictEqual(parsed.steps.map((s) => s.name), ["extract"], "--stages=extract resolves the step");

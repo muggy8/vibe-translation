@@ -14,7 +14,12 @@ const { finding } = require("./rules");
 const { assessVolume } = require("./volume");
 const { assessSeries } = require("./series");
 const { renderPostMortemMarkdown, postMortemDir } = require("./render");
-const { assessRunScope, countRunExpectations, declaresRunScope } = require("./scope");
+const {
+  assessRunScope,
+  countRunExpectations,
+  declaresRunScope,
+  declaresPerInstallmentRunScope,
+} = require("./scope");
 const { specForStep } = require("../artifacts");
 const { filterVolumesByInstallment } = require("../manifest");
 
@@ -63,7 +68,9 @@ function artifactContext(claims) {
  *   record. Omit it and the post-mortem reads it from disk.
  * @param {string|null} [opts.volumeArg] - The `--volume` filter, when the step ran on one volume.
  *   Series-root expectations are skipped for a single-volume run, because the tasks
- *   deliberately do not publish a stale series copy for one volume.
+ *   deliberately do not publish a stale series copy for one volume — and the same filter scopes a
+ *   `perInstallment` run expectation, so a run asked for one book expects that book's report and is
+ *   not blamed for the sixteen it was never asked to process.
  * @param {Partial<import("../artifacts").ArtifactContext>} [opts.claims] - What a delivery command
  *   claims it wrote, which is what its `required` run expectations are gated on.
  * @returns {Promise<PostMortemReport>}
@@ -100,7 +107,13 @@ async function runPostMortem({ step, seriesDir, manifest, volumeArg, claims }) {
   // not assessed against a plan of record it never read — and `diagnose`/`fix` can be pointed at a
   // ticket without a readable series folder. Requiring the plan there would report a gap that is
   // not this command's to fill.
-  const needsCorpus = Boolean(spec.perVolume || (spec.series && spec.series.length));
+  // A per-installment run expectation names files after volumes, and the list of volumes only exists
+  // in the plan of record — so a step that declares one needs the plan read, exactly like a step that
+  // writes into the corpus. `extract` is that step: its deliverable is a report per book, and without
+  // the plan there is no way to know which books it owes a report for.
+  const needsCorpus = Boolean(
+    spec.perVolume || (spec.series && spec.series.length) || declaresPerInstallmentRunScope(spec)
+  );
 
   let plan = manifest;
   if (needsCorpus && plan === undefined) {
@@ -142,16 +155,27 @@ async function runPostMortem({ step, seriesDir, manifest, volumeArg, claims }) {
     checked += spec.series.length;
   }
   if (declaresRunScope(spec)) {
-    const runFindings = await assessRunScope({ spec, step, runDir: postMortemDir(), ctx });
+    const runFindings = await assessRunScope({
+      spec,
+      step,
+      runDir: postMortemDir(),
+      ctx,
+      volumes: volumeEntries,
+    });
     findings.push(...runFindings);
-    checked += countRunExpectations({ spec, ctx });
+    checked += countRunExpectations({ spec, ctx, volumes: volumeEntries });
   }
+
+  // A step that owes one record per volume assessed one record per volume, even though it wrote
+  // nothing into a volume folder. Reporting "0 volumes" for a run that just opened 17 per-book
+  // reports is the kind of number that makes a checked thing look unchecked.
+  const assessesVolumes = Boolean(spec.perVolume) || declaresPerInstallmentRunScope(spec);
 
   const counts = {
     HIGH: findings.filter((f) => f.severity === "HIGH").length,
     MEDIUM: findings.filter((f) => f.severity === "MEDIUM").length,
     LOW: findings.filter((f) => f.severity === "LOW").length,
-    volumes: spec.perVolume ? volumeEntries.length : 0,
+    volumes: assessesVolumes ? volumeEntries.length : 0,
     checked,
   };
 

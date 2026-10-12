@@ -10,8 +10,10 @@
  * a delivery command that fails left a record nobody was going to look at.
  *
  * `run` is a third scope beside `volume` and `series`: expectations resolved against the run folder
- * rather than the corpus. It is only consulted for a step that declares it, so the nine pipeline
- * steps are assessed exactly as before.
+ * rather than the corpus. It is only consulted for a step that declares it, and until 2026-10-12 only
+ * these four commands did. `extract` is now the one pipeline step that also declares it — with
+ * `perInstallment` expectations, one per volume the run processed — and the other twelve pipeline
+ * steps are still pinned to declare nothing (`test/test-delivery-audit.js`, gotcha 127).
  *
  * The `level` of an expectation here reads differently from the corpus half, and deliberately so.
  * A pipeline output is `required` because the step writes it on every path it can reach. A delivery

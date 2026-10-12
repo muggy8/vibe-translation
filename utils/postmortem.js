@@ -22,8 +22,11 @@
  *      `ON_QA_LIMIT=accept` path publishes output no grader signed off);
  *   8. a chapter the handoff listed has no draft;
  *   9. the consistency audit's own verdict is carried into the finding list;
- *   10. for a delivery command, the records it claims it wrote are in the run folder
- *       and have the shape their renderer always gives them (utils/postmortem/scope.js).
+ *   10. for a step or command that writes records into the run folder, the files it owes are there
+ *       and have the shape their renderer always gives them (utils/postmortem/scope.js) — either one
+ *       file for the whole run (`delivery-plan.md`) or one file per volume the run was asked to
+ *       process (`extraction-01.md` … `extraction-17.md`), which is what tells "the step finished and
+ *       found nothing" apart from "the step stopped after book 9".
  *       The questions about those records agreeing with EACH OTHER — a patch naming a
  *       ticket that does not exist, a lock left by a process that is gone — are asked
  *       by utils/delivery-audit.js, which sits on top of this layer rather than inside it.
@@ -39,8 +42,9 @@
  * The code lives in utils/postmortem/: rules.js (what a finding is, and what a shape means),
  * file.js (one file, one verdict), volume.js (one volume folder against what its step owed),
  * series.js (the series-root copies and the audit's verdict), scope.js (the run folder, where the
- * delivery layer's records live), run.js (the assessment itself), render.js (the report a human
- * reads). This file is the public surface, and the two shapes the delivery layer names in its JSDoc.
+ * delivery layer's records and a step's own reports live), run.js (the assessment itself), render.js
+ * (the report a human reads). This file is the public surface, and the two shapes the delivery layer
+ * names in its JSDoc.
  *
  * @module utils/postmortem
  */
@@ -94,5 +98,9 @@ module.exports = {
   readConsistencyVerdict: series.readConsistencyVerdict,
   finding: rules.finding,
   assessRunScope: scope.assessRunScope,
+  countRunExpectations: scope.countRunExpectations,
   declaresRunScope: scope.declaresRunScope,
+  declaresPerInstallmentRunScope: scope.declaresPerInstallmentRunScope,
+  runScopeTargets: scope.runScopeTargets,
+  runScopeVolumeKey: scope.runScopeVolumeKey,
 };

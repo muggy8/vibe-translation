@@ -42,8 +42,11 @@ false positives on legitimate material. Measured on the offline loop's plain-tex
 heading of its own is titled after its file), and the loop continues.
 
 What it does **not** do: it does not re-extract a warm cache, it does not repair anything it finds, it
-does not declare an artifact expectation anywhere (`test/test-delivery-audit.js` pins that no pipeline
-step declares a run scope — gotcha 127), and it is not the converter (`utils/source/extract.js` is).
+writes nothing into a volume folder, and it is not the converter (`utils/source/extract.js` is). What it
+**does** declare is its own record: `extraction-{installment}.md` / `.json` per volume plus the series
+summary pair, in the `run` scope, all four `required` — the one pipeline step the delivery layer checks
+its records against, and the only one (`test/test-delivery-audit.js` names it as the exception and pins
+the other twelve steps to declare nothing — gotcha 127).
 
 → `extract.js`, `extract/`, `utils/source/plan/01-extraction-step.md`, `docs/map-core.md`.
 

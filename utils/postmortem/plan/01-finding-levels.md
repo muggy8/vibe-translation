@@ -1,6 +1,6 @@
 # Finding levels — plan of record
 
-**Status: a plan, not a build.** Written 2026-10-12, the same day the gap it fixes was measured.
+**Status: a plan, not a build — except slice 7, which is built (2026-10-12).** Written 2026-10-12, the same day the gap it fixes was measured. Slices 1–6 are unbuilt; slice 7 (the extraction step declaring its own output, and the run-scope guard amended to name it) is in the tree and measured against the real corpus.
 
 It changes one thing: what a finding **means** to the layer that reads findings. It does not add
 checks — the checks already exist and already fire. It fixes the part where what they say is thrown
@@ -251,7 +251,7 @@ it is reported as done.
 | 4 | **The per-volume gate in the shared volume loop** (§3.2) — the thing that makes a pause possible at all. | `walkVolumes` stops after the volume that tripped the gate and exits with its own code; the stages that do not use the shared loop are named out loud rather than silently ungated. Nothing is assessed mid-chapter. |
 | 5 | The pause is executable end to end: the run halts at volume *n*, the answer is obtained, the step resumes from volume *n*. | The offline loop shows a MAJOR finding halting at volume *n* and resuming at volume *n* — not *n+1* — and the resumed pass does not pay for the volumes already accepted. |
 | 6 | The docs and the maps: `docs/delivery-layer.md`, `docs/environment.md` if any knob moves, and a gotcha for the four-blind-kinds finding. | The maps describe the routing that exists. |
-| 7 | **The extraction step declares its own output** (§10), and the run-scope guard is amended to name that one exception instead of banning all of them. | `extract` goes from declaring nothing to declaring what it always writes; the post-mortem reports a missing **per-book** report and a missing summary as findings, so a run that stopped after book 9 is distinguishable from a run that finished and found nothing; the other twelve pipeline steps are still asserted to declare nothing. Independent of slices 2–6 — it can be dispatched any time after slice 1. |
+| 7 | **The extraction step declares its own output** (§10), and the run-scope guard is amended to name that one exception instead of banning all of them. | **BUILT 2026-10-12.** `extract` declares four `required` run expectations — `extraction-{installment}.md` / `.json` per volume (the new `perInstallment` shape) plus `extraction-summary.md` / `.json` — and the post-mortem checks them after the step: measured on the real corpus, `extract post-mortem — CLEAN (0 HIGH, 0 MEDIUM, 0 LOW, 36 expectation(s) checked)` with 0 findings across 17 legitimate books. A planted missing per-book report is a HIGH `missing-required` naming that volume; a run limited to one volume expects that volume's record and not the other sixteen; the other twelve pipeline steps are still asserted to declare nothing, with `extract` named as the single exception and the reason written in the test. `test/test-extract-run-scope.js` (19 checks) is the behavioural half; gotcha 127 records the reversal. Independent of slices 2–6. |
 
 **Slice 4 is the one this plan used to skip.** Slices 2 and 3 can be built without it — they change
 what the triage *says* — but nothing before slice 4 changes what a running step *does*, and a plan
@@ -349,3 +349,16 @@ per-volume finding needs if it is ever to be routed by level instead of failing 
 reason given for the thorough version is the one that matters: `extract` writes 17 reports and a crash
 part-way through leaves some of them written and some not, and a check that only looks at the summary
 cannot tell "the step ran and found nothing" from "the step stopped after book 9".
+
+**Slice 7 is built.** `ArtifactExpectation` gained `perInstallment: true`, which expands one run
+expectation once per volume the run was asked to process (the volume list `runPostMortem` already
+filters for `--volume`, so a one-volume run is not blamed for the reports it was never asked to write),
+and each finding carries the volume whose record is missing. `extract` declares four `required`
+expectations, and the severity was checked against the writer rather than assumed: `extractOneVolume`
+writes a report pair for a volume whose archive would not open, and `extractVolumes` writes the summary
+pair before it throws, so "every path it can reach" holds on every path the assessment can run on
+(`--dry-run` writes nothing and `index/steps.js` never assesses a dry run). Measured on the real
+corpus: `extract post-mortem — CLEAN (0 HIGH, 0 MEDIUM, 0 LOW, 36 expectation(s) checked)`, 0 findings.
+`test/test-extract-run-scope.js` (19 checks) plants a missing per-book report, a missing summary, a
+stub, half-written JSON and a wrong-shape document, and asserts each is named at the right severity
+with the volume it belongs to. The guard moved as described above and gotcha 127 records both halves.

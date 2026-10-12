@@ -132,9 +132,14 @@ async function assessStep(stepName, { seriesDir, volumeArg, outDir }) {
  */
 function reportAssessment(stepName, report, outDir) {
   const { HIGH, MEDIUM, LOW } = report.counts;
+  // The count of what was actually looked at, printed beside the verdict. "CLEAN (0 HIGH, 0 MEDIUM,
+  // 0 LOW)" over a step that declared nothing and therefore checked nothing reads exactly like a
+  // step that declared a great deal and passed it all, and that reading is the whole reason a
+  // step's silence is easy to mistake for a step's success.
   console.log(
     `[index] ${stepName} post-mortem — ${report.ok ? "CLEAN" : "FINDINGS"} ` +
-      `(${HIGH} HIGH, ${MEDIUM} MEDIUM, ${LOW} LOW) — ${path.relative(projectRoot, path.join(outDir, `${stepName}.md`))}`
+      `(${HIGH} HIGH, ${MEDIUM} MEDIUM, ${LOW} LOW, ${report.counts.checked} expectation(s) checked) — ` +
+      `${path.relative(projectRoot, path.join(outDir, `${stepName}.md`))}`
   );
   if (report.error) console.log(`[index]   assessment could not run: ${report.error}`);
   for (const f of report.findings.slice(0, 12)) {

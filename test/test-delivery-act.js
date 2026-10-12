@@ -58,6 +58,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const { STEP_ARTIFACT_SPECS } = require("../utils/artifacts");
+const { runScopeVolumeKey } = require("../utils/postmortem");
 const { PIPELINE_STEPS } = require("../gulpfile");
 const resume = require("../utils/resume");
 const delivery = require("../delivery");
@@ -210,12 +211,39 @@ async function writeSeriesOutputs(seriesDir, step) {
   }
 }
 
+/**
+ * Write every file a step is declared to leave in the run's own records folder — one file for the
+ * whole run, or (with `perInstallment`) one per volume the run processed. `extract` is that step, and
+ * a "complete series" fixture that does not hold its reports is a fixture the post-mortem is right to
+ * call unfinished.
+ * @param {string} runDir
+ * @param {string} step
+ * @param {Array<{folder: string, installmentNumber: string}>} volumes
+ */
+async function writeRunOutputs(runDir, step, volumes) {
+  const spec = STEP_ARTIFACT_SPECS[step];
+  if (!spec || !spec.run || spec.run.length === 0) return 0;
+  await fs.promises.mkdir(runDir, { recursive: true });
+  let written = 0;
+  for (const e of spec.run) {
+    const names = e.perInstallment
+      ? (volumes || []).map((v) => e.name.replace("{installment}", runScopeVolumeKey(v)))
+      : [e.name];
+    for (const name of names) {
+      await fs.promises.writeFile(path.join(runDir, name), contentFor(name, e.shape), "utf8");
+      written += 1;
+    }
+  }
+  return written;
+}
+
 /** A series where every step finished what it claims to have. */
 async function completeSeries(label) {
   const fx = await fixtureSeries(label);
   for (const { name } of PIPELINE_STEPS) {
     for (const v of fx.volumes) await writeVolumeOutputs(fx.dir, v, name);
     await writeSeriesOutputs(fx.dir, name);
+    await writeRunOutputs(path.join(fx.dir, ".postmortem"), name, fx.volumes);
   }
   await fs.promises.writeFile(
     path.join(fx.dir, "translation-report.json"),

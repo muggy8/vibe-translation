@@ -18,9 +18,11 @@
  * This module is that question, written down as data. It declares, per step:
  *   - `volume`      — files the step must leave in each volume folder it ran on
  *   - `series`      — files the step must leave at the series root
- *   - `run`         — files a delivery command must leave in the folder a run remembers
+ *   - `run`         — files a step or a delivery command must leave in the folder a run remembers
  *                     itself in (`<POSTMORTEM_DIR>/`): the plan of record, the ticket
- *                     channel, the patch channel
+ *                     channel, the patch channel, and the extraction step's per-book and series
+ *                     reports. Either one file for the whole run, or — with `perInstallment` — one
+ *                     file per volume the run was asked to process.
  *   - `quarantines` — files whose PRESENCE is itself a finding (a `.rejected`
  *     file means a gate fired; the pipeline kept it as evidence, and an
  *     un-monitored run never looks at it)
@@ -70,6 +72,11 @@ require("../types"); // JSDoc type definitions
  * @property {string} [why] - One line of provenance: why this file is expected.
  * @property {function(ArtifactContext): boolean} [when] - Skip this expectation
  *   entirely when it returns false (a stage the operator turned off writes nothing).
+ * @property {boolean} [perInstallment] - Only meaningful on a `run` expectation: the step writes
+ *   ONE such file per volume this run was asked to process, and `{installment}` in the name is
+ *   replaced by that volume's report key. The finding names the volume whose record is missing.
+ *   A whole-run expectation (the delivery commands' plan / ticket / patch channels) omits it and is
+ *   resolved exactly as it always was.
  */
 
 /**
@@ -114,7 +121,8 @@ require("../types"); // JSDoc type definitions
  * @property {ArtifactExpectation[]} volume
  * @property {ArtifactExpectation[]} series
  * @property {ArtifactExpectation[]} [run] - Expectations resolved against the run folder
- *   (`POSTMORTEM_DIR`). Only the delivery commands declare it.
+ *   (`POSTMORTEM_DIR`): the delivery commands' records, and the `extract` step's own per-book and
+ *   series reports. Declaring it is a decision, not a step's own business — see gotcha 127.
  * @property {QuarantineExpectation[]} quarantines
  */
 

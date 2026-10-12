@@ -17,6 +17,11 @@
  *   `translation-target.json` as one of its outputs, so a generic seeder overwrites the fixture's
  *   committed plan with a copy that has no `discovery` block — and the triage correctly reports that
  *   there is no usable plan (gotcha 33).
+ * - **A fixture that claims a step finished holds the records that step's finished run left.** Most
+ *   steps' output is a file in a volume folder; `extract`'s is a report per volume in the run's own
+ *   records folder. `writeRunOutputs` lays both shapes out from the declaration, so a "complete
+ *   series" fixture is complete in the run folder as well as in the corpus — and the post-mortem,
+ *   which now checks `extract`'s reports, agrees.
  *
  * `integrity.basis` is ≥ 20 characters and `discovery.confidence` is an object of 0–1 numbers on
  * purpose: `validateVolumeIntegrity` and `validateDiscoveryBlock` reject anything thinner, and a
@@ -28,6 +33,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { STEP_ARTIFACT_SPECS } = require("../utils/artifacts");
+const { runScopeVolumeKey } = require("../utils/postmortem");
 const { PIPELINE_STEPS } = require("../gulpfile");
 
 /** Where the throwaway series live. Each suite passes its own label, so they cannot collide. */
@@ -176,6 +182,39 @@ async function writeSeriesOutputs(seriesDir, step) {
 }
 
 /**
+ * Write every file one step is declared to leave in the run's own records folder.
+ *
+ * Two shapes, both declared in `utils/artifacts.js`: one file for the whole run, and — with
+ * `perInstallment` — one file per volume the run processed (`extraction-01.md` … ). The key comes
+ * from `runScopeVolumeKey`, the same rule the assessment uses, so a fixture laid out from the
+ * declaration cannot disagree with the check that reads it. A fixture that claims a step finished has
+ * to hold the records a finished run of that step leaves; otherwise the post-mortem is right to say
+ * the step did not finish, and the fixture is the thing that is wrong.
+ *
+ * @param {string} runDir - The fixture's `POSTMORTEM_DIR`.
+ * @param {string} step
+ * @param {Array<{folder: string, installmentNumber: string}>} volumes - The volumes this fixture's run
+ *   processed, which is also what a `--volume` scenario passes.
+ * @returns {Promise<number>} How many records were written.
+ */
+async function writeRunOutputs(runDir, step, volumes) {
+  const spec = STEP_ARTIFACT_SPECS[step];
+  if (!spec || !spec.run || spec.run.length === 0) return 0;
+  await fs.promises.mkdir(runDir, { recursive: true });
+  let written = 0;
+  for (const e of spec.run) {
+    const names = e.perInstallment
+      ? (volumes || []).map((v) => e.name.replace("{installment}", runScopeVolumeKey(v)))
+      : [e.name];
+    for (const name of names) {
+      await fs.promises.writeFile(path.join(runDir, name), contentFor(name, e.shape), "utf8");
+      written += 1;
+    }
+  }
+  return written;
+}
+
+/**
  * Remove one step's declared outputs from one volume, so the post-mortem reports the work as missing.
  *
  * @param {string} seriesDir
@@ -220,6 +259,9 @@ async function completeSeries(label, root = FIXTURES_ROOT) {
   for (const { name } of PIPELINE_STEPS) {
     for (const v of fx.volumes) await writeVolumeOutputs(fx.dir, v, name);
     await writeSeriesOutputs(fx.dir, name);
+    // A step whose deliverable is a RECORD has to have its records here too, or the fixture claims a
+    // finished run the post-mortem correctly says never happened (`extract` is that step).
+    await writeRunOutputs(fx.ledgerDir, name, fx.volumes);
   }
   // The deliverable, so the triage and the acceptance test read the goal function rather than guess it.
   await fs.promises.writeFile(
@@ -266,6 +308,7 @@ module.exports = {
   fixtureSeries,
   writeVolumeOutputs,
   writeSeriesOutputs,
+  writeRunOutputs,
   removeStepOutputs,
   leaveGateEvidenceBesideTheGap,
   completeSeries,

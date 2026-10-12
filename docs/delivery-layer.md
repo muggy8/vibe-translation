@@ -533,6 +533,12 @@ remember, decide, or start.
    `--open` and `--status` legitimately write nothing; `required` then means "you said you wrote it and
    the disk says you did not". `autopilot` declares an empty list on purpose: it writes nothing itself,
    every move being a child command that files its own record.
+   A run expectation now comes in **two shapes**: one file for the whole run (`delivery-plan.md`), or —
+   with `perInstallment: true` — **one file per volume the run was asked to process**, `{installment}`
+   in the name replaced by that volume's report key and the finding carrying the volume it belongs to.
+   A `--volume=05` run therefore expects volume 05's record and is not blamed for the sixteen it was
+   never asked to write. The four delivery commands use only the whole-run shape, and their counts are
+   unchanged by the new one (`test/test-extract-run-scope.js` pins both halves).
 2. **Do the records agree with each other?** A file-presence check cannot ask these, which is why they
    are in `utils/delivery-audit.js` rather than in the spec table. A channel that does not parse is
    `record-unreadable` HIGH — and note the direction: `readTickets` / `readPatches` / `readLedger`
@@ -558,6 +564,24 @@ remember, decide, or start.
 **A live run lock is not a finding.** While a run is going on the lock is the gate, and the audit has
 nothing to say about it. Asked afterwards it is evidence. Reporting the lock working as a defect is
 how a check gets switched off, and the same rule keeps `--no-write`, `--open` and `--status` clean.
+
+**The one pipeline step that declares run records: `extract`.** Its deliverable is not a corpus
+artifact — it is `extraction-<NN>.md` / `.json` per volume plus `extraction-summary.md` / `.json`, all
+in the run folder, so it is the one step whose output lives exactly where the delivery commands'
+records live. It declared none of them until 2026-10-12, because `test/test-delivery-audit.js` pinned
+that no pipeline step may declare a run scope; the account owner reversed that in
+`utils/postmortem/plan/01-finding-levels.md` §10, and the guard now names `extract` as the single
+exception while still asserting the other twelve pipeline steps declare nothing (gotcha 127 records
+both halves). All four expectations are `required`, because the step writes a report for every volume
+it *attempts* — including the volume whose archive would not open, whose report says `FAILED` — and
+writes the summary before it throws. `--dry-run` is the one path that writes nothing, and the runner
+never assesses a dry run (`index/steps.js`: `runAssessment = parsed.postMortem && !dryRun`), so there
+is no path where the step exits clean and the check fires on it. Measured on the real corpus:
+`npm run pipeline -- --stages=extract` reports `CLEAN (0 HIGH, 0 MEDIUM, 0 LOW, 36 expectation(s)
+checked)` — 17 volumes × 2 records + the summary pair, zero findings across 17 legitimate books.
+Assessing `extract` now needs the plan of record (it is what says which books a report is owed for),
+which is why `runPostMortem` reads one for a step with a `perInstallment` expectation and still does
+not read one for `diagnose` or `fix`.
 
 **What it deliberately does not do.** It never changes the command's exit code and never refuses the
 command: it runs *after* the work, and by then the work is done — turning a completed run into a failed

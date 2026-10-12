@@ -16,8 +16,10 @@
  *   1. The four delivery commands are declared in utils/artifacts.js, and the declaration cannot
  *      drift from the commands `package.json` actually exposes. A command nobody declared is the gap
  *      this change exists to close.
- *   2. The nine pipeline steps declare no run scope, so the corpus half of the post-mortem is
- *      untouched by this change.
+ *   2. Twelve of the thirteen pipeline steps declare no run scope, so the corpus half of the
+ *      post-mortem is untouched by the delivery commands' run-scope audit. `extract` is the one named
+ *      exception, granted by the account owner (gotcha 127), and the exception is asserted to be
+ *      exactly one step — a second one slipping in fails here.
  *   3. A delivery command that wrote what it says it wrote reports nothing — including the paths that
  *      legitimately write nothing (`--no-write`, `--open`, `--status`).
  *   4. Every cross-record defect fires: a channel that does not parse, a patch answering a ticket that
@@ -216,14 +218,46 @@ async function scenarioCommandsAreDeclared() {
     assert.ok(exposed.includes(name), `${name} is declared as a delivery command but no npm script runs it`);
   }
 
-  // The corpus half is untouched: not one pipeline step declares a run scope, so the thirteen steps are
-  // assessed exactly as they were before this change. (`extract` is the step that most tempts an
-  // exception, because its whole output is a report — and it declares nothing, for this reason.)
+  // The corpus half is untouched, with ONE named exception. This loop was written to prove that
+  // adding the delivery commands' run-scope audit left the corpus steps assessed exactly as they
+  // were before it — a regression guard for that one change. It was never a law about who may hold a
+  // record, and on 2026-10-12 the account owner made the decision it had been left to
+  // (`utils/postmortem/plan/01-finding-levels.md` §10): the extraction step's own output is checked
+  // after its own step, because every later artifact is built on the text it audited.
+  //
+  // So the guard moved from "nobody but the delivery commands declares a run scope" to "nobody but
+  // the delivery commands AND this one named step". What it still protects is unchanged: a step
+  // cannot acquire a run scope quietly, on the way to some other goal. Adding one means editing this
+  // list, and editing this list means saying why in the sentence below and in
+  // `utils/postmortem/plan/01-finding-levels.md`. `extract` is on it because its whole deliverable is
+  // a record, and a crash part-way through a 17-volume run leaves some of those records written and
+  // some not — which a check that only looked at the summary could not tell apart from a clean run.
+  const RUN_SCOPE_EXCEPTIONS = ["extract"];
   const pipeline = Object.keys(STEP_ARTIFACT_SPECS).filter((n) => !DELIVERY_COMMANDS.includes(n));
   assert.strictEqual(pipeline.length, 13, "the thirteen pipeline steps are still the corpus half");
   for (const name of pipeline) {
+    if (RUN_SCOPE_EXCEPTIONS.includes(name)) continue;
     assert.strictEqual(STEP_ARTIFACT_SPECS[name].run, undefined, `${name} must not declare a run scope`);
   }
+  // The exception is bounded, and the bound is the point: the twelve others are still asserted to
+  // declare nothing, and a second step slipping a run scope in fails here rather than in a review.
+  const withRunScope = pipeline.filter((n) => STEP_ARTIFACT_SPECS[n].run !== undefined);
+  assert.deepStrictEqual(
+    withRunScope,
+    RUN_SCOPE_EXCEPTIONS,
+    `the only pipeline step allowed a run scope is ${RUN_SCOPE_EXCEPTIONS.join(", ")} — the rest of ` +
+      `the corpus half is assessed exactly as it was, and adding an exception is a decision recorded ` +
+      `in utils/postmortem/plan/01-finding-levels.md, not a step's own business`
+  );
+  assert.ok(
+    STEP_ARTIFACT_SPECS.extract.run.some((e) => e.perInstallment === true),
+    "extract's exception has to be the per-book half: a flat run list cannot tell \"the step ran and " +
+      "found nothing\" from \"the step stopped after book 9\", which is the reason it was granted"
+  );
+  assert.ok(
+    STEP_ARTIFACT_SPECS.extract.run.some((e) => !e.perInstallment && e.name === "extraction-summary.md"),
+    "and the series summary beside it, so a run that wrote no report at all is named too"
+  );
 }
 
 // ─── 2. A command that wrote what it says it wrote reports nothing ────────────
@@ -894,7 +928,11 @@ async function scenarioEntryPointsAreWired() {
 (async function main() {
   try {
     await scenarioCommandsAreDeclared();
-    console.log(`delivery audit: ${DELIVERY_COMMANDS.length} delivery commands declared, 12 pipeline steps untouched`);
+    console.log(
+      `delivery audit: ${DELIVERY_COMMANDS.length} delivery commands declared, ` +
+        `${Object.keys(STEP_ARTIFACT_SPECS).length - DELIVERY_COMMANDS.length - 1} pipeline steps still ` +
+        `declare no run scope, and \`extract\` is the one named exception`
+    );
 
     await scenarioCleanRun();
     console.log("delivery audit: a command that wrote what it claims reports nothing (and a rehearsal is not blamed)");
