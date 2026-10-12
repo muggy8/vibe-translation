@@ -242,6 +242,10 @@ async function scenarioShapeRules() {
     "glossary.md.rejected",
     "translation-ch1.rejected.md",
     "translation-ch1.rejected-passage.md",
+    // The pipeline writes this into every volume folder so the quarantines stay out of git while the
+    // run's memory does not (gotcha 116). Measured on the 17 real books it was the ONLY thing the
+    // stray-file check ever reported: 18 findings, 2 distinct files, 0 genuine.
+    ".gitignore",
   ]) {
     assert.ok(isKnownVolumeFile(name), `${name} is legitimate output, not a stray`);
   }

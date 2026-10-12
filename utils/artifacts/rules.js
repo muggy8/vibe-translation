@@ -110,6 +110,11 @@ const KNOWN_VOLUME_FILE_PATTERNS = [
   // reported by a step's `quarantines`, not by the unexpected-file check.
   /\.rejected$/,
   /\.rejected(-passage)?\.md$/,
+  // Every volume folder gets a pipeline-written `.gitignore` whose whole content is `*.rejected*`, so the
+  // run's memory can be committed with the books while the quarantines stay out (gotcha 116). No step
+  // declares it, and it is not a defect: measured on the 17 legitimate books it was the *only* thing the
+  // unexpected-file check ever reported — 18 findings, 2 distinct files, 0 genuine.
+  /^\.gitignore$/,
 ];
 
 /**

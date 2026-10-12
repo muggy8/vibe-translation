@@ -1,17 +1,20 @@
 /**
  * utils/postmortem/rules.js — what a finding is, and what a shape means.
  *
- * The one constructor for a finding (severity, kind, step, volume, file, message) and the
- * shape vocabulary the checks compare artifacts against. Nothing here reads a file: it is
- * the vocabulary the file checks speak in.
+ * The one constructor for a finding (severity, kind, level, step, volume, file, message) and the shape
+ * vocabulary the checks compare artifacts against. Nothing here reads a file: it is the vocabulary the
+ * file checks speak in. The level comes from ./levels.js, which is data in a closed path so the role
+ * being investigated cannot re-grade the finding it is investigated for.
  */
 
 const path = require("path");
 
 const { hasDocumentShape } = require("../fs");
 const { seriesArtifactFile } = require("../../configs/shared");
+const { FINDING_LEVELS, levelFor } = require("./levels");
 
 /** @typedef {import("../postmortem").PostMortemFinding} PostMortemFinding */
+/** @typedef {import("./levels").FindingLevel} FindingLevel */
 
 // ─── Shape rules ──────────────────────────────────────────────────────────────
 
@@ -62,6 +65,12 @@ function matchesShape(content, shape) {
 /**
  * Build one finding.
  *
+ * The level is looked up here, at the moment the finding is built, so it travels with the finding into
+ * the report, the JSON sidecar and the triage instead of being re-derived by whoever reads them
+ * (`utils/postmortem/plan/01-finding-levels.md` §6). A kind with no row in the table gets `"MINOR"` —
+ * investigated, never a halt — **and its message says so**, because a default that is invisible is how
+ * an unclassified kind ends up reported as a small one.
+ *
  * @param {"HIGH"|"MEDIUM"|"LOW"} severity
  * @param {string} kind
  * @param {string} step
@@ -71,7 +80,19 @@ function matchesShape(content, shape) {
  * @returns {PostMortemFinding}
  */
 function finding(severity, kind, step, volume, file, message) {
-  return { severity, kind, step, volume, file, message };
+  const declared = Boolean(FINDING_LEVELS[kind]);
+  const level = levelFor(kind);
+  return {
+    severity,
+    kind,
+    level,
+    step,
+    volume,
+    file,
+    message: declared
+      ? message
+      : `${message} [level undeclared for kind "${kind}" — reported at MINOR, which is the safe default and not a judgement about this finding]`,
+  };
 }
 
 /**

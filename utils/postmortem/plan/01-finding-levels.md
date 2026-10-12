@@ -286,10 +286,15 @@ vanished with no error at all.
 
 So:
 
-- **The level table is data, in a banned patch path.** `utils/postmortem/`, `utils/resume/` and
-  `utils/tickets/` are already closed to the dev team, and the level table belongs there. The dev
-  team cannot re-grade the finding it is being investigated for. This is `AGENTS.md` rule 3 with no
-  environment knob on it.
+- **The level table is data, in a banned patch path.** `utils/resume/` and `utils/tickets/` are already
+  closed to the dev team. **`utils/postmortem/` was not** — measured when slice 1 was built,
+  `BANNED_PATCH_PATHS` (`utils/patches/rules.js:100`) covered tickets / resume / delivery-verify / ledger /
+  runlock / patches / reference-store and did not name `postmortem`, so the sentence this plan originally
+  wrote here was false, and the table it asked for would have landed in a path the investigated role can
+  edit. Closed by adding `postmortem` to that pattern and `test/test-finding-levels.js` to the
+  constraint-tests pattern beside it, because a guard whose proof is editable by the role it judges is
+  decoration (gotcha 67, and gotcha 129 for the gap itself). The dev team cannot re-grade the finding it is
+  being investigated for. This is `AGENTS.md` rule 3 with no environment knob on it.
 - **A test pins the two lists against each other.** For every finding kind: the level it is declared
   at, the severity it is emitted at, and the route the triage gives it must agree. A new kind with no
   level, or a kind emitted at a severity its level contradicts, **fails `npm test`**. That test is
@@ -311,7 +316,9 @@ it is reported as done.
 
 | # | slice | what it has to prove |
 |---|---|---|
-| 1 | The level table as data, and the test that pins emitted severity against declared level. | The four blind kinds fail the test **before** any behaviour changes — the slice is proven by a red test it makes green. No routing changes yet. |
+| 1 | The level table as data, and the test that pins emitted severity against declared level. | **BUILT 2026-10-12.** `utils/postmortem/levels.js` (447 lines) declares a level and a one-line `why` for all **67** kinds — STOP 18 · MAJOR 29 · MINOR 15 · NOTE 5 — and `finding()` in `utils/postmortem/rules.js` stamps `level` onto every finding beside `severity`; an unknown kind gets MINOR **and** says `level undeclared for kind "…"` in its own message. `test/test-finding-levels.js` (342 lines, **461 checks**) enumerates the kinds from the source text and fails on any undeclared one, on a STOP kind not emitted at HIGH, on the count moving off 67, on the damage kinds the triage cannot see moving off exactly **4** (`wrong-shape`,
+`chapter-without-draft`, `accepted-without-acceptance`, `audit-verdict-missing` — the four from §1), and
+on the table or the test leaving the banned-path list. **The red test came first, as required:** run against an empty table it failed by naming 67 kinds, 29 of them from the reference store's audit. `npm test` exits 0 with every baseline unmoved — 93 requests / 18 kinds and 39 / 6, both second passes 0 calls, prompt audit 22 checks / 0 findings in both loops. **Nothing about what a run does changed:** `DAMAGE_KINDS`, `EVIDENCE_KINDS`, `utils/resume/`, `index/assess.js` and `--fail-on` are byte-identical. |
 | 2 | The triage routes on level instead of severity: `STOP` halts, `MAJOR` pauses, `MINOR` batches, `NOTE` reports. | A planted `chapter-without-draft` fixture becomes a pause and an investigation, not a note. A planted `unexpected-file` does **not** stop a run. |
 | 3 | The investigation bound: one per (kind, step, run), the answer filed on the ticket, a second occurrence reusing it. | A finding present in every volume of the fixture produces **one** model turn, and the offline loop's call count records the number. |
 | 4 | **The per-volume gate in the shared volume loop** (§3.2) — the thing that makes a pause possible at all. | `walkVolumes` stops after the volume that tripped the gate and exits with its own code; the stages that do not use the shared loop are named out loud rather than silently ungated. Nothing is assessed mid-chapter. **Scoped by §3.2's table**: the gate is for the stages that carry the previous book forward *and* pay per book, so `extract` is exempt on three independent grounds and `retranslate` / `consistency-audit` / `discover` do not use the shared loop at all. |
@@ -337,8 +344,24 @@ that reaches its final slice before noticing that has a hole in the middle of it
 | assessments a full 17-volume run makes | **10** (one per step, after it returns) | **170** (one per volume per step) — free of model calls, not free of time |
 | model calls added to the offline loops | 93 / 39 today | re-baselined and written into this plan |
 
-**Slice 1 has to produce the red test first.** If it goes green immediately, the measurement in §1 is
-wrong and this plan is wrong, and that is the cheapest possible way to find out.
+**Slice 1 produced the red test first, and it was red.** Run against an empty table it failed by naming
+all 67 kinds, 29 of them from the reference store's audit. Two of this table's rows are therefore already
+answered and two are not: **the 67 kinds now all have a declared level** (slice 1), and the offline loops'
+call counts are **confirmed unmoved** by it — 93 / 18 and 39 / 6, both second passes silent. What is still
+0 is the useful half: the triage still routes on severity, so the four blind kinds are still blind, pinned
+at exactly 4 by a test that fails if the number rises and fails if it falls without the test being edited.
+
+**Two measurements slice 1 made that this plan did not ask for and now has to answer.**
+
+- **The stray-file check cries wolf, and now that would cost something.** Assessing all 13 steps against
+  the real corpus produced 18 `unexpected-file` findings, **2 distinct files, both `.gitignore`** — the file
+  `utils/reference-store/quarantine.js` writes into every volume folder (gotcha 116) — and **0 genuine**.
+  Declared legitimate in `utils/artifacts/rules.js` and pinned in `test/test-postmortem.js`. It was free to
+  ignore while a MEDIUM was discarded; at MINOR it is an investigation somebody gets paid to run.
+- **An empty corpus is not a measurement of MAJOR inflation.** The same pass over the 17 books, which hold
+  extracted text and nothing else, produced 679 findings: **STOP 449, MINOR 229, MAJOR 1** — 449 of them
+  `missing-required` for artifacts that do not exist yet. §9.1's question ("how many MAJOR findings does a
+  real run produce?") is still unanswered, and this number does not answer it.
 
 ---
 

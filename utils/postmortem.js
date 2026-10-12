@@ -40,11 +40,11 @@
  * with them; the post-mortem's job is to be honest and cheap.
  *
  * The code lives in utils/postmortem/: rules.js (what a finding is, and what a shape means),
- * file.js (one file, one verdict), volume.js (one volume folder against what its step owed),
- * series.js (the series-root copies and the audit's verdict), scope.js (the run folder, where the
- * delivery layer's records and a step's own reports live), run.js (the assessment itself), render.js
- * (the report a human reads). This file is the public surface, and the two shapes the delivery layer
- * names in its JSDoc.
+ * levels.js (the level every finding kind is declared at — data in a closed path), file.js (one file,
+ * one verdict), volume.js (one volume folder against what its step owed), series.js (the series-root
+ * copies and the audit's verdict), scope.js (the run folder, where the delivery layer's records and a
+ * step's own reports live), run.js (the assessment itself), render.js (the report a human reads). This
+ * file is the public surface, and the two shapes the delivery layer names in its JSDoc.
  *
  * @module utils/postmortem
  */
@@ -58,6 +58,11 @@
  * @property {"HIGH"|"MEDIUM"|"LOW"} severity - HIGH: the step did not finish what it
  *   claims to have finished. MEDIUM: a gap worth reading about. LOW: worth knowing,
  *   normally fine.
+ * @property {"STOP"|"MAJOR"|"MINOR"|"NOTE"} level - How far the damage travels, declared by kind in
+ *   utils/postmortem/levels.js: STOP (the deliverable is missing or unreadable), MAJOR (every later
+ *   volume inherits it), MINOR (one file of one volume, or one record of one run), NOTE (a measurement).
+ *   A different axis from severity — `reference-evidence-does-not-verify` is HIGH and MAJOR, and
+ *   `closed-without-outcome` is HIGH and MINOR. An unknown kind gets MINOR and says so in its message.
  * @property {string} kind - The stable machine-readable class (`missing-required`,
  *   `wrong-shape`, `unexpected-file`, …). A future diagnosis agent selects on this.
  * @property {string} step - The step being assessed.
@@ -81,6 +86,7 @@
  */
 
 const rules = require("./postmortem/rules");
+const levels = require("./postmortem/levels");
 const volume = require("./postmortem/volume");
 const series = require("./postmortem/series");
 const scope = require("./postmortem/scope");
@@ -97,6 +103,10 @@ module.exports = {
   matchesShape: rules.matchesShape,
   readConsistencyVerdict: series.readConsistencyVerdict,
   finding: rules.finding,
+  LEVELS: levels.LEVELS,
+  FINDING_LEVELS: levels.FINDING_LEVELS,
+  FINDING_LEVEL_ROWS: levels.FINDING_LEVEL_ROWS,
+  levelFor: levels.levelFor,
   assessRunScope: scope.assessRunScope,
   countRunExpectations: scope.countRunExpectations,
   declaresRunScope: scope.declaresRunScope,

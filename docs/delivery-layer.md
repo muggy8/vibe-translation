@@ -51,6 +51,36 @@ everything and exits 0 — use it while the check is new and you are learning wh
 findings are real. Reports go to `<SERIES_LOCATION>/.run/postmortem/<step>.md` (for a human)
 and `<step>.json` beside it (for whatever reads them next). → `docs/environment.md`, gotcha 94.
 
+**Every finding also carries a level, and the level is a different question from the severity.**
+Severity answers *"should the run stop?"*. The level answers *"how far does the damage travel, so how
+big a fix should the investigation look for?"* — declared per finding kind in
+`utils/postmortem/levels.js`, stamped onto the finding by `finding()` in `utils/postmortem/rules.js`,
+and carried into both report halves. The four levels (`utils/postmortem/plan/01-finding-levels.md` §3):
+
+| level | what it says | the fix it expects |
+|---|---|---|
+| `STOP` | the deliverable is missing, unreadable or empty — nothing downstream can be built on it | anything; the run is already halted |
+| `MAJOR` | the deliverable exists and is usable, but it is wrong in a way **every later volume inherits** | major: a rule, a converter, a stage's code |
+| `MINOR` | wrong in one file of one volume, or in the run's own records; nothing downstream inherits it | minor: one file, one volume, a re-run |
+| `NOTE` | a measurement, or a leftover that is doing its job | none |
+
+The two axes are deliberately not the same word: `reference-evidence-does-not-verify` is HIGH **and**
+MAJOR, `closed-without-outcome` is HIGH **and** MINOR. **Nothing about what a run does has changed
+yet** — the triage still routes on severity (`utils/resume/state.js`), and routing on level is slice 2
+of that plan. An unknown kind gets `MINOR` and its message says `level undeclared for kind "…"` out
+loud, so an unclassified kind is visible rather than quietly downgraded.
+
+Two tests hold the table honest. `test/test-finding-levels.js` enumerates every finding kind the
+repository emits from the source text (67 today) and fails the suite if any of them has no declared
+level, if a `STOP` kind is not emitted at HIGH, or if the number of damage kinds the triage cannot see
+rises above the 4 it pins. `test/test-source-audit.js` pins the finding's own field list, so a finding
+that loses its level fails too. The table has no environment variable and must not get one: the level
+is what the investigated role is investigated *for*, and a grade it can switch off is not a grade.
+Both the table and that test are closed to the dev team: `utils/postmortem/` and
+`test/test-finding-levels.js` are in `BANNED_PATCH_PATHS` (`utils/patches/rules.js`), which is what the
+plan's §6 assumed was already true and measured was not — the folder was missing from the ban until the
+slice that put a guard table in it exposed the gap (gotcha 129).
+
 **One finding reads the QA loop's own channel rather than its output.** Each volume's
 rolling-state file now carries a tally: how many grades the loop asked for, and how many
 came back in a shape nothing could read. `grade-failures` is HIGH when every grade was

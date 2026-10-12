@@ -180,8 +180,8 @@ function assertFindings(auditResult, expected, label) {
   for (const f of auditResult.findings) {
     assert.deepStrictEqual(
       Object.keys(f).sort(),
-      ["file", "kind", "message", "severity", "step", "volume"],
-      `${label}: a finding must be exactly the post-mortem's own shape (severity, kind, step, volume, file, message)`
+      ["file", "kind", "level", "message", "severity", "step", "volume"],
+      `${label}: a finding must be exactly the post-mortem's own shape (severity, kind, level, step, volume, file, message)`
     );
     assert.strictEqual(f.step, EXTRACTION_STEP, `${label}: findings belong to the extract step`);
     assert.strictEqual(f.volume, "01", `${label}: a finding names the volume it is about`);
