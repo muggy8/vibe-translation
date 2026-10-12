@@ -32,6 +32,7 @@ const __chapters = require("./source/chapters");
 const __html = require("./source/html");
 const __epub = require("./source/epub");
 const __images = require("./source/images");
+const __rubyGuides = require("./source/ruby-guides");
 const __extract = require("./source/extract");
 const __bundle = require("./source/bundle");
 const __prompt_lines = require("./source/prompt-lines");
@@ -43,6 +44,7 @@ module.exports = {
   ...__html,
   ...__epub,
   ...__images,
+  ...__rubyGuides,
   ...__extract,
   ...__bundle,
   ...__prompt_lines,

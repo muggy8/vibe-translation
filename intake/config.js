@@ -105,6 +105,11 @@ const VOLUME_ARTIFACT_PATTERNS = [
   /^.*-validation.*\.md$/,
   /^.*-coverage\.(md|json)$/,
   /^.*-bundle\.meta\.json$/,
+  // The pronunciation-guide harvest written beside the bundle (utils/source/ruby-guides.js). It is
+  // a .json, so the two source scans (which accept only .epub/.txt/.md) could never pick it, but the
+  // committed-layout scan and the after-run audit ask THIS list, and an unlisted file there is a
+  // finding — the same lesson gotcha 119 learned from the audit report that got read as the novel.
+  /^.*-ruby-guides\.json$/,
   /^.*-whole\.md$/,
   /^.*-ch\d+(\.\d+)?\.md$/,
   // A plain-text book too big for one call is split into part files in the volume folder. Those are

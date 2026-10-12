@@ -32,26 +32,47 @@ const DEFAULT_CHUNK_THRESHOLD_CHARS = 120000;
 
 
 /**
- * Bundle-meta schema version. Bump this whenever the segment id/file naming
- * scheme changes, so caches written under an older scheme are re-extracted
- * (v1: interludes were globally numbered "int.K" and the epilogue "chN.5";
- * v2: interludes are "chN.K" anchored to the preceding chapter and the
- * epilogue is "chN.epilogue"; v3: epilogues are named like interludes,
- * continuing the chN.K counter after their anchor chapter; v4: segments carry
- * `bodyChars` and an `empty` flag, so a section that converted to nothing is
- * recorded as an empty chapter instead of a silent zero-length one; v5: the
- * spine is grouped by the book's own table of contents, so an inserted
- * illustration page or a chapter the packager split across two files is ONE
- * chapter, and cover / contents / notice / colophon pages are recorded as
- * packaging instead of being handed downstream as chapters; v6: every bundle
- * records its SCRIPT MIX (CJK characters vs everything else, whole volume and
- * per chapter), because a token count belongs to a (text, model) pair and the
- * pipeline may re-estimate the same book against a different model without
- * re-reading it).
+ * Bundle-meta schema version. Bump this whenever the extraction's OUTPUT changes, so caches written
+ * under an older rule are re-extracted rather than served forever: the cache key is the archive's
+ * fingerprint plus this number, and the converter's behaviour is NOT in the key. Changing how a book
+ * is converted and leaving this alone means every volume keeps serving the text already on disk and
+ * nothing changes — which is why a converter change is not finished until the version moves with it.
+ *
+ * (v1: interludes were globally numbered "int.K" and the epilogue "chN.5"; v2: interludes are
+ * "chN.K" anchored to the preceding chapter and the epilogue is "chN.epilogue"; v3: epilogues are
+ * named like interludes, continuing the chN.K counter after their anchor chapter; v4: segments carry
+ * `bodyChars` and an `empty` flag, so a section that converted to nothing is recorded as an empty
+ * chapter instead of a silent zero-length one; v5: the spine is grouped by the book's own table of
+ * contents, so an inserted illustration page or a chapter the packager split across two files is ONE
+ * chapter, and cover / contents / notice / colophon pages are recorded as packaging instead of being
+ * handed downstream as chapters; v6: every bundle records its SCRIPT MIX (CJK characters vs
+ * everything else, whole volume and per chapter), because a token count belongs to a (text, model)
+ * pair and the pipeline may re-estimate the same book against a different model without re-reading
+ * it; v7: a pronunciation guide is no longer pasted into the word it annotates — <ruby>蒲<rt>かま
+ * </rt>田<rt>た</rt></ruby> extracts as 蒲田, not 蒲かま田た — and every guide the conversion sets
+ * aside is harvested beside the bundle (`<base>-ruby-guides.json`, utils/source/ruby-guides.js).
+ * Measured on the 17 archives of the live series: 45,497 guides (45,429 of them landing in a chapter
+ * and 68 on pages the books declare as packaging), 146,352 characters, 5.6% of the series' text and
+ * 11.25% of volume 8.)
  *
  * @type {number}
  */
-const BUNDLE_SCHEMA_VERSION = 6;
+const BUNDLE_SCHEMA_VERSION = 7;
+
+/**
+ * What the CURRENT schema changed, in the sentence an operator sees when a cached bundle is thrown
+ * away because of it.
+ *
+ * It used to be hard-coded to schema 5's change ("chapters now come from the book's own contents
+ * list"), so a cache written under schema 6 was re-extracted with a message describing a rule that
+ * had been in place for two versions — an operator reading it would go looking for a chapter-count
+ * bug. One constant, named at the version that introduced it.
+ *
+ * @type {string}
+ */
+const SCHEMA_CHANGE_NOTE =
+  "pronunciation guides are now set aside instead of pasted into the words they annotate, and each " +
+  "volume's guides are harvested to <base>-ruby-guides.json";
 
 
 /**
@@ -122,6 +143,7 @@ const TEXT_PART_TARGET_CHARS = (() => {
 module.exports = {
   DEFAULT_CHUNK_THRESHOLD_CHARS,
   BUNDLE_SCHEMA_VERSION,
+  SCHEMA_CHANGE_NOTE,
   EMPTY_SEGMENT_CHARS,
   UNDECLARED_SECTION_MIN_CHARS,
   TEXT_PART_TARGET_CHARS,

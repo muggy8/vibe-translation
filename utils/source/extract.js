@@ -31,6 +31,7 @@ const { PACKAGING_CLASS_RE, PACKAGING_TITLE_RE, assignSegmentIds, classifySectio
 const { firstHeadingText, normalizeSpaces, xhtmlToMarkdown } = require("./html");
 const { normalizeZipPath, openEpub } = require("./epub");
 const { ImageRegistry } = require("./images");
+const { writeRubyGuideFile } = require("./ruby-guides");
 
 /**
  * @typedef {Object} ReadSection - One readable page of the archive, converted to Markdown.
@@ -42,6 +43,7 @@ const { ImageRegistry } = require("./images");
  * @property {number} textChars - Characters of story text (Markdown markup excluded).
  * @property {boolean} declaredInNav - Whether the book's contents list named this page.
  * @property {string} md
+ * @property {RubyGuide[]} guides - The pronunciation guides this page's conversion set aside.
  */
 
 /**
@@ -49,6 +51,7 @@ const { ImageRegistry } = require("./images");
  * @property {string} title
  * @property {string} body
  * @property {boolean} syntheticTitle - True when the title is ours rather than the book's.
+ * @property {RubyGuide[]} guides - The guides the pages in this group had set aside.
  */
 
 /**
@@ -81,6 +84,11 @@ async function readSections(opened, registry) {
     const zipPath = item.zipPath;
     const html = await zip.file(zipPath).async("string");
     const $ = cheerio.load(html);
+    // The guides this page's conversion removes, collected BY the conversion. A second walk of
+    // the same page looking for <ruby> would be a second rule about what a guide is, and the two
+    // would drift; the harvest is whatever the converter actually took out.
+    /** @type {RubyGuide[]} */
+    const guides = [];
     // The page's OWN heading, kept separate from the fallback chain: a group the contents list did
     // not name is titled from this, not from the page's <title>, which in this template is the
     // series title on every single page.
@@ -93,7 +101,7 @@ async function readSections(opened, registry) {
     // to mention.
     const declaresPackaging = PACKAGING_CLASS_RE.test(bodyClass) || PACKAGING_TITLE_RE.test(pageTitle);
     const title = navTitles.get(zipPath) || heading || pageTitle || `Section ${sections.length + 1}`;
-    const md = xhtmlToMarkdown(html, chapterImageRef(zipPath));
+    const md = xhtmlToMarkdown(html, chapterImageRef(zipPath), (guide) => guides.push(guide));
     sections.push({
       zipPath,
       title,
@@ -103,6 +111,7 @@ async function readSections(opened, registry) {
       textChars: textCharsOf(md),
       declaredInNav: navTitles.has(zipPath),
       md,
+      guides,
     });
   }
   return sections;
@@ -210,7 +219,12 @@ function groupSectionsIntoChapters(base, sections, navEntries) {
           `The book's contents list is incomplete; check it against the packaging list below.`
       );
     }
-    chapterGroups.push({ title, body, syntheticTitle: own.synthetic });
+    chapterGroups.push({
+      title,
+      body,
+      syntheticTitle: own.synthetic,
+      guides: pages.reduce((all, p) => all.concat(p.guides || []), []),
+    });
   }
 
   return { grouped, groups, chapterGroups, packaging };
@@ -250,6 +264,7 @@ function reportGrouping(base, { grouped, groups, sections, chapterGroups, packag
         title: s.title,
         body: stripRepeatedHeading(s.md, s.title),
         syntheticTitle: !s.heading,
+        guides: s.guides || [],
       }))
     );
     packaging.length = 0;
@@ -285,10 +300,14 @@ function reportGrouping(base, { grouped, groups, sections, chapterGroups, packag
  * Assign ids and write the per-chapter files (each starts with its title as an H1; a duplicate
  * leading heading in the chapter body is dropped).
  *
+ * Also returns every pronunciation guide this chapter's pages had, tagged with the chapter's id —
+ * the harvest is attributed to the chapter the reader would find the word in, which only exists
+ * after this function assigns the ids.
+ *
  * @param {string} base
  * @param {string} volumeDir
  * @param {ChapterGroup[]} chapterGroups
- * @returns {Promise<{segments: Object[], contents: string[]}>}
+ * @returns {Promise<{segments: Object[], contents: string[], guideOccurrences: RubyGuideOccurrence[]}>}
  */
 async function writeChapterFiles(base, volumeDir, chapterGroups) {
   const ids = assignSegmentIds(chapterGroups.map((c) => c.title));
@@ -296,6 +315,8 @@ async function writeChapterFiles(base, volumeDir, chapterGroups) {
   const segments = [];
   /** @type {string[]} */
   const contents = [];
+  /** @type {RubyGuideOccurrence[]} */
+  const guideOccurrences = [];
 
   for (let i = 0; i < chapterGroups.length; i++) {
     let body = chapterGroups[i].body;
@@ -334,9 +355,17 @@ async function writeChapterFiles(base, volumeDir, chapterGroups) {
       syntheticTitle: chapterGroups[i].syntheticTitle === true,
     });
     contents.push(content.trim());
+    for (const guide of chapterGroups[i].guides || []) {
+      guideOccurrences.push({
+        word: guide.base,
+        reading: guide.reading,
+        annotations: guide.annotations,
+        chapter: ids[i],
+      });
+    }
   }
 
-  return { segments, contents };
+  return { segments, contents, guideOccurrences };
 }
 
 /**
@@ -419,9 +448,22 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
   );
   reportGrouping(base, { grouped, groups, sections, chapterGroups, packaging });
 
-  const { segments, contents } = await writeChapterFiles(base, volumeDir, chapterGroups);
+  const { segments, contents, guideOccurrences } = await writeChapterFiles(base, volumeDir, chapterGroups);
   const { whole, wholeFile } = await writeWholeInstallment(base, volumeDir, contents);
   const images = await collectImages(opened, registry);
+
+  // The guides that sat on pages the book itself declared as packaging (a colophon, a notice) are
+  // not in any chapter, so they are not in the harvest. Counting them is what makes the harvest's
+  // coverage answerable instead of assumed.
+  const guidesOnPages = sections.reduce((n, s) => n + (s.guides ? s.guides.length : 0), 0);
+  const harvest = await writeRubyGuideFile({
+    volumeDir,
+    base,
+    sourceFile: path.basename(epubPath),
+    bundleSchema: BUNDLE_SCHEMA_VERSION,
+    occurrences: guideOccurrences,
+  });
+  reportRubyGuides(base, harvest, guidesOnPages, whole.length);
 
   return {
     format: "epub",
@@ -438,7 +480,50 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
     wholeChars: whole.length,
     // The whole-installment script mix (see the per-segment note above).
     scriptMix: scriptMixOf(whole),
+    // The harvest lives in its own file (see utils/source/ruby-guides.js); the meta records where
+    // it is and how big it is, so a cache hit can check the file is still there and a reader can
+    // find it without opening it.
+    rubyGuides: { file: harvest.file, ...harvest.totals, guidesOnPackagingPages: guidesOnPages - guideOccurrences.length },
   };
+}
+
+/**
+ * Say out loud what the converter took out, and where the record of it is.
+ *
+ * This is the line an operator sees when a bundle is re-extracted because the converter changed:
+ * the amount of text the previous converter pasted into the words it was supposed to keep.
+ *
+ * @param {string} base - The source base name, for the log line.
+ * @param {{file: string, totals: RubyGuideTotals}} harvest - What was written.
+ * @param {number} guidesOnPages - Guides removed across every readable page, chapters or not.
+ * @param {number} wholeChars - Characters of the whole-volume text this extraction produced.
+ * @returns {void}
+ */
+function reportRubyGuides(base, harvest, guidesOnPages, wholeChars) {
+  const t = harvest.totals;
+  if (t.guides === 0) {
+    if (guidesOnPages > 0) {
+      console.warn(
+        `[source] ${base}: ${guidesOnPages} pronunciation guide(s) were removed but NONE landed in a ` +
+          `chapter — every page that carried one was classified as packaging.`
+      );
+    }
+    return;
+  }
+  const pasted = t.guideChars + wholeChars;
+  console.log(
+    `[source] ${base}: set aside ${t.guides} pronunciation guide(s) — ${t.guideChars} character(s), ` +
+      `${((t.guideChars / pasted) * 100).toFixed(1)}% of what this book's text used to be, that the ` +
+      `previous converter pasted into the words they annotate. ${t.distinctWords} distinct word(s) ` +
+      `(${t.wordsGuidedInKatakana} guided in katakana, ${t.wordsWithMoreThanOneReading} guided more ` +
+      `than one way) harvested to ${harvest.file}.`
+  );
+  if (guidesOnPages > t.guides) {
+    console.log(
+      `[source] ${base}: ${guidesOnPages - t.guides} further guide(s) sat on pages the book declares ` +
+        `as packaging and are not in the harvest.`
+    );
+  }
 }
 
 module.exports = {

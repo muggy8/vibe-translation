@@ -79,6 +79,52 @@
  * @property {string|null} sourceFingerprint — sha256 of the source file (set by
  *   resolveSourceBundle); the skip-checks compare it against the fingerprint
  *   persisted in the last run's rolling state (isSourceStale).
+ * @property {string|null} rubyGuidesPath — epub bundles only: the file holding every pronunciation
+ *   guide this volume's extraction set aside (utils/source/ruby-guides.js). null for a plain-text
+ *   source, and for a bundle cached under a schema older than the one that harvests them.
+ * @property {{file: string, guides: number, guideChars: number, distinctWords: number, rows: number, chapters: number}|null} rubyGuides — The same harvest's totals, so a stage can report "this volume guides N words" without opening the file.
+ */
+
+// ─── Pronunciation guides (utils/source/ruby-guides.js) ─────────────────────
+
+/**
+ * @typedef {Object} RubyGuide
+ * One pronunciation guide a converter set aside, as the conversion removed it.
+ * @property {string} base        — The word the book prints, guides taken out (蒲田, 上機嫌).
+ * @property {string} reading     — The guide the author wrote for it, in document order (かまた).
+ * @property {number} annotations — How many guide parts carried it (2 for 蒲かま田た, 1 for 三色院パンジー).
+ */
+
+/**
+ * @typedef {Object} RubyGuideOccurrence
+ * One removed guide, attributed to the chapter it was found in.
+ * @property {string} word        — RubyGuide.base.
+ * @property {string} reading     — RubyGuide.reading.
+ * @property {number} annotations — RubyGuide.annotations.
+ * @property {string} chapter     — The segment id (ch1, ch5.1, …) this guide occurred in.
+ */
+
+/**
+ * @typedef {Object} RubyGuideRow
+ * One (word, reading) pair this volume used, and where it used it.
+ * @property {string} word         — The word as the book prints it.
+ * @property {string} reading      — What the author said it is read as.
+ * @property {number} count        — How many times this volume guided this word this way.
+ * @property {string[]} chapters   — The segment ids it occurred in, in reading order.
+ * @property {"katakana"|"hiragana"|"latin"|"han"|"other"} readingScript — Which writing system the reading is written in; katakana is how this series marks a reading that is not the Japanese pronunciation.
+ */
+
+/**
+ * @typedef {Object} RubyGuideTotals
+ * What one volume's harvest holds.
+ * @property {number} guides — Guides harvested into the file.
+ * @property {number} guideParts — Guide elements behind them (a word guided per character carries several).
+ * @property {number} guideChars — Characters the previous converter pasted into the running text.
+ * @property {number} distinctWords — Words this volume guided at all.
+ * @property {number} rows — (word, reading) rows in the file.
+ * @property {number} wordsWithMoreThanOneReading — Words guided two or more ways.
+ * @property {number} wordsGuidedInKatakana — Words the author overrode with a foreign reading.
+ * @property {number} chapters — Chapters the harvest covers.
  */
 
 // ─── Epub container (utils/source.js openEpub) ──────────────────────────────

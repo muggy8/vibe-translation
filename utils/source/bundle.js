@@ -16,7 +16,7 @@ const { scriptMixOf } = tokens;
 require("../../types"); // JSDoc type definitions
 
 const { chunkThresholdChars, splitPlainTextSegments } = require("./mode");
-const { BUNDLE_SCHEMA_VERSION, EMPTY_SEGMENT_CHARS, TEXT_PART_TARGET_CHARS } = require("./config");
+const { BUNDLE_SCHEMA_VERSION, SCHEMA_CHANGE_NOTE, EMPTY_SEGMENT_CHARS, TEXT_PART_TARGET_CHARS } = require("./config");
 const { isEpubPath, readJsonOrNull, sha256OfFile } = require("./epub");
 const { extractEpubToBundle } = require("./extract");
 
@@ -193,6 +193,10 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
         imagesDir: null,
         wholeChars: st.size,
         scriptMix: scriptMixOf(wholeText),
+        // A plain-text source has no markup to harvest, so the harvest doors are present and empty
+        // rather than absent: a caller must not have to know which format produced the bundle.
+        rubyGuidesPath: null,
+        rubyGuides: null,
         cacheHit: parts.every((p) => p.cacheHit),
         sourceFingerprint: fingerprint,
       };
@@ -222,6 +226,8 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
       imagesDir: null,
       wholeChars: st.size,
       scriptMix: scriptMixOf(wholeText),
+      rubyGuidesPath: null,
+      rubyGuides: null,
       cacheHit: false,
       // Content hash of the source file — the artifact skip-checks compare it
       // against the fingerprint persisted in the last run's rolling state so
@@ -255,6 +261,13 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
         if (!(await fileExists(path.join(volumeDir, seg.file)))) missing.push(seg.file);
       }
       if (!(await fileExists(path.join(volumeDir, cached.wholeFile)))) missing.push(cached.wholeFile);
+      // The guide harvest is part of the extraction, not a note about it: a bundle whose harvest
+      // file was deleted is re-extracted, the same way a bundle that lost a chapter file is.
+      // Otherwise the volume silently loses the only record of what the author said its words
+      // are read as, and every later "what does this word sound like?" question goes unanswered.
+      if (cached.rubyGuides && cached.rubyGuides.file && !(await fileExists(path.join(volumeDir, cached.rubyGuides.file)))) {
+        missing.push(cached.rubyGuides.file);
+      }
       if (missing.length === 0) {
         console.log(
           `[source] bundle for "${path.basename(originalPath)}" is up to date (cache hit) — ` +
@@ -271,7 +284,7 @@ async function resolveSourceBundle({ seriesDir, volume, volumeDir, force = false
         cached.schema === BUNDLE_SCHEMA_VERSION
           ? "source changed"
           : `schema ${cached.schema === undefined ? "1 (pre-versioning)" : cached.schema} → ${BUNDLE_SCHEMA_VERSION} ` +
-            `(chapters now come from the book's own contents list, not one per spine page)`;
+            `(${SCHEMA_CHANGE_NOTE})`;
       console.log(
         `[source] bundle for "${path.basename(originalPath)}" is stale (${reason}) — re-extracting.`
       );
@@ -343,6 +356,11 @@ function materializeBundle(meta, { originalPath, volumeDir, cacheHit }) {
     imagesDir: (meta.images || []).length > 0 ? path.join(volumeDir, "images") : null,
     wholeChars: meta.wholeChars || 0,
     scriptMix: meta.scriptMix || null,
+    // The pronunciation guides this volume's extraction set aside (utils/source/ruby-guides.js).
+    // `rubyGuidesPath` is the file to open to ask "what did the author say this word is read as";
+    // null on a plain-text source or a cache written before schema 7.
+    rubyGuidesPath: meta.rubyGuides && meta.rubyGuides.file ? path.join(volumeDir, meta.rubyGuides.file) : null,
+    rubyGuides: meta.rubyGuides || null,
     cacheHit,
     // The cache meta records the epub's sha256 (see resolveSourceBundle) —
     // the same value the artifact skip-checks compare against.

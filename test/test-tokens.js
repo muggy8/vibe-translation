@@ -332,7 +332,7 @@ const { runVolumeWithModeFallback } = require("../utils/qa-loop");
     assert.strictEqual(stricter.chunked, true, "a stricter fraction sends the same volume chunked");
     delete process.env.SOURCE_CHUNK_SAFETY_FRACTION;
 
-    assert.strictEqual(BUNDLE_SCHEMA_VERSION, 6, "schema 6 carries the script mix, so old caches re-extract");
+    assert.strictEqual(BUNDLE_SCHEMA_VERSION, 7, "schema 7 sets the pronunciation guides aside, so every cache holding the guide-split text re-extracts");
   }
 
   // ─── 7. the "did not fit in one pass" error class ──────────────────────────

@@ -6,6 +6,33 @@
  * wrapping div around many <p>, so walking only the top-level children glued every
  * paragraph into a single run-on line (gotcha 35).
  *
+ * THE PRONUNCIATION GUIDE IS NOT PART OF THE WORD. A Japanese book marks how a word is
+ * read with a guide nested inside the word's own markup:
+ *
+ *     <ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>                    the book says 蒲田, read Kamata
+ *     <ruby>上<rt>じよう</rt>機<rt>き</rt>嫌<rt>げん</rt></ruby>   the book says 上機嫌
+ *
+ * Treating <ruby> as an ordinary container kept everything inside it in order, so the
+ * extracted text read 蒲かま田た and 上じよう機き嫌げん: the word and its own pronunciation
+ * guide became one string. Measured across the 17 archives of the live series that is
+ * 45,497 annotations and 146,352 characters pasted into the running text — 5.6% of the
+ * series' text, 11.25% of volume 8 — and 74 of the 561 rows the series' final cumulative
+ * glossary publishes hold a split string of exactly this shape (虹パ彩ン寺ジ菫ー for
+ * 虹彩寺菫, 大ガ千ー本ベ槍ラ for 大千本槍).
+ * So a <ruby> renders as its BASE TEXT ONLY, in place: 蒲田, 上機嫌, 三色院菫子. Not
+ * dropped, not marked inline, not footnoted — the word alone.
+ *
+ * The guide is not dropped silently: both converters hand every guide they set aside to
+ * their `onRubyGuide` callback, and `utils/source/ruby-guides.js` harvests what those
+ * callbacks receive. The harvest is produced BY the removal, so it cannot drift from it.
+ *
+ * BOTH CONVERTERS, OR NOTHING. `xhtmlToMarkdown` builds the text the stages read and
+ * `htmlToPlainText` builds the size the intake reports a book by; if they disagree, the
+ * intake is measuring one book and the pipeline is reading another — the class of bug
+ * gotcha 119 records. The ruby rule is therefore stated once (RUBY_GUIDE_TAGS, and one
+ * base/guide split each side applies) and `test/test-source-ruby.js` pins that the two
+ * converters set aside the same guides from the same document.
+ *
  * Part of the source.js layer (split out of the original single file).
  */
 
@@ -13,38 +40,135 @@ const cheerio = require("cheerio");
 require("../../types"); // JSDoc type definitions
 
 /**
+ * The tags that hold a pronunciation guide INSIDE a <ruby>: <rt> is the guide itself,
+ * <rtc> groups guides, <rp> is the bracket punctuation a browser shows when it cannot
+ * render ruby at all. None of them is part of the word.
+ *
+ * The base side (<rb>, <rbc>) and the ruby's own text nodes ARE the word.
+ *
+ * @type {Set<string>}
+ */
+const RUBY_GUIDE_TAGS = new Set(["rt", "rtc", "rp"]);
+
+/**
+ * Collapse whitespace runs (including newlines) to single spaces.
+ *
+ * @param {string|null} text
+ * @returns {string}
+ */
+function normalizeSpaces(text) {
+  return (text || "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Split one <ruby> element into the word the book prints and the reading the author wrote.
+ *
+ * Base text is the ruby's own text nodes plus every non-guide child (a <rb>/<rbc> ruby base,
+ * or a <span> the packager wrapped around part of the word). Guide text is every <rt>/<rtc>/<rp>
+ * subtree, concatenated in document order — which is how the book intends it: 蒲 + かま,
+ * 田 + た is the word 蒲田 read かまた, not two unrelated annotations sitting beside each other.
+ *
+ * @param {import("cheerio").CheerioAPI} $ - The cheerio API for this document.
+ * @param {import("cheerio").Cheerio<Element>} rubyEl - One <ruby> element.
+ * @returns {RubyGuide} The word, the reading, and how many guide parts carried it.
+ */
+function splitRuby($, rubyEl) {
+  let base = "";
+  let reading = "";
+  let annotations = 0;
+  rubyEl.contents().each((i, node) => {
+    if (node.type === "text") {
+      base += node.data || "";
+      return;
+    }
+    if (node.type !== "tag") return;
+    const tag = (node.name || "").toLowerCase();
+    if (RUBY_GUIDE_TAGS.has(tag)) {
+      reading += $(node).text() || "";
+      annotations += 1;
+      return;
+    }
+    base += $(node).text() || "";
+  });
+  return { base: normalizeSpaces(base), reading: normalizeSpaces(reading), annotations };
+}
+
+/**
+ * Render one <ruby> as the word alone, and report the guide that was set aside.
+ *
+ * This is the whole ruby rule for the Markdown side. It recurses through the ruby's own
+ * children rather than the generic container path precisely so a guide can never be
+ * reached as an ordinary inline element.
+ *
+ * @param {import("cheerio").CheerioAPI} $ - The cheerio API for this document.
+ * @param {import("cheerio").Cheerio<Element>} rubyEl - One <ruby> element.
+ * @param {(src: string) => string} imageRef
+ * @param {(guide: RubyGuide) => void} [onRubyGuide] - Receives every guide this render removes.
+ * @returns {string} The base text (possibly empty for a malformed ruby).
+ */
+function renderRuby($, rubyEl, imageRef, onRubyGuide) {
+  const guide = splitRuby($, rubyEl);
+  if (onRubyGuide && (guide.base || guide.reading)) onRubyGuide(guide);
+  // A ruby whose base is empty is malformed markup; its guide is then the only text the
+  // page carries, and dropping it silently would lose a word. Keep it in the text.
+  return guide.base || guide.reading;
+}
+
+/**
+ * Text of an element with every pronunciation guide taken out, WITHOUT harvesting it.
+ *
+ * Used for the page's own heading: the heading is compared against the chapter title the
+ * contents list gave it (stripRepeatedHeading), and a title that kept its guides while the
+ * body dropped them would never match, so the chapter file would print its heading twice.
+ * The harvest comes from the conversion itself, so this must not report a second copy.
+ *
+ * @param {import("cheerio").CheerioAPI} $ - The cheerio API for this document.
+ * @param {import("cheerio").Cheerio<Element>} el
+ * @returns {string}
+ */
+function textWithoutGuides($, el) {
+  let out = "";
+  el.contents().each((i, node) => {
+    if (node.type === "text") {
+      out += node.data || "";
+      return;
+    }
+    if (node.type !== "tag") return;
+    if (RUBY_GUIDE_TAGS.has((node.name || "").toLowerCase())) return;
+    out += textWithoutGuides($, $(node));
+  });
+  return out;
+}
+
+/**
  * Convert an XHTML document (one epub chapter) to Markdown.
  *
  * Block mapping: h1–h6 → `#`…, p → paragraph, blockquote → `> `, ul/ol →
  * lists, pre → fenced code, table → ` | `-separated rows, hr → `---`.
  * Inline mapping: em → `*…*`, b/strong → `**…**`, del/s → `~~…~~`, a → its
- * text, br → line break, img → `imageRef(src)`. All other tags render as
- * their text. Whitespace runs collapse to single spaces (safe for Japanese
- * text, which carries no spaces).
+ * text, br → line break, img → `imageRef(src)`, ruby → its word alone.
+ * All other tags render as their text. Whitespace runs collapse to single
+ * spaces (safe for Japanese text, which carries no spaces).
  *
  * @param {string} html - The XHTML content of one chapter.
  * @param {(src: string) => string} imageRef - Maps a raw <img src> to a
  *   Markdown image reference (the caller registers the image).
+ * @param {(guide: RubyGuide) => void} [onRubyGuide] - Called once for every pronunciation
+ *   guide this conversion sets aside (the harvest: utils/source/ruby-guides.js).
  * @returns {string} The Markdown text (trimmed).
  */
-function xhtmlToMarkdown(html, imageRef) {
+function xhtmlToMarkdown(html, imageRef, onRubyGuide) {
   const $ = cheerio.load(typeof html === "string" ? html : "");
   $("script, style, head, title").remove();
   const root = $("body").length ? $("body") : $.root();
   const out = [];
   root.contents().each((i, node) => {
-    const piece = node.type === "text" ? normalizeSpaces(node.data) : renderBlock($, $(node), imageRef);
+    const piece =
+      node.type === "text" ? normalizeSpaces(node.data) : renderBlock($, $(node), imageRef, onRubyGuide);
     if (piece) out.push(piece);
   });
   return out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 }
-
-
-/** Collapse whitespace runs (including newlines) to single spaces. */
-function normalizeSpaces(text) {
-  return (text || "").replace(/\s+/g, " ").trim();
-}
-
 
 /**
  * Render one block-level element to Markdown.
@@ -52,27 +176,28 @@ function normalizeSpaces(text) {
  * @param {import("cheerio").CheerioAPI} $ - The cheerio API for this document.
  * @param {import("cheerio").Cheerio<Element>} el
  * @param {(src: string) => string} imageRef
+ * @param {(guide: RubyGuide) => void} [onRubyGuide]
  * @returns {string}
  */
-function renderBlock($, el, imageRef) {
+function renderBlock($, el, imageRef, onRubyGuide) {
   const node = el.get(0);
   if (!node || node.type === "text") return normalizeSpaces(el.text());
   const tag = (node.tagName || "").toLowerCase();
   const heading = tag.match(/^h([1-6])$/);
   if (heading) {
-    const text = inlineText($, el, imageRef);
+    const text = inlineText($, el, imageRef, onRubyGuide);
     return text ? `${"#".repeat(parseInt(heading[1], 10))} ${text}` : "";
   }
   switch (tag) {
     case "p":
     case "figure":
-      return inlineText($, el, imageRef);
+      return inlineText($, el, imageRef, onRubyGuide);
     case "br":
       return "";
     case "hr":
       return "---";
     case "blockquote": {
-      const inner = renderContainer($, el, imageRef);
+      const inner = renderContainer($, el, imageRef, onRubyGuide);
       return inner ? inner.split("\n").map((line) => (line ? `> ${line}` : ">")).join("\n") : "";
     }
     case "pre": {
@@ -83,7 +208,7 @@ function renderBlock($, el, imageRef) {
     case "ol": {
       const items = [];
       el.find("> li").each((i, li) => {
-        const t = inlineText($, $(li), imageRef);
+        const t = inlineText($, $(li), imageRef, onRubyGuide);
         if (t) items.push(`${tag === "ol" ? `${i + 1}. ` : "- "}${t}`);
       });
       return items.join("\n");
@@ -93,7 +218,7 @@ function renderBlock($, el, imageRef) {
       el.find("tr").each((i, tr) => {
         const cells = [];
         $(tr).find("> td, > th").each((j, c) => {
-          const t = inlineText($, $(c), imageRef);
+          const t = inlineText($, $(c), imageRef, onRubyGuide);
           if (t) cells.push(t);
         });
         if (cells.length) rows.push(cells.join(" | "));
@@ -104,6 +229,9 @@ function renderBlock($, el, imageRef) {
       const src = el.attr("src");
       return src ? imageRef(src) : "";
     }
+    // ruby is NOT a container: its guides are the one thing inside it that is not the text.
+    case "ruby":
+      return renderRuby($, el, imageRef, onRubyGuide);
     case "div":
     case "section":
     case "article":
@@ -113,13 +241,13 @@ function renderBlock($, el, imageRef) {
     case "center":
     case "span":
     case "font":
-    case "ruby":
-      return renderContainer($, el, imageRef);
+      return renderContainer($, el, imageRef, onRubyGuide);
     default:
-      return el.children().length > 0 ? renderContainer($, el, imageRef) : inlineText($, el, imageRef);
+      return el.children().length > 0
+        ? renderContainer($, el, imageRef, onRubyGuide)
+        : inlineText($, el, imageRef, onRubyGuide);
   }
 }
-
 
 /**
  * Render the children of a container element (recursing into blocks).
@@ -127,28 +255,31 @@ function renderBlock($, el, imageRef) {
  * @param {import("cheerio").CheerioAPI} $ - The cheerio API for this document.
  * @param {import("cheerio").Cheerio<Element>} el
  * @param {(src: string) => string} imageRef
+ * @param {(guide: RubyGuide) => void} [onRubyGuide]
  * @returns {string}
  */
-function renderContainer($, el, imageRef) {
+function renderContainer($, el, imageRef, onRubyGuide) {
   const out = [];
   el.contents().each((i, node) => {
-    const piece = node.type === "text" ? normalizeSpaces(node.data) : renderBlock($, $(node), imageRef);
+    const piece =
+      node.type === "text" ? normalizeSpaces(node.data) : renderBlock($, $(node), imageRef, onRubyGuide);
     if (piece) out.push(piece);
   });
   return out.join("\n\n");
 }
 
-
 /**
  * Render inline content of an element to Markdown text. <br> becomes a real
- * line break; all other whitespace collapses to single spaces.
+ * line break; ruby contributes its word only; all other whitespace collapses
+ * to single spaces.
  *
  * @param {import("cheerio").CheerioAPI} $ - The cheerio API for this document.
  * @param {import("cheerio").Cheerio<Element>} el
  * @param {(src: string) => string} imageRef
+ * @param {(guide: RubyGuide) => void} [onRubyGuide]
  * @returns {string}
  */
-function inlineText($, el, imageRef) {
+function inlineText($, el, imageRef, onRubyGuide) {
   const BR = "\u0000br\u0000";
   let out = "";
   el.contents().each((i, node) => {
@@ -168,33 +299,36 @@ function inlineText($, el, imageRef) {
         break;
       }
       case "em": {
-        const t = inlineText($, n, imageRef);
+        const t = inlineText($, n, imageRef, onRubyGuide);
         out += t.trim() ? `*${t}*` : t;
         break;
       }
       case "strong":
       case "b": {
-        const t = inlineText($, n, imageRef);
+        const t = inlineText($, n, imageRef, onRubyGuide);
         out += t.trim() ? `**${t}**` : t;
         break;
       }
       case "del":
       case "s": {
-        const t = inlineText($, n, imageRef);
+        const t = inlineText($, n, imageRef, onRubyGuide);
         out += t.trim() ? `~~${t}~~` : t;
         break;
       }
+      case "ruby":
+        out += renderRuby($, n, imageRef, onRubyGuide);
+        break;
       default:
-        out += inlineText($, n, imageRef);
+        out += inlineText($, n, imageRef, onRubyGuide);
         break;
     }
   });
   return out.replace(/\s+/g, " ").replace(new RegExp(BR, "g"), "\n").trim();
 }
 
-
 /**
- * The text of the first heading (h1–h6) in the document, if any.
+ * The text of the first heading (h1–h6) in the document, if any — with every
+ * pronunciation guide taken out, so a heading matches the body the converter produced.
  *
  * @param {import("cheerio").CheerioAPI} $
  * @returns {string}
@@ -203,17 +337,18 @@ function firstHeadingText($) {
   for (const tag of ["h1", "h2", "h3", "h4", "h5", "h6"]) {
     const h = $(tag).first();
     if (h.length) {
-      const t = normalizeSpaces(h.text());
+      const t = normalizeSpaces(textWithoutGuides($, h));
       if (t) return t;
     }
   }
   return "";
 }
 
-
 /**
  * Block-level tags: each one starts a new piece of text. Everything else is
  * inline and stays glued to the sentence it belongs to.
+ *
+ * ruby is deliberately NOT here: a word with a guide stays inside its sentence.
  *
  * @type {Set<string>}
  */
@@ -224,34 +359,56 @@ const PLAIN_TEXT_BLOCK_TAGS = new Set([
   "section", "table", "tbody", "td", "th", "tr", "ul",
 ]);
 
-
 /**
  * Text of a node WITHOUT crossing into a nested block element (a nested block
  * is handled by htmlToPlainText's own recursion, so it is not swallowed here).
  * <br> becomes a newline so a hard line break inside a paragraph survives.
+ * A <ruby> contributes its word only, and hands its guide to `onRubyGuide` —
+ * the same rule xhtmlToMarkdown applies, so the two converters cannot disagree.
  *
  * @param {Object|null} node - A cheerio/domhandler node.
+ * @param {(guide: RubyGuide) => void} [onRubyGuide] - Receives every guide this render removes.
  * @returns {string} The inline text.
  */
-function inlineTextOf(node) {
+function inlineTextOf(node, onRubyGuide) {
   if (!node) return "";
   if (node.type === "text") return node.data || "";
   if (node.type !== "tag") return "";
   const name = (node.name || "").toLowerCase();
   if (PLAIN_TEXT_BLOCK_TAGS.has(name)) return "";
   if (name === "br") return "\n";
-  return (node.children || []).map(inlineTextOf).join("");
+  if (name === "ruby") {
+    let base = "";
+    let reading = "";
+    let annotations = 0;
+    for (const child of node.children || []) {
+      if (child && child.type === "tag" && RUBY_GUIDE_TAGS.has((child.name || "").toLowerCase())) {
+        reading += inlineTextOf(child) || "";
+        annotations += 1;
+        continue;
+      }
+      base += inlineTextOf(child, onRubyGuide);
+    }
+    const entry = {
+      base: normalizeSpaces(base),
+      reading: normalizeSpaces(reading),
+      annotations,
+    };
+    if (onRubyGuide && (entry.base || entry.reading)) onRubyGuide(entry);
+    return entry.base || entry.reading;
+  }
+  return (node.children || []).map((child) => inlineTextOf(child, onRubyGuide)).join("");
 }
-
 
 /**
  * Collect the paragraph-shaped pieces of a document into `out`.
  *
  * @param {Object|null} node - A cheerio/domhandler node.
  * @param {string[]} out - The pieces collected so far (mutated).
+ * @param {(guide: RubyGuide) => void} [onRubyGuide] - Receives every guide this render removes.
  * @returns {void}
  */
-function collectTextPieces(node, out) {
+function collectTextPieces(node, out, onRubyGuide) {
   if (!node) return;
   if (node.type === "text") {
     const piece = normalizeSpaces(node.data);
@@ -265,7 +422,7 @@ function collectTextPieces(node, out) {
     // This block's own text (its direct text + inline children), split on any
     // hard <br> breaks...
     const own = (node.children || [])
-      .map(inlineTextOf)
+      .map((child) => inlineTextOf(child, onRubyGuide))
       .join("")
       .split("\n")
       .map(normalizeSpaces)
@@ -275,15 +432,14 @@ function collectTextPieces(node, out) {
     // blocks: the inline and text children were already folded into `own`.
     for (const child of node.children || []) {
       if (child && child.type === "tag" && PLAIN_TEXT_BLOCK_TAGS.has((child.name || "").toLowerCase())) {
-        collectTextPieces(child, out);
+        collectTextPieces(child, out, onRubyGuide);
       }
     }
     return;
   }
-  const piece = normalizeSpaces(inlineTextOf(node));
+  const piece = normalizeSpaces(inlineTextOf(node, onRubyGuide));
   if (piece) out.push(piece);
 }
-
 
 /**
  * Convert XHTML to plain text (paragraph breaks kept, no markup). Lighter
@@ -297,21 +453,26 @@ function collectTextPieces(node, out) {
  * the intake agent judges a book by.
  *
  * @param {string} html - The XHTML document.
+ * @param {(guide: RubyGuide) => void} [onRubyGuide] - Called once for every pronunciation
+ *   guide this conversion sets aside — the same rule and the same harvest as xhtmlToMarkdown.
  * @returns {string} The plain text.
  */
-function htmlToPlainText(html) {
+function htmlToPlainText(html, onRubyGuide) {
   const $ = cheerio.load(typeof html === "string" ? html : "");
   $("script, style, head, title").remove();
   const root = $("body").length ? $("body").get(0) : $.root().get(0);
   const out = [];
-  collectTextPieces(root, out);
+  collectTextPieces(root, out, onRubyGuide);
   return out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-
 module.exports = {
-  xhtmlToMarkdown,
+  RUBY_GUIDE_TAGS,
   normalizeSpaces,
+  splitRuby,
+  renderRuby,
+  textWithoutGuides,
+  xhtmlToMarkdown,
   renderBlock,
   renderContainer,
   inlineText,

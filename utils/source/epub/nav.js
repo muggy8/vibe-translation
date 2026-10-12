@@ -5,12 +5,17 @@
  * lookup table for sampling one section on its own, and `entries` is the same pairs IN DOCUMENT
  * ORDER, which is what groupSpineIntoChapters() uses to tell a chapter apart from an inserted
  * illustration page.
+ *
+ * Both views are read GUIDE-FREE (`textWithoutGuides`), because these titles are compared against
+ * the chapter text the converter produced — `stripRepeatedHeading` on one side, the chapter's own
+ * name on the other — and a title that kept a pronunciation guide while the body dropped it would
+ * match nothing.
  */
 
 const path = require("path");
 const cheerio = require("cheerio");
 
-const { normalizeSpaces } = require("../html");
+const { normalizeSpaces, textWithoutGuides } = require("../html");
 const { normalizeZipPath } = require("./basics");
 
 /**
@@ -58,7 +63,12 @@ async function loadNavStructure(zip, opfDir, manifestItems) {
         const scope = $("nav").length ? $("nav") : $.root();
         scope.find("a[href]").each((i, a) => {
           const href = $(a).attr("href");
-          const t = normalizeSpaces($(a).text());
+          // Guide-free, like the body it names: `stripRepeatedHeading` compares this title against
+          // the chapter's own converted heading, and a title that kept its pronunciation guides
+          // while the body dropped them would never match — the chapter file would print its own
+          // heading twice. (Measured: no <ruby> in any of the 17 archives' nav files, so this is
+          // the rule being stated once, not a defect seen in the wild.)
+          const t = normalizeSpaces(textWithoutGuides($, $(a)));
           if (!href || !t) return;
           const key = normalizeZipPath(
             path.posix.join(path.posix.dirname(p), stripHrefFragment(href))
@@ -90,7 +100,7 @@ async function loadNavStructure(zip, opfDir, manifestItems) {
         const $ = cheerio.load(await entry.async("string"));
         $("navPoint").each((i, el) => {
           const src = $(el).find("content").attr("src");
-          const t = normalizeSpaces($(el).find("text").text());
+          const t = normalizeSpaces(textWithoutGuides($, $(el).find("text").first()));
           if (!src || !t) return;
           const key = normalizeZipPath(path.posix.join(opfDir, stripHrefFragment(src)));
           record(key, t, { inToc: true, type: "" });

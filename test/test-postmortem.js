@@ -53,6 +53,7 @@ const os = require("os");
 
 const { TASKS } = require("../utils/hooks");
 const { declaredSteps, isKnownVolumeFile, DELIVERY_COMMANDS } = require("../utils/artifacts");
+const { isVolumeArtifact } = require("../get-translation-target");
 const runState = require("../configs/run-state");
 const {
   runPostMortem,
@@ -104,6 +105,9 @@ async function seedSeries(dir) {
     await fs.writeFile(path.join(volDir, "book.epub"), "not really an epub", "utf8");
     await fs.writeFile(path.join(volDir, "book-whole.md"), DOC, "utf8");
     await fs.writeFile(path.join(volDir, "book-bundle.meta.json"), "{}", "utf8");
+    // The pronunciation-guide harvest the extraction writes beside the bundle. It is extraction
+    // output, not step output, and the after-run audit must not call it a stray.
+    await fs.writeFile(path.join(volDir, "book-ruby-guides.json"), "{}", "utf8");
 
     await fs.writeFile(path.join(volDir, "glossary.md"), TABLE, "utf8");
     await fs.writeFile(path.join(volDir, "glossary-validation.md"), DOC, "utf8");
@@ -242,6 +246,13 @@ async function scenarioShapeRules() {
     assert.ok(isKnownVolumeFile(name), `${name} is legitimate output, not a stray`);
   }
   assert.ok(!isKnownVolumeFile("notes-from-a-previous-agent.md"));
+
+  // The pronunciation-guide harvest (utils/source/ruby-guides.js) is legitimate through the OTHER door.
+  // The stray-file check (utils/postmortem/volume.js) asks both vocabularies, and the intake's already
+  // names `<base>-ruby-guides.json`; KNOWN_VOLUME_FILE_PATTERNS holds only the names that vocabulary
+  // does not reach, so adding it there would be a second answer to one question.
+  assert.ok(isVolumeArtifact("book-ruby-guides.json"), "the harvest is pipeline output, not a stray");
+  assert.ok(!isKnownVolumeFile("book-ruby-guides.json"), "and it is the intake's vocabulary that says so");
 }
 
 // ─── 3. A healthy step reports nothing ────────────────────────────────────────
