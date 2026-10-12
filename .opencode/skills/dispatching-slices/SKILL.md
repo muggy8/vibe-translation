@@ -14,10 +14,21 @@ One slice per dispatch. If you find yourself writing "and also", that is two dis
 
 **One dispatch in flight at a time.** Wait for it to return, verify it, commit it, then start
 the next. Never run two workers side by side — not two investigators, and not a builder
-together with a verifier. Every measurement you take afterwards describes the repository at
-the instant it runs; a worker writing while another one measures gives you a reading of a state
-that never existed, and you will end up reporting it as fact. Dispatch → wait → verify →
-commit → dispatch.
+together with a verifier — and never dispatch a worker while a pipeline run is making model
+calls.
+
+The reason is the inference server: the model behind OpenCode on this machine answers one
+request at a time. Measured here, two 400-token generations in sequence took 3,134 ms and
+2,224 ms; fired together they returned at 2,202 ms and 4,404 ms — the second took exactly twice
+as long, which is a queue. Concurrency buys nothing here and lengthens every wait, which is
+what trips idle deadlines and stage timeouts. Worker sessions, verifiers and the pipeline's own
+stage calls all share that single slot.
+
+The second reason: every measurement you take afterwards describes the repository at the instant
+it runs; a worker writing while another one measures gives you a reading of a state that never
+existed, and you will end up reporting it as fact.
+
+Dispatch → wait → verify → commit → dispatch.
 
 ## Scope the slice before you write it
 

@@ -31,12 +31,20 @@ were unchanged, and the book sizes were invented. Both were caught by someone ru
 4. Get the test suite green before you move on. Do not stack work on a red tree.
 5. Do not weaken a guard, the severity ladder, or the banned-patch-path table. Do not add an
    environment knob to a check — a check you can switch off is not a check.
-6. Tests use fixtures. No test may read the real 17 volumes or any file under the series
+6. **The inference server on this machine answers one request at a time.** That is measured, not
+   assumed: two 400-token generations fired at the same instant came back at 2,202 ms and
+   4,404 ms — the second took exactly twice as long, which is a queue. So do not introduce
+   concurrent model calls into a stage, do not raise `STAGE_CONCURRENCY` above 1, and do not
+   parallelise anything that reaches the endpoint; it lengthens every wait and is how a stage
+   starts tripping idle deadlines and timeouts. If a slice genuinely needs parallel inference,
+   measure the endpoint first and say what you found. The same slot is shared with whatever else
+   is calling the model, including the operator's own tooling.
+7. Tests use fixtures. No test may read the real 17 volumes or any file under the series
    folder.
-7. JSDoc on every function, using the names from `types.js`. CommonJS. No new dependency.
-8. Update the docs you made untrue: the map docs, `AGENTS.md` if a command or setting changed,
+8. JSDoc on every function, using the names from `types.js`. CommonJS. No new dependency.
+9. Update the docs you made untrue: the map docs, `AGENTS.md` if a command or setting changed,
    the plan of record if a slice landed. A gotcha only if you genuinely learned one.
-9. Commit nothing.
+10. Commit nothing.
 
 ## If the slice touches the books
 

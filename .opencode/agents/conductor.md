@@ -48,14 +48,27 @@ and never launch a checker while a builder is still writing.
 This is a hard rule, including for the tempting cases: two read-only investigators, or one
 builder plus one verifier. Run them one after another.
 
-The reason is that everything you rely on afterwards is a measurement of a single tree.
-`git status`, `npm test`, a database query, a checksum — each one describes the repository at
-the instant it runs. If a worker is mid-write while another one measures, the measurement
-describes a state that never really existed, and you will report it as fact. Two builders can
-also reach the same file, and neither knows it.
+**The reason is the inference server, not tidiness.** The model that powers OpenCode on this
+machine (`http://localhost:9200/v1`) answers **one request at a time**. Measured here: two
+400-token generations run one after another took 3,134 ms and 2,224 ms; the same two fired at
+the same instant came back at 2,202 ms and 4,404 ms — the second took exactly twice as long,
+which is the signature of a queue, not of parallel work. Nothing is gained by running two
+things at once; they just wait for each other, and a long wait is what trips the pipeline's
+idle deadline and its timeouts.
+
+That single slot is shared. A worker session thinking, a `verifier` running `npm test`, and
+the pipeline's own stage calls are all customers of the same queue. So: never run a worker
+while a pipeline run is making calls, and never run two workers. The pipeline already assumes
+this — `STAGE_CONCURRENCY` defaults to 1 for exactly this reason — and a worker session is the
+one place that assumption can be broken from outside.
+
+The second reason still holds: every check you take afterwards describes the repository at the
+instant it runs. If a worker is mid-write while another one measures, the measurement describes
+a state that never really existed, and you will report it as fact. Two builders can also reach
+the same file, and neither knows it.
 
 So the sequence is always: dispatch → wait → verify → commit → dispatch the next. Slower in
-wall-clock terms, and worth it: a wrong measurement here costs a decision, not a rerun.
+wall-clock terms, and worth it on both counts.
 
 ## Before you dispatch
 

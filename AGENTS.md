@@ -223,10 +223,24 @@ Three rules in it are load-bearing, and they are here because they were learned 
    before the dispatch for everything that was promised to survive. Nothing is committed on a
    report's word, and a claim that does not match the disk is reported to the account owner
    that plainly rather than patched over.
-3. **One worker at a time — never two in flight.** If two or more slices are needed, finish
-   one (dispatch, verify, commit) before starting the next. This includes the tempting cases:
-   two read-only investigators, or a builder plus a checker running together. Every check that
-   comes afterwards — `git status`, `npm test`, a database query, a checksum — describes the
-   repository at the instant it runs, so a worker writing while another one measures produces a
-   reading of a state that never existed, and that reading gets reported as fact. The sequence
-   is dispatch → wait → verify → commit → dispatch.
+3. **One worker at a time — never two in flight, and never a worker alongside a run.** If two
+   or more slices are needed, finish one (dispatch, verify, commit) before starting the next.
+   This includes the tempting cases: two read-only investigators, or a builder plus a checker.
+
+   **The reason is the inference server.** The model that powers OpenCode on this machine
+   (`http://localhost:9200/v1`) answers **one request at a time**. Measured: two 400-token
+   generations run in sequence took 3,134 ms and 2,224 ms; fired at the same instant they came
+   back at 2,202 ms and 4,404 ms — the second took exactly twice as long, which is a queue, not
+   parallelism. Running things concurrently buys nothing and lengthens every wait, which is what
+   trips the harness's idle deadline and the stage timeouts. That one slot is shared by the
+   worker sessions, a verifier running `npm test`, and the pipeline's own stage calls — so a
+   worker is the one way to break the assumption from outside. `STAGE_CONCURRENCY` already
+   defaults to 1 for this reason (docs/environment.md); **do not raise it, and do not write
+   concurrent model calls into a stage, unless the endpoint genuinely serves parallel requests
+   and that has been measured.**
+
+   The second reason: every check that follows describes the repository at the instant it runs
+   — `git status`, `npm test`, a database query, a checksum — so a worker writing while another
+   one measures produces a reading of a state that never existed, and it gets reported as fact.
+
+   The sequence is dispatch → wait → verify → commit → dispatch.
