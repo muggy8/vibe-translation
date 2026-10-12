@@ -792,6 +792,57 @@ async function scenarioAnOlderPartialIsReReadRatherThanTrusted() {
 
 
 /**
+ * A chapter that cost two paid reads is still named in the report on the pass that follows — the pass
+ * that paid for nothing.
+ *
+ * The report is one of the three files the acceptance grader is handed. Its old trigger was "this pass
+ * paid for a re-read", so the moment a volume was re-run after its chapters had already been read, every
+ * chapter was reused, `paidReads` was 0 for all of them, and the block disappeared. Measured on the real
+ * volume 02 on 2026-10-12: after its two cut-off chapters were re-read and the stage ran again, the
+ * grader was shown a reference whose most expensive chapters had each taken two reads, with nothing in its
+ * materials saying so. The trigger is now the paid reads **recorded on the chapter**, whoever paid for them.
+ *
+ * @returns {Promise<void>}
+ */
+async function scenarioAChapterThatTookTwoReadsIsStillNamedOnTheNextPass() {
+  const series = fixtureReadingSeries("reading-report-after-resume");
+  await sealVolumeOne(series);
+  const bundle = await bundleOf(series, 1);
+  const target = bundle.segments[1].id;
+  stubHarness(series.calls, { cutOffChapter: target });
+
+  const first = await readVolume(series);
+  assert.ok(first.ok);
+  const paidFirst = series.calls.length;
+  assert.strictEqual(paidFirst, bundle.segments.length + 1, `one chapter took two paid reads and the rest one: ${paidFirst}`);
+
+  const reportFile = path.join(series.volumes[1].dir, "character-voice-reading.md");
+  const firstReport = fs.readFileSync(reportFile, "utf8");
+  assert.ok(firstReport.includes("came back whole"), "the re-read closed the array, so nothing is left incomplete");
+
+  const again = await readVolume(series);
+  assert.ok(again.ok);
+  assert.strictEqual(series.calls.length, paidFirst, "the second pass makes no call at all");
+  assert.strictEqual(again.incompleteChapters.length, 0, JSON.stringify(again.chapters));
+  assert.ok(again.chapters.every((c) => c.reused), "every chapter is reused");
+
+  const secondReport = fs.readFileSync(reportFile, "utf8");
+  assert.ok(secondReport.includes(target), `the report still names the chapter that cost two reads: ${secondReport}`);
+  assert.ok(secondReport.includes("paid for in an earlier pass"), `and it says who paid for them: ${secondReport}`);
+  assert.ok(secondReport.includes("(cut off)"), "and the read that never closed is still visible");
+
+  // The other half: a volume whose every chapter closed on its first read has nothing to say.
+  const quiet = ev.readingReport(
+    [{ id: "ch1", claims: 3, reused: true, paidReads: 0, attempts: [{ thinkingLevel: null, claims: 3, cutOff: false }] }],
+    { volume: 2 }
+  );
+  assert.strictEqual(quiet, "", "a clean reading history produces no block");
+
+  console.log("extract-voice: a chapter that took two reads stays in the report after the volume is re-run for free");
+}
+
+
+/**
  * The command is reachable only by typing it: nothing in the pipeline requires it, and importing it
  * does not start a run.
  */
@@ -826,6 +877,7 @@ function scenarioItIsNotPartOfARun() {
   await scenarioAChapterStillCutOffIsNamedNotHidden();
   await scenarioOneChapterCanBeReReadByName();
   await scenarioAnOlderPartialIsReReadRatherThanTrusted();
+  await scenarioAChapterThatTookTwoReadsIsStillNamedOnTheNextPass();
   scenarioItIsNotPartOfARun();
   console.log("\nextract-voice: all scenarios passed");
 })().catch((err) => {

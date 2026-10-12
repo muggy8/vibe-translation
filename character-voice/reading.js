@@ -30,7 +30,10 @@
  * whatever level the run is using; a cut-off answer is retried at this one because that is the level
  * the measurement showed completes the answer on the chapters that failed. It is not a guard being
  * loosened — it is a second attempt at a different setting, recorded in the partial next to the first
- * attempt's, so the volume's own record says which level produced what.
+ * attempt's, so the volume's own record says which level produced what. **When the run's own level already
+ * equals this one the retry is a same-level re-sample, not a lower-reasoning retry** — measured on
+ * 2026-10-12 with `AI_THINKING_LEVEL=medium`, and the re-sample still closed both cut-off chapters, so what
+ * fixed them was a second roll rather than the lower level (AGENTS.md gotcha 122).
  *
  * ## What is bounded
  *
@@ -553,9 +556,18 @@ async function readVolumeChapters({ ctx, segments, volumeDir, installmentNumber,
  * including the grader, whose message list includes it. This is where "volume 02's chapters 4 and 5
  * were thin" stops being something only the run log knows.
  *
+ * **It reports the chapter's whole reading history, not just this pass.** A partial carries every paid
+ * read it took, and a re-run reuses the partial and pays for nothing — so a report triggered only by what
+ * *this* pass paid for goes quiet exactly when the volume is re-run after the damage was already paid for.
+ * Measured on the real volume 02 on 2026-10-12: after its two cut-off chapters were re-read and the stage
+ * ran again, every chapter was reused, `paidReads` was 0 for all seven, and the block vanished from
+ * `character-voice-validation.md` — the grader was shown a reference whose most expensive chapters had
+ * each taken two reads, with nothing in its materials saying so. The trigger is therefore the number of
+ * paid reads **recorded on the chapter**, whoever paid for them.
+ *
  * @param {Array<{id: string, entries?: Array<Object>, claims?: number, reused?: boolean, paidReads?: number, incomplete?: boolean, cutOff?: boolean, attempts?: Array<Object>}>} chapters
  * @param {{volume: string|number}} opts
- * @returns {string} A markdown block, or "" when every chapter was read complete and none was reused from a cut-off partial.
+ * @returns {string} A markdown block, or "" when every chapter came back whole on its first paid read.
  */
 function readingReport(chapters, { volume }) {
   const rows = chapters.map((chapter) => {
@@ -567,24 +579,27 @@ function readingReport(chapters, { volume }) {
       claims,
       reused: Boolean(chapter.reused),
       paidReads: chapter.paidReads === undefined ? attempts.length : chapter.paidReads,
+      // What the chapter cost in total, across every pass that touched it. A reused partial carries the
+      // attempts of the pass that paid for them, and that is the number the report has to answer with.
+      reads: attempts.length,
       incomplete: Boolean(chapter.incomplete || chapter.cutOff),
       levels: levels || (chapter.reused ? "reused from a complete partial" : "—"),
     };
   });
   const incomplete = rows.filter((r) => r.incomplete);
-  const retried = rows.filter((r) => r.paidReads > 1);
+  const retried = rows.filter((r) => r.reads > 1);
   if (!incomplete.length && !retried.length) return "";
 
   const out = [
     "## How this volume was read",
     "",
-    `_Every chapter of this volume was read on its own. A chapter whose answer never reached its closing bracket was cut off — half an answer, with the rest unwritten — and was re-read once at a lower reasoning level. ${incomplete.length ? "The chapters still cut off after both paid reads are named below." : "No chapter was still cut off after its re-read."}_`,
+    `_Every chapter of this volume was read on its own. A chapter whose answer never reached its closing bracket was cut off — half an answer, with the rest unwritten — and was re-read once at the retry level named in its row below. ${incomplete.length ? "The chapters still cut off after both paid reads are named below." : "No chapter was still cut off after its re-read."}_`,
     "",
     "| chapter | claims kept | paid reads | how it was read |",
     "| --- | --- | --- | --- |",
   ];
   for (const row of rows) {
-    out.push(`| ${row.id} | ${row.claims} | ${row.paidReads}${row.reused ? " (reused)" : ""} | ${row.levels}${row.incomplete ? " — **INCOMPLETE**" : ""} |`);
+    out.push(`| ${row.id} | ${row.claims} | ${row.reads}${row.reused ? " (reused — paid for in an earlier pass)" : ""} | ${row.levels}${row.incomplete ? " — **INCOMPLETE**" : ""} |`);
   }
   out.push("");
   if (incomplete.length) {

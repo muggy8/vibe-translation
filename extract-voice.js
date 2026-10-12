@@ -43,7 +43,9 @@
  *     still refuses the pass — a notebook with a hole in it is not a notebook.
  *   - **A cut-off chapter is detected, named, and re-read.** An answer whose array never reached its
  *     closing bracket is half an answer, and the pass does not accept it at 6 claims. It is retried
- *     once at a lower reasoning level and the better answer wins; a chapter still cut off after both
+ *     once at the retry level and the better answer wins **within that pass** — a chapter re-read by name
+ *     replaces the answer the earlier pass stored, whatever that answer held (gotcha 122); a chapter still
+ *     cut off after both
  *     paid reads is kept and printed as INCOMPLETE, and named in the report the grader reads. Measured
  *     on volume 02: three of seven chapters came back cut off, and two of them yielded 6 and 1 claims
  *     for chapters of 33.5k and 35.5k characters.
@@ -257,11 +259,16 @@ async function runExtractPass({ seriesDir, volumeArg, dryRun = false, force = fa
     }
 
     const carried = attempt.opened.carried;
+    const topped = attempt.opened.toppedUp;
     if (carried) {
       const counts = carried.provenance.copiedRows;
       log(`  record:  carried forward from volume ${previousInstallmentNumber} (${counts.facts} facts, ${counts.cast} characters)`);
-    } else if (attempt.opened.toppedUp && attempt.opened.toppedUp.total > 0) {
-      log(`  record:  topped up from volume ${previousInstallmentNumber} (${attempt.opened.toppedUp.total} row(s) this record was missing)`);
+    } else if (topped && topped.reattached) {
+      log(`  record:  this volume had been reopened, so its record arrived empty — volume ${previousInstallmentNumber}'s ${topped.total} row(s) were attached and the copy stamped`);
+    } else if (topped && topped.total > 0) {
+      log(`  record:  topped up from volume ${previousInstallmentNumber} (${topped.total} row(s) this record was missing)`);
+    } else if (topped && topped.skipped && topped.reason && !/has not changed/.test(topped.reason)) {
+      log(`  record:  NOT topped up from volume ${previousInstallmentNumber} — ${topped.reason}`);
     }
     const backfill = attempt.opened.glossaryBackfill;
     if (backfill && backfill.ran) {

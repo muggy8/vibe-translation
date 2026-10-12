@@ -49,6 +49,49 @@ function sha256OfFile(file) {
 }
 
 /**
+ * Row counts of every counted table, from a handle already open on a record.
+ *
+ * @param {Object} db - An open database handle.
+ * @returns {Object<string, number>} Table name → row count.
+ */
+function countsFromHandle(db) {
+  /** @type {Object<string, number>} */
+  const counts = {};
+  for (const table of COUNTED_TABLES) {
+    try {
+      counts[table] = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+    } catch {
+      counts[table] = 0;
+    }
+  }
+  return counts;
+}
+
+/**
+ * Row counts of every counted table, from a record on disk that no handle is held on.
+ *
+ * @param {string} file
+ * @returns {Object<string, number>} Table name → row count.
+ */
+function countsFromFile(file) {
+  let db = null;
+  try {
+    db = openDatabase(file, { readOnly: true });
+    return countsFromHandle(db);
+  } catch {
+    return {};
+  } finally {
+    if (db) {
+      try {
+        db.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+/**
  * Copy volume `fromVolume`'s reference store into `toVolume`'s folder, guarded.
  *
  * @param {Object} opts
@@ -409,6 +452,24 @@ function readCopyProvenance(ctx) {
  * which is the same rule `copyForwardStore` enforces by refusing to copy over a volume that already
  * has one.
  *
+ * ## The one destination with no provenance row this door accepts
+ *
+ * A top-up normally needs the destination's `copy_provenance` row: it is what says which record this
+ * file was made from, and without it the door cannot know whose rows to attach. A record the reopen
+ * door produced has no such row — `carryReopenHistory` builds the fresh record as an empty shell holding
+ * only the reopen history — and that is the shape that silently stranded the real volume 02 on
+ * 2026-10-12: `openVolumeRecord` skipped the copy-forward (a record exists), the top-up skipped (no
+ * provenance), nothing printed, and the volume was about to be re-derived carrying **none** of volume 1's
+ * 574 rows. Measured on a fixture before it was fixed: the fresh record is `facts 0, cast 0,
+ * copy_provenance 0, record_reopens 1`, and `openVolumeRecord` leaves it exactly that way.
+ *
+ * So the door now recognises that shape instead of skipping it: **no provenance row, and at least one
+ * `record_reopens` row for this volume** — a combination only `reopenVolumeRecord` writes. That record is
+ * a reopened one, its source is the volume before it, and its rows are attached and stamped the way a
+ * top-up stamps any other copy. Every other destination with no provenance row still gets the old
+ * refusal, because "I do not know where this record came from" is not a licence to pour another
+ * volume's claims into it.
+ *
  * @param {Object} opts
  * @param {number|string} opts.fromVolume
  * @param {number|string} opts.toVolume
@@ -416,7 +477,7 @@ function readCopyProvenance(ctx) {
  * @param {string} [opts.fromFolder]
  * @param {string} [opts.toFolder]
  * @param {string} [opts.step]
- * @returns {{ok: boolean, skipped: boolean, reason: string|null, copied: Object<string, number>, total: number, refusal: ReferenceRefusal|null, findings: PostMortemFinding[]}}
+ * @returns {{ok: boolean, skipped: boolean, reason: string|null, reattached: boolean, copied: Object<string, number>, total: number, refusal: ReferenceRefusal|null, findings: PostMortemFinding[]}}
  */
 function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFolder, step = INTEGRITY_STEP } = {}) {
   const volKey = String(toVolume);
@@ -424,7 +485,7 @@ function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFold
    * The one shape every outcome that is not a top-up returns.
    * @param {string} reason
    */
-  const nothing = (reason) => ({ ok: true, skipped: true, reason, copied: {}, total: 0, refusal: null, findings: [] });
+  const nothing = (reason) => ({ ok: true, skipped: true, reason, reattached: false, copied: {}, total: 0, refusal: null, findings: [] });
 
   let sourcePath;
   let destPath;
@@ -436,6 +497,7 @@ function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFold
       ok: false,
       skipped: true,
       reason: null,
+      reattached: false,
       copied: {},
       total: 0,
       refusal: refusal({
@@ -453,11 +515,19 @@ function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFold
   const sourceSha256 = sha256OfFile(sourcePath.file);
   const dest = openDatabase(destPath.file);
   const provenance = dest.prepare("SELECT * FROM copy_provenance WHERE volume = ?").get(Number(toVolume));
-  if (!provenance || Number(provenance.source_volume) !== Number(fromVolume)) {
+  /**
+   * A destination with no provenance row is normally a record this door has no business touching. The
+   * one exception is a record the reopen door just produced: it holds a `record_reopens` row for its own
+   * volume and nothing else, because `carryReopenHistory` builds the fresh record as an empty shell. Left
+   * as a skip, that record is re-derived with none of the earlier volumes' claims in it, and nothing says
+   * so. See this function's header for the measurement.
+   */
+  const reattached = !provenance && countReopenRows(dest, Number(toVolume)) > 0;
+  if (!reattached && (!provenance || Number(provenance.source_volume) !== Number(fromVolume))) {
     dest.close();
     return nothing(`volume ${toVolume}'s record was not copied from volume ${fromVolume}`);
   }
-  if (provenance.source_sha256 === sourceSha256) {
+  if (provenance && provenance.source_sha256 === sourceSha256) {
     dest.close();
     return nothing("the source record has not changed since this copy was made");
   }
@@ -479,6 +549,7 @@ function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFold
       ok: false,
       skipped: true,
       reason: null,
+      reattached: false,
       copied: {},
       total: 0,
       refusal: refusal({
@@ -512,15 +583,40 @@ function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFold
     // `COUNTED_TABLES`, so the rows just arrived in this file. Without this, a record legitimately topped
     // up after its source was reopened would stay marked stale forever.
     const sourceReopens = countReopenRows(dest, Number(fromVolume));
-    dest
-      .prepare("UPDATE copy_provenance SET source_sha256 = ?, source_reopens = ?, copied_at = ? WHERE volume = ?")
-      .run(sourceSha256, sourceReopens, new Date().toISOString(), Number(toVolume));
+    const copiedAt = new Date().toISOString();
+    if (provenance) {
+      dest
+        .prepare("UPDATE copy_provenance SET source_sha256 = ?, source_reopens = ?, copied_at = ? WHERE volume = ?")
+        .run(sourceSha256, sourceReopens, copiedAt, Number(toVolume));
+    } else {
+      // The reopened shell has no provenance row to update, and without one it would look stale to the
+      // next door that asks (`recordIsStale` reads the reopen history the rows above just brought in, but
+      // it needs the provenance row to know which volume to ask about at all). So the attach is recorded.
+      dest
+        .prepare(
+          "INSERT INTO copy_provenance (volume, source_volume, source_file, source_sha256, source_rows, source_reopens, copied_rows, copied_at, ok, note) " +
+            "VALUES (?,?,?,?,?,?,?,?,?,?)"
+        )
+        .run(
+          Number(toVolume),
+          Number(fromVolume),
+          sourcePath.file,
+          sourceSha256,
+          JSON.stringify(countsFromFile(sourcePath.file)),
+          sourceReopens,
+          JSON.stringify(countsFromHandle(dest)),
+          copiedAt,
+          1,
+          `volume ${toVolume}'s record was reopened and its source's rows were attached by the top-up door`
+        );
+    }
   } catch (err) {
     dest.close();
     return {
       ok: false,
       skipped: true,
       reason: null,
+      reattached,
       copied,
       total,
       refusal: refusal({
@@ -543,7 +639,29 @@ function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFold
   }
   dest.close();
 
-  return { ok: true, skipped: false, reason: null, copied, total, refusal: null, findings: [] };
+  return {
+    ok: true,
+    skipped: false,
+    reason: null,
+    reattached,
+    copied,
+    total,
+    refusal: null,
+    findings: reattached
+      ? [
+          finding(
+            "MEDIUM",
+            "reference-record-reattached-to-its-source",
+            step,
+            volKey,
+            `${destPath.folder}/series.db`,
+            `volume ${toVolume}'s record had been reopened and arrived with no provenance row, so volume ${fromVolume}'s ` +
+              `${total} row(s) were attached and the copy was stamped. A reopened volume is not a fresh series: ` +
+              "its earlier volumes' claims have to arrive again, or the reference this volume publishes is smaller than the one it replaced."
+          ),
+        ]
+      : [],
+  };
 }
 
 module.exports = { copyForwardStore, topUpVolumeRecord, readCopyProvenance, sha256OfFile };

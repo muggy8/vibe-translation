@@ -61,7 +61,21 @@ function openVoiceRecord(ctx, previousVolume) {
     bundleSegments: ctx.bundle && ctx.bundle.segments ? ctx.bundle.segments : null,
   });
   if (opened.ok) {
-    if (opened.toppedUp && !opened.toppedUp.skipped && opened.toppedUp.total > 0) {
+    if (opened.toppedUp && opened.toppedUp.reattached) {
+      console.log(
+        `Volume ${ctx.values.INSTALLMENT_NUMBER}: this volume's record had been reopened, and a reopened record arrives with no ` +
+          `copy of volume ${previousVolume} in it. The top-up door attached volume ${previousVolume}'s ${opened.toppedUp.total} row(s) ` +
+          "and stamped the copy. Without that, this volume would have been re-derived with none of the earlier volumes' claims — " +
+          "a reference smaller than the one it replaces."
+      );
+    }
+    if (opened.toppedUp && opened.toppedUp.skipped && opened.toppedUp.reason && !/has not changed/.test(opened.toppedUp.reason)) {
+      console.log(
+        `Volume ${ctx.values.INSTALLMENT_NUMBER}: the reference record was NOT topped up from volume ${previousVolume} ` +
+          `(${opened.toppedUp.reason}). Whatever volume ${previousVolume} has published since this record was made is not in it.`
+      );
+    }
+    if (opened.toppedUp && !opened.toppedUp.skipped && !opened.toppedUp.reattached && opened.toppedUp.total > 0) {
       console.log(
         `Volume ${ctx.values.INSTALLMENT_NUMBER}: reference record topped up from volume ${previousVolume} ` +
           `(${opened.toppedUp.total} row(s) this record was missing — the copy was made before that volume's ` +

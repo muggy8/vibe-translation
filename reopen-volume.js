@@ -191,8 +191,16 @@ async function main({ args, seriesDir, log = console.log }) {
   log(`\n  what happens next:`);
   log(`    - the artifacts in these folders are untouched. The door that replaces them moves each one`);
   log(`      aside as it writes its own, and keeps every earlier rejection.`);
-  log(`    - running volume ${volume} now builds its record from the beginning: no copy-forward (it is`);
-  log(`      the first volume), its own published glossary re-imported, its chapters re-read.`);
+  if (volume === 1) {
+    log(`    - running volume ${volume} now builds its record from the beginning: no copy-forward (it is`);
+    log(`      the first volume), its own published glossary re-imported, its chapters re-read.`);
+  } else {
+    log(`    - running volume ${volume} now re-derives its record: the fresh file arrives holding only the`);
+    log(`      reopen history, so the door that opens it attaches volume ${volume - 1}'s sealed rows again and`);
+    log(`      stamps the copy, then re-imports this volume's glossary and re-reads its chapters.`);
+    log(`      A reopened volume is NOT a fresh series — without that attach the reference it publishes would`);
+    log(`      be smaller than the one it replaced.`);
+  }
   if (result.cascade.length) {
     log(`    - running volume ${result.cascade[result.cascade.length - 1].volume} after that copies forward from volume ${volume}'s NEW record, not the retired one.`);
   }

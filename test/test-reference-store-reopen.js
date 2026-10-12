@@ -17,6 +17,10 @@
  *     the fresh record** — the act that records the reopen is not the act that destroys the record of it;
  *   - a record whose source volume was reopened after the copy was made is **refused at the door that
  *     would have topped it up**, because a top-up only ever adds rows;
+ *   - a volume that is **not the first** gets the volume before it back when it is reopened: the fresh
+ *     record arrives as an empty shell with no provenance row, and the top-up door now recognises that
+ *     shape, attaches the source's rows and stamps the copy — while a record with no provenance row and
+ *     no reopen row of its own is still refused;
  *   - nothing is unsealed: the retired file still holds its sealed rows, sealed;
  *   - the audit report says the volume was reopened, and why.
  *
@@ -47,6 +51,7 @@ const {
   sealVolumeRecord,
   auditVolumeRecord,
   copyForwardStore,
+  topUpVolumeRecord,
   reopenVolumeRecord,
   readReopenHistory,
   volumeRecordIsStale,
@@ -848,6 +853,100 @@ function scenarioTheExtractorSLabelIsTakenOffAndTheClaimSurvives() {
   console.log("  the extractor's own label is taken off the published claim, kept in the candidate, and named in the audit");
 }
 
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Reopening a volume that is NOT the first: the fresh record is an empty shell, and the door that opens
+ * it has to put the volume before it back in.
+ *
+ * Why this scenario exists. Every other reopen scenario reopens volume 1 — the one volume with nothing
+ * downstream and nothing upstream. The real volume 02 was reopened on 2026-10-12, and the fresh record
+ * `carryReopenHistory` builds holds only the reopen history: no `copy_provenance` row. That made
+ * `openVolumeRecord` skip the copy-forward (a record exists) and made `topUpVolumeRecord` skip too (no
+ * provenance row to tell it whose rows to attach), and **nothing printed either skip**. The volume was
+ * about to be re-derived with none of volume 1's 574 rows, which is a reference smaller than the one it
+ * replaced. Measured on a fixture before the fix: `facts 0, cast 0, copy_provenance 0, record_reopens 1`,
+ * unchanged by opening it.
+ *
+ * The repair is narrow: the top-up door accepts a destination with no provenance row **only** when that
+ * destination holds a `record_reopens` row for its own volume — a shape only the reopen door writes — and
+ * it stamps the copy it attaches. This scenario pins both halves, including the half that must stay
+ * refused.
+ *
+ * @returns {void}
+ */
+function scenarioReopeningANonFirstVolumeReattachesTheVolumeBeforeIt() {
+  const { series } = publishedSeries("reopen-nonfirst");
+  const first = series.volumes[0];
+  const second = series.volumes[1];
+
+  const res = reopenVolumeRecord({ volume: 2, folder: second.folder, seriesDir: series.dir, reason: REASON });
+  assert.ok(res.ok, JSON.stringify(res.refusal));
+
+  // The shell, pinned as the shell — this is the shape that used to be invisible.
+  const shell = openReferenceStore({ volume: 2, folder: second.folder, seriesDir: series.dir, stage: DOCUMENT_SOURCE_STAGE, create: false });
+  const shellCounts = shell.tableCounts();
+  shell.close();
+  assert.strictEqual(shellCounts.facts, 0, `a reopened record starts empty: ${JSON.stringify(shellCounts)}`);
+  assert.strictEqual(shellCounts.cast, 0, JSON.stringify(shellCounts));
+  assert.strictEqual(shellCounts.copy_provenance, 0, "and it carries no provenance row, which is what made every door skip");
+  assert.strictEqual(shellCounts.record_reopens, 1, "the only thing it holds is the reopen row");
+
+  const opened = openVolumeRecord({ volume: 2, folder: second.folder, seriesDir: series.dir, previousVolume: 1, previousFolder: first.folder });
+  assert.ok(opened.ok, JSON.stringify(opened.refusal));
+  assert.ok(opened.toppedUp && opened.toppedUp.reattached, `the reopened record must be re-attached, not skipped: ${JSON.stringify(opened.toppedUp)}`);
+  assert.ok(opened.toppedUp.total > 0, `and rows actually arrived: ${JSON.stringify(opened.toppedUp.copied)}`);
+
+  const counts = opened.store.tableCounts();
+  assert.ok(counts.facts >= 10, `volume 1's claims are in the record again: ${JSON.stringify(counts)}`);
+  assert.ok(counts.cast >= 3, `and its roster: ${JSON.stringify(counts)}`);
+  assert.strictEqual(counts.copy_provenance, 1, "the attach is stamped, so the next door knows what this record was built from");
+  const reattach = opened.toppedUp.findings.filter((f) => f.kind === "reference-record-reattached-to-its-source");
+  assert.strictEqual(reattach.length, 1, `and it is said out loud: ${JSON.stringify(opened.toppedUp.findings)}`);
+  assert.ok(reattach[0].message.includes("reopened"), reattach[0].message);
+  opened.store.close();
+
+  // It is not stale, and the next open is a clean no-op rather than a second attach.
+  const again = openVolumeRecord({ volume: 2, folder: second.folder, seriesDir: series.dir, previousVolume: 1, previousFolder: first.folder });
+  assert.ok(again.ok, `a record re-attached after the redo is not a stale copy: ${JSON.stringify(again.refusal)}`);
+  assert.ok(again.toppedUp.skipped && /has not changed/.test(again.toppedUp.reason || ""), JSON.stringify(again.toppedUp));
+  assert.strictEqual(again.toppedUp.reattached, false, JSON.stringify(again.toppedUp));
+  const after = again.store.tableCounts();
+  again.store.close();
+  assert.strictEqual(after.facts, counts.facts, "and the second open adds nothing");
+
+  // The reason survives the act that records it.
+  const histStore = openReferenceStore({ volume: 2, folder: second.folder, seriesDir: series.dir, stage: DOCUMENT_SOURCE_STAGE, create: false });
+  const history = readReopenHistory(histStore);
+  histStore.close();
+  assert.strictEqual(history.length, 1, JSON.stringify(history));
+  assert.strictEqual(history[0].volume, 2);
+  assert.strictEqual(history[0].reason, REASON);
+
+  // ── The narrow half ────────────────────────────────────────────────────────
+  // A record with no provenance row and NO reopen row of its own is still not a licence to attach.
+  const other = fixtureStoreSeries("reopen-nonfirst-refused");
+  const one = other.volumes[0];
+  const sealed = openReferenceStore({ volume: 1, folder: one.folder, seriesDir: other.dir, stage: DOCUMENT_SOURCE_STAGE });
+  sealed.registerChaptersFromSource();
+  importVolumeArtifacts(sealed, { glossaryMarkdown: GLOSSARY_01, voiceMarkdown: VOICE_01 });
+  sealVolumeRecord(sealed);
+  sealed.close();
+  const two = other.volumes[1];
+  const own = openReferenceStore({ volume: 2, folder: two.folder, seriesDir: other.dir, stage: DOCUMENT_SOURCE_STAGE });
+  own.registerChaptersFromSource();
+  own.close();
+
+  const refused = topUpVolumeRecord({ fromVolume: 1, toVolume: 2, seriesDir: other.dir });
+  assert.strictEqual(refused.ok, true, JSON.stringify(refused.refusal));
+  assert.strictEqual(refused.skipped, true, "a record nobody copied is still not a top-up target");
+  assert.strictEqual(refused.reattached, false, JSON.stringify(refused));
+  assert.strictEqual(refused.total, 0, JSON.stringify(refused.copied));
+  assert.ok(refused.reason.includes("was not copied from volume 1"), refused.reason);
+
+  console.log("  a reopened volume gets the volume before it back, and a record with no provenance and no reopen row still does not");
+}
+
 // ─── Runner ──────────────────────────────────────────────────────────────────
 
 scenarioAReopenRequiresAReason();
@@ -857,6 +956,7 @@ scenarioAStaleCopyRefusesToBeOpened();
 scenarioACopyMadeAfterTheRedoIsNotStale();
 scenarioTheAuditReportSaysTheVolumeWasReopened();
 scenarioAReopenVoidstheGradesOfTheRecordItRetires();
+scenarioReopeningANonFirstVolumeReattachesTheVolumeBeforeIt();
 scenarioTheDetectorFiresOnTheTwoRealDefectsAndNowhereElse();
 scenarioFilingRefusesUnfinishedProseAndDropsADirtyCitation();
 scenarioTheAuditNamesEveryLineThatCarriesADraftingNote();
