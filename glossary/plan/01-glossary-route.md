@@ -9,6 +9,13 @@ It is the glossary half of the program in `character-voice/plan/04-implementatio
 and it uses the same store, the same rules and the same gate. Where that document describes
 why the store exists, this one describes how the glossary stage becomes a route over it.
 
+**It depends on `utils/source/plan/01-extraction-step.md`.** Everything this plan renders is
+built out of extracted book text, and the defect that made the old glossaries wrong was an
+extraction defect, not a glossary one. That plan is separate because extraction is upstream of
+*every* stage; the dependency runs the other way — the glossary rebuild should not start until
+the extraction step has run over all 17 volumes and produced its numbers, or at minimum until the
+extraction audit has been run and read.
+
 ---
 
 ## 1. Why this is being done
@@ -153,6 +160,10 @@ settled here:
 Each slice is one worker session, ends with `npm test` green, and is checked against the disk
 before it is reported as done.
 
+**Slice 0 is not in this table:** it is the extraction step
+(`utils/source/plan/01-extraction-step.md` §6), and it runs first. Clean extracted text is a
+precondition of slices 1–6, not a task inside them.
+
 | # | slice | acceptance test |
 |---|---|---|
 | 1 | The record becomes unconditional: open it per volume, file the extraction's terms, seal after the grade. Delete `GLOSSARY_STORE_VALIDATORS`. | The store loop's glossary path *is* the default loop's glossary path; the flag's name appears nowhere in the repository. |
@@ -199,4 +210,8 @@ without it.
    cumulative glossary published held a pronunciation-guide string (`虹パ彩ン寺ジ菫ー` for
    虹彩寺菫). Those artifacts are discarded, so nothing needs repairing — but the term matcher
    and the evidence matcher should be re-measured against clean text before slice 1 is trusted,
-   because both were tuned against dirty text.
+   because both were tuned against dirty text. **That measurement now belongs to the extraction
+   plan** (`utils/source/plan/01-extraction-step.md` §3, the guide-split and name-split checks),
+   which turns it from a script somebody writes by hand into a step with a report. What stays
+   here is the consequence: if that audit finds the matchers still tripping on clean text, the
+   fix is in the matchers, and slice 1 inherits it.
