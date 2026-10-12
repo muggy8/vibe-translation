@@ -83,10 +83,15 @@
  * @property {string} markdown - The human-readable report.
  * @property {string} [error] - Set when the assessment itself could not run (a missing
  *   plan of record). An assessment that could not run is never reported as clean.
+ * @property {import("./postmortem/halt").VolumeHaltRecord & {suppressedMissing: number}} [halt]
+ *   Set when the step stopped at a volume boundary on purpose (utils/postmortem/halt.js). It names the
+ *   volume it stopped after, the volumes it never attempted, and how many `missing-*` findings that
+ *   accounts for — which is what tells a deliberate halt apart from a step that broke on every book.
  */
 
 const rules = require("./postmortem/rules");
 const levels = require("./postmortem/levels");
+const halt = require("./postmortem/halt");
 const volume = require("./postmortem/volume");
 const series = require("./postmortem/series");
 const scope = require("./postmortem/scope");
@@ -100,6 +105,8 @@ module.exports = {
   renderPostMortemMarkdown: render.renderPostMortemMarkdown,
   postMortemDir: render.postMortemDir,
   hasTableShape: rules.hasTableShape,
+  hasProseShape: rules.hasProseShape,
+  proseParagraphs: rules.proseParagraphs,
   matchesShape: rules.matchesShape,
   readConsistencyVerdict: series.readConsistencyVerdict,
   finding: rules.finding,
@@ -107,6 +114,18 @@ module.exports = {
   FINDING_LEVELS: levels.FINDING_LEVELS,
   FINDING_LEVEL_ROWS: levels.FINDING_LEVEL_ROWS,
   levelFor: levels.levelFor,
+  HALT_LEVELS: halt.HALT_LEVELS,
+  HALT_STAGES: halt.HALT_STAGES,
+  LOOP_STAGES_NOT_GATED: halt.LOOP_STAGES_NOT_GATED,
+  NO_VOLUME_LOOP_STAGES: halt.NO_VOLUME_LOOP_STAGES,
+  MISSING_OUTPUT_KINDS: halt.MISSING_OUTPUT_KINDS,
+  haltsForStep: halt.haltsForStep,
+  haltTriggerFor: halt.haltTriggerFor,
+  VolumeHaltError: halt.VolumeHaltError,
+  writeVolumeHalt: halt.writeVolumeHalt,
+  readVolumeHalt: halt.readVolumeHalt,
+  clearVolumeHalt: halt.clearVolumeHalt,
+  applyVolumeHalt: halt.applyVolumeHalt,
   assessRunScope: scope.assessRunScope,
   countRunExpectations: scope.countRunExpectations,
   declaresRunScope: scope.declaresRunScope,

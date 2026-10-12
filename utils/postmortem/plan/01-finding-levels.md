@@ -130,8 +130,23 @@ so 170 volume assessments cost **under 100 ms per full run**, with no model call
 carried when it was written — "170 assessments instead of 10" — counted calls to `runPostMortem` rather
 than the per-volume work each call already performs, and it is corrected here.
 
+> **Confirmed after slice 4, with one correction.** The gate calls `runPostMortem` once per volume, which
+> is a little more than `assessVolume` alone: it re-reads the plan of record and renders the report's
+> Markdown. Measured on a 17-volume fixture: **0.19–0.98 ms per volume in steady state**, 3.1 ms for the
+> first call in a process, **9.3 ms for all 17**, and **0.50–1.50 ms per volume** as printed by the gate
+> itself in the offline loops. "Under 100 ms per full run, no model call" holds.
+
 **The account owner's decision (2026-10-12): every volume of every step is assessed after that volume,
 not after the step.** No step is exempt, and no step is exempted because its output is not inherited.
+
+**Refined the same day, before slice 4 was built, and this is the rule that got built.** Checking and
+pausing are two different acts and only one of them is free. Assessing a volume mid-step costs nothing,
+so it is done for every stage that can halt; assessing a volume mid-step for a stage that CANNOT halt
+produces findings nobody records, because the after-step assessment reports the same ones a moment
+later. And four steps — `extract`, `discover`, `retranslate`, `consistency-audit` — do not walk their
+volumes through the shared loop at all, so "assess every step mid-step" would mean new hooks in four
+stages for no benefit. What is built: **102 of the 170 volume assessments run inside the step** (the
+six gated stages × 17 volumes) and **68 still run after it**. Every one of the 170 still happens.
 
 **Which steps the gate is for — measured, not assumed.** A per-volume pause earns its keep when
 **both** hold: the stage **copies the previous book's work into the next one**, so damage in book 3 is
@@ -321,7 +336,7 @@ it is reported as done.
 on the table or the test leaving the banned-path list. **The red test came first, as required:** run against an empty table it failed by naming 67 kinds, 29 of them from the reference store's audit. `npm test` exits 0 with every baseline unmoved — 93 requests / 18 kinds and 39 / 6, both second passes 0 calls, prompt audit 22 checks / 0 findings in both loops. **Nothing about what a run does changed:** `DAMAGE_KINDS`, `EVIDENCE_KINDS`, `utils/resume/`, `index/assess.js` and `--fail-on` are byte-identical. |
 | 2 | The triage routes on level instead of severity: `STOP` halts, `MAJOR` pauses, `MINOR` batches, `NOTE` reports. | A planted `chapter-without-draft` fixture becomes a pause and an investigation, not a note. A planted `unexpected-file` does **not** stop a run. |
 | 3 | The investigation bound: one per (kind, step, run), the answer filed on the ticket, a second occurrence reusing it. | A finding present in every volume of the fixture produces **one** model turn, and the offline loop's call count records the number. |
-| 4 | **The per-volume gate in the shared volume loop** (§3.2) — the thing that makes a pause possible at all. | `walkVolumes` stops after the volume that tripped the gate and exits with its own code; the stages that do not use the shared loop are named out loud rather than silently ungated. Nothing is assessed mid-chapter. **Scoped by §3.2's table**: the gate is for the stages that carry the previous book forward *and* pay per book, so `extract` is exempt on three independent grounds and `retranslate` / `consistency-audit` / `discover` do not use the shared loop at all. |
+| 4 | **The per-volume gate in the shared volume loop** (§3.2) — the thing that makes a pause possible at all. | **BUILT 2026-10-12.** The policy is data: `utils/postmortem/halt.js` (392 lines) declares `HALT_LEVELS` (`STOP`, `MAJOR`), `HALT_STAGES` (glossary, character-voice, style-guide, jump-in-wiki, translate, verify-translate — each with the reason it inherits), `LOOP_STAGES_NOT_GATED` (`polish`: pays, inherits nothing), `NO_VOLUME_LOOP_STAGES` (`extract`, `discover`, `retranslate`, `translate-qa`, `consistency-audit`, `translation-report`, each named with why it never reaches the gate), `haltsForStep`, `haltTriggerFor` (reads the level from `./levels.js`, never a severity), and `VolumeHaltError` — named and **structural**, so `ON_VOLUME_ERROR=skip` cannot walk past it. `walkVolumes` assesses each volume that finishes (`runPostMortem` with `volumeArg`, assess-only, nothing mid-chapter, nothing in `--dry-run`) and ends the walk on a trigger; the halt is recorded in `<run records>/last-volume-halt.json` and `applyVolumeHalt` folds it into the after-step report, so "stopped after book 3 on purpose" and "broke on books 4–17" print differently (`report.halt.suppressedMissing` counts what the halt explains away). The loop clears its own step's record before it walks; `index/run-step.js` clears it too, beside the structural marker it already deletes, because a step that dies BEFORE its walk never reaches the loop's line and the previous run's halt would then silence this run's genuinely missing books. Measured: **0.50–1.50 ms per volume** in the offline loops and **0.19–0.98 ms steady state** on a 17-volume fixture (first call in a process: 3.1 ms), **0 model calls**, ~9 ms for a 17-volume step. `test/test-volume-halt-gate.js` (751 lines, **122 checks**) is the behavioural half, and **the red test came first**: before the gate existed it failed with `AssertionError: a MAJOR finding in volume 1 must stop the walk (it used to walk straight into volume 2)`, and a probe confirmed the premise (`processed: [ 'Book(01)', 'Book(02)' ]`, no error thrown). **What the gate found on its first run is the slice's most important result:** it halted the offline loop's own `translate` stage at volume 1 on a `wrong-shape` MAJOR that was a **false positive** — `translation.md` was declared `shape: "document"` while the merge prints no heading for a synthetic or source-language title (measured on the real corpus: 17 volumes, 133 chapters, **0 merge-printed headings**). The declaration was corrected to a new `prose` shape (`utils/postmortem/rules.js`: `hasProseShape` / `proseParagraphs` — at least two paragraphs of ordinary text with headings, tables, blockquote banners and rules stripped out), which refuses what `document` wrongly accepted — `# Title` alone, a banner alone, one line of model chatter — and accepts the book the stage publishes. `npm test` exits 0 with every baseline unmoved: 93 / 18 kinds and 39 / 6, both second passes 0 calls, prompt audit 22 checks / 0 findings in both loops, 461 level checks, 33 audit checks, 30 extraction-step checks, 21 ruby checks, 19 run-scope checks, 16 patch checks, 14 dev-team checks. |
 | 5 | The pause is executable end to end: the run halts at volume *n*, the answer is obtained, the step resumes from volume *n*. | The offline loop shows a MAJOR finding halting at volume *n* and resuming at volume *n* — not *n+1* — and the resumed pass does not pay for the volumes already accepted. |
 | 6 | The docs and the maps: `docs/delivery-layer.md`, `docs/environment.md` if any knob moves, and a gotcha for the four-blind-kinds finding. | The maps describe the routing that exists. |
 | 7 | **The extraction step declares its own output** (§10), and the run-scope guard is amended to name that one exception instead of banning all of them. | **BUILT 2026-10-12.** `extract` declares four `required` run expectations — `extraction-{installment}.md` / `.json` per volume (the new `perInstallment` shape) plus `extraction-summary.md` / `.json` — and the post-mortem checks them after the step: measured on the real corpus, `extract post-mortem — CLEAN (0 HIGH, 0 MEDIUM, 0 LOW, 36 expectation(s) checked)` with 0 findings across 17 legitimate books. A planted missing per-book report is a HIGH `missing-required` naming that volume; a run limited to one volume expects that volume's record and not the other sixteen; the other twelve pipeline steps are still asserted to declare nothing, with `extract` named as the single exception and the reason written in the test. `test/test-extract-run-scope.js` (19 checks) is the behavioural half; gotcha 127 records the reversal. Independent of slices 2–6. |
@@ -341,8 +356,8 @@ that reaches its final slice before noticing that has a hole in the middle of it
 | chapters of the book that were never translated, caught by the layer | **0** — the check exists and its output is discarded | every one, at MAJOR |
 | volumes published with no grader signing off, caught | **0** — same | every one, at MAJOR |
 | investigations per run | 1 kind (`quarantine-present`) | bounded by (kind × step), counted in the offline loop |
-| assessments a full 17-volume run makes | **10** (one per step, after it returns) | **170** (one per volume per step) — free of model calls, not free of time |
-| model calls added to the offline loops | 93 / 39 today | re-baselined and written into this plan |
+| assessments a full 17-volume run makes | **10** (one per step, after it returns) | **170** (one per volume per step) — free of model calls, not free of time. **Measured after slice 4:** 102 of them (6 gated stages × 17 volumes) now run **inside** the step and 68 still run after it, at **0.50–1.50 ms per volume** in the offline loops and 0.19–0.98 ms steady state on a 17-volume fixture — ~9 ms for a 17-volume step, 0 model calls. |
+| model calls added to the offline loops | 93 / 39 today | **93 / 39 — unmoved**, measured again after slice 4 (both second passes 0 calls, prompt audit 22 checks / 0 findings in both loops). The gate makes no model call, and the one thing it did change — the `translate` stage halting at volume 1 — turned out to be a false positive in a declared shape and was fixed at the declaration rather than re-baselined around. |
 
 **Slice 1 produced the red test first, and it was red.** Run against an empty table it failed by naming
 all 67 kinds, 29 of them from the reference store's audit. Two of this table's rows are therefore already
@@ -350,6 +365,26 @@ answered and two are not: **the 67 kinds now all have a declared level** (slice 
 call counts are **confirmed unmoved** by it — 93 / 18 and 39 / 6, both second passes silent. What is still
 0 is the useful half: the triage still routes on severity, so the four blind kinds are still blind, pinned
 at exactly 4 by a test that fails if the number rises and fails if it falls without the test being edited.
+
+**Slice 4 also produced the red test first, and it too was red** — `AssertionError: a MAJOR finding in
+volume 1 must stop the walk (it used to walk straight into volume 2)` — and it made two measurements
+nobody asked for:
+
+- **A declared shape that was wrong on every legitimate book, and cost nothing until the gate acted on
+  it.** `translation.md` was declared `shape: "document"`. The merge prints no heading for a chapter
+  whose title is a file name, a pipeline label, or a title still in the source language, and the
+  translate prompt asks for the translation only. Measured against the real corpus: **17 volumes, 133
+  chapters, 0 headings the merge would print** — so `wrong-shape` fired on every translated volume a
+  real run could produce, at MEDIUM, where `--fail-on=high` discarded it. The gate made it a halt on
+  the first pass of the offline loop. Fixed at the declaration: a `prose` shape (two or more paragraphs
+  of ordinary text, structure stripped out) that accepts the book and refuses `# Title` alone, a banner
+  alone, or one line of model chatter. **The general form: a level table is inert until something acts
+  on it, and the first thing it acts on is the check that was already lying.**
+- **The gate's own cost line was measuring the wrong thing.** It timed from before the volume loop to
+  after it, so it printed the stage's model calls as the gate's cost — 91–199 ms per volume in the
+  offline loop's first pass. Timed per assessment it is **0.50–1.50 ms per volume** there and
+  0.19–0.98 ms steady state on a 17-volume fixture, which is what §3.2 claimed. Pinned by a source
+  check in `test/test-volume-halt-gate.js` so it cannot drift back.
 
 **Two measurements slice 1 made that this plan did not ask for and now has to answer.**
 

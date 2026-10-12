@@ -13,6 +13,7 @@ const path = require("path");
 const { finding } = require("./rules");
 const { assessVolume } = require("./volume");
 const { assessSeries } = require("./series");
+const { applyVolumeHalt } = require("./halt");
 const { renderPostMortemMarkdown, postMortemDir } = require("./render");
 const {
   assessRunScope,
@@ -186,6 +187,11 @@ async function runPostMortem({ step, seriesDir, manifest, volumeArg, claims }) {
     counts,
     markdown: "",
   };
+  // A step that stopped at a volume boundary on purpose is not a step whose every remaining book is
+  // broken. The halt record is what tells the two apart, and it has to be folded in BEFORE the
+  // Markdown is rendered — otherwise the report a human reads says "14 missing required files" about
+  // a run that deliberately stopped after book 3. utils/postmortem/halt.js.
+  applyVolumeHalt(report);
   report.markdown = renderPostMortemMarkdown(report);
   return report;
 }

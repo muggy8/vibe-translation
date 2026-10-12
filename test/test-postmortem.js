@@ -88,6 +88,18 @@ const DOC = `# Report
 `;
 
 /**
+ * A translated volume: prose paragraphs, no heading. `translation.md` declares the
+ * `prose` shape because the merge prints no heading for a synthetic or
+ * source-language title, so a headed DOC is the wrong stand-in for it.
+ */
+const PROSE = `Mornings at the academy always began in fog, and the ginkgo trees on either side of
+the main gate sank into it and kept only their outlines.
+
+That day it was Akari. She walked three paces faster than me, and in front of the
+schoolhouse door she turned around and brought up the Pact.
+`;
+
+/**
  * Lay out a two-volume series whose glossary step finished cleanly.
  *
  * @param {string} dir - Series folder.
@@ -489,7 +501,7 @@ async function scenarioChapterCoverage() {
   );
   await fs.writeFile(path.join(vol, "translation-ch1.md"), DOC, "utf8");
   await fs.writeFile(path.join(vol, "translation-ch2.md"), DOC, "utf8");
-  await fs.writeFile(path.join(vol, "translation.md"), DOC, "utf8");
+  await fs.writeFile(path.join(vol, "translation.md"), PROSE, "utf8");
   await fs.writeFile(path.join(vol, "translation-qa.md"), DOC, "utf8");
   await fs.writeFile(
     path.join(vol, "translation-state.json"),
@@ -512,7 +524,7 @@ async function scenarioChapterCoverage() {
   assert.strictEqual(report.ok, false);
 
   // Finish volume 02's required output: the step now reads as finished.
-  await fs.writeFile(path.join(vol2, "translation.md"), DOC, "utf8");
+  await fs.writeFile(path.join(vol2, "translation.md"), PROSE, "utf8");
   await fs.writeFile(path.join(vol2, "translation-qa.md"), DOC, "utf8");
   const finished = await runPostMortem({ step: "translate", seriesDir: dir });
   assert.strictEqual(finished.ok, true, `a finished translate step must read clean:\n${finished.markdown}`);

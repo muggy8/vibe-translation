@@ -358,6 +358,9 @@ async function verifyTranslate() {
     volumes,
     folders,
     volumeByFolder,
+    step: "verify-translate",
+    seriesDir,
+    manifest: series.manifest,
     processVolume: (folderName) =>
       verifyOneVolume({ folderName, volume: volumeByFolder.get(folderName), run, prepared, tally }),
   });

@@ -13,6 +13,7 @@ const { spawn } = require("child_process");
 
 const { gulpCommand, stepTimeoutMs, structuralMarkerPath } = require("./settings");
 const { trackChild } = require("../utils/shutdown");
+const { clearVolumeHalt } = require("../utils/postmortem");
 
 const projectRoot = path.join(__dirname, ".."); // the runner's ROOT
 
@@ -39,6 +40,11 @@ function runStep(stepName, gulpArgs) {
     try {
       fs.rmSync(marker); // this step's outcome, not the previous step's
     } catch {}
+    // The same rule for the volume-halt record (utils/postmortem/halt.js). The loop clears its own
+    // record before it walks, but a step that dies BEFORE its walk — during intake, on a bad plan of
+    // record — never gets there, and the previous run's halt would then silence this run's genuinely
+    // missing books.
+    clearVolumeHalt(stepName);
 
     const { command, prefixArgs } = gulpCommand();
     const child = spawn(command, [...prefixArgs, stepName, ...gulpArgs], {

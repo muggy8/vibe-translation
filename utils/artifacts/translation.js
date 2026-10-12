@@ -4,6 +4,15 @@
  * The draft, the verification sidecars, the retranslation repairs, the polished text and the
  * series report. A rejected draft is kept deliberately (gotcha 39) so `retranslate` has
  * something to repair, which is why its quarantine is MEDIUM and not HIGH.
+ *
+ * `translation.md` is declared `prose`, not `document`, and that is a measured correction rather
+ * than a style choice. The merge prints no heading for a chapter whose title is a file name, a
+ * pipeline label, or a title still in the source language (`utils/translate/merge.js:
+ * headingForSegment`), and the translate prompt asks for the translation and nothing else. Measured
+ * against the real 17 books: 133 chapters, 0 headings the merge would print — so `shape:
+ * "document"` reported `wrong-shape` on every legitimate translated volume, and once a MAJOR
+ * finding could halt a step (`utils/postmortem/halt.js`) that false positive stopped the offline
+ * loop's own translate stage at volume 1.
  */
 
 const { volumeConsistencyEnabled, polishVerifyEnabled, QUARANTINED_DRAFT } = require("./rules");
@@ -20,7 +29,7 @@ const TRANSLATION_SPECS = {
       {
         name: "translation.md",
         level: "required",
-        shape: "document",
+        shape: "prose",
         why: "the merged volume — what the pipeline publishes",
       },
       {
@@ -89,7 +98,7 @@ const TRANSLATION_SPECS = {
       {
         name: "translation.md",
         level: "required",
-        shape: "document",
+        shape: "prose",
         why: "retranslate re-merges the volume after every repair",
       },
       {
@@ -116,7 +125,7 @@ const TRANSLATION_SPECS = {
       {
         name: "translation.md",
         level: "required",
-        shape: "document",
+        shape: "prose",
         why: "the loop re-merges after every retranslate batch",
       },
       {
@@ -137,7 +146,7 @@ const TRANSLATION_SPECS = {
       {
         name: "translation.md",
         level: "required",
-        shape: "document",
+        shape: "prose",
         why: "polish re-merges the volume (polished text wins when it was accepted)",
       },
       {

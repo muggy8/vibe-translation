@@ -39,16 +39,86 @@ function hasTableShape(content) {
 }
 
 /**
+ * How many paragraphs of ordinary text a `prose` artifact must hold.
+ *
+ * Two, not one: the defect this shape exists to catch is a file that holds the
+ * volume's warning banner, or one line of model chatter, or a heading with nothing
+ * under it. One paragraph cannot tell those apart from a real book; two can, and no
+ * size threshold is needed. Measured against the material the pipeline actually
+ * writes: the offline loop's translated volume holds 11 body paragraphs (12 blocks,
+ * one of them the UNVERIFIED banner) and the real 17 volumes' chapters run from 547
+ * to 19,174 source characters each, so a merged volume is never one paragraph.
+ *
+ * @type {number}
+ */
+const PROSE_MIN_PARAGRAPHS = 2;
+
+/**
+ * The ordinary-text paragraphs of a file: blank-line-separated blocks with the
+ * structure stripped out of them.
+ *
+ * Headings, table rows, blockquote banners (the UNVERIFIED warning the merge puts
+ * above a chapter that did not pass verification) and horizontal rules are removed
+ * line by line, so what is left is the text a reader actually reads. A block with
+ * nothing left is not a paragraph of prose.
+ *
+ * @param {string} content
+ * @returns {string[]} The paragraphs, in order.
+ */
+function proseParagraphs(content) {
+  const paragraphs = [];
+  for (const block of String(content || "").split(/\n\s*\n/)) {
+    const text = block
+      .split("\n")
+      .filter((line) => {
+        const t = line.trim();
+        if (!t) return false;
+        if (/^#{1,6}\s/.test(t)) return false;
+        if (/^>/.test(t)) return false;
+        if (/^\|.*\|$/.test(t)) return false;
+        if (/^[-*_]{3,}$/.test(t)) return false;
+        return true;
+      })
+      .join(" ")
+      .trim();
+    if (text) paragraphs.push(text);
+  }
+  return paragraphs;
+}
+
+/**
+ * Whether text is a translated book rather than a scaffold, a banner or a remark.
+ *
+ * This is the shape `translation.md` needs and `document` cannot give it. The merge
+ * deliberately prints no heading for a chapter whose title is a file name, a pipeline
+ * label, or a title still written in the source language
+ * (`utils/translate/merge.js: headingForSegment`), and the translate prompt says
+ * "output only the translation". Measured against the real corpus: 17 volumes, 133
+ * chapters, **0 headings the merge would print** — so `shape: "document"` reports
+ * `wrong-shape` on every legitimate translated volume, and at MAJOR that halts the
+ * run at volume 1 on a false positive. `prose` keeps the check honest in both
+ * directions: it refuses a file that is only structure (`document` accepts `# Title`
+ * with nothing under it) and it accepts the prose the stage actually publishes.
+ *
+ * @param {string} content
+ * @returns {boolean}
+ */
+function hasProseShape(content) {
+  return proseParagraphs(content).length >= PROSE_MIN_PARAGRAPHS;
+}
+
+/**
  * Whether text satisfies one expectation's declared shape.
  *
  * @param {string} content - The file's contents.
- * @param {"document"|"table"|"json"|"any"} [shape]
+ * @param {"document"|"table"|"json"|"prose"|"any"} [shape]
  * @returns {boolean}
  */
 function matchesShape(content, shape) {
   if (!shape || shape === "any") return true;
   if (shape === "table") return hasTableShape(content);
   if (shape === "document") return hasDocumentShape(content);
+  if (shape === "prose") return hasProseShape(content);
   if (shape === "json") {
     try {
       JSON.parse(content);
@@ -115,4 +185,4 @@ function seriesArtifactPath(fileName, seriesDir) {
   return seriesArtifactFile(fileName, legacyKeys[fileName] || "", seriesDir);
 }
 
-module.exports = { hasTableShape, matchesShape, finding, seriesArtifactPath };
+module.exports = { hasTableShape, hasProseShape, proseParagraphs, matchesShape, finding, seriesArtifactPath };

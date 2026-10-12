@@ -37,6 +37,22 @@ function renderPostMortemMarkdown(report) {
     lines.push("");
   }
 
+  // A deliberate stop is not a broken book. Say so before the findings, because the difference between
+  // "the step halted after volume 3" and "volumes 4-17 produced nothing" is the whole reason this
+  // layer exists (utils/postmortem/halt.js).
+  if (report.halt) {
+    const kinds = (report.halt.trigger || []).map((f) => `${f.level} ${f.kind}`).join(", ");
+    lines.push(
+      `> **The step halted after volume ${report.halt.haltedAfterVolume}** (${report.halt.haltedAfterFolder || "folder unknown"}) ` +
+        `on ${kinds || "a volume-boundary finding"}. ` +
+        `${(report.halt.unattemptedVolumes || []).length} volume(s) — ${(report.halt.unattemptedVolumes || []).join(", ") || "none"} — ` +
+        `were never attempted, and their missing output is not counted as damage ` +
+        `(${report.halt.suppressedMissing || 0} finding(s) suppressed here for that reason). ` +
+        `Re-run this step from volume ${report.halt.haltedAfterVolume}.`
+    );
+    lines.push("");
+  }
+
   if (report.findings.length === 0) {
     lines.push("Every file this step is expected to leave is present and has the shape it should.");
     lines.push("");
@@ -82,6 +98,7 @@ async function writePostMortemReport(report, outDir) {
         step: report.step,
         ok: report.ok,
         error: report.error,
+        halt: report.halt,
         counts: report.counts,
         findings: report.findings,
         writtenAt: new Date().toISOString(),

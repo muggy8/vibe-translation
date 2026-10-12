@@ -55,6 +55,21 @@ const DOC = `# Report
 - nothing wrong here
 `;
 
+/**
+ * A translated volume: prose paragraphs and the warning banner the merge puts above a
+ * chapter that did not pass verification. The shape `translation.md` declares
+ * (`prose`) — no heading, because the merge prints none for a synthetic or
+ * source-language title.
+ */
+const PROSE = `> **⚠ UNVERIFIED** — fixture banner.
+
+Mornings at the academy always began in fog, and the ginkgo trees on either side of
+the main gate sank into it at this time of year and kept only their outlines.
+
+That day it was Akari. She walked three paces faster than me, and in front of the
+schoolhouse door she turned around and brought up the Pact.
+`;
+
 /** The audit's own sign-off, which `utils/postmortem.js` reads out of the report. */
 const PASS_DOC = `${DOC}
 
@@ -79,6 +94,7 @@ function contentFor(name, shape) {
   if (shape === "table") return TABLE;
   if (shape === "json") return JSON.stringify({ fixture: true }, null, 2) + "\n";
   if (shape === "document") return DOC;
+  if (shape === "prose") return PROSE;
   return "fixture\n";
 }
 

@@ -81,6 +81,47 @@ Both the table and that test are closed to the dev team: `utils/postmortem/` and
 plan's §6 assumed was already true and measured was not — the folder was missing from the ban until the
 slice that put a guard table in it exposed the gap (gotcha 129).
 
+**Two of those levels now stop a running step at the volume boundary.** `utils/postmortem/halt.js` is
+the policy: after a volume's own work finishes, `walkVolumes` (`utils/series-run/loop.js`) assesses
+**that volume** with the machinery that already existed (`runPostMortem`, with `volumeArg` set to the
+volume, which is also what skips the series-root expectations mid-run), and if the findings contain a
+`STOP` or a `MAJOR` the walk ends there. `MINOR` and `NOTE` are recorded and the walk continues. The
+loop does not decide which stages halt — it asks the table, because a stage that can declare itself
+exempt is not gated, and the table sits in the same closed path as the level table.
+
+| stage | halts | why |
+|---|---|---|
+| `glossary`, `character-voice`, `style-guide`, `jump-in-wiki`, `translate`, `verify-translate` | **yes** | they copy the previous book into the next one **and** pay model calls per book |
+| `polish` | no | it pays per book but carries nothing forward, so a halt there throws away work that was going to be fine |
+| `extract`, `discover`, `retranslate`, `translate-qa`, `consistency-audit`, `translation-report` | never reaches the gate | they do not walk the volumes through the shared loop; `extract` is exempt on three independent grounds (it carries nothing, costs nothing, and auditing every book before it fails is its design) |
+
+A halt is a **named error** (`VolumeHaltError`, `structural: true`), so `ON_VOLUME_ERROR=skip` and
+`ON_TASK_ERROR=continue` cannot walk past it — the skip policy is for flaky model calls, not for a
+broken book. It writes one record, `<run records>/last-volume-halt.json`
+(`{ step, haltedAfterVolume, attemptedVolumes, unattemptedVolumes, trigger, at }`), and
+`runPostMortem` reads it back on the after-step assessment: the volumes the step never reached do not
+become `missing-required` HIGH findings (they are counted in `report.halt.suppressedMissing` instead),
+the volume that tripped the gate keeps every finding it earned, and the report is never `ok`. Without
+that record a step that stopped after book 3 on purpose and a step that broke on books 4–17 print the
+same fourteen HIGH findings, which is the exact confusion this layer exists to prevent. The gate makes
+no model call and writes no report mid-step. Pinned by `test/test-volume-halt-gate.js`.
+
+**The gate's first act on real material was a halt on a false positive, and that is worth keeping in
+the record.** Its first run through the offline pipeline loop stopped the `translate` stage after
+volume 1 on a `wrong-shape` MAJOR: `translation.md` had no Markdown heading and no table. It was not
+a broken book. The merge prints no heading for a chapter whose title is a file name, a pipeline label,
+or a title still written in the source language (`utils/translate/merge.js: headingForSegment`), and
+the translate prompt asks for the translation and nothing else. Measured against the real 17 books:
+**133 chapters, 0 headings the merge would print** — so the declared `shape: "document"` called every
+legitimate translated volume the wrong shape, and it had been doing so silently since the check was
+written, because a MEDIUM finding was discarded unless `--fail-on=medium` was asked for. The
+declaration is corrected, not the finding: `translation.md` is declared `prose` (at least two
+paragraphs of ordinary text, with headings, tables, blockquote banners and rules stripped out), which
+refuses what `document` wrongly accepted — a file that is only `# Title`, or only the UNVERIFIED
+banner, or one line of model chatter — and accepts the book the stage actually publishes. The lesson
+is the general one: **a level only becomes load-bearing when something acts on it, and the first thing
+it acts on is whatever the checks were quietly getting wrong.**
+
 **One finding reads the QA loop's own channel rather than its output.** Each volume's
 rolling-state file now carries a tally: how many grades the loop asked for, and how many
 came back in a shape nothing could read. `grade-failures` is HIGH when every grade was
