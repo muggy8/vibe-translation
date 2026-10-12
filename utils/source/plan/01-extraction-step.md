@@ -1,9 +1,12 @@
 # The extraction step — plan of record
 
-**Status: a plan, not a build.** Written 2026-10-12, the same day the extraction defect was
-found and fixed. It is deliberately its own plan rather than a section of
-`glossary/plan/01-glossary-route.md`, because extraction is upstream of *every* stage, not one
-of them.
+**Status: partly built.** Written 2026-10-12, the same day the extraction defect was found and fixed.
+**Slice 1 — the audit as a pure function — is built** (`utils/source/audit.js` + `utils/source/audit/`,
+tested by `test/test-source-audit.js`, 26 checks, part of `npm test`). Slices 2–5 are not: there is no
+`extract` step in the pipeline yet, so the audit still runs nowhere inside a run and writes no reports —
+though it has been run once, by hand, over a copy of all 17 archives (§3), which is where the numbers
+below come from. It is deliberately its own plan rather than a section of
+`glossary/plan/01-glossary-route.md`, because extraction is upstream of *every* stage, not one of them.
 
 ---
 
@@ -103,6 +106,29 @@ the extraction layer at all, and pretending otherwise would hand a worker a chec
 | MEDIUM | a bundle whose pronunciation-guide harvest file is missing | does the file exist beside the bundle |
 | info | chapters, characters, guides set aside, images, packaging excluded | the counts the extraction already writes |
 
+**What building slice 1 found about the middle one.** "A segment with no body that is not marked
+packaging" has a gap in it: **the bundle records packaging as its own list, never as a flag on a
+segment.** Under the normal path that is fine — a packaging page never becomes a segment, so the audit
+never sees one. Under the two fallbacks in `extract.js` (the contents list names none of the book's
+pages, or names only packaging) every page stands alone as a chapter and `packaging` is cleared, so a
+cover plate really does arrive as a segment with no body, and the only evidence left that it is a cover
+plate is the title the book's own navigation gave it. The audit therefore exempts a segment whose title
+matches `PACKAGING_TITLE_RE` or appears in the bundle's packaging list — the extraction's own vocabulary,
+not a second list. **If slice 2 wants that exemption to be airtight, the extraction has to persist a
+per-segment packaging mark**, which is a bundle-schema decision (it re-extracts all 17 volumes again) and
+so belongs to the account owner, not to a slice.
+
+**What slice 1 measured, and it is the first number this layer has ever had.** Not through the step
+(that is slice 2) — through a throwaway script that copied the 17 archives into `/tmp/opencode/audit-real/`
+and ran `resolveSourceBundle` plus the audit there, leaving the corpus untouched. Across all 17 volumes:
+**133 chapters, 109 packaging groups, 0 chapters that extracted to nothing, 45,429 pronunciation guides
+harvested, and 0 findings — 0 HIGH and 0 MEDIUM.** 133 chapters is the same figure gotcha 52 records for
+the series, which is the cross-check that the measurement went through the real door. **The audit fires
+zero times on legitimate material**, and the contents-list fallback (the only path where the packaging
+exemption is load-bearing) fired **0 times out of 17**, so the exemption's narrowness costs nothing on
+this series today. That is a measurement of the audit, not of the step: no per-volume report, no series
+summary and no run records were written, and slice 3 still has to produce those.
+
 **Deferred, with the reason said plainly:**
 
 1. **A guide-split string still present in extracted text (HIGH).** The obvious way to check it is to
@@ -188,14 +214,15 @@ One worker session per slice, each ending with `npm test` green and checked agai
 
 | # | slice | what it has to prove |
 |---|---|---|
-| 1 | The audit as a pure function over a bundle: the five computable checks in §3, against fixtures. | Each HIGH check fires on a planted fixture and stays silent on a clean one. No stage runs, no model is called, nothing from `utils/reference-store/` is imported. |
+| 1 ✅ | The audit as a pure function over a bundle: the five computable checks in §3, against fixtures. | **Built.** Each HIGH check fires on a planted fixture and stays silent on a clean one; no stage runs, no model is called, nothing from `utils/reference-store/` is imported. What building it settled: the empty-chapter exemption has to be the **book's own declaration** (`PACKAGING_TITLE_RE` plus the bundle's packaging list), because under the contents-list fallbacks a cover plate becomes a segment and a check without the exemption re-invents gotcha 52's phantom holes; and a plain-text volume with no archive anywhere must stay silent, because `.md` books are a supported shape. |
 | 2 | The step itself: `extract` in the pipeline order, running the audit over every volume, writing the per-volume report and the series summary. | `--stages=extract` runs alone; a warm cache re-verifies rather than re-extracts and says so; a planted HIGH finding stops the run before `glossary` is reached. |
-| 3 | The first real numbers: run the step over all 17 archives and read what it says. | Per volume: chapters, characters, guides set aside, images, packaging excluded, findings. **This is the extraction layer's first measurement ever**, and it is what the glossary plan is waiting for. |
+| 3 | The numbers, through the step: run `extract` over all 17 volumes and write the per-volume report and the series summary. | The counts are already known (§3: 133 chapters, 109 packaging groups, 0 findings across 17 volumes, measured from a copy). What slice 3 adds is the **records** — a report per volume, a series table, and a step assessment in the ledger and the post-mortem — which is what the glossary plan is waiting for. |
 | 4 | The deferred tripwire, **only if** the harvest row shape is changed to record each annotation's own base-and-reading sequence (§3). | A fixture carrying a guide-split string produces HIGH **exactly** — no pattern matching, no false positives. If the shape change is refused, this slice is not built and the deferral stands. |
-| 5 | The docs and the maps: `docs/map-core.md`, the step list, and a gotcha if the build teaches one. | The maps describe the step that exists, not the one that was planned. |
+| 5 | The docs and the maps: `docs/map-core.md`, the step list, and a gotcha if the build teaches one. | The maps describe the step that exists, not the one that was planned. (Slice 1 already added `utils/source/audit/` and `test/test-source-audit.js` to `docs/map-helpers.md` and `docs/map-tests.md`; the STEP list still belongs here.) |
 
-**Slice 3 is the one that pays for itself.** Slices 1–2 build a thing nobody has ever run; slice 3 is
-the first time anybody learns what the extraction layer actually produces across the series.
+**Slice 1 is the cheapest thing in this plan and it is done, and it already answered the counting
+question.** Slice 2 is the one that makes the answer belong to the run rather than to a script somebody
+ran by hand: a report per volume, a series table, and an assessment the delivery layer can see.
 
 ---
 

@@ -1,0 +1,268 @@
+/**
+ * utils/source/audit/checks.js — the five questions the extraction layer can answer about itself.
+ *
+ * Exactly the five `utils/source/plan/01-extraction-step.md` §3 measured as computable from what
+ * extraction already produces. The two it deferred are NOT here, and the plan says why: a guide-split
+ * string cannot be rebuilt from a harvest that stores only the joined (word, reading) pair, and "is
+ * this a character name?" has no roster to ask at extraction time.
+ *
+ * Every check is a pure function over `{volume, bundle, names, segments, packagingTitles}` returning
+ * `PostMortemFinding[]`. No file reads, no model, no writes, no agent — the plan's §4 is explicit that
+ * a model in front of a fact a checksum already proves is a token spent to confirm something free.
+ *
+ * Part of the source.js layer's audit half.
+ */
+
+const path = require("path");
+
+require("../../../types"); // JSDoc type definitions
+
+const { finding } = require("../../postmortem/rules");
+const { rubyGuideFileName } = require("../ruby-guides");
+
+const {
+  EXTRACTION_STEP,
+  FILE_NAME_EXT_RE,
+  isArchivePath,
+  nameKey,
+  archiveNamesOf,
+  segmentHasNoBody,
+  segmentDeclaresPackaging,
+  findingFile,
+  sourceNameKeys,
+} = require("./rules");
+const { EMPTY_SEGMENT_CHARS } = require("../config");
+
+/**
+ * Check 1 (HIGH) — the volume's source is not the book the plan of record named.
+ *
+ * Two shapes, both real, both gotcha 119:
+ *   (a) the bundle opened a loose text file while a book archive sits in the same volume folder — the
+ *       exact failure that made four stages read an 8,803-byte audit report as a 151,548-character
+ *       novel and decide the volume had one segment and no chapter-by-chapter path;
+ *   (b) the bundle opened a DIFFERENT file than the one the plan of record names for this volume, which
+ *       is what "the plan of record's sourceFile against what the bundle actually opened" means
+ *       literally, and which is what happens whenever a bundle is resolved for one folder and audited
+ *       against another.
+ *
+ * A plain-text volume with no archive anywhere is NOT this finding: `.txt` / `.md` books are a supported
+ * shape here, and a check that called every one of them a defect is a check somebody switches off.
+ *
+ * @param {{volume: TranslationTargetVolume, bundle: SourceBundle, names: string[]}} p
+ * @returns {PostMortemFinding[]} Zero or one HIGH finding.
+ */
+function auditSourceIsArchive({ volume, bundle, names }) {
+  const openedName = path.basename(bundle.originalPath || "");
+  const plannedName = path.basename(volume.sourceFile || "");
+  const archives = archiveNamesOf(names);
+
+  if (isArchivePath(bundle.originalPath || "")) {
+    if (plannedName && nameKey(openedName) !== nameKey(plannedName)) {
+      return [
+        finding(
+          "HIGH",
+          "source-not-archive",
+          EXTRACTION_STEP,
+          volume.installmentNumber || null,
+          findingFile(volume),
+          `The plan of record lists this volume's source as "${volume.sourceFile}" but the bundle was ` +
+            `resolved from "${openedName}". The extraction read a different file from the one this volume ` +
+            `is supposed to be. Check which folder the bundle was resolved for.`
+        ),
+      ];
+    }
+    return [];
+  }
+
+  if (archives.length === 0) return [];
+  return [
+    finding(
+      "HIGH",
+      "source-not-archive",
+      EXTRACTION_STEP,
+      volume.installmentNumber || null,
+      findingFile(volume, openedName),
+      `This volume was extracted from "${openedName}", which is not a book archive, while its folder ` +
+        `holds ${archives.length} archive(s): ${archives.join(", ")}. Every artifact built from this ` +
+        `volume is built from the wrong file — the shape of gotcha 119, where a 102,892-token novel was ` +
+        `reported to four stages as a 2,394-token single-segment source.`
+    ),
+  ];
+}
+
+/**
+ * Check 2 (HIGH) — the volume has no chapter a downstream stage could work on.
+ *
+ * Either the bundle has no segments at all, or every one of them converted to nothing. Today this
+ * surfaces several stages later as a confusing failure (a glossary that found nothing to research, a
+ * translate step reporting the volume INCOMPLETE with no text at all). Saying it here costs nothing and
+ * stops the run before a stage spends tokens discovering it.
+ *
+ * @param {{volume: TranslationTargetVolume, segments: SourceSegment[]}} p
+ * @returns {PostMortemFinding[]} Zero or one HIGH finding.
+ */
+function auditHasUsableChapter({ volume, segments }) {
+  if (segments.length === 0) {
+    return [
+      finding(
+        "HIGH",
+        "no-usable-chapter",
+        EXTRACTION_STEP,
+        volume.installmentNumber || null,
+        findingFile(volume),
+        `The extraction produced 0 chapters for this volume. Nothing downstream can read it: every stage ` +
+          `that walks this volume's segments has nothing to walk. The archive either has no readable text ` +
+          `in its spine, or its contents list and its pages disagree completely.`
+      ),
+    ];
+  }
+  if (!segments.every(segmentHasNoBody)) return [];
+  return [
+    finding(
+      "HIGH",
+      "no-usable-chapter",
+      EXTRACTION_STEP,
+      volume.installmentNumber || null,
+      findingFile(volume),
+      `All ${segments.length} chapter(s) this volume extracted to are empty — the volume holds no text to ` +
+        `translate. ${segments.length} segment(s) were produced and none of them converted to at least ` +
+        `${EMPTY_SEGMENT_CHARS} characters of text.`
+    ),
+  ];
+}
+
+/**
+ * Check 3 (HIGH) — a chapter that converted to nothing, beyond the pages the book declares as packaging.
+ *
+ * The worst kind of missing text, because it looks like a short chapter: the segment exists, it has a
+ * title, it has a file, and it has no body. The extraction already logs each one (bundle schema 4's
+ * `empty` flag) and the translation stage already records it as "EMPTY IN SOURCE" — but a log line
+ * nobody reads is not a check, and a hole in the BOOK has to be told apart from a hole the converter
+ * made.
+ *
+ * The exemption is the book's own declaration: a cover plate, an inserted illustration or the colophon
+ * the contents list named as packaging never becomes a chapter, and under the fallbacks (where every
+ * page stands alone) the title the navigation gave it is still the evidence that it is packaging. Those
+ * are reported through the bundle's packaging list, not here. The exemption is the extraction's own
+ * vocabulary read back, and it is narrow rather than complete — see AGENTS.md gotcha 126 for what a
+ * bundle cannot say about a segment.
+ *
+ * @param {{volume: TranslationTargetVolume, segments: SourceSegment[], packagingTitles: Set<string>}} p
+ * @returns {PostMortemFinding[]} One HIGH finding per chapter that converted to nothing.
+ */
+function auditEmptyChapters({ volume, segments, packagingTitles }) {
+  const findings = [];
+  for (const segment of segments) {
+    if (!segmentHasNoBody(segment)) continue;
+    if (segmentDeclaresPackaging(segment, packagingTitles)) continue;
+    const bodyChars = Number.isFinite(segment.bodyChars) ? segment.bodyChars : 0;
+    findings.push(
+      finding(
+        "HIGH",
+        "chapter-extracted-empty",
+        EXTRACTION_STEP,
+        volume.installmentNumber || null,
+        findingFile(volume, segment.file),
+        `Chapter "${segment.id}" ("${segment.title}") converted to ${bodyChars} character(s) of text ` +
+          `(the extraction's floor is ${EMPTY_SEGMENT_CHARS}) and the book does not declare it as ` +
+          `packaging. Either the converter failed on this page's structure or a chapter is missing from ` +
+          `the archive. A chapter silently missing looks exactly like a short chapter downstream.`
+      )
+    );
+  }
+  return findings;
+}
+
+/**
+ * Check 4 (MEDIUM) — a chapter title that is a file name rather than a name the book prints.
+ *
+ * Two shapes this repository has actually shipped. A plain-text volume used to be headed with
+ * `path.basename(sourceFile)`, so the published book literally began `# test_story(1).md`; and on
+ * volumes 8 and 11 of the live series a section with no name of its own was titled `p-001.xhtml`, which
+ * reads in every report as a chapter the book has. The extraction now guards both (`plainTextTitle`
+ * marks a file-name title synthetic, and an unnamed section gets "Untitled section N"), so this check is
+ * the tripwire that says the guard stopped working — and it is MEDIUM because a title that must not be
+ * printed is a blemish in the reports, not a lost chapter.
+ *
+ * A synthetic placeholder ("Untitled section 3", "Part 2 of 5") is NOT this finding: it is the extraction
+ * admitting it has no title, which is the honest answer. This check is about a title that pretends to be
+ * a real one.
+ *
+ * @param {{volume: TranslationTargetVolume, bundle: SourceBundle, segments: SourceSegment[]}} p
+ * @returns {PostMortemFinding[]} One MEDIUM finding per chapter titled after a file.
+ */
+function auditTitlesAreTitles({ volume, bundle, segments }) {
+  const sourceNames = sourceNameKeys(bundle, volume);
+  const findings = [];
+  for (const segment of segments) {
+    const title = String(segment.title || "").trim();
+    if (!title) continue;
+    const key = nameKey(title);
+    if (!key) continue;
+    const isSourceName = sourceNames.has(key);
+    const isOwnFileName = key === nameKey(segment.file);
+    const endsInFileExtension = FILE_NAME_EXT_RE.test(title);
+    if (!isSourceName && !isOwnFileName && !endsInFileExtension) continue;
+    findings.push(
+      finding(
+        "MEDIUM",
+        "title-is-filename",
+        EXTRACTION_STEP,
+        volume.installmentNumber || null,
+        findingFile(volume, segment.file),
+        `Chapter "${segment.id}" is titled "${title}", which is a file name, not a title the book prints. ` +
+          `It lands in chapters.json and in every report as a chapter the book has. The merge prints no ` +
+          `heading for a synthetic title, so the published text is safe — the artifact that lists the ` +
+          `chapters is not.`
+      )
+    );
+  }
+  return findings;
+}
+
+/**
+ * Check 5 (MEDIUM) — a bundle whose pronunciation-guide harvest file is not beside it.
+ *
+ * The harvest is part of the extraction, not a note about it: `<base>-ruby-guides.json` is the only
+ * record of what the author said each guided word is read as (三色院菫子 → パンジー, 玄武 → ジヨーロ),
+ * and 146 distinct words across the live series are guided with a reading that is not the Japanese
+ * pronunciation at all. `resolveSourceBundle` already re-extracts a cache that lost the file, so a
+ * bundle that reaches this audit without one got past that check somehow — a cache certifying a hole
+ * (gotcha 123).
+ *
+ * A plain-text volume is silent: it has no markup to harvest, and its bundle says so
+ * (`rubyGuidesPath: null`).
+ *
+ * @param {{volume: TranslationTargetVolume, bundle: SourceBundle, names: string[]}} p
+ * @returns {PostMortemFinding[]} Zero or one MEDIUM finding.
+ */
+function auditGuideHarvest({ volume, bundle, names }) {
+  if (!isArchivePath(bundle.originalPath || "")) return [];
+  const expected = rubyGuideFileName(bundle.base || "");
+  const named = bundle.rubyGuides && bundle.rubyGuides.file ? bundle.rubyGuides.file : "";
+  const present = new Set(names);
+  if (present.has(expected) && (!named || present.has(named))) return [];
+  const missing = named && named !== expected ? `${expected} (the bundle meta points at "${named}")` : expected;
+  const guides = bundle.rubyGuides && Number.isFinite(bundle.rubyGuides.guides) ? bundle.rubyGuides.guides : null;
+  return [
+    finding(
+      "MEDIUM",
+      "ruby-harvest-missing",
+      EXTRACTION_STEP,
+      volume.installmentNumber || null,
+      findingFile(volume, expected),
+      `This volume's extraction set aside ${guides === null ? "an unknown number of" : guides} ` +
+        `pronunciation guide(s) and "${missing}" is not in the volume folder. The readings the author ` +
+        `wrote for those words exist nowhere else, and every later "how is this word read?" question ` +
+        `about this volume is answered by a translator guessing.`
+    ),
+  ];
+}
+
+module.exports = {
+  auditSourceIsArchive,
+  auditHasUsableChapter,
+  auditEmptyChapters,
+  auditTitlesAreTitles,
+  auditGuideHarvest,
+};

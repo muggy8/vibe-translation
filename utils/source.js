@@ -35,6 +35,7 @@ const __images = require("./source/images");
 const __rubyGuides = require("./source/ruby-guides");
 const __extract = require("./source/extract");
 const __bundle = require("./source/bundle");
+const __audit = require("./source/audit");
 const __prompt_lines = require("./source/prompt-lines");
 
 module.exports = {
@@ -47,5 +48,6 @@ module.exports = {
   ...__rubyGuides,
   ...__extract,
   ...__bundle,
+  ...__audit,
   ...__prompt_lines,
 };
