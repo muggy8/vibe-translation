@@ -132,14 +132,13 @@ function offloadOne(messages, extra = {}) {
   assert.strictEqual(ctx.contextManagementEnabled("devteam"), true);
 
   // Every pipeline-stage handle name in this project must be OUTSIDE the list.
+  // (The character-voice stage is not in it: its one route makes no agent call at all.)
   const stageNames = [
     "glossary-research",
     "glossary-amend",
     "glossary-validator",
     "glossary-feedback",
     "glossary-findings-merge",
-    "character-voice-compile",
-    "character-voice-validator",
     "style-guide-compile",
     "jump-in-wiki-author",
     "jump-in-wiki-merge",

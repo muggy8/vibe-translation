@@ -35,12 +35,11 @@
  * Usage:
  *   node test/test-pipeline-loop.js                    full run + audit + second pass
  *   node test/test-pipeline-loop.js --stages=glossary  narrow it while debugging
- *   node test/test-pipeline-loop.js --chunked=character-voice
+ *   node test/test-pipeline-loop.js --chunked=glossary
  *                                                    # force those stages down the chapter-by-chapter
  *                                                    # path (the fixture is cut into chapter-sized parts)
  *   node test/test-pipeline-loop.js --store-validators
- *                                                    # pin GLOSSARY_STORE_VALIDATORS / VOICE_STORE_VALIDATORS
- *                                                    # on for this run
+ *                                                    # pin GLOSSARY_STORE_VALIDATORS on for this run
  *   node test/test-pipeline-loop.js --no-second-pass
  *   node test/test-pipeline-loop.js --audit-selftest   plant known prompt defects
  *                                                    and prove the audit reports them
@@ -97,16 +96,21 @@ const ROLE_PREFIXES = ["TRANSLATE", "VERIFY", "EDIT", "AUDIT"];
 /**
  * The stages that have a chapter-by-chapter path at all. `--chunked=` is only accepted for these,
  * because forcing a stage that has no fallback would silently do nothing.
+ *
+ * The character voice reference is not one of them any more. Its one route reads the volume chapter by
+ * chapter whatever the volume's size, so there is no second path to force onto it — and its author
+ * route, which did have one, was removed (git history at commit 75e59a7).
  */
-const CHUNKABLE_STAGES = ["glossary", "character-voice", "style-guide", "jump-in-wiki"];
+const CHUNKABLE_STAGES = ["glossary", "style-guide", "jump-in-wiki"];
 
 /**
- * Whether this run pins the two reference-store flags on.
+ * Whether this run pins the reference-store flag on.
  *
- * `--store-validators`. Both flags are production settings and both default off; this is the loop's own
- * way of measuring the flag-on path without the caller remembering to export two variables, and without
- * an npm script that only works in a POSIX shell. It sets the child's environment; it does not change a
- * default.
+ * `--store-validators`. It is a production setting and it defaults off; this is the loop's own way of
+ * measuring the flag-on path without the caller remembering to export a variable, and without an npm
+ * script that only works in a POSIX shell. It sets the child's environment; it does not change a
+ * default. (The character-voice stage's record is not behind any flag: its artifacts are rendered out
+ * of the record.)
  *
  * @returns {boolean}
  */
@@ -117,10 +121,14 @@ function storeValidatorsPinned() {
 /**
  * The stages this run forces down the chapter-by-chapter path.
  *
- * `--chunked=character-voice` (comma-separated). The fixture is small, so the mode decision would
- * never pick the fallback on its own; this is the same `--chunked` an operator passes to a real run,
- * handed to the named stage's child process. The stages that have no fallback are refused rather than
- * silently ignored.
+ * `--chunked=glossary` (comma-separated). The fixture is small, so the mode decision would never pick
+ * the fallback on its own; this is the same `--chunked` an operator passes to a real run, handed to the
+ * named stage's child process. The stages that have no fallback are refused rather than silently
+ * ignored.
+ *
+ * Cutting the fixture into chapter-sized parts is half of what this does, and it changes every stage in
+ * the run, not only the named ones: a volume with several chapters is a different fixture shape, and a
+ * stage that reads chapter by chapter (the voice stage) now reads several of them.
  *
  * @returns {string[]}
  */
@@ -130,7 +138,12 @@ function chunkedStages() {
   const wanted = arg.slice("--chunked=".length).split(",").map((s) => s.trim()).filter(Boolean);
   const unknown = wanted.filter((name) => !CHUNKABLE_STAGES.includes(name));
   if (unknown.length > 0) {
-    throw new Error(`--chunked: ${unknown.join(", ")} has no chapter-by-chapter path. Known: ${CHUNKABLE_STAGES.join(", ")}`);
+    throw new Error(
+      `--chunked: ${unknown.join(", ")} has no chapter-by-chapter path. Known: ${CHUNKABLE_STAGES.join(", ")}` +
+        (wanted.includes("character-voice")
+          ? " (the character-voice stage reads the volume chapter by chapter on its only route, so there is nothing to force)"
+          : "")
+    );
   }
   return wanted;
 }
@@ -240,11 +253,11 @@ function childEnv(endpoint) {
     // `--chunked=<stage>`: a plain-text volume cut into ONE part has no chapter-by-chapter path at
     // all — `shouldProcessChunked` refuses it whatever the operator asks for. So when the run asks
     // for the fallback, the fixture is cut into chapter-sized parts (utils/source/config.js). Only
-    // then: the default loop keeps the production split, and its 107-call baseline with it.
+    // then: the default loop keeps the production split, and its call baseline with it.
     ...(chunkedStages().length > 0 ? { SOURCE_TEXT_PART_TARGET_CHARS: "200" } : {}),
 
     // `--store-validators`: the flag-on path, pinned here rather than inherited from the shell.
-    ...(storeValidatorsPinned() ? { GLOSSARY_STORE_VALIDATORS: "1", VOICE_STORE_VALIDATORS: "1" } : {}),
+    ...(storeValidatorsPinned() ? { GLOSSARY_STORE_VALIDATORS: "1" } : {}),
 
     // The production defaults, spelled out so the run is reproducible.
     PASSING_SCORE: "70",
@@ -460,14 +473,7 @@ function digestOf(output) {
 function runStageAsync(name, env, timeoutMs) {
   return new Promise((resolve) => {
     const argv = [__filename, `--stage=${name}`];
-    if (chunkedStages().includes(name)) {
-      argv.push("--chunked");
-      // The chapter-by-chapter fallback is a property of the **author** route: the assembled route
-      // reads chapter by chapter whatever the volume's size, so `--chunked` means nothing to it.
-      // This variant exists to keep the author route's fallback path covered offline, so it says which
-      // route it is testing instead of letting the flag mean different things in different routes.
-      if (name === "character-voice") argv.push("--route=author");
-    }
+    if (chunkedStages().includes(name)) argv.push("--chunked");
     const child = spawn(process.execPath, argv, { cwd: ROOT, env });
     let output = "";
     let killed = false;
@@ -868,12 +874,8 @@ async function main() {
   console.log(`series: ${SERIES_DIR} (${workflow.VOLUMES.length} volumes, plain text)`);
   if (chunkedStages().length > 0) {
     console.log(`forced chapter-by-chapter: ${chunkedStages().join(", ")} (fixture parts cut to 200 chars so the fallback path exists)`);
-    if (chunkedStages().includes("character-voice")) {
-      console.log("character-voice route: author — the chapter-by-chapter fallback belongs to that route; the default assembled route reads chapter by chapter already.");
-    }
-  } else {
-    console.log("character-voice route: assemble (the default) — read chapter by chapter, render both artifacts from the record, no author agent.");
   }
+  console.log("character-voice: one route — read the volume chapter by chapter, render both artifacts from the record, no agent turn (--chunked means nothing to it).");
   if (!reportSelfCheck()) {
     console.error("The scripted answers would fail the pipeline's own checks. Fix the fixture before running.");
     process.exitCode = 1;

@@ -1,5 +1,13 @@
 /**
- * Prompt-file locations, the QA iteration cap, and the truncation window for the injected voice reference. clientDir is the project root — a module in this folder reaches it through projectRoot, not through its own __dirname.
+ * Prompt-file locations and the truncation window for the injected voice reference.
+ * clientDir is the project root — a module in this folder reaches it through projectRoot, not through
+ * its own __dirname.
+ *
+ * Two prompt pairs, because the stage asks the model two things: read one chapter, and grade the
+ * rendered reference. The author, validator and feedback prompt files went with the route that used
+ * them; the validator half of the gate is now queries against the volume's record, which make no call
+ * and need no prompt. There is no QA iteration cap here either: the gate grades once, and a cap an
+ * operator could raise on a stage with no rewrite pass is a knob on nothing.
  *
  * Part of the character-voice.js layer (split out of the original single file).
  */
@@ -18,24 +26,10 @@ const extractSystemPromptFile = path.join(clientDir, "system-prompts", "characte
 
 const extractUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice-extract.md");
 
-const authorSystemPromptFile = path.join(clientDir, "system-prompts", "character-voice.md");
-
-const authorUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice.md");
-
-const validatorSystemPromptFile = path.join(clientDir, "system-prompts", "character-voice-validator.md");
-
-const validatorUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice-validator.md");
-
 const acceptanceSystemPromptFile = path.join(clientDir, "system-prompts", "character-voice-acceptance.md");
 
 const acceptanceUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice-acceptance.md");
 
-const feedbackSystemPromptFile = path.join(clientDir, "system-prompts", "character-voice-feedback.md");
-
-const feedbackUserPromptTemplateFile = path.join(clientDir, "user-prompts", "character-voice-feedback.md");
-
-
-const maxValidationIterations = Math.max(1, parseInt(process.env.QA_MAX_ITERATIONS, 10) || 10);
 
 const VOICE_REF_TRUNCATION_THRESHOLD = 64 * 1024;
 
@@ -47,15 +41,8 @@ module.exports = {
   seriesDir,
   extractSystemPromptFile,
   extractUserPromptTemplateFile,
-  authorSystemPromptFile,
-  authorUserPromptTemplateFile,
-  validatorSystemPromptFile,
-  validatorUserPromptTemplateFile,
   acceptanceSystemPromptFile,
   acceptanceUserPromptTemplateFile,
-  feedbackSystemPromptFile,
-  feedbackUserPromptTemplateFile,
-  maxValidationIterations,
   VOICE_REF_TRUNCATION_THRESHOLD,
   VOICE_REF_TRUNCATION_MAX_ENTRIES,
 };

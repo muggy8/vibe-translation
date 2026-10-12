@@ -1,8 +1,8 @@
 /**
- * character-voice/assemble.js — the voice stage's normal route: read the volume chapter by chapter,
- * file what was found, and **render** the two artifacts from the volume's record. No author agent.
+ * character-voice/assemble.js — the voice stage's route: read the volume chapter by chapter, file what
+ * was found, and **render** the two artifacts from the volume's record. No author agent.
  *
- * Why this is the default now. Measured on the real volumes: volume 01's authored run cost 37 model
+ * Why this is the only route. Measured on the real volumes: volume 01's authored run cost 37 model
  * calls, 166.7M prompt tokens and 12.7 hours, and the reference it produced was scored 48/100 and had
  * to be rebuilt by code. The same volume read-and-assembled cost about 1.1M tokens. Volume 02 read and
  * assembled cost 14 calls / 1.66M tokens / 0.85 h and its published reference was graded **82/100**
@@ -10,11 +10,11 @@
  * that made the reference good; it was the half that made it expensive, and it was also the half that
  * destroyed volume 01's file in the first place.
  *
- * ## What the gate still does, on this route
+ * ## What the gate does
  *
  * Everything except the rewrite. The deterministic audit runs. The acceptance grade runs, with the same
  * rubric, the same sampled reference, the same three files handed to the grader — including
- * `pov-map.md`, which this route renders precisely so the gate can run. The only thing missing is the
+ * `pov-map.md`, which this file is rendered precisely so the gate can run. The only thing missing is the
  * feedback pass, because there is no author to ask: a grade that fails cannot be answered by a model
  * re-typing the same claims, so it stops the volume instead.
  *
@@ -36,8 +36,8 @@
  * have to exist in the volume folder for the gate to run at all. Writing them, grading them, and
  * quarantining them if the grade fails is the order that lets the real gate grade the real artifacts
  * without publishing a volume nobody accepted. `rebuild-voice.js` keeps its own rule — publishing seals
- * and nothing else seals — untouched: on this route the seal is the stage's own end-of-volume seal, the
- * same one the author route gets.
+ * and nothing else seals — untouched: on this route the seal is the stage's own end-of-volume seal, at
+ * the end of `processVoiceVolume`.
  *
  * @module character-voice/assemble
  */
@@ -49,7 +49,7 @@ require("../types"); // JSDoc type definitions
 const rs = require("../utils/reference-store");
 const { ACCEPTANCE_PASSING_SCORE } = require("../configs/shared");
 const { assertVoiceCarryForward } = require("./carry-forward");
-const { fileVoiceExtraction, auditAssembledArtifacts } = require("./store");
+const { fileVoiceExtraction, auditVoiceArtifact } = require("./store");
 const { runQaLoop } = require("./qa");
 const reading = require("./reading");
 
@@ -207,7 +207,7 @@ async function runAssembledVolume(ctx) {
       `${paid} model call(s), ${read.chapters.filter((c) => c.reused).length} chapter(s) reused.`
   );
 
-  // The candidate copies, through the same door the author route uses. They are candidates: the
+  // The candidate copies, filed through the store's import door. They are candidates: the
   // published bullets come from the adopted rows, and the gap between the two is a query the audit runs.
   fileVoiceExtraction(ctx, entries);
 
@@ -223,14 +223,21 @@ async function runAssembledVolume(ctx) {
   if (built.rendered.truncated || built.povRendered.truncated) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: ${built.rendered.truncated + built.povRendered.truncated} bullet(s) were cut to fit one line.`);
   }
+  if (built.rebuild.volumeSealed) {
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: this volume's record was already sealed — by the glossary stage, at the end of ` +
+        "its own work on the volume — and it held no character-voice rows, so this is the first reference the volume has had " +
+        "and nothing published is being replaced."
+    );
+  }
 
   reopenRecordForStage(ctx);
 
   // The cumulative invariant, checked against the previous volume's published reference — the same
-  // guard the author route runs, on a file this route produced by rendering instead of by writing.
+  // guard every cumulative stage runs, on a file this stage produced by rendering instead of writing.
   await assertVoiceCarryForward(ctx, "the assembled render");
 
-  const audit = await auditAssembledArtifacts(ctx, { refused: built.rebuild.refused });
+  const audit = await auditVoiceArtifact(ctx, { refused: built.rebuild.refused });
   if (audit.highFindings.length) {
     const moved = await quarantineAssembledArtifacts(ctx);
     throw new Error(
@@ -248,8 +255,9 @@ async function runAssembledVolume(ctx) {
       `Volume ${values.INSTALLMENT_NUMBER}: the acceptance gate did not accept the assembled reference ` +
       `(scores: ${result.scores.join(", ") || "none usable"}; passing score: ${ACCEPTANCE_PASSING_SCORE}). ` +
       `${moved.length ? `${moved.join(" and ")} — the artifacts were moved aside so the next volume cannot build on them.` : ""} ` +
-      "This route has no author agent to rewrite the reference, so a failing grade stops the volume rather than paying for another pass over the same claims. " +
-      "What to do: re-read the thin chapters (`extract-voice.js --chapter=<id>`), or run this volume on the author route with --route=author."
+      "This stage has no rewrite pass, so a failing grade stops the volume rather than paying for another pass over the same claims. " +
+      "What to do: re-read the thin chapters (`npm run extract-voice -- --volume=NN --chapter=<id>`) and run the volume again, " +
+      "or reopen the record and re-derive it from the beginning (`npm run reopen -- --volume=NN --reason=\"…\"`)."
     );
   }
 

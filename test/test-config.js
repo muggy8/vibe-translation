@@ -350,33 +350,39 @@ assert.strictEqual(
   }
 }
 
-// ─── the voice stage's route selector: a flag, not a variable ─────────────────
+// ─── the voice stage has one route, and `--route=` is refused, not ignored ────
 {
-  const { readVoiceRoute, VOICE_ROUTES, DEFAULT_VOICE_ROUTE } = require("../character-voice");
+  const { assertNoRouteSelector } = require("../character-voice");
 
-  assert.deepStrictEqual(VOICE_ROUTES, ["assemble", "author"], "the closed menu: the assembled route and the author route, nothing else");
-  assert.strictEqual(DEFAULT_VOICE_ROUTE, "assemble", "read-then-assemble is what a run does when nobody says otherwise");
-  assert.strictEqual(readVoiceRoute(["node", "index.js", "--stage=character-voice"]), "assemble", "no flag, the default route");
-  assert.strictEqual(readVoiceRoute(["node", "index.js", "--route=assemble"]), "assemble");
-  assert.strictEqual(readVoiceRoute(["node", "index.js", "--route=author"]), "author", "the older route stays selectable");
+  // No flag: nothing to say, nothing to refuse.
+  assert.doesNotThrow(() => assertNoRouteSelector(["node", "index.js", "--stage=character-voice"]));
 
-  // A typo must not quietly build volumes a different way from the one asked for. This is the same
-  // shape as the banned-option filter (gotcha 70): the refusal sits on the thing that reads the
-  // choice, not on a comment telling somebody to type it correctly.
-  for (const typo of ["--route=autor", "--route=asemble", "--route=", "--route=AUTHOR"]) {
+  // The removed route names what replaced it. An operator who types it believes they are getting an
+  // author agent; the run they would get has no author agent anywhere in it, so the refusal has to say
+  // both that it is gone and where the work happens now.
+  assert.throws(
+    () => assertNoRouteSelector(["node", "index.js", "--route=author"]),
+    /--route=author was removed[\s\S]*reads the volume chapter by chapter[\s\S]*renders character-voice\.md and pov-map\.md[\s\S]*extract-voice[\s\S]*rebuild-voice[\s\S]*75e59a7/
+  );
+
+  // Every other value is refused too: a flag that selects nothing is a flag that lies about the run.
+  // This is the same shape as the banned-option filter (gotcha 70) — the refusal sits on the thing that
+  // reads the choice, not on a comment telling somebody to type it correctly.
+  for (const typed of ["--route=assemble", "--route=autor", "--route=", "--route=AUTHOR"]) {
     assert.throws(
-      () => readVoiceRoute(["node", "index.js", typo]),
-      /is not a character-voice route/,
-      `${typo} is refused rather than resolved to something nearby`
+      () => assertNoRouteSelector(["node", "index.js", typed]),
+      /is not a character-voice option: this stage has one route and no selector/,
+      `${typed} is refused rather than accepted and ignored`
     );
   }
 
-  // And it is not an environment variable: switching a route from .env would change what a run does
+  // And there is no variable behind any of it: switching a route from .env would change what a run does
   // underneath a run, which is the thing AGENTS.md rule 3 exists to prevent.
   const src = fs.readFileSync(path.join(__dirname, "..", "character-voice", "task.js"), "utf8");
-  const routeBlock = src.slice(src.indexOf("function readVoiceRoute"), src.indexOf("function readVoiceRoute") + 1400);
-  assert.ok(/process\.argv/.test(routeBlock), "the route is read from the command line");
+  const routeBlock = src.slice(src.indexOf("function assertNoRouteSelector"), src.indexOf("function assertNoRouteSelector") + 1600);
+  assert.ok(/process\.argv/.test(routeBlock), "the flag is read from the command line");
   assert.ok(!/process\.env\.[A-Z_]*ROUTE/.test(routeBlock), "and no variable is in front of it");
+  assert.ok(!src.includes("runChunkedVolume") && !src.includes("runCompile"), "and the task module no longer reaches the removed route's flow");
 }
 
 console.log("config: all checks passed.");

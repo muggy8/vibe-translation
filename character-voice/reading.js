@@ -14,8 +14,9 @@
  * Measured on the real volume 02, at the run's normal reasoning level: **three of seven chapters
  * came back cut off** — the answer never reached its closing bracket. Two of them yielded 6 and 1
  * claims for chapters of 33,541 and 35,553 characters, and the pass accepted them. Re-read at a
- * lower reasoning level the same two chapters yielded 21 and 8. The old chunked route was worse:
- * `character-voice/chunked.js` swallowed an unparseable chapter in a `catch {}` and carried on.
+ * lower reasoning level the same two chapters yielded 21 and 8. The route this one replaced was worse:
+ * its chapter-by-chapter flow swallowed an unparseable chapter in a `catch {}` and carried on, so the
+ * hole never surfaced (that flow is gone; it is in git history at commit 75e59a7).
  *
  * A cut-off answer is not a short answer, it is a **half an answer**: the model stopped in the middle
  * of the list, and what it was about to write is not in the file. Nothing about the volume says which
@@ -48,8 +49,7 @@ const path = require("path");
 const crypto = require("crypto");
 require("../types"); // JSDoc type definitions
 
-const { runExtract } = require("./stages");
-const { parseVoiceQuirks } = require("./amend");
+const { runExtract, parseVoiceQuirks } = require("./stages");
 const { buildAlreadyExtractedNote } = require("./prompts");
 
 /** One chapter's answer, kept beside the volume so an interrupted pass does not pay for it twice. */

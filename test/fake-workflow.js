@@ -353,48 +353,6 @@ function glossaryMarkdown(volume) {
   ].join("\n");
 }
 
-function characterVoiceMarkdown(volume) {
-  return [
-    `# キャラクターボイスリファレンス — ${SERIES.name}`,
-    "",
-    `現行：${volume.installment}巻まで`,
-    "",
-    // `### ` is the heading the character-voice reference actually uses (volume 01's real file, and
-    // the shape `character-voice/carry-forward.js` counts sections by). Written as `## ` it was
-    // invisible to that guard, so the fixture never exercised the one gate that catches a reference
-    // which lost a character.
-    "### 主人公（語り手）",
-    "",
-    "- **Pronouns**: 私。自由間接話法が混ざる。「私はその輪郭を数えるのが好きだった。」",
-    "- **Sentence endings**: 事実を短い平叙文で並べ、感情を後から一文だけ添える。「霧の日は、廊下の窓が内側から曇る。」",
-    "",
-    "### 灯里",
-    "",
-    "- **Pronouns**: 依頼形を避ける。命令ではなく確認の言い方。「その日は灯里だった。」",
-    "- **Catchphrases**: 「もう一度確認したい」",
-    "",
-    "### 悠真",
-    "",
-    "- **Vocabulary register**: 用語を定義してから話す。比喩を嫌う。「技術は反復で、魔法は依頼だ」",
-    "",
-  ].join("\n");
-}
-
-function povMapMarkdown(volume) {
-  return [
-    `# POV Map — ${SERIES.alt}, volume ${volume.installment}`,
-    "",
-    "| Section | POV | Narration type |",
-    "|---|---|---|",
-    "| Opening | The protagonist | first-person-internal |",
-    "| Roof scenes | The protagonist | first-person-internal with free indirect discourse |",
-    "| Closing | The protagonist | first-person-internal |",
-    "",
-    "Markers: the narration stays inside the protagonist throughout this volume; the only shift is free indirect discourse in the roof scenes.",
-    "",
-  ].join("\n");
-}
-
 function styleGuideMarkdown(volume) {
   const extra =
     volume.installment === "02"
@@ -474,7 +432,6 @@ function sharedWikiMarkdown(volume) {
 
 const VALIDATION_KINDS = {
   glossary: { file: "glossary-validation.md", artifact: "glossary.md" },
-  "character-voice": { file: "character-voice-validation.md", artifact: "character-voice.md + pov-map.md" },
   "style-guide": { file: "style-guide-validation.md", artifact: "style-guide.md" },
   "jump-in-wiki": { file: "jump-in-wiki-validation-{{NN}}.md", artifact: "wiki.md + shared-wiki.md" },
 };
@@ -668,9 +625,6 @@ const SIGNATURES = [
   ["**Glossary Auditor**", "glossary-validator"],
   ["**Quality Gatekeeper** for a translation glossary", "acceptance"],
   ["**Voice and Perspective Analyst**", "voice-extract"],
-  ["**Character Voice Archivist** operating in **revision mode**", "voice-feedback"],
-  ["**Character Voice Archivist** maintaining", "voice-author"],
-  ["**Character Voice and Perspective Auditor**", "voice-validator"],
   ["**Quality Gatekeeper** for a character voice", "acceptance"],
   ["**Style Convention Analyst**", "style-extract"],
   ["**Style Guide Archivist** operating in **revision mode**", "style-feedback"],
@@ -949,22 +903,6 @@ function agentSteps(kind, volume, ctx) {
       return [
         { toolCalls: [read("glossary.md")], finishReason: "tool_calls" },
         { toolCalls: [write(reportFileNamed(ctx.userText, "glossary-validation.md"), validationMarkdown("glossary", volume, 1))], finishReason: "tool_calls" },
-        done("Wrote the validation report."),
-      ];
-
-    case "voice-author":
-    case "voice-feedback":
-      return [
-        { toolCalls: [read(volume.stagedFile)], finishReason: "tool_calls" },
-        { toolCalls: [write("character-voice.md", characterVoiceMarkdown(volume))], finishReason: "tool_calls" },
-        { toolCalls: [write("pov-map.md", povMapMarkdown(volume))], finishReason: "tool_calls" },
-        done(`Wrote character-voice.md and pov-map.md for volume ${volume.installment}.`),
-      ];
-
-    case "voice-validator":
-      return [
-        { toolCalls: [read("character-voice.md")], finishReason: "tool_calls" },
-        { toolCalls: [write(reportFileNamed(ctx.userText, "character-voice-validation.md"), validationMarkdown("character-voice", volume, 1))], finishReason: "tool_calls" },
         done("Wrote the validation report."),
       ];
 

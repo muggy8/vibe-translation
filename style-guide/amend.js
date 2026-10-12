@@ -12,8 +12,9 @@ const { authorMaxStepsFor } = require("../utils/prompt");
 
 /**
  * The write instruction for a style-guide pass — shared by the compile and
- * feedback passes, whole and per-chapter. See voiceWriteInstruction /
- * glossaryWriteInstruction: the cumulative document is edited IN PLACE, and the
+ * feedback passes, whole and per-chapter. See glossaryWriteInstruction (the voice
+ * stage's equivalent went with its author route, which is gone): the cumulative
+ * document is edited IN PLACE, and the
  * whole-file write is only for a file that does not exist yet.
  *
  * @param {boolean} hasExistingFile - Whether "style-guide.md" already holds the

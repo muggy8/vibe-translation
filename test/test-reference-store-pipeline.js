@@ -1173,14 +1173,18 @@ function scenarioAuditCountsAreTheStoresOwn() {
   console.log("reference-store pipeline: the audit re-checks every citation it holds and reports its own counts");
 }
 
-// ─── The flag: off means nothing here runs ────────────────────────────────────
+// ─── The flag: off means the glossary glue runs nothing ───────────────────────
 
 /**
- * Both flags default off, and with them off the stage glue touches nothing: no record is opened, no
- * row is written, no file is changed. That is the rollback guarantee, tested rather than asserted.
+ * The glossary flag defaults off, and with it off the stage glue touches nothing: no record is opened,
+ * no row is written, no file is changed. That is the rollback guarantee, tested rather than asserted.
+ *
+ * The voice half of the flag is gone (the voice stage renders its artifacts out of the record, so the
+ * record is not optional), and `voiceStore.*` with no record open is the same guarantee from the other
+ * side: every glue verb returns null and writes nothing.
  */
 async function scenarioFlagOffTouchesNothing() {
-  assert.deepStrictEqual(STORE_VALIDATORS, { glossary: false, voice: false }, "both flags default off (plan 04 §12: a stage that has not run a real volume through the new path keeps the old one)");
+  assert.deepStrictEqual(STORE_VALIDATORS, { glossary: false }, "the glossary flag defaults off (plan 04 §12: a stage that has not run a real volume through the new path keeps the old one)");
 
   const fx = fixtureStoreSeries("pipeline-flag-off");
   const ctx = {
@@ -1196,7 +1200,6 @@ async function scenarioFlagOffTouchesNothing() {
 
   assert.strictEqual(voiceStore.fileVoiceExtraction(ctx, [{ type: "voice", character: "如月雨露", quirkType: "pronoun", description: "x", examples: ["気にすんな！"] }]), null);
   assert.strictEqual(glossaryStore.fileGlossaryExtraction(ctx, [{ term: "会計担当", type: "concept", query: "x" }]), null);
-  assert.strictEqual(await voiceStore.mirrorVoiceArtifact(ctx), null);
   assert.strictEqual(await glossaryStore.mirrorGlossaryArtifact(ctx), null);
   assert.strictEqual(await voiceStore.auditVoiceArtifact(ctx), null);
   assert.strictEqual(await glossaryStore.auditGlossaryArtifact(ctx), null);

@@ -27,9 +27,9 @@
  * here. Slice 6 adds the pipeline's own door — `reference-store/pipeline-store.js`, which a
  * stage calls from its orchestration to file what it already produced and to run the audit — and
  * it is still not agent tool access: no agent reads, writes, or queries the store, and no prompt
- * mentions it. That is slice 7. The pipeline half is behind `STORE_VALIDATORS`
- * (`GLOSSARY_STORE_VALIDATORS` / `VOICE_STORE_VALIDATORS`, both off by default); the store's own
- * guards are not behind it.
+ * mentions it. That is slice 7. The glossary half of the pipeline door is behind
+ * `GLOSSARY_STORE_VALIDATORS` (off by default); the character-voice half is not behind any flag, because
+ * that stage renders its artifacts out of the record. The store's own guards are behind neither.
  *
  * @module utils/reference-store
  */

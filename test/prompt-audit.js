@@ -50,9 +50,6 @@ const AGENT_KINDS = new Set([
   "glossary-author",
   "glossary-validator",
   "glossary-feedback",
-  "voice-author",
-  "voice-validator",
-  "voice-feedback",
   "style-author",
   "style-validator",
   "style-feedback",
@@ -527,7 +524,6 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
     ["glossary-extract", "glossary-author", "glossary extraction before the glossary amend"],
     ["glossary-author", "glossary-validator", "the glossary author before the glossary validator"],
     ["glossary-validator", "acceptance", "the validator before the acceptance grade"],
-    ["voice-extract", "voice-author", "voice extraction before the voice compile"],
     ["style-extract", "style-author", "style extraction before the style compile"],
     ["audit-agent", "translate", "the consistency audit before the first translation"],
     ["verify", "retranslate", "verification before retranslation"],
@@ -541,7 +537,7 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
     if (b < a) orderGaps.push(`${label}: ${after} (#${b}) ran before ${before} (#${a})`);
   }
   if (orderGaps.length) fail("stage-ordering", "the calls did not happen in the order the pipeline is built in.", orderGaps);
-  else pass("stage-ordering", `${seenStages.join(" → ")} — every stage's first call came after the stage it depends on, and within each volume: extract → author → validator → acceptance.`);
+  else pass("stage-ordering", `${seenStages.join(" → ")} — every stage's first call came after the stage it depends on, and within each volume: extract → author → validator → acceptance (the character-voice stage is extract → acceptance: its validator half is a query, not a call).`);
 
   // ─── 11. Nothing answered with an error, a cut-off, or nothing at all ───────
   const badAnswers = [];
@@ -594,9 +590,6 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
     "glossary-author",
     "glossary-validator",
     "glossary-feedback",
-    "voice-author",
-    "voice-validator",
-    "voice-feedback",
     "style-author",
     "style-validator",
     "style-feedback",

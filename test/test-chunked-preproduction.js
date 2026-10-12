@@ -1,13 +1,21 @@
 /**
- * test/test-chunked-preproduction.js — the chapter-by-chapter path of the two cumulative
- * reference tasks: the character voice reference and the style guide.
+ * test/test-chunked-preproduction.js — the chapter-by-chapter path of the style guide, the one
+ * cumulative reference task that still has one.
  *
- * Why this suite exists: both tasks have a whole-installment path and a chapter-by-chapter
+ * Why this suite exists: the style guide has a whole-installment path and a chapter-by-chapter
  * fallback, and the fallback is where the two guarantees that protect a cumulative document
  * actually live — the previous volume's copy is seeded in before any agent touches it, and the
  * carry-forward gate runs BETWEEN chapters, so a character or a category lost at chapter 3 is
  * caught at chapter 3 rather than eight chapters and one acceptance loop later. A
  * whole-installment fixture never reaches that code, so until now nothing did.
+ *
+ * It used to cover the character voice reference too. That stage's chapter-by-chapter flow belonged
+ * to its author route, and the author route was removed: the voice stage reads chapter by chapter on
+ * its only route and renders the document from the volume's record, so there is no agent pass between
+ * chapters to seed, amend, or shrink, and no compile prompt to assert on. Its equivalent guarantees
+ * moved into the record — the copy-forward refusal, the render, the seal — and are pinned by
+ * `test-reference-store-*.js` and the offline pipeline loop. Leaving a stubbed voice flow here would
+ * mean stubbing a flow that no longer exists.
  *
  * The harness is stubbed (the wiring is what is under test, not the provider); the files, the
  * QA loop, the seed and the guards are the real ones. Everything happens in a throwaway
@@ -22,31 +30,6 @@ const path = require("path");
 const os = require("os");
 
 const harness = require("../harness");
-
-/** The previous volume's character voice reference: two characters, both cumulative. */
-const PREV_VOICE = `# Character Voice Reference — Series, volume 05
-
-## Characters
-
-### 如月雨露（ジョーロ）
-- Register: blunt, clipped sentence ends.
-- Catchphrase: "まあね".
-
-### 佐伯さん
-- Register: formal, over-polite in front of strangers.
-
-## POV
-- Third person limited, following 如月雨露.
-`;
-
-/** The same reference with one character missing — what the between-chapter gate exists to catch. */
-const SHRUNK_VOICE = `# Character Voice Reference — Series, volume 06
-
-## Characters
-
-### 如月雨露（ジョーロ）
-- Register: blunt, clipped sentence ends.
-`;
 
 /** The previous volume's style guide: two categories, both cumulative. */
 const PREV_STYLE = `# Style Guide — Series, volume 05
@@ -65,12 +48,6 @@ const SHRUNK_STYLE = `# Style Guide — Series, volume 06
 - \`-san\` is kept as \`-san\`; never expanded to "Mr." or "Ms.".
 `;
 
-/** The voice task owes two documents; the seed only copies the reference, so the agent writes both. */
-const POV_MAP = `# POV Map — Series, volume 06
-
-- Chapter 1: third person limited, following 如月雨露.
-- Chapter 2: third person limited, following 佐伯さん.
-`;
 
 const VALIDATION_REPORT =
   "# Validation — Series, volume 06\n\n" +
@@ -93,75 +70,6 @@ const SEGMENTS = [
  */
 const FLOWS = [
   {
-    label: "character-voice",
-    artifactName: "character-voice.md",
-    validationName: "character-voice-validation.md",
-    partialPrefix: "character-voice-validation-",
-    prevArtifact: PREV_VOICE,
-    shrunk: SHRUNK_VOICE,
-    newEntriesName: "character-voice-new.json",
-    // What the extraction one-shot answers with: one entry, in the shape
-    // parseVoiceQuirks accepts (an entry without a `type` is filtered out).
-    extractPayload: '[{"type": "quirk", "character": "如月雨露", "note": "clipped sentence ends"}]',
-    // "the compile pass (chapter ch2) dropped character section(s) that … held"
-    guardMessage: /the compile pass \(chapter ch2\) dropped character section\(s\)/,
-    isCompileAgent: (name) => /^author-voice-\d+-ch\d+$/.test(name),
-    isFeedbackAgent: (name) => /^feedback-author-/.test(name),
-    /** The second document the author passes owe, which the seed does not copy in. */
-    companion: (volDir) => ({ file: path.join(volDir, "pov-map.md"), content: POV_MAP }),
-    load: () => require("../character-voice"),
-    compare: (prev, current) => require("../character-voice").compareVoiceCarryForward(prev, current),
-    /** What a chapter's compile pass adds to the reference it was handed. */
-    append: "\n### 秋野桜（通称コスモス）\n- Register: warm, oblique, answers a question with a question.\n",
-    /** The document the FIRST chapter's pass produces, because there is nothing to amend yet. */
-    firstDraft:
-      "# Character Voice Reference — Series, volume 01\n\n## Characters\n\n" +
-      "### 如月雨露（ジョーロ）\n- Register: blunt, clipped sentence ends.\n",
-    /** The line the section map must contain before a later pass is told where to put a character. */
-    indexLine: "如月雨露（ジョーロ）",
-    indexHeading: 'What "character-voice.md" already holds',
-    createInstruction: "neither file exists yet",
-    amendInstruction: "ALREADY holds the reference",
-    buildCtx: (p) => ({
-      values: {
-        INSTALLMENT_NUMBER: p.installment,
-        SOURCE_NAME: "Series",
-        SOURCE_LANGUAGE: "Japanese",
-        TARGET_LANGUAGE: "English",
-      },
-      folderName: p.folderName,
-      volumeDir: p.volDir,
-      sourceFile: path.join(p.volDir, SEGMENTS[0].file),
-      bundle: {
-        format: "epub",
-        segments: SEGMENTS,
-        wholeChars: 200,
-        wholePath: path.join(p.volDir, SEGMENTS[0].file),
-        sourceFingerprint: "fixture-fingerprint",
-      },
-      isFirst: p.isFirst,
-      previousFolderName: p.previousFolderName,
-      previousVoiceRefFile: p.previousArtifactFile,
-      voiceOutputFile: p.artifactFile,
-      povOutputFile: path.join(p.volDir, "pov-map.md"),
-      validationOutputFile: p.validationFile,
-      extractPrompt: "Extract the voice quirks and POV information.",
-      extractSystemPrompt: "You extract voice quirks.",
-      authorSystemPrompt: "You maintain the character voice reference.",
-      authorTemplate: "Amend the reference for {{SOURCE_NAME}}.",
-      authorUserPrompt: "Amend the reference for {{SOURCE_NAME}}.",
-      validatorSystemPrompt: "You audit the character voice reference.",
-      validatorPrompt: "Audit the reference.",
-      validatorUserPrompt: "Audit the reference.",
-      feedbackSystemPrompt: "You apply the validation findings.",
-      feedbackPrompt: "Apply the findings.",
-      feedbackUserPrompt: "Apply the findings.",
-      acceptanceSystemPrompt: "You grade the reference.",
-      acceptancePrompt: "Grade the reference.",
-      chunked: true,
-    }),
-  },
-  {
     label: "style-guide",
     artifactName: "style-guide.md",
     validationName: "style-guide-validation.md",
@@ -175,7 +83,6 @@ const FLOWS = [
     guardMessage: /the compile pass \(chapter ch2\) dropped style-guide section\(s\)/,
     isCompileAgent: (name) => /^author-style-\d+-ch\d+$/.test(name),
     isFeedbackAgent: (name) => /^author-style-feedback-/.test(name),
-    companion: null,
     load: () => require("../style-guide"),
     compare: (prev, current) => require("../style-guide").compareStyleCarryForward(prev, current),
     /** What a chapter's compile pass adds to the guide it was handed. */
@@ -232,7 +139,7 @@ const FLOWS = [
 /**
  * Run one cumulative reference task's chapter-by-chapter path and assert what it owes.
  *
- * @param {{label: string, artifactName: string, validationName: string, partialPrefix: string, prevArtifact: string, shrunk: string, guardMessage: RegExp, isCompileAgent: Function, isFeedbackAgent: Function, companion: ?Function, load: Function, compare: Function, buildCtx: Function}} flow
+ * @param {{label: string, artifactName: string, validationName: string, partialPrefix: string, prevArtifact: string, shrunk: string, guardMessage: RegExp, isCompileAgent: Function, isFeedbackAgent: Function, load: Function, compare: Function, buildCtx: Function}} flow
  */
 async function runFlow(flow) {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `chunked-${flow.label}-`));
@@ -280,18 +187,10 @@ async function runFlow(flow) {
           } else {
             await fs.writeFile(artifactFile, flow.prevArtifact, "utf8");
           }
-          if (flow.companion) {
-            const c = flow.companion(volDir);
-            await fs.writeFile(c.file, c.content, "utf8");
-          }
         } else if (flow.isFeedbackAgent(name)) {
           counters.feedback++;
           // A feedback pass amends the document it was handed: it does not shrink it.
           await fs.writeFile(artifactFile, await fs.readFile(artifactFile, "utf8"), "utf8");
-          if (flow.companion) {
-            const c = flow.companion(volDir);
-            await fs.writeFile(c.file, c.content, "utf8");
-          }
         }
         return { text: "", toolCalls: [{ toolCallId: "1", toolName: "readFile", input: {} }] };
       },
@@ -416,10 +315,6 @@ async function testFirstVolumeIsToldToAmend(flow) {
           // add to the copy that is already there.
           const prior = await fs.readFile(artifactFile, "utf8").catch(() => null);
           await fs.writeFile(artifactFile, prior === null ? flow.firstDraft : prior + flow.append, "utf8");
-          if (flow.companion) {
-            const c = flow.companion(volDir);
-            await fs.writeFile(c.file, c.content, "utf8");
-          }
         } else if (name.startsWith("validator-merge-")) {
           await fs.writeFile(validationFile, VALIDATION_REPORT, "utf8");
         } else if (name.startsWith("validator-")) {
@@ -427,10 +322,6 @@ async function testFirstVolumeIsToldToAmend(flow) {
           await fs.writeFile(path.join(volDir, `${flow.partialPrefix}${id}.md`), VALIDATION_REPORT, "utf8");
         } else if (flow.isFeedbackAgent(name)) {
           await fs.writeFile(artifactFile, await fs.readFile(artifactFile, "utf8"), "utf8");
-          if (flow.companion) {
-            const c = flow.companion(volDir);
-            await fs.writeFile(c.file, c.content, "utf8");
-          }
         }
         return { text: "", toolCalls: [{ toolCallId: "1", toolName: "readFile", input: {} }] };
       },

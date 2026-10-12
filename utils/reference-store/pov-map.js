@@ -24,8 +24,9 @@
  * The record this volume was opened with already carries every earlier volume's sealed rows in it
  * (`copy-forward.js`), so rendering the record renders the accumulated map: volume 1's chapters
  * first, then this volume's, each in the order its own source prints them. That is a change to the
- * artifact's contract — `character-voice/carry-forward.js` and `character-voice/amend.js` both say
- * `pov-map.md` describes **only this volume** — and it is a deliberate one: the claims being carried
+ * artifact's contract — the route this one replaced said `pov-map.md` describes **only this volume**
+ * (that route is gone; its wording is in git history at commit 75e59a7) — and it is a deliberate one:
+ * the claims being carried
  * are sealed rows of the same record the cumulative reference is rendered from, and a per-volume map
  * would silently drop the point-of-view history the reference keeps. The translation stage is not
  * flooded by it: `utils/translate/references.js` injects at most 2,000 characters of this file,

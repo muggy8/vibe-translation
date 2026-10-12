@@ -504,36 +504,45 @@ that each looked like something else (gotcha 104): a plain-text volume cut into 
 path to take at all, and the scripted model brain hardcoded the consolidated report's file name, so the
 per-chapter partial stayed empty and the "never wrote real output" guard correctly refused the volume.
 
-With both fixed, `npm run pipeline-loop-chunked` (part of `npm test`) runs `discover → glossary →
-character-voice` with the character-voice stage forced chapter-by-chapter and both store flags pinned
-on. What it shows:
+**What the loop is now, and why it stopped being called "chunked character-voice".** With the author
+route removed (§7.11) the character-voice stage has one path: it reads the volume chapter by chapter
+whatever the volume's size. There is no fallback to force onto it, so `--chunked=character-voice` is
+refused by the loop and `CHUNKABLE_STAGES` is `glossary, style-guide, jump-in-wiki`. The loop is now
+`npm run pipeline-loop-store`: `discover → glossary → character-voice`, with the **glossary** forced
+chapter-by-chapter, the fixture cut into chapter-sized parts, and `GLOSSARY_STORE_VALIDATORS` pinned on.
+What is unique about it is the store being on and the fixture having several chapters per volume — which
+is also what makes the voice stage read several chapters instead of one.
 
-| character-voice stage, two fixture volumes | whole, flags off | whole, flags on | chunked, flags off | chunked, flags on |
-|---|---|---|---|---|
-| model calls | 22 | 16 | 44 | 26 |
-| prompt characters | 221,317 | 159,541 | 495,577 | 295,973 |
-| validator-family calls | 6 | 0 | 18 | 0 |
+| character-voice stage, two fixture volumes | flags off, one chapter per volume | store on, several chapters per volume |
+|---|---|---|
+| model calls | 8 | 10 |
+| prompt characters | 69,703 | 85,295 |
+| agent turns | 0 | 0 |
+| validator-family calls | 0 | 0 |
 
-**The chunked branch does run the store.** The deterministic audit fires (27 and 29 citations
-re-checked on the fixture's two volumes), the extraction claims are filed, the finished reference is
-mirrored, and the record is **sealed** (9 rows, then 0) — the seal lives at the task level, so both modes
-reach it, and the whole-mode→chunked retry is safe because `mirrorVoiceArtifact` resets this volume's
-mirror before re-importing.
+The whole loop is 93 calls with the flags off and 39 in the store loop; both second passes are zero
+calls. Before the route was removed the same stage cost 22 calls whole and 26 chunked, and 6 of the
+whole-mode calls were validator agents.
 
-**What vanishes in the chunked branch specifically:** 12 per-chapter validator agents and 6
-findings-merge agents (whole mode drops 6 validator agents). The merge agent's work — consolidate the
-partials, dedupe, keep the chapter tags, produce the summary and verdict sections — is fully replaced,
-because consolidating a report checks nothing. What is **not** replaced is the per-chapter *reading*: an
-agent that read the reference against one chapter could notice the reference misdescribes a character,
-and no query in the store asks that question. That gap is not chunked-specific — whole mode pays for it
-too — and the only thing still judging it is the acceptance grade.
+**The store path runs end to end here, and it seals.** The deterministic audit fires (25 and 27 citations
+re-checked on the fixture's two volumes), the extraction claims are filed, the adopted rows are rendered
+into both artifacts, and the record is sealed at the end of the volume. What no longer exists in the
+store path at all is the per-chapter validator agent and the findings-merge agent: consolidating partial
+reports into one report was the merge agent's job, and a query over the whole record never had partial
+reports to combine.
 
-**And the chunked branch is more expensive, which the flags do not undo.** Whole mode pays for one
-extraction and one compile pass per volume; chunked mode pays for one of each **per chapter**. On the
-fixture that is 4 authoring calls becoming 8; on volume 02 it is 2 becoming 14. The store removes the
-validation half of the bill, not the authoring half.
+**What the store path does not replace.** The per-chapter *reading* was never a validator's job, and the
+store does not add one: an agent that read the reference against one chapter could notice the reference
+misdescribes a character, and no query in the store asks that question. That gap is not chunked-specific
+and it is not new — the whole-installment path paid for it too — and the only thing still judging it is
+the acceptance grade.
 
-See gotcha 104, `docs/map-tests.md` (`test-pipeline-loop.js`, `fake-workflow.js`, `prompt-audit.js`).
+**And the loop is what caught gotcha 120.** With the store on, the glossary stage seals each volume at
+the end of its own work on it, so the voice stage arrives at a record that is already sealed and holds
+nothing but glossary rows — and the rebuild door refused it as "a published character-voice reference"
+while reporting zero such rows. Nothing else in the test suite reaches that shape, because nothing else
+runs the glossary store and the voice render in the same series. That is the argument for keeping this
+loop after the thing it was named for went away.
 
 ### 7.8 The roster fold: a pronoun is not a character, and where a split may be repaired
 
@@ -748,26 +757,24 @@ found the rebuild **ran anyway** — byte-identical output, zero new rows — wh
 `source_stage = "document"` rows. A guard whose counter misses the rows a route writes is not
 covering that route; it is worth knowing that before trusting the guard.
 
-**Read-then-assemble is what a run does.** `character-voice/assemble.js` is the voice stage's default
-route (`--route=assemble`; `--route=author` selects the older one). The route selector is a command
-line flag, not an environment variable, and an unrecognised value is an error rather than a fallback.
-On this route the stage opens the volume's record whether or not `VOICE_STORE_VALIDATORS` is on,
-because the record *is* the artifact's source; the author route keeps the flag exactly where it was,
-and with the flag off it is byte-for-byte the pipeline that has always run.
+**Read-then-assemble became what a run does.** `character-voice/assemble.js` became the voice stage's
+default route, and then its only one (§7.11). At the time it was added, `--route=author` still selected
+the older flow; the selector was a command line flag rather than an environment variable, and an
+unrecognised value was an error rather than a fallback — the same rule the refusal of `--route=` keeps.
+On this route the stage opened the volume's record whatever `VOICE_STORE_VALIDATORS` said, because the
+record *is* the artifact's source.
 
-The gate is unchanged on both routes — the deterministic audit, the same rubric, the same three files
-handed to the grader, `pov-map.md` included. What the assembled route drops is the **feedback pass**,
+The gate is unchanged from the two-route era — the deterministic audit, the same rubric, the same three
+files handed to the grader, `pov-map.md` included. What the new route dropped is the **feedback pass**,
 because there is no author to ask: `maxIterations: 1`, one grade per volume instead of five, and a
 failing grade moves both artifacts to `.rejected`, leaves the record a draft (which is what the next
 volume's copy-forward refuses), and throws, so the step runner's post-mortem and ticket machinery see
 it like any other failed step. `test/test-task-failure.js` pins that shape end to end.
 
 The offline loop's numbers moved, and the honest reading is that they moved for the right reason: the
-whole-pipeline default loop is **93 calls** where it was 107, with the character-voice stage alone
-going from 24 to 8; the chapter-by-chapter store variant is **47**, unchanged, because it now says
-`--route=author` explicitly — the whole-installment → chunked *fallback* belongs to the author route,
-and the assembled route is chapter-by-chapter already, so leaving the flag to mean two things would
-have stopped that variant covering the path it exists to cover.
+whole-pipeline default loop is **93 calls** where it was 107, with the character-voice stage alone going
+from 24 to 8. The store variant moved too, from 47 to 39, when it stopped running the voice stage down
+the author route's chapter-by-chapter fallback (§7.7).
 
 **A cut-off chapter is a different failure from a malformed one.** Volume 02's own partials, read
 after the fact: `ch2`, `ch4` and `ch5` each already carried `cutOff: true`. The scanner had noticed
@@ -797,6 +804,56 @@ author route's map is still per-volume. And the rendered map is not the marker c
 reading a chapter could notice a viewpoint break the extraction never filed, and no query in the store
 asks that question — the same gap §7.3 names for the coverage guard, in a different artifact.
 
+### 7.11 The author route removed, and what it was measured to have bought
+
+The plan of record kept the author route behind `--route=author` while the read-then-assemble route was
+being built, on the plan's own rollback rule: a stage that has not run a real volume through the new path
+keeps the old one. Volumes 1 and 2 have now run through the new path, were re-graded through the stage's
+own acceptance check, and are sealed on it. The old path was no longer a rollback — it was a second
+implementation of the same stage, with its own prompt pairs, its own QA loop wiring, its own carry-forward
+seed, its own mode decision, and its own tests. It was removed rather than left deprecated.
+
+**What it cost, measured from the run log rather than remembered.** Volume 01's authored run
+(`2026-10-09T20-32-15-343Z`): **166,370,184 tokens** across **25 agent turns** (10 compile agents, 10
+validators, 1 findings-merge, 4 completed feedback agents) and **11 one-shot calls**. The four completed
+feedback agents alone: **256 tool calls, 131 writes, 53,656,318 tokens — 32.3% of the run**. Three of
+those four ended at their step cap without a final answer; a fifth feedback turn started and the run log
+ends mid-turn.
+
+**What it bought, measured the same way.** **Exactly one acceptance grade was ever taken** in that run —
+48/100, "Requires revision", its note naming a "blocking corrupted tail (220 lines of duplicated
+fragments)" — recorded in the volume's acceptance window as `results: [48]`. **There was no re-grade after
+the feedback round.** The pass that cost a third of the run produced no measurable change in the one number
+the stage judges its output by, and the file it produced is quarantined on disk (`character-voice.md.rejected`,
+336,428 bytes), not published.
+
+**What the render does not produce, stated without spin.** The authored `pov-map.md` had four sections the
+render has no equivalent for — Markers, Narration Types, POV Shift Summary, and **Unresolved POV Questions**
+— together **58 content lines (all of them bullets), 8,493 characters, 20,849 bytes: 38.0% of that file's
+bytes and 35.2% of its content lines** (the file holds 165 content lines). The rendered map is *larger*
+than the authored map's own chapter section (60 bullets / 19,604 characters against 92 table rows /
+15,360 characters) — and the comparison is generous to the render, because the rendered map covers both
+volumes while the authored one covers one — so the loss is confined to those four sections. Of them,
+`Unresolved POV Questions` is the one with real value to a translator: who is speaking in an ambiguous
+passage, which 僕/俺 switches not to normalise, which characters are present but unnamed, and where not to
+add interior monologue. Nothing in the record holds that, because nothing in the extraction was asked to
+find it. Closing that gap means asking the extraction a new question, not restoring an author agent.
+
+**What the stage no longer does, and what that costs.** It makes no agent call, so there is no step cap to
+size, no write instruction to get wrong, and no recovery turn to gate. It no longer decides a processing
+mode, so it no longer prints the "this source is N tokens against an M-token allowance" line; its size
+guard is the reading pass's cut-off detector, which catches the failure that line warned about instead of
+predicting it. `--chunked` is accepted and announced as a no-op. And a volume gets **one grade instead of
+five**: a failing grade quarantines rather than buying a revision, which is a real trade — the old route
+could act on a grader's complaints, and the new one cannot.
+
+**The guard the removal exposed** is gotcha 120: with the store on, the glossary stage seals a volume
+before the voice stage renders into it, and the rebuild door refused that as overwriting a published
+reference. The author route never rendered, so it never stood in front of that guard.
+
+**What is genuinely unfinished.** The four `pov-map.md` summary sections (§7.11 above). The speaker-
+attribution work that would fill them is a separate slice and was deliberately not started here.
+
 ---
 
 ## 8. Build order
@@ -811,7 +868,7 @@ fixture series (`test/fixture-series.js`); none may reach the real 17 volumes.
 | 3 | Copy-forward as a **guarded step** | **Done 2026-10-10; reviewed.** A planted corrupt source file is refused and reported HIGH. A clean copy has identical row counts and records its source hash |
 | 4 | Import both artifacts for one volume, **render them back** | **Done 2026-10-10; reviewed, and the review's corrections are applied.** Measured on the real volume 01: the rendered glossary is byte-identical to the file on disk except for the one row the store refused, and the character-voice reference reproduces its content (its line structure differs only where the file itself has a 54,341-character welded line) |
 | 5 | Sealing and ownership | **Done 2026-10-10; reviewed.** An agent updates and deletes its own unsealed rows. The same call against another volume's row changes **zero** rows and returns a refusal naming the real owner and pointing at `challenge_fact`. After sealing, delete is refused |
-| 6 | Replace the AI validators with queries + a graded sample | **Done 2026-10-10, behind `GLOSSARY_STORE_VALIDATORS` / `VOICE_STORE_VALIDATORS`, both default off.** Each planted defect is caught at the right severity — `test/test-reference-store-pipeline.js`, twenty scenarios, the shape `test/test-postmortem.js` uses. The whole-document validators make no model calls: on the offline fixture loop the glossary stage goes 21 → 15 calls and 186,301 → 116,602 prompt characters, the character-voice stage 22 → 16 and 221,281 → 157,828, the whole run 107 → 95 and 1,131,401 → 998,663, and the `glossary-validator` / `voice-validator` kinds (12 calls, 149,454 characters) stop existing. On the real volume 01, measured without a model call, one acceptance grade drops from 227,782 characters to 23,473 for the character-voice reference and from 31,763 to 17,472 for the glossary. **No real volume has been run through the stage's flag-gated path yet** — which is why both flags default off (§12). What *has* now run on a real volume is the store itself: volume 02's record was opened, filled, audited, rendered and sealed by `extract-voice.js` + `rebuild-voice.js` with the flags off, because that route has no flag in front of its record door (§7.9, gotcha 106) |
+| 6 | Replace the AI validators with queries + a graded sample | **Done 2026-10-10, behind `GLOSSARY_STORE_VALIDATORS` (default off) — and, for the character-voice stage, behind no flag at all** (§7.11: that stage renders its artifacts out of the record, so a switch in front of the record is a switch in front of the stage, and `VOICE_STORE_VALIDATORS` was removed). Each planted defect is caught at the right severity — `test/test-reference-store-pipeline.js`, twenty scenarios, the shape `test/test-postmortem.js` uses. The whole-document validators make no model calls: on the offline fixture loop the glossary stage goes 21 → 15 calls and 186,301 → 116,602 prompt characters, the character-voice stage 22 → 16 and 221,281 → 157,828, the whole run 107 → 95 and 1,131,401 → 998,663, and the `glossary-validator` / `voice-validator` kinds (12 calls, 149,454 characters) stop existing. On the real volume 01, measured without a model call, one acceptance grade drops from 227,782 characters to 23,473 for the character-voice reference and from 31,763 to 17,472 for the glossary. **No real volume has been run through the stage's flag-gated path yet** — which is why both flags default off (§12). What *has* now run on a real volume is the store itself: volume 02's record was opened, filled, audited, rendered and sealed by `extract-voice.js` + `rebuild-voice.js` with the flags off, because that route has no flag in front of its record door (§7.9, gotcha 106) |
 | 7 | Give the pre-production agents the read and write tools, with budgets | Tested against the scripted endpoint in `test/fake-backend.js`, **including a model that asks for more than the window can hold — that grant must be refused, not honoured** |
 | 8 | Two-tier injection into the translator | The card tier is never dropped. The full tier is ranked by appearance in the chapter. A volume-N translation cannot see a volume-N+1 fact. Bumped through `REFERENCE_SELECTION_VERSION` so dependent drafts invalidate deliberately (gotcha 27) |
 | 9 | The repair loop as query-and-propose | A repair agent makes **no file edits** on a published artifact |
@@ -829,9 +886,11 @@ the published file untouched.
 **Slices 1–5 are built, and they add a parallel implementation that no agent touches** — nothing about what a prompt
 says or which calls the pipeline makes changes, so they can be merged and tested without any
 behavioural risk. **Slice 6 is built too, and it does change which calls the pipeline makes** (the whole-document validators
-stop running), so it ships behind two flags that both default off: the rehearsal is `GLOSSARY_STORE_VALIDATORS=1
-VOICE_STORE_VALIDATORS=1 npm run pipeline-loop`, and the switch back is un-setting them (gotcha 97). **Slices 7–9 change what the agents are able to do.** Review gates accordingly: 1–5
-are safe to merge on a green suite, 6 needs the cost and quality numbers checked, 7–9 need the flag.
+stop running), so it shipped behind two flags that both defaulted off: the rehearsal was `GLOSSARY_STORE_VALIDATORS=1
+VOICE_STORE_VALIDATORS=1 npm run pipeline-loop`, and the switch back was un-setting them (gotcha 97). **The voice half of
+that switch is gone** (§7.11): the character-voice stage renders its artifacts out of the record, so its record is opened
+unconditionally and only the glossary still has the flag. **Slices 7–9 change what the agents are able to do.**
+Review gates accordingly: 1–5 are safe to merge on a green suite, 6 needs the cost and quality numbers checked, 7–9 need the flag.
 
 **One-time cost to accept**, carried forward from 5.1: every existing `contextHash` and rolling-state
 file invalidates once, which means one full re-verification. Budget for it explicitly.

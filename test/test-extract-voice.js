@@ -803,7 +803,9 @@ function scenarioItIsNotPartOfARun() {
   assert.ok(!indexSource.includes("extract-voice"), "it is not one of the pipeline's stages");
 
   const stageSource = fs.readFileSync(path.join(__dirname, "..", "character-voice", "task.js"), "utf8");
-  assert.ok(!stageSource.includes("extract-voice"), "and the voice stage does not call it");
+  // The stage may NAME the command in the fix it tells an operator to run; what it may not do is
+  // reach it. A require is the difference between a suggestion and a step.
+  assert.ok(!/require\(["']\.\/extract-voice["']\)|require\(["']\.\.\/extract-voice["']\)/.test(stageSource), "and the voice stage does not call it");
 
   assert.ok(/require\.main === module/.test(source), "importing it does not start it");
 

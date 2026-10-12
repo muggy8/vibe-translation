@@ -86,7 +86,7 @@ require("../../types"); // JSDoc type definitions
 /** The heading the rebuilt file opens with — the same title the authored artifact uses. */
 const REBUILT_VOICE_TITLE = "# Character Voice Reference";
 
-/** The section every character lives under, matching `system-prompts/character-voice.md`. */
+/** The section every character lives under — the one every published reference on disk uses. */
 const REBUILT_VOICE_SECTION = "Characters";
 
 /**
@@ -227,15 +227,23 @@ function rebuildClaimAlreadyStored(store, { key, aspect, body }) {
  * The third case is a refusal that names the legal verb: `resetDocumentMirror`, run from a handle opened
  * with the import stage. `rebuildVoiceVolume` does exactly that before it files anything.
  *
- * **The sealing question is asked about the volume, not about one kind of row.** It used to be asked as
- * "does this volume hold sealed rows whose `source_stage` is the document mirror", which was true of the
- * author route's record and false of the read-then-assemble route's: that route files its adopted claims
- * as `rebuild` rows and its extraction copies as `extract` rows, so a volume sealed by it had zero sealed
- * `document` rows and a full `--apply --move-aside` rebuild ran straight over its published record
- * (gotcha 109). Asking "is this volume sealed" is both narrower and wider than the row query: narrower
- * because it is one fact the store already keeps, wider because it does not care which stage wrote the
- * rows the seal froze. The row counts are still taken, over every stage, so the refusal can name what it
- * is refusing to overwrite rather than only that it is refusing.
+ * **The sealing question is asked about the character-voice document, not about the volume's seal
+ * marker.** It used to be asked as "does this volume hold sealed rows whose `source_stage` is the
+ * document mirror", which was true of the author route's record and false of the read-then-assemble
+ * route's: that route files its adopted claims as `rebuild` rows and its extraction copies as `extract`
+ * rows, so a volume sealed by it had zero sealed `document` rows and a full `--apply --move-aside`
+ * rebuild ran straight over its published record (gotcha 109). The row query below closes that: it
+ * counts sealed rows over **every** stage, so a published reference is caught whoever wrote it.
+ *
+ * What it does not count is the volume's seal marker on its own, and that is a deliberate correction,
+ * not a loosening. `npx gulp` runs each stage over every volume before the next stage starts, and the
+ * glossary stage seals the volume at the end of its own work on it (see `glossary/store.js`'s header),
+ * so by the time the character-voice stage reaches a volume its record is already sealed — with nothing
+ * in it but glossary rows. Refusing on the marker alone told that stage it was overwriting a published
+ * character-voice reference when the reference it was about to write was the first one that volume ever
+ * had. A seal with no character-voice rows under it is not a published character-voice reference; it is
+ * a published glossary. The marker is still reported (`volumeSealed`), because a stage that renders into
+ * a record another stage already sealed is worth seeing in the log.
  *
  * @param {ReferenceStore} store
  * @param {number} vol
@@ -256,7 +264,7 @@ function inspectVoiceMirrorForRebuild(store, vol) {
   }
   const volumeSealed = store.isVolumeSealed(vol);
 
-  if (volumeSealed || sealedTotal > 0) {
+  if (sealedTotal > 0) {
     const kinds = Object.entries(sealedStages)
       .sort((a, b) => b[1] - a[1])
       .map(([stage, n]) => `${n} ${stage}`)
@@ -271,8 +279,8 @@ function inspectVoiceMirrorForRebuild(store, vol) {
         verb: "rebuild_voice",
         rule: "rebuild-refuses-a-sealed-voice-record",
         because:
-          `volume ${vol}'s record is ${volumeSealed ? "sealed" : "holds sealed rows"}: ` +
-          `${sealedTotal} sealed row(s) of its own (${kinds || "no stage counted, only the seal"}). ` +
+          `volume ${vol}'s record holds ${sealedTotal} sealed character-voice row(s) of its own ` +
+          `(${kinds})${volumeSealed ? ", and the volume is sealed" : ""}. ` +
           "Sealed rows are published; a rebuild does not replace them, whatever stage wrote them.",
         useInstead: [
           "challenge_fact",
@@ -762,9 +770,9 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
    */
   const adopted = store.db
     .prepare(
-      "SELECT SUM(CASE WHEN key IS NOT NULL THEN 1 ELSE 0 END) AS claims, " +
+      "SELECT COALESCE(SUM(CASE WHEN key IS NOT NULL THEN 1 ELSE 0 END), 0) AS claims, " +
         "COUNT(DISTINCT key) AS characters, " +
-        "SUM(CASE WHEN key IS NULL THEN 1 ELSE 0 END) AS unkeyed " +
+        "COALESCE(SUM(CASE WHEN key IS NULL THEN 1 ELSE 0 END), 0) AS unkeyed " +
         "FROM facts WHERE owner_volume = ? AND source_stage = ?"
     )
     .get(vol, REBUILD_SOURCE_STAGE);
@@ -806,6 +814,11 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
     unresolved,
     candidates,
     screened,
+    // True when this volume's record was already sealed by another stage (the glossary seals at the end
+    // of its own work). The render went ahead because the seal froze no character-voice rows — but it is
+    // worth a line in the log, because it says the reference being written here is the first one this
+    // volume ever had.
+    volumeSealed: mirror.volumeSealed,
     refusal: null,
   };
 }
@@ -1186,7 +1199,7 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
       verb: "rebuild_voice",
       rule: "rebuild-record-missing-its-earlier-volumes",
       because: `volume ${volNumber} is not the first volume, and its record holds nothing from the volumes before it. A rebuild files this volume's claims; it does not carry the earlier record forward, and a reference rebuilt into an empty record would silently drop every character the earlier volumes established.`,
-      useInstead: ["openVolumeRecord({ volume, folder, seriesDir }) — or run the character-voice stage once with VOICE_STORE_VALIDATORS on, which carries the previous volume's record first", "rebuild volume 1 first, then work forward"],
+      useInstead: ["openVolumeRecord({ volume, folder, seriesDir }) — or run the character-voice stage once, which carries the previous volume's record first", "rebuild volume 1 first, then work forward"],
       fix: `carry volume ${volNumber - 1}'s record into volume ${volNumber} before rebuilding it.`,
     }),
     aliases: { applied: [], refused: [] },

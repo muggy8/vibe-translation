@@ -1030,19 +1030,18 @@ assert.ok(perTermPrompt.includes("- (pending: "), "per-term prompt mentions the 
 assert.ok(perTermPrompt.includes("editFile"), "per-term prompt instructs editFile");
 
 // ─── character-voice: parseVoiceQuirks ──────────────────────────────────────
+// The voice layer's exported surface is what one route needs: the extraction parser, the reference
+// truncation the extractor is shown, the section parser the carry-forward gate counts, the one prompt
+// block the reading pass builds, and the gate's comparison. The author turn, the validator turn, the
+// feedback turn, the write instruction, the recovery prompt and the inlined section index went with the
+// route that sent them (git history at commit 75e59a7).
 const {
   parseVoiceQuirks,
   truncateVoiceRef,
   emittedToolCallAsText,
-  buildExtractTurnPrompt,
-  buildAuthorTurnPrompt,
-  buildValidatorTurnPrompt,
-  buildFeedbackTurnPrompt,
+  buildAlreadyExtractedNote,
   parseVoiceSections,
   voicePrimaryName,
-  buildVoiceIndex,
-  voiceWriteInstruction,
-  voiceRecoveryPrompt,
   compareVoiceCarryForward,
 } = require("../character-voice");
 
@@ -1165,61 +1164,39 @@ assert.strictEqual(emittedToolCallAsText(null), false, "emittedToolCallAsText: n
 assert.strictEqual(emittedToolCallAsText({}), false, "emittedToolCallAsText: empty result not flagged");
 assert.strictEqual(emittedToolCallAsText({ text: "", toolCalls: [] }), false, "emittedToolCallAsText: empty text not flagged");
 
-// ─── character-voice: prompt builders ───────────────────────────────────────
-const voiceCtx = {
-  values: { INSTALLMENT_NUMBER: "01", SOURCE_NAME: "Test", SOURCE_LANGUAGE: "Japanese", TARGET_LANGUAGE: "English" },
-  folderName: "test_story(1)",
-  sourceFile: "test-series/test_story(1)/test_story(1).md",
-  isFirst: true,
-  previousFolderName: null,
-  extractUserPrompt: "# Extraction — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
-  authorUserPrompt: "# Compilation — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}\n\n{{EXTRACTION_RESULTS}}",
-  validatorUserPrompt: "# Validation — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
-  feedbackUserPrompt: "# Feedback — {{SOURCE_NAME}}, Volume {{INSTALLMENT_NUMBER}}",
-  voiceOutputFile: "character-voice.md",
-  povOutputFile: "pov-map.md",
-};
+// ─── character-voice: buildAlreadyExtractedNote ─────────────────────────────
+// The only prompt block this stage builds in code. It is what keeps a chapter-by-chapter reading pass
+// from re-claiming what its own earlier chapters already found, so the two things worth pinning are:
+// it says nothing on the first chapter (there is nothing yet), and it names a POV claim's character
+// from the field a POV claim actually uses.
+{
+  assert.strictEqual(
+    buildAlreadyExtractedNote({ installmentNumber: "01", segmentsTotal: 3, doneSegments: [], entries: [] }),
+    null,
+    "the first chapter of the pass gets no note — there is nothing already extracted"
+  );
 
-const extractPrompt = buildExtractTurnPrompt(voiceCtx);
-assert.ok(extractPrompt.includes("Test"), "extract prompt carries series name");
-assert.ok(extractPrompt.includes("01"), "extract prompt carries installment");
-
-const authorPrompt = buildAuthorTurnPrompt(voiceCtx, '[{"type":"voice","character":"ソラ"}]');
-assert.ok(authorPrompt.includes("Test"), "author prompt carries series name");
-assert.ok(authorPrompt.includes('{"type":"voice","character":"ソラ"}'), "author prompt carries extraction results");
-assert.ok(authorPrompt.includes('"test_story(1).md" (same folder)'), "author prompt names the volume source at its real path");
-assert.ok(authorPrompt.includes("absent — this is the first volume"), "author prompt (first volume): previous reference absent");
-
-const authorPromptFirst = buildAuthorTurnPrompt({ ...voiceCtx, values: { ...voiceCtx.values, INSTALLMENT_NUMBER: "01" } }, "");
-assert.ok(authorPromptFirst.includes("this is the first volume"), "author prompt (empty results): mentions first volume");
-
-const validatorPrompt = buildValidatorTurnPrompt(voiceCtx);
-assert.ok(validatorPrompt.includes("Test"), "validator prompt carries series name");
-assert.ok(validatorPrompt.includes("01"), "validator prompt carries installment");
-assert.ok(validatorPrompt.includes('"character-voice.md" (same folder)'), "validator prompt names the reference under audit");
-assert.ok(validatorPrompt.includes('"pov-map.md" (same folder)'), "validator prompt names the POV map under audit");
-
-const feedbackPrompt = buildFeedbackTurnPrompt(voiceCtx);
-assert.ok(feedbackPrompt.includes("Test"), "feedback prompt carries series name");
-assert.ok(feedbackPrompt.includes("01"), "feedback prompt carries installment");
-assert.ok(feedbackPrompt.includes("character-voice-validation.md"), "feedback prompt names the validation report");
-
-// Non-first volume: the previous reference is named at its real relative path
-// (../<previous folder>/character-voice.md) — the convention from glossary.js.
-const voiceCtxVol2 = {
-  ...voiceCtx,
-  values: { ...voiceCtx.values, INSTALLMENT_NUMBER: "02" },
-  folderName: "test_story(2)",
-  sourceFile: "test-series/test_story(2)/test_story(2).md",
-  isFirst: false,
-  previousFolderName: "test_story(1)",
-};
-for (const [name, prompt] of [
-  ["author", buildAuthorTurnPrompt(voiceCtxVol2, "[]")],
-  ["validator", buildValidatorTurnPrompt(voiceCtxVol2)],
-  ["feedback", buildFeedbackTurnPrompt(voiceCtxVol2)],
-]) {
-  assert.ok(prompt.includes("../test_story(1)/character-voice.md"), `${name} prompt (volume 02) names the previous reference at its real path`);
+  const note = buildAlreadyExtractedNote({
+    installmentNumber: "02",
+    segmentsTotal: 4,
+    doneSegments: ["ch1", "ch2"],
+    entries: [
+      { type: "voice", character: "如月雨露", quirkType: "sentenceEnding" },
+      { type: "voice", character: "如月雨露", quirkType: "catchphrase" },
+      { type: "pov", assignedCharacter: "三色院菫子", marker: "※" },
+      { type: "pov", assignedCharacter: "三色院菫子" },
+      { type: "pov", marker: "『 』" },
+      { type: "voice" },
+    ],
+  });
+  assert.ok(note.includes("## Already extracted in volume 02"), "the note names the volume it is tallying");
+  assert.ok(note.includes("ch1, ch2 (2 of 4)"), "the note says which chapters are behind this one, and how many");
+  assert.ok(note.includes("如月雨露: sentenceEnding x1, catchphrase x1 (2 claim(s))"), "a character's claims are grouped by kind");
+  assert.ok(note.includes("三色院菫子: POV ※ x1, POV x1 (2 claim(s))"), "a POV claim's character comes from assignedCharacter, not character");
+  assert.ok(note.includes("(POV, unassigned)"), "a POV claim with no character says so instead of hiding");
+  assert.ok(note.includes("(no character named)"), "a voice claim with no character says so instead of hiding");
+  assert.ok(note.includes("Do not repeat a claim"), "the note ends with the instruction the tally exists to make possible");
+  assert.ok(!note.includes("covers the chapters before it, in reading order"), "the note does not claim a cumulative file this route never wrote");
 }
 
 // ─── style-guide: parseStyleObservations ─────────────────────────────────────
@@ -1358,7 +1335,11 @@ for (const [name, prompt] of [
 // rebuilds it from memory. Volume 01's character-voice feedback turn made 46 tool
 // calls — 29 reads, 15 searches, ZERO writes — and hit its flat step cap while
 // still verifying findings, because the one write it had been told to do was the
-// last thing in its instructions.
+// last thing in its instructions. That route is gone (git history at commit
+// 75e59a7); what is left here is the unit the cumulative rule is stated in — the
+// character section — because the carry-forward gate still counts it, and it is
+// still the only thing in the stage that can see a character who only ever appeared
+// in an earlier volume.
 
 // voicePrimaryName: the part of a heading that says WHO the section is about.
 assert.strictEqual(voicePrimaryName("如月雨露（ジョーロ）【俺人格】"), "如月雨露", "primary name drops the alias and persona tags");
@@ -1443,41 +1424,12 @@ const survivorGone = compareVoiceCarryForward(foldPrev, bothGone, { merged: [{ m
 assert.ok(survivorGone.missing.some((m) => m.name === "如月雨露"), "the survivor's own absence is still a loss");
 assert.ok(survivorGone.missing.some((m) => m.name === "俺"), "and the folded name is a loss too, because nothing survived into");
 
-// The write instruction follows the file, exactly as glossaryWriteInstruction does.
-const voiceSeeded = voiceWriteInstruction(true, "amend");
-assert.ok(voiceSeeded.includes("ALREADY holds"), "a seeded reference is described as already there");
-assert.ok(voiceSeeded.includes("editFile"), "and amended IN PLACE with editFile");
-assert.ok(voiceSeeded.includes('Do NOT rewrite "character-voice.md" with writeFile'), "the whole-file write is forbidden by name");
-assert.ok(voiceSeeded.includes("pov-map.md"), "the per-volume map is still written whole — the two files are not the same kind");
-assert.ok(voiceSeeded.includes("HIGH"), "and the pass works in severity order so a capped turn still leaves a better document");
-const voiceUnseeded = voiceWriteInstruction(false, "amend");
-assert.ok(voiceUnseeded.includes("does not exist yet") || voiceUnseeded.includes("neither file exists yet"), "the first volume really does write both files whole");
-assert.ok(!voiceUnseeded.includes("Do NOT rewrite"), "and is not told to edit a file that is not there");
-assert.ok(voiceWriteInstruction(true, "correct").includes("Correct"), "the feedback wording says correct, not amend");
-
-// The recovery turn must not demand the instruction that broke the file.
-const voiceRecovery = voiceRecoveryPrompt(true, true);
-assert.ok(voiceRecovery.includes("editFile"), "the recovery turn edits");
-assert.ok(!/rewrite both files using writeFile/.test(voiceRecovery), "and never demands the whole-file rewrite that destroyed it");
-assert.ok(voiceRecoveryPrompt(true, false).includes("writeFile"), "with no seeded file, writing it whole is the right ask");
-
-// The index is a map, not the document, and it says when it truncates (gotcha 43).
-assert.ok(buildVoiceIndex(voiceRefPrev).includes("日向葵（ひまわり）"), "the voice index lists the sections");
-assert.strictEqual(buildVoiceIndex("no sections here"), "", "voice index: no sections, no index");
-process.env.VOICE_INDEX_MAX_CHARS = "40";
-const cappedVoiceIndex = buildVoiceIndex(voiceRefPrev);
-assert.ok(cappedVoiceIndex.includes("are not listed here"), "capped voice index SAYS it truncated");
-assert.ok(cappedVoiceIndex.includes("grep"), "capped voice index names the way to check anyway");
-delete process.env.VOICE_INDEX_MAX_CHARS;
-
-// The turn prompts carry the instruction, so the agent is never handed a prompt
-// that contradicts it.
-const voiceCtxSeeded = { ...voiceCtx, isFirst: false, previousFolderName: "test_story(1)", voiceSeeded: true };
-assert.ok(buildAuthorTurnPrompt(voiceCtxSeeded, "[]").includes("editFile"), "the compile turn says amend in place");
-assert.ok(buildFeedbackTurnPrompt(voiceCtxSeeded).includes("editFile"), "the feedback turn says patch, not rewrite");
-assert.ok(!buildFeedbackTurnPrompt(voiceCtxSeeded).includes("write the complete corrected files"), "and no leftover demand to rewrite everything");
-assert.ok(buildFeedbackTurnPrompt(voiceCtxSeeded).includes("ONE grep"), "the feedback turn batches its source checks instead of one search per finding");
-assert.ok(buildAuthorTurnPrompt(voiceCtx, "[]").includes("neither file exists yet"), "the first volume's compile turn writes both files whole");
+// The write instruction, the recovery prompt, the inlined section index and the compile/feedback turn
+// prompts used to be asserted here. They belonged to the author route, and the reference this stage
+// publishes is rendered by code from the volume's record — there is no agent turn to instruct, and no
+// agent that could break a cumulative file by rewriting it. The guarantee that a cumulative document is
+// amended and never reproduced is still asserted here for the style guide (below) and for the glossary,
+// and for this stage it is now enforced by `renderVoice` refusing to publish a render that loses a row.
 
 // ─── style-guide: the same rules, on a document whose unit is a section ──────
 const styleRefPrev =

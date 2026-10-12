@@ -41,7 +41,7 @@ require("../../types"); // JSDoc type definitions
 /** The heading the renderer writes at the top of the file. */
 const VOICE_TITLE = "# Character Voice Reference";
 
-/** The section every character lives under, matching `system-prompts/character-voice.md`. */
+/** The section every character lives under — the one every published reference on disk uses. */
 const VOICE_SECTION = "Characters";
 
 /**

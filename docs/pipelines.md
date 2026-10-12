@@ -45,33 +45,99 @@ Per volume:
 
 ## 6. Pipeline C: character-voice (`character-voice.js`)
 
+**One route, no selector.** The stage used to have a second one — an author agent that compiled the
+reference from the extraction and rewrote it on feedback, with a whole-installment-vs-chapter-by-chapter
+decision in front of it and `--route=author` in front of that. It is removed, not deprecated: `--route=`
+is refused for every value, with a message that names what replaced it. The code is in git history at
+commit `75e59a7` if it is ever needed again. What follows is the one flow.
+
 Per volume, in order — each volume's reference builds on the previous one's:
 
-1. **Extract** — one-shot call: source text → JSON array of `{ type, character, quirkType, description, examples, ... }` entries for both voice quirks and POV analysis. Parsed by `parseVoiceQuirks` (tolerates markdown fences and prose).
-2. **Compile** — the workflow first **copies the previous volume's `character-voice.md` into this volume's folder** (`seedVoiceReferenceFromPrevious`) and turns it into an inlined section map (`buildVoiceIndex` → `voiceIndexBlock`), then an author agent (per-volume session, step cap `voiceAuthorMaxSteps` → `authorMaxStepsFor(referenceBytes, sourceBytes)`) reads the source, the reference it is amending, and the extraction results, and produces two files:
-   - `character-voice.md` — the cumulative character voice reference, **amended in place with `editFile`** (`voiceWriteInstruction`; the whole-file `writeFile` is forbidden from volume 02 on — see gotcha 64)
-   - `pov-map.md` — the per-volume POV map (marker identification, narration type classification, POV assignments, free indirect discourse detection), **written whole**, because it describes only this volume and is not cumulative — which is also why it is the one file the seed deliberately does NOT copy
-   The agent-mode turn prompts (author/validator/feedback) name every material at its real path — the previous volume's reference at `../<previous folder>/character-voice.md` (same convention as glossary.js) — so agents never have to guess where to read. A missing previous reference fails loudly (dry-run: warn).
-   **After the compile pass and after every feedback pass**, the same deterministic carry-forward gate the glossary runs (`assertVoiceCarryForward` → `compareVoiceCarryForward`) checks that this volume's reference still holds every character section the previous volume's held. The unit is the `### Character` section keyed on `voicePrimaryName` — the heading with its bracketed aliases and persona tags removed (`如月雨露（ジョーロ）【俺人格】` → `如月雨露`) — because the persona tag is what a feedback pass is most likely to reword while leaving the entry intact, and a COUNT dropping cannot be explained by a rename. A loss fails the volume and moves the reference to `character-voice.md.rejected`. The chunked flow runs it **between chapters** (`guardVoiceCarryForwardAgainst`). Knob: `VOICE_CARRY_FORWARD_GUARD=false`.
+1. **Open the volume's reference record** (`openVoiceRecord`) before anything is written. The previous
+   volume's sealed record is copied forward first, and that copy is where the hard stop lives: a volume
+   whose reference lost characters this volume's own text contains is not carried forward, with no
+   exception and no downgrade. It is not behind a setting — the artifacts are rendered out of this record,
+   so a switch in front of it would not turn a check off, it would turn the volume off.
+2. **Read the volume chapter by chapter** (`character-voice/reading.js` — the same pass
+   `extract-voice.js` runs). One extraction one-shot per chapter: source text → JSON array of
+   `{ type, character, quirkType, description, examples, ... }` entries for both voice quirks and POV
+   analysis, parsed by `parseVoiceQuirks` (tolerates markdown fences and prose). Each chapter's answer is
+   kept in its own partial tagged with a fingerprint of the text it was read from, so a chapter already
+   read for the same text is not paid for twice. An answer whose array never reached its closing bracket is
+   half an answer: it is named and re-read once at `EXTRACTION_RETRY_THINKING_LEVEL`, and a chapter still
+   cut off after both paid reads is kept and printed as **INCOMPLETE** in the log, in
+   `character-voice-reading.md`, and in the report the grader reads. Each chapter after the first is shown
+   `buildAlreadyExtractedNote` — which characters and which claim kinds its earlier chapters produced, not
+   the claim text — so "extract only what this chapter adds" is an instruction the extractor can follow.
+3. **File what was found** (`fileVoiceExtraction`): the claims land in the record as `extract`-stage
+   candidates, on the roster entry the record already uses for that character, and a claim whose quotes do
+   not appear in this volume's text is refused and named rather than filed.
+4. **Render both artifacts out of the record** — no agent writes either file. `character-voice.md` is the
+   cumulative reference (every earlier volume's sealed claims plus this volume's adopted ones);
+   `pov-map.md` is organised by chapter and is **cumulative** too, which is the shape that has room for the
+   point-of-view claims a character section cannot hold. The adoption step is the same door
+   `rebuild-voice.js` uses (`utils/reference-store/rebuild.js`), so the stage and the manual command cannot
+   produce different references from the same record.
+5. **The carry-forward gate** (`assertVoiceCarryForward` → `compareVoiceCarryForward`) checks that the
+   rendered reference still holds every character section the previous volume's held. The unit is the
+   `### Character` section keyed on `voicePrimaryName` — the heading with its bracketed aliases and persona
+   tags removed (`如月雨露（ジョーロ）【俺人格】` → `如月雨露`) — and a name the record itself folded into
+   another roster entry counts as carried when its survivor's section is present (gotcha 110). A loss fails
+   the volume and moves the reference to `character-voice.md.rejected`. Knob:
+   `VOICE_CARRY_FORWARD_GUARD=false`.
+6. **The deterministic audit** (`auditVoiceArtifact`) writes `character-voice-validation.md` from queries
+   against this volume's record, with the reading pass's report folded in so the grader can see how the
+   volume was read. The questions the validator agent used to answer by reading the file are queries: does
+   the reference cover every character this volume's own text contains (HIGH when this volume's extraction
+   filed a claim about them or their name occurs in 3 or more of its chapters; a MEDIUM **mention** when
+   neither holds); is any line too long for an agent's file tools to read (HIGH — the 54,341-character line
+   that made volume 01's reference unreparable is measurable in one pass over the file); which claims the
+   extraction found and the published reference never took. It also writes `character-voice.md-audit.md`
+   beside the artifact it judges, the way `rebuild-voice.js` has always written it (gotcha 119).
+7. **The acceptance grade** — the same rubric, the same three files handed to the grader
+   (`character-voice.md`, `pov-map.md`, `character-voice-validation.md`), the same rolling window and
+   consensus gates as every other stage, with a bounded sample of the reference instead of the whole
+   document. **One iteration, one grade**: there is no feedback pass, because there is no author to ask. A
+   failing grade moves both artifacts to `.rejected`, leaves the record a draft — which is what the next
+   volume's copy-forward refuses — and throws, so the step runner's post-mortem and ticket machinery see it
+   like any other failed step.
+8. **Seal the record** (`sealVoiceRecord`) as the last act of a volume the gate accepted. An unsealed
+   volume is what the next volume's copy-forward refuses, which is the shape the "a damaged reference may
+   not be carried forward" rule takes.
+9. After all volumes: the last volume's `character-voice.md` is copied to the series artifacts directory
+   (`SERIES_ARTIFACTS_DIR`, default `<SERIES_LOCATION>/character-voice.md`). Skipped for `--volume` runs.
 
-3. **QA loop**: a fresh validator agent per iteration writes `character-voice-validation.md` (step cap `validatorMaxStepsFor`) → acceptance one-shot scores the reference 0–100 → unless the rolling window of scores meets the criterion, a fresh author agent applies feedback (`character-voice-feedback.md`, step cap `voiceAuthorMaxSteps`, **patching in HIGH → MEDIUM → LOW order with `editFile`** rather than verifying everything and rewriting at the end). Same score-based acceptance criterion as the other pipelines (the state file is saved on every iteration, including the accepting one, so accepted volumes are skipped on re-run). This is the stage where both QA-loop rules were measured (gotcha 65): a passing 76 used to buy its second sample with a 2.63M-token feedback pass that wrote nothing and an 8.4M-token re-audit of the unchanged document, and the flat `maxSteps: 30` is what stopped that pass at 46 tool calls before it had written anything.
-4. After all volumes: the last volume's `character-voice.md` is copied to the series artifacts directory (`SERIES_ARTIFACTS_DIR`, default `<SERIES_LOCATION>/character-voice.md`). Skipped for `--volume` runs.
+Artifacts per volume folder: `character-voice.md` (the cumulative reference), `pov-map.md` (cumulative,
+organised by chapter), `character-voice-new.json` (the extraction notebook, the input `rebuild-voice.js`
+re-derives from), `character-voice-validation.md` (the report the grader reads), `character-voice.md-audit.md`
+(the audit beside the artifact), `character-voice-reading.md` (only when a chapter had to be re-read or was
+left incomplete), `series.db` (the volume's reference record), and `character-voice.md.rejected` /
+`pov-map.md.rejected` (artifacts a gate rejected — kept as evidence, numbered, never read by the next
+volume).
 
-Artifacts per volume folder: `character-voice.md` (cumulative snapshot), `pov-map.md` (per-volume on the author route, cumulative on the assembled one — see the routes below), `character-voice-new.json` (extraction snapshot for the handoff), `character-voice-validation.md` (validation report), `character-voice-reading.md` (on the assembled route, and only when a chapter had to be re-read or was left incomplete), and `character-voice.md.rejected` (a reference the carry-forward gate or the acceptance gate rejected — kept as evidence, never read by the next volume).
+**What the stage no longer does, and what that costs.** It makes no agent call: the whole stage is one
+extraction one-shot per chapter plus the grades. It does not decide a processing mode, so it no longer
+prints the "this source is N tokens against an M-token allowance" line — its size guard is the reading
+pass's cut-off detector, which catches the failure that line was a warning about rather than predicting it.
+`--chunked` is accepted and announced as a no-op, because there is no second path to force onto a stage
+that reads chapter by chapter whatever the volume's size. And the reference is no longer a document an
+editor rewrites on feedback: one grade decides it, so a volume gets one grade instead of five and a failing
+grade quarantines instead of buying a revision.
 
-**With `VOICE_STORE_VALIDATORS` on** (slice 6, default off) the same artifact list is produced by a different route: the volume's `series.db` record is opened before the compile pass (copying the previous volume's record forward, or topping it up — see gotcha 97 for why the top-up is needed), `character-voice-new.json` and this volume's own `character-voice.md` are filed into it, and `character-voice-validation.md` is written by querying that record. The questions the validator agent used to answer by reading the file are now queries: does the reference cover every character this volume's own text contains (HIGH — measured from the extracted chapters, so a character who genuinely stays off the page is left alone and their existing claims are not touched); is any line too long for an agent's file tools to read (HIGH — the 54,341-character line that made volume 01's reference unreparable is measurable in one pass over the file); which claims the extraction found and the published reference never took. The acceptance grader is shown a bounded sample of the reference plus that report. Chunked mode drops the per-chapter validators and the findings-merge agent. The volume's record is sealed at the end of the stage's work on it. Off, none of this happens. → `character-voice/store.js`, `utils/reference-store/pipeline-store.js`.
+**`pov-map.md` means something different than it used to, and that changed before the removal did.** The
+removed route wrote it per volume, whole, describing only the volume in front of it. The route that replaced
+it renders it from the record, and the record is cumulative, so it carries every earlier volume's sealed
+point-of-view claims in the order their own chapters appear. Translation context is not the reason:
+`utils/translate/references.js` injects at most 2,000 characters of it, chosen by which sections the chapter
+being translated matches. The reason to keep the change in view is meaning — a reader who expects
+`pov-map.md` to be about *this* volume is reading a document that is also about every volume before it.
+→ gotcha 109.
 
-**The stage has two routes, and `--route=` chooses which one a run takes.** `--route=assemble` is the **default** and needs no flag; `--route=author` selects the flow described above.
+**Cumulative invariant:** same as glossary — regenerating any volume sets `regeneratedAny` → all later
+volumes are regenerated too.
 
-On the assembled route there is no compile pass and no feedback pass. The volume is read chapter by chapter through `character-voice/reading.js` (the same pass `extract-voice.js` runs — one call per chapter, each chapter's answer kept in its own partial, a chapter whose answer never reached its closing bracket named and re-read once at a lower reasoning level), the claims are filed in the volume's record, and **both artifacts are rendered from that record** by `utils/reference-store/rebuild.js` and `utils/reference-store/pov-map.js`: `character-voice.md` in chapter order with every earlier volume's sealed claims carried forward, and `pov-map.md` organised by chapter, which is the shape that has room for the point-of-view claims a character section cannot hold. The carry-forward gate runs, the deterministic audit runs, and the acceptance grade runs with the same rubric and the same three files handed to the grader — `pov-map.md` included, which is the reason the map is rendered rather than skipped. What is absent is the author: a failing grade moves both artifacts to `.rejected`, leaves the record a draft (which is what the next volume's copy-forward refuses), and throws, so the step runner's post-mortem and ticket machinery see it like any other failed step. One grade per volume, not five. The record is opened on this route **whether or not `VOICE_STORE_VALIDATORS` is on**, because the record is the artifact's source; the seal is still the stage's own end-of-volume `sealVoiceRecord`. → `character-voice/assemble.js`, gotcha 109.
-
-On the author route nothing above changed, and with `VOICE_STORE_VALIDATORS` off it is byte-for-byte the pipeline that has always run. The whole-installment → chapter-by-chapter mode fallback, `--chunked`, and the seed that copies the previous volume's reference in belong to this route: the assembled route reads chapter by chapter whatever the volume's size, so `--chunked` means nothing to it.
-
-**One artifact means two things depending on the route, and that is unresolved.** `pov-map.md` on the author route describes only this volume and is written whole. On the assembled route it is **cumulative** — every earlier volume's sealed point-of-view claims, in the order their own chapters appear — because it renders the record and the record is cumulative. Translation context is not the reason: `utils/translate/references.js` injects at most 2,000 characters of it, chosen by which sections the chapter being translated matches. The reason to keep the difference in view is meaning, and both `character-voice/carry-forward.js` and `character-voice/amend.js` now say which route produces which.
-
-**Cumulative invariant:** same as glossary — regenerating any volume sets `regeneratedAny` → all later volumes are regenerated too.
-
-**Key differences from glossary:** no research stage (quirks are text-intrinsic); produces two files instead of one; extraction and compilation are separate stages.
+**Key differences from glossary:** no research stage (quirks are text-intrinsic); produces two files instead
+of one; no agent turn anywhere in the stage.
 
 ## 7. Pipeline D: style-guide (`style-guide.js`)
 

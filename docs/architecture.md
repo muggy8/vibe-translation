@@ -99,21 +99,21 @@ Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md
    then decides accept-or-fail, exactly as at the iteration limit. The two rules
    compose: with the re-grade path in place, the stall only fires when the grades
    genuinely disagree — which is when a rewrite was the right answer anyway.
-   **Fresh agent per feedback iteration** for glossary / character-voice /
-   style-guide (no persistent session — each feedback turn starts with a
+   **Fresh agent per feedback iteration** for glossary / style-guide
+   (no persistent session — each feedback turn starts with a
    clean context that includes the validation report and the current
    artifact); the wiki keeps its author session for feedback.
-   **A route with no author in it runs the same loop with one iteration and no watched
-   feedback artifacts.** The character-voice stage's default route (`--route=assemble`,
-   `character-voice/assemble.js`) renders its artifacts from the volume's record, so there is
-   nothing a feedback pass could rewrite: `maxIterations: 1`, the validator half is the record
-   audit run against the artifacts as rendered (no mirroring — on that route the file *is* the
-   record's render), and a grade that does not accept stops the volume instead of paying for
-   another pass over the same claims. Five grades over a document nothing can change is sampling
+   **A stage with no author in it runs the same loop with one iteration and no watched
+   feedback artifacts.** The character-voice stage renders its artifacts from the volume's record
+   (`character-voice/assemble.js`), so there is nothing a feedback pass could rewrite: `maxIterations: 1`,
+   the validator half is the record audit run against the artifacts as rendered (no mirroring — on this
+   route the file *is* the record's render), and a grade that does not accept stops the volume instead of
+   paying for another pass over the same claims. Five grades over a document nothing can change is sampling
    noise, not QA. The loop itself — iterations, rolling window, consensus gates, the confirmation
-   re-grades, `ON_QA_LIMIT` — is still the one implementation in `utils/qa-loop/`, which is the
-   point: the assembled route hands different stage descriptions to the same loop rather than
-   forking a second one that could drift from it. → gotcha 109.
+   re-grades, `ON_QA_LIMIT` — is still the one implementation in `utils/qa-loop/`, which is the point: a
+   stage hands different stage descriptions to the same loop rather than forking a second one that could
+   drift from it. The whole-installment scenarios in `test/test-qa-orchestration.js` are hosted on the style
+   guide for the same reason: the voice stage cannot host a scenario about feedback rounds. → gotcha 109.
 4. **Idempotency**: a volume whose outputs already exist and pass acceptance is skipped (unless `--force`). The skip-check reads a persisted rolling-window state file (`*-rolling-state.json`) written alongside the validation report during the last run, recomputing the acceptance decision deterministically — no AI call needed. If the state file is missing or corrupt, the check falls back to regenerating (fail-open). A failed skip-check degrades to "not skipped" (fail-open, by design). **Source-staleness detection**: the state file also persists the `sourceFingerprint` of the source file the accepted output was built from (sha256 of the original plain-text file, or the epub extraction cache hash — `bundle.sourceFingerprint` from `utils/source.js`). On re-run, `isSourceStale(state, bundle)` compares the two: a changed source invalidates the skip and the volume regenerates (then the cumulative `regeneratedAny` cascade rebuilds all later volumes). Fail-open: a legacy state file without a fingerprint, or a bundle without one, keeps the current skip behavior — old runs are safe to re-run.
 
 **Un-monitored run policies** (front-loaded in `.env`, see docs/environment.md): the pipeline is built to run un-monitored overnight / for multiple days, so the decisions that would otherwise need a human are env-driven (code defaults keep the safe "fail loudly" behavior):

@@ -15,6 +15,15 @@
  * No network, no real endpoint. Run with `npm test` (or standalone:
  * `node test/test-qa-orchestration.js`). The ON_QA_LIMIT=fail variant runs in
  * a spawned child (the policy constant is read at module load).
+ *
+ * Which task hosts the whole-installment scenarios, and why it moved. They used to run through
+ * character-voice's `runVolume`, which is where the loop's shape was measured in live runs. That
+ * stage's author route — the compile agent and the feedback pass — was removed, and the stage's one
+ * remaining route grades once with no rewrite pass between grades, so it cannot host a scenario about
+ * feedback rounds or an iteration budget. The style guide is the remaining task with the same shape
+ * (extract → compile agent → validator → grade → feedback), so it hosts them now: the loop under test is
+ * the same `runSharedQaLoop`, still driven through a real task module rather than a synthetic config.
+ * The chapter-by-chapter half always drove `runPerChapterQaLoop` directly and is unchanged.
  */
 require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 const assert = require("assert");
@@ -59,7 +68,7 @@ if (!childFailLimit) {
 }
 
 const harness = require("../harness");
-const cv = require("../character-voice");
+const sg = require("../style-guide");
 const { runPerChapterQaLoop } = require("../utils/qa-loop");
 const {
   loadRollingState,
@@ -112,7 +121,7 @@ function makeVolumeDir() {
   return { root, volumeDir, sourceFile };
 }
 
-/** The full volume context for character-voice runVolume (whole mode, vol 01). */
+/** The full volume context for style-guide runVolume (whole-installment mode, vol 01). */
 function makeCtx(v) {
   const volumeDir = v.volumeDir;
   const ctx = {
@@ -134,16 +143,15 @@ function makeCtx(v) {
       sourceFingerprint: "fp-001",
     },
     chunked: false,
-    voiceOutputFile: path.join(volumeDir, "character-voice.md"),
-    povOutputFile: path.join(volumeDir, "pov-map.md"),
-    validationOutputFile: path.join(volumeDir, "character-voice-validation.md"),
+    styleOutputFile: path.join(volumeDir, "style-guide.md"),
+    validationOutputFile: path.join(volumeDir, "style-guide-validation.md"),
     isFirst: true,
     previousFolderName: null,
-    previousVoiceRefFile: null,
-    extractPrompt: "Extract the quirks. {{SOURCE_NAME}} vol {{INSTALLMENT_NUMBER}}.",
-    validatorPrompt: "Validate the reference. {{SOURCE_NAME}} vol {{INSTALLMENT_NUMBER}}.",
+    previousStyleGuideFile: null,
+    extractPrompt: "Extract the constructs. {{SOURCE_NAME}} vol {{INSTALLMENT_NUMBER}}.",
+    validatorPrompt: "Validate the guide. {{SOURCE_NAME}} vol {{INSTALLMENT_NUMBER}}.",
     feedbackPrompt: "Apply the feedback. {{SOURCE_NAME}} vol {{INSTALLMENT_NUMBER}}.",
-    acceptancePrompt: "Score the reference. {{SOURCE_NAME}} vol {{INSTALLMENT_NUMBER}}.",
+    acceptancePrompt: "Score the guide. {{SOURCE_NAME}} vol {{INSTALLMENT_NUMBER}}.",
     extractTemplate: "Extract. {{SOURCE_NAME}} vol {{INSTALLMENT_NUMBER}}.",
     authorTemplate: "Compile. {{SOURCE_NAME}} vol {{INSTALLMENT_NUMBER}}. {{EXTRACTION_RESULTS}}",
     extractSystemPrompt: "You are an extractor.",
@@ -162,8 +170,7 @@ function makeCtx(v) {
 /** The agent stub's file writers (real fs — the deterministic gates see them). */
 let feedbackWriteCount = 0;
 function writeArtifacts(volumeDir, marker) {
-  fs.writeFileSync(path.join(volumeDir, "character-voice.md"), `# Character Voice (${marker})\n`, "utf8");
-  fs.writeFileSync(path.join(volumeDir, "pov-map.md"), `# POV Map (${marker})\n`, "utf8");
+  fs.writeFileSync(path.join(volumeDir, "style-guide.md"), `# Style Guide (${marker})\n`, "utf8");
 }
 /**
  * The feedback author's writers. Each pass writes DIFFERENT bytes, because that is
@@ -172,12 +179,11 @@ function writeArtifacts(volumeDir, marker) {
  */
 function writeRevisedArtifacts(volumeDir) {
   feedbackWriteCount += 1;
-  fs.writeFileSync(path.join(volumeDir, "character-voice.md"), `# Character Voice (revised ${feedbackWriteCount})\n`, "utf8");
-  fs.writeFileSync(path.join(volumeDir, "pov-map.md"), `# POV Map (revised ${feedbackWriteCount})\n`, "utf8");
+  fs.writeFileSync(path.join(volumeDir, "style-guide.md"), `# Style Guide (revised ${feedbackWriteCount})\n`, "utf8");
 }
 function writeReport(volumeDir, marker) {
   fs.writeFileSync(
-    path.join(volumeDir, "character-voice-validation.md"),
+    path.join(volumeDir, "style-guide-validation.md"),
     `# Validation Report (${marker})\n\nFinal recommendation: Pass\n`,
     "utf8"
   );
@@ -202,8 +208,8 @@ function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = 
   feedbackWriteCount = 0;
   return {
     oneShot(label) {
-      if (label.startsWith("character-voice-extract-")) return "[]";
-      if (label.startsWith("character-voice-acceptance-")) {
+      if (label.startsWith("style-guide-extract-")) return "[]";
+      if (label.startsWith("style-guide-acceptance-")) {
         // Exceptional-score confirmations are scripted separately so a scenario
         // can control the consensus independently of the first grade.
         if (label.includes("-confirm")) {
@@ -223,7 +229,7 @@ function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = 
       throw new Error(`Unexpected one-shot label: ${label}`);
     },
     agent(name, prompt, entry) {
-      if (name.startsWith("author-voice-") && !name.includes("feedback")) {
+      if (name.startsWith("author-style-") && !name.includes("feedback")) {
         // Compile author (or its recovery turn).
         const isRecovery = Boolean(entry.label && entry.label.includes("recovery"));
         if (compileWritesFiles || (isRecovery && recoveryWritesFiles)) {
@@ -231,11 +237,11 @@ function makeDefaultScript(volumeDir, acceptanceReplies, { compileWritesFiles = 
         }
         return { text: compileText };
       }
-      if (name.startsWith("validator-voice-")) {
+      if (name.startsWith("validator-style-")) {
         writeReport(volumeDir, name);
         return { text: "" };
       }
-      if (name.startsWith("author-voice-feedback-")) {
+      if (name.startsWith("author-style-feedback-")) {
         // `feedbackWritesFiles: false` scripts the live failure shape: a feedback
         // turn that spent its whole step budget reading and wrote nothing, leaving
         // the artifacts exactly as the compile pass wrote them.
@@ -258,7 +264,7 @@ function jsonReply(score) {
 
 function acceptanceLabels() {
   return callLog.filter(
-    (c) => c.kind === "one-shot" && c.label.startsWith("character-voice-acceptance-")
+    (c) => c.kind === "one-shot" && c.label.startsWith("style-guide-acceptance-")
   ).map((c) => c.label);
 }
 function agentCalls(namePrefix) {
@@ -294,17 +300,17 @@ async function scenarioAcceptsOnTwoFreshPasses() {
   script = makeDefaultScript(v.volumeDir, [jsonReply(85), jsonReply(90)]);
   callLog = [];
   try {
-    await cv.runVolume(ctx);
+    await sg.runVolume(ctx);
     assert.strictEqual(acceptanceLabels().length, 2, "two acceptance checks");
-    assert.strictEqual(agentCalls("author-voice-feedback-").length, 1, "one feedback pass (iteration 1's single score cannot accept)");
-    const compile = agentCalls("author-voice-01");
+    assert.strictEqual(agentCalls("author-style-feedback-").length, 1, "one feedback pass (iteration 1's single score cannot accept)");
+    const compile = agentCalls("author-style-01");
     assert.strictEqual(compile.length, 1, "compile author ran exactly one turn (no recovery over written files)");
     const state = await loadState(ctx.validationOutputFile);
     assert.ok(state, "rolling state persisted");
     assert.deepStrictEqual(state.results, [85, 90], "window holds both fresh scores");
     assert.strictEqual(state.sourceFingerprint, "fp-001", "source fingerprint persisted for the staleness check");
     assert.strictEqual(isAcceptedState(state), true, "state is an accepted state");
-    const artifact = fs.readFileSync(ctx.voiceOutputFile, "utf8");
+    const artifact = fs.readFileSync(ctx.styleOutputFile, "utf8");
     assert.ok(artifact.includes("revised"), "artifact is the feedback pass's latest revision");
   } finally {
     cleanup(v.root);
@@ -321,12 +327,12 @@ async function scenarioFeedbackThenAccept() {
   script = makeDefaultScript(v.volumeDir, [jsonReply(55), jsonReply(92)]);
   callLog = [];
   try {
-    await cv.runVolume(ctx);
+    await sg.runVolume(ctx);
     assert.strictEqual(acceptanceLabels().length, 2, "two acceptance checks");
-    assert.strictEqual(agentCalls("author-voice-feedback-").length, 1, "one feedback pass after the failing check");
-    const feedback = agentCalls("author-voice-feedback-")[0];
-    assert.strictEqual(feedback.label, "character-voice-feedback-01", "feedback turn label kept");
-    const artifact = fs.readFileSync(ctx.voiceOutputFile, "utf8");
+    assert.strictEqual(agentCalls("author-style-feedback-").length, 1, "one feedback pass after the failing check");
+    const feedback = agentCalls("author-style-feedback-")[0];
+    assert.strictEqual(feedback.label, "style-guide-feedback-01", "feedback turn label kept");
+    const artifact = fs.readFileSync(ctx.styleOutputFile, "utf8");
     assert.ok(artifact.includes("revised"), "feedback pass rewrote the artifact");
     const state = await loadState(ctx.validationOutputFile);
     assert.deepStrictEqual(state.results, [55, 92], "window holds fail-then-pass");
@@ -349,10 +355,10 @@ async function scenarioLimitAcceptPolicy() {
   script = makeDefaultScript(v.volumeDir, [jsonReply(40), jsonReply(45), jsonReply(50), jsonReply(60)]);
   callLog = [];
   try {
-    await cv.runVolume(ctx);
+    await sg.runVolume(ctx);
     assert.strictEqual(ctx.limitReached, true, "limit flag set on the ctx");
     assert.strictEqual(acceptanceLabels().length, 4, "one acceptance check per iteration");
-    assert.strictEqual(agentCalls("author-voice-feedback-").length, 4, "feedback after every failing check, including the last iteration (the loop applies feedback before checking the limit)");
+    assert.strictEqual(agentCalls("author-style-feedback-").length, 4, "feedback after every failing check, including the last iteration (the loop applies feedback before checking the limit)");
     const state = await loadState(ctx.validationOutputFile);
     assert.deepStrictEqual(state.results, [50, 60], "state holds the final (window-sized) scores");
     assert.strictEqual(isAcceptedState(state), false, "limit-accepted state is NOT an accepted state (re-run re-validates)");
@@ -380,7 +386,7 @@ async function scenarioLimitFailPolicy() {
   script = makeDefaultScript(v.volumeDir, [jsonReply(40), jsonReply(45), jsonReply(50), jsonReply(60)]);
   callLog = [];
   try {
-    await assert.rejects(() => cv.runVolume(ctx), /iteration limit/);
+    await assert.rejects(() => sg.runVolume(ctx), /iteration limit/);
     assert.strictEqual(acceptanceLabels().length, 4, "all iterations ran before the policy failed the volume");
   } finally {
     cleanup(v.root);
@@ -388,21 +394,25 @@ async function scenarioLimitFailPolicy() {
 }
 
 /**
- * Recovery turn gating: the compile agent replies in chat WITHOUT writing
- * the files → the fallback REFUSES to use that reply (one chat reply cannot be
- * the content of two different documents), returns true, and the recovery turn
- * fires and writes both files.
+ * Recovery turn gating: the compile agent replies in chat WITHOUT writing its
+ * file → the fallback REFUSES to use that reply (a remark about what the agent is
+ * about to write is not a document), returns true, and the recovery turn fires and
+ * writes the file.
  *
  * The refused reply must never reach the disk. Observed live: the fallback wrote
- * one 164-character planning sentence into BOTH character-voice.md and
- * pov-map.md, and the volume passed every "was the work done?" check on it.
+ * one 164-character planning sentence into BOTH artifacts of the voice stage, and
+ * the volume passed every "was the work done?" check on it. The two-artifact half
+ * of that rule — one chat reply cannot be the content of two different documents —
+ * is pinned at its own door in test-translate.js and test-artifact-integrity.js;
+ * what is pinned here is the task-level consequence: refuse, re-send the task to
+ * the same agent, and never let the refused text become the artifact.
  */
 async function scenarioRecoveryWhenFileMissing() {
   const v = makeVolumeDir();
   const ctx = makeCtx(v);
-  // A reply big enough to clear the size floor, so what refuses it is the
-  // two-missing-outputs rule and not the length check.
-  const chatReply = `# Character Voice Reference\n\n${"carried-forward voice quirk entry. ".repeat(200)}`;
+  // Long enough to clear the size floor, so what refuses it is the document-shape
+  // gate and not the length check: this is planning narration, not a guide.
+  const chatReply = "I will now write the file with the complete reference. ".repeat(40);
   script = makeDefaultScript(v.volumeDir, [jsonReply(90), jsonReply(95)], {
     compileWritesFiles: false,
     recoveryWritesFiles: true,
@@ -410,18 +420,14 @@ async function scenarioRecoveryWhenFileMissing() {
   });
   callLog = [];
   try {
-    await cv.runVolume(ctx);
-    const compile = agentCalls("author-voice-01");
+    await sg.runVolume(ctx);
+    const compile = agentCalls("author-style-01");
     assert.strictEqual(compile.length, 2, "compile + recovery turns");
-    assert.strictEqual(compile[0].label, "character-voice-compile-01");
-    assert.strictEqual(compile[1].label, "character-voice-compile-recovery-01", "recovery turn label kept");
-    assert.ok(fs.existsSync(ctx.voiceOutputFile), "artifact exists (the recovery turn wrote it)");
-    assert.ok(fs.existsSync(ctx.povOutputFile), "POV map exists");
-    const voice = fs.readFileSync(ctx.voiceOutputFile, "utf8");
-    const pov = fs.readFileSync(ctx.povOutputFile, "utf8");
-    assert.ok(!voice.includes("carried-forward voice quirk entry"), "the refused chat reply never became character-voice.md");
-    assert.ok(!pov.includes("carried-forward voice quirk entry"), "the refused chat reply never became pov-map.md");
-    assert.ok(pov.includes("POV Map"), "the POV map is the recovery turn's own file, not a copy of the voice reference");
+    assert.strictEqual(compile[0].label, "style-guide-compile-01");
+    assert.strictEqual(compile[1].label, "style-guide-compile-recovery-01", "recovery turn label kept");
+    assert.ok(fs.existsSync(ctx.styleOutputFile), "artifact exists (the recovery turn wrote it)");
+    const guide = fs.readFileSync(ctx.styleOutputFile, "utf8");
+    assert.ok(!guide.includes("I will now write the file"), "the refused chat reply never became style-guide.md");
     assert.strictEqual(acceptanceLabels().length, 2, "QA loop still ran to acceptance");
   } finally {
     cleanup(v.root);
@@ -429,10 +435,10 @@ async function scenarioRecoveryWhenFileMissing() {
 }
 
 /**
- * Recovery DISABLED (AGENT_RECOVERY_ENABLED=false, read at call time): no
- * recovery turn runs, and because the fallback will not duplicate one chat
- * reply across two artifacts, the volume FAILS LOUDLY instead of publishing a
- * plausible-looking wrong pair. Turning recovery off means the hard stop is the
+ * Recovery DISABLED (AGENT_RECOVERY_ENABLED=false, read at call time): no recovery
+ * turn runs, and because the fallback will not launder a planning sentence into a
+ * published document, the volume FAILS LOUDLY instead of publishing a
+ * plausible-looking wrong artifact. Turning recovery off means the hard stop is the
  * only thing left.
  */
 async function scenarioRecoveryDisabled() {
@@ -443,15 +449,14 @@ async function scenarioRecoveryDisabled() {
   script = makeDefaultScript(v.volumeDir, [jsonReply(90), jsonReply(95)], {
     compileWritesFiles: false,
     recoveryWritesFiles: true,
-    compileText: `# Character Voice Reference\n\n${"carried-forward voice quirk entry. ".repeat(200)}`,
+    compileText: "I will now write the file with the complete reference. ".repeat(40),
   });
   callLog = [];
   try {
-    await assert.rejects(() => cv.runVolume(ctx), /never wrote real output/);
-    const compile = agentCalls("author-voice-01");
+    await assert.rejects(() => sg.runVolume(ctx), /never wrote real output/);
+    const compile = agentCalls("author-style-01");
     assert.strictEqual(compile.length, 1, "no recovery turn when AGENT_RECOVERY_ENABLED=false");
-    assert.ok(!fs.existsSync(ctx.voiceOutputFile), "the chat reply was not written as the artifact");
-    assert.ok(!fs.existsSync(ctx.povOutputFile), "nor duplicated into the POV map");
+    assert.ok(!fs.existsSync(ctx.styleOutputFile), "the chat reply was not written as the artifact");
   } finally {
     process.env.AGENT_RECOVERY_ENABLED = prev;
     cleanup(v.root);
@@ -473,9 +478,9 @@ async function scenarioUnparseableAcceptanceFailsClosed() {
   ]);
   callLog = [];
   try {
-    await cv.runVolume(ctx);
+    await sg.runVolume(ctx);
     assert.strictEqual(acceptanceLabels().length, 3, "three iterations: unparseable + two fresh passes");
-    assert.strictEqual(agentCalls("author-voice-feedback-").length, 2, "feedback after the unparseable check and the first single score");
+    assert.strictEqual(agentCalls("author-style-feedback-").length, 2, "feedback after the unparseable check and the first single score");
     const state = await loadState(ctx.validationOutputFile);
     assert.deepStrictEqual(state.results, [95, 95], "the unparseable reply was not stored");
     assert.strictEqual(isAcceptedState(state), true, "accepted state");
@@ -564,14 +569,14 @@ async function scenarioExceptionalConsensus() {
     });
     callLog = [];
     try {
-      await cv.runVolume(ctx);
+      await sg.runVolume(ctx);
       const labels = acceptanceLabels();
       assert.strictEqual(labels.length, 3, `first grade + 2 confirmations (got ${labels.length})`);
       assert.ok(labels.some((l) => l.includes("confirm1")), "the first confirmation ran");
       // One validator turn only: the fast path skipped the feedback pass AND
       // the second full validator turn the normal loop would have needed.
-      assert.strictEqual(agentCalls("validator-voice-").length, 1, "exactly one validator turn");
-      assert.strictEqual(agentCalls("author-voice-feedback-").length, 0, "no feedback pass");
+      assert.strictEqual(agentCalls("validator-style-").length, 1, "exactly one validator turn");
+      assert.strictEqual(agentCalls("author-style-feedback-").length, 0, "no feedback pass");
       const state = await loadState(ctx.validationOutputFile);
       assert.strictEqual(state.acceptedBy, "exceptional-consensus", "the state records HOW it was accepted");
       assert.strictEqual(state.deterministicScore, 86, "the temperature-0 grade is persisted");
@@ -592,9 +597,9 @@ async function scenarioExceptionalConsensus() {
     });
     callLog = [];
     try {
-      await cv.runVolume(ctx);
-      assert.strictEqual(agentCalls("author-voice-feedback-").length, 1, "the feedback pass ran — the fast path did not fire");
-      assert.strictEqual(agentCalls("validator-voice-").length, 2, "the normal second validation iteration ran");
+      await sg.runVolume(ctx);
+      assert.strictEqual(agentCalls("author-style-feedback-").length, 1, "the feedback pass ran — the fast path did not fire");
+      assert.strictEqual(agentCalls("validator-style-").length, 2, "the normal second validation iteration ran");
       const state = await loadState(ctx.validationOutputFile);
       assert.strictEqual(state.acceptedBy, "rolling-window", "accepted by the normal criterion instead");
       // The confirmation grades are recorded for diagnosis but never counted:
@@ -629,14 +634,14 @@ async function scenarioFeedbackNoOpStopsLoop() {
   });
   callLog = [];
   try {
-    await cv.runVolume(ctx);
-    assert.strictEqual(agentCalls("author-voice-feedback-").length, 1, "exactly one feedback pass (the no-op is not retried)");
-    assert.strictEqual(agentCalls("validator-voice-").length, 1, "no second validator turn over an unchanged document");
+    await sg.runVolume(ctx);
+    assert.strictEqual(agentCalls("author-style-feedback-").length, 1, "exactly one feedback pass (the no-op is not retried)");
+    assert.strictEqual(agentCalls("validator-style-").length, 1, "no second validator turn over an unchanged document");
     assert.strictEqual(acceptanceLabels().length, 1, "no second grade of the unchanged document");
     const state = await loadState(ctx.validationOutputFile);
     assert.strictEqual(state.stalled, true, "the state records that the loop stalled");
     // The artifact is still the compile pass's, not a phantom "revised" one.
-    const artifact = fs.readFileSync(ctx.voiceOutputFile, "utf8");
+    const artifact = fs.readFileSync(ctx.styleOutputFile, "utf8");
     assert.ok(artifact.includes("v1") && !artifact.includes("revised"), "the unchanged artifact is what the compile pass wrote");
   } finally {
     cleanup(v.root);
@@ -674,20 +679,20 @@ async function scenarioPassingConsensus() {
     });
     callLog = [];
     try {
-      await cv.runVolume(ctx);
+      await sg.runVolume(ctx);
       const labels = acceptanceLabels();
       assert.strictEqual(labels.length, 3, `first grade + 2 re-grades (got ${labels.length})`);
       assert.ok(labels.some((l) => l.includes("confirm1")), "the independent re-grade ran");
       assert.ok(labels.some((l) => l.includes("confirm2")), "the temperature-0 anchor ran");
-      assert.strictEqual(agentCalls("author-voice-feedback-").length, 0, "no feedback pass — the samples came from re-grading");
-      assert.strictEqual(agentCalls("validator-voice-").length, 1, "no second full validator turn");
+      assert.strictEqual(agentCalls("author-style-feedback-").length, 0, "no feedback pass — the samples came from re-grading");
+      assert.strictEqual(agentCalls("validator-style-").length, 1, "no second full validator turn");
       const state = await loadState(ctx.validationOutputFile);
       assert.strictEqual(state.acceptedBy, "passing-consensus", "the state records HOW it was accepted");
       assert.deepStrictEqual(state.results, [76, 78, 76].slice(-2), "the re-grades went INTO the window (unlike the exceptional path)");
       assert.strictEqual(state.deterministicScore, 76, "the temperature-0 grade is persisted");
       assert.ok(isAcceptedState(state), "the persisted state still reads as accepted (no-AI skip check)");
       // The artifact is the compile pass's: nothing rewrote it.
-      const artifact = fs.readFileSync(ctx.voiceOutputFile, "utf8");
+      const artifact = fs.readFileSync(ctx.styleOutputFile, "utf8");
       assert.ok(artifact.includes("v1") && !artifact.includes("revised"), "the artifact was never rewritten to collect a sample");
     } finally {
       cleanup(v.root);
@@ -704,9 +709,9 @@ async function scenarioPassingConsensus() {
     });
     callLog = [];
     try {
-      await cv.runVolume(ctx);
-      assert.strictEqual(agentCalls("author-voice-feedback-").length, 1, "the feedback pass ran — a re-grade disagreed with the passing grade");
-      assert.strictEqual(agentCalls("validator-voice-").length, 2, "the normal second validation iteration ran");
+      await sg.runVolume(ctx);
+      assert.strictEqual(agentCalls("author-style-feedback-").length, 1, "the feedback pass ran — a re-grade disagreed with the passing grade");
+      assert.strictEqual(agentCalls("validator-style-").length, 2, "the normal second validation iteration ran");
       const state = await loadState(ctx.validationOutputFile);
       assert.ok(state.results.every((s) => s >= 70), "the failing re-grade was counted, then the window was rebuilt by real iterations");
       assert.strictEqual(state.acceptedBy, "rolling-window", "accepted by the normal criterion instead");

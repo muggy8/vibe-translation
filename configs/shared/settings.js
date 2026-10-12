@@ -262,26 +262,29 @@ function resolveRunSettings(manifest) {
 }
 
 /**
- * Which validator the two stored artifacts run: the whole-document AI validator agent, or the
- * reference store's deterministic queries plus a graded sample.
+ * Which validator the glossary stage runs: the whole-document AI validator agent, or the reference
+ * store's deterministic queries plus a graded sample.
  *
- * `off` (the default for both) is today's pipeline, byte-for-byte: the validator agent runs, the
- * acceptance grader is handed the whole artifact, and nothing writes to `series.db`. Turning one on
- * changes which calls that stage makes and starts writing the volume's record; it changes no prompt
- * file and no artifact's name, folder or shape.
+ * `off` (the default) is today's pipeline, byte-for-byte: the validator agent runs, the acceptance
+ * grader is handed the whole artifact, and nothing writes to `series.db`. Turning it on changes which
+ * calls that stage makes and starts writing the volume's record; it changes no prompt file and no
+ * artifact's name, folder or shape.
  *
  * **This is not a knob on a guard, and it is not one.** The evidence rule, the ownership rule and
  * the copy-forward integrity check have no off switch on either side of it (AGENTS.md rule 3). What
  * it switches is which questions get *asked by a model* and which get answered by a query.
  *
- * They are per stage on purpose: the plan's rollback rule is that a stage that has not run a real
- * volume through the new path keeps the old one.
+ * The character-voice half of this setting is gone, and it is worth saying why: the voice stage's one
+ * route renders `character-voice.md` and `pov-map.md` **out of** the volume's record, so a run with the
+ * voice record switched off is not a cheaper run, it is a run with no artifact. A setting that cannot
+ * be turned off without turning the stage off is not a setting; the record is opened unconditionally
+ * in `character-voice/task.js`. The glossary still has the switch because that stage can still build
+ * its document without the store.
  *
- * @type {{glossary: boolean, voice: boolean}}
+ * @type {{glossary: boolean}}
  */
 const STORE_VALIDATORS = Object.freeze({
   glossary: readBoolEnv("GLOSSARY_STORE_VALIDATORS", false),
-  voice: readBoolEnv("VOICE_STORE_VALIDATORS", false),
 });
 
 /**

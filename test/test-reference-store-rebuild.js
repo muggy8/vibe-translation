@@ -1170,6 +1170,59 @@ function scenarioASealedVoiceRecordRefusesARebuild() {
 // ─── Scenario ────────────────────────────────────────────────────────────────
 
 /**
+ * A volume sealed by the **glossary** stage is not a published character-voice reference.
+ *
+ * `npx gulp` runs each stage over every volume before the next stage starts, and the glossary stage
+ * seals the volume at the end of its own work on it. So when the character-voice stage reaches a
+ * volume, its record is already sealed — with nothing in it but glossary rows. Refusing on the seal
+ * marker alone told that stage it was overwriting a published reference when the reference it was about
+ * to write was the first one the volume ever had. This is the shape the offline loop with
+ * `GLOSSARY_STORE_VALIDATORS` on actually runs, and it is the shape that made that loop fail.
+ *
+ * The guard is the rows, not the marker: a sealed character-voice row is out of reach, a sealed glossary
+ * row is a different document, and the second rebuild — the one over the reference this render just
+ * published — is refused exactly as before.
+ * @returns {void}
+ */
+function scenarioAVolumeSealedByTheGlossaryStageIsNotAPublishedVoiceReference() {
+  const series = fixtureStoreSeries("rebuild-sealed-by-glossary");
+
+  // The glossary stage's own pass over the volume: its rows filed, the volume sealed at the end.
+  const glossaryPass = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  const imported = importVolumeArtifacts(glossaryPass, { glossaryMarkdown: GLOSSARY_01 });
+  assert.ok(imported.glossary, "the glossary half ran");
+  const glossaryRows = glossaryPass.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE owner_volume = 1").get().n;
+  assert.ok(glossaryRows > 0, `and it filed rows into this volume's record (${glossaryRows})`);
+  sealVolumeRecord(glossaryPass);
+  glossaryPass.close();
+
+  const sealedReader = openFixture(series, 1, DOCUMENT_SOURCE_STAGE);
+  assert.strictEqual(isVolumeSealed(sealedReader, 1), true, "the volume really is sealed before the voice stage arrives");
+  const voiceRowsBefore = sealedReader.db
+    .prepare("SELECT COUNT(*) AS n FROM facts WHERE owner_volume = 1 AND sealed = 1 AND aspect != 'term_usage'")
+    .get().n;
+  assert.strictEqual(voiceRowsBefore, 0, "and it holds no sealed character-voice row: nothing character-voice has been published");
+  sealedReader.close();
+
+  const built = rebuildFixtureVolume(series, { apply: true });
+  assert.ok(built.ok, JSON.stringify(built.refusal));
+  assert.strictEqual(built.rebuild.volumeSealed, true, "the rebuild says it rendered into a record another stage had already sealed");
+  assert.ok(built.rebuild.adoptedClaims > 0, "and it rendered a reference: the render is what this volume's first character-voice rows are");
+  assert.strictEqual(fs.existsSync(path.join(series.volumes[0].dir, "character-voice.md")), true, "the artifact is published");
+
+  // The same door, a second time, over the reference that render just published: refused, and it names
+  // the rows it is refusing to overwrite rather than only the seal.
+  const again = rebuildFixtureVolume(series, { apply: true });
+  assert.strictEqual(again.ok, false, "a published character-voice reference is not rebuilt over");
+  assert.strictEqual(again.refusal.rule, "rebuild-refuses-a-sealed-voice-record", again.refusal && again.refusal.rule);
+  assert.ok(again.refusal.because.includes("character-voice row"), again.refusal.because);
+
+  console.log("  a volume sealed by the glossary stage is not a published character-voice reference — the render goes ahead, and the second one does not");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
  * A rebuild replaces this volume's own mirror of the reference it is rebuilding, and nothing else —
  * and it does it through the verb that is allowed to, not by reaching across stages.
  * @returns {void}
@@ -1512,8 +1565,8 @@ function scenarioThePovMapRendersWhatTheCharacterReferenceCannot() {
 /**
  * The map is cumulative, in the order the chapters it cites appear.
  *
- * This is a change to the artifact's contract: `character-voice/carry-forward.js` and
- * `character-voice/amend.js` both used to say `pov-map.md` describes only this volume. The claims
+ * This is a change to the artifact's contract: the route this stage replaced said `pov-map.md`
+ * describes only this volume (that wording is in git history at commit 75e59a7). The claims
  * being carried are sealed rows of the same record the cumulative reference is rendered from, so a
  * per-volume map would drop the point-of-view history the reference keeps.
  * @returns {void}
@@ -1799,6 +1852,7 @@ function scenarioAPublishedRebuildWritesTheMapBeforeItSeals() {
   scenarioRePublishingARebuildsOwnOutputSealsItWithoutStackingRejectedFiles();
   scenarioARecordedAliasOutlivesTheRunThatCreatedTheRosterEntry();
   scenarioASealedVoiceRecordRefusesARebuild();
+  scenarioAVolumeSealedByTheGlossaryStageIsNotAPublishedVoiceReference();
   scenarioARebuildClearsOnlyItsOwnMirror();
   scenarioTheDamagedFileIsMovedAsideAndKept();
   scenarioTheRebuiltFileRoundTrips();
