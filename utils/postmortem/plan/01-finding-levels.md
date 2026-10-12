@@ -251,7 +251,7 @@ it is reported as done.
 | 4 | **The per-volume gate in the shared volume loop** (§3.2) — the thing that makes a pause possible at all. | `walkVolumes` stops after the volume that tripped the gate and exits with its own code; the stages that do not use the shared loop are named out loud rather than silently ungated. Nothing is assessed mid-chapter. |
 | 5 | The pause is executable end to end: the run halts at volume *n*, the answer is obtained, the step resumes from volume *n*. | The offline loop shows a MAJOR finding halting at volume *n* and resuming at volume *n* — not *n+1* — and the resumed pass does not pay for the volumes already accepted. |
 | 6 | The docs and the maps: `docs/delivery-layer.md`, `docs/environment.md` if any knob moves, and a gotcha for the four-blind-kinds finding. | The maps describe the routing that exists. |
-| 7 | **The extraction step declares its own output** (§10), and the run-scope guard is amended to name that one exception instead of banning all of them. | `extract` goes from declaring nothing to declaring what it always writes; the post-mortem reports a missing extraction summary as a finding; the other twelve pipeline steps are still asserted to declare nothing. Independent of slices 2–6 — it can be dispatched any time after slice 1. |
+| 7 | **The extraction step declares its own output** (§10), and the run-scope guard is amended to name that one exception instead of banning all of them. | `extract` goes from declaring nothing to declaring what it always writes; the post-mortem reports a missing **per-book** report and a missing summary as findings, so a run that stopped after book 9 is distinguishable from a run that finished and found nothing; the other twelve pipeline steps are still asserted to declare nothing. Independent of slices 2–6 — it can be dispatched any time after slice 1. |
 
 **Slice 4 is the one this plan used to skip.** Slices 2 and 3 can be built without it — they change
 what the triage *says* — but nothing before slice 4 changes what a running step *does*, and a plan
@@ -341,9 +341,11 @@ amendment keeps what the guard actually protects**: `extract` becomes the single
 remaining twelve pipeline steps are still asserted to declare nothing, and the reason an exception is
 allowed is written into the test rather than left to the commit message.
 
-What is still a design point is *what* gets declared. `assessRunScope` reads a flat list of file names
-out of `postMortemDir()`, which expresses `extraction-summary.md` and `.json` directly; the per-volume
-reports are 17 files, and the mechanism has no per-volume run-scope shape today. Declaring the summaries
-and leaving the per-volume reports to the step's own `assertWrote` is the small version of this slice;
-teaching the run-scope shape to expand per volume is the larger one, and it is the version that would
-later let a per-volume extraction finding be routed by level like any other.
+**And the scope is decided (account owner, 2026-10-12): every book's report, plus the
+summary.** Not the small version. `assessRunScope` reads a flat list of file names out of
+`postMortemDir()`, which expresses `extraction-summary.md` and `.json` directly but has no shape for
+"one expected file per volume", so this slice has to teach the run-scope shape that — the same shape a
+per-volume finding needs if it is ever to be routed by level instead of failing the whole step. The
+reason given for the thorough version is the one that matters: `extract` writes 17 reports and a crash
+part-way through leaves some of them written and some not, and a check that only looks at the summary
+cannot tell "the step ran and found nothing" from "the step stopped after book 9".
