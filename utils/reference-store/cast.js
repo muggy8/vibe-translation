@@ -37,6 +37,9 @@
 
 const { refusal } = require("./refusals");
 const { FACT_CHARACTER_ROLES, isInVocabulary } = require("./schema");
+// A leaf on purpose: `attribution.js` requires `facts.js`, which requires this file, so the narrator
+// rule cannot come from there without closing a cycle (gotcha 85).
+const { narratorRosterKeyRefusal } = require("./narrator");
 require("../../types"); // JSDoc type definitions
 
 /**
@@ -97,6 +100,12 @@ function upsertCast(ctx, entry) {
       }),
     };
   }
+  // **The narration is not a character.** The coverage rule counts rows in `cast`, so a roster entry
+  // keyed `narrator` would be counted as a person the reference has to cover — a question with no
+  // answer, on a name no chapter prints. The answer "the narrator said this" has its own door: a claim
+  // with no roster entry. See `attribution.js`.
+  const narratorRefusal = narratorRosterKeyRefusal(key, "cast_upsert");
+  if (narratorRefusal) return { ok: false, cast: null, created: false, refusal: narratorRefusal };
   const display = typeof entry.display === "string" && entry.display.trim() ? entry.display.trim() : key;
   const existing = getCast(ctx, key);
   const aliases = mergeLists(existing ? parseAliases(existing.aliases) : [], entry.aliases);

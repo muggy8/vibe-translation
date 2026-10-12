@@ -36,6 +36,7 @@ const queries = require("./queries");
 const integrity = require("./integrity");
 const documentProse = require("./document-prose");
 const presence = require("./presence");
+const attribution = require("./attribution");
 const { storeError } = require("./refusals");
 require("../../types"); // JSDoc type definitions
 
@@ -268,6 +269,14 @@ function openReferenceStore({ volume, folder, seriesDir, stage = "merge", create
   ctx.castPresence = (vol) => presence.castPresence(ctx, vol);
   ctx.presenceDetail = (vol, key) => presence.presenceDetail(ctx, vol, key);
   ctx.presenceMeasured = (vol) => presence.presenceMeasured(ctx, vol);
+
+  ctx.attributionDoubts = (opts) => attribution.attributionDoubts(ctx, opts);
+  ctx.attributionSummary = (opts) => attribution.attributionSummary(ctx, opts);
+  ctx.attributionFindings = (opts) => attribution.attributionFindings(ctx, opts);
+  ctx.namePrintedWithReadingAids = (opts) => attribution.namePrintedWithReadingAids(ctx, opts);
+  ctx.speakerPassage = (opts) => attribution.speakerPassage(ctx, opts);
+  ctx.attributionAnswers = (upTo) => attribution.attributionAnswers(ctx, upTo);
+  ctx.recordAttributionAnswer = (proposal) => attribution.recordAttributionAnswer(ctx, proposal);
 
   ctx.factsFor = (query) => queries.factsFor(ctx, query);
   ctx.factsForChapter = (query) => queries.factsForChapter(ctx, query);

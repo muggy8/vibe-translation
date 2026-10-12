@@ -98,7 +98,7 @@ const VOLUME_ARTIFACT_PATTERNS = [
   /^polish-verification\.json$/,
   /^glossary-(research|coverage|new-terms)\.(md|json)$/,
   /^.*-rolling-state\.json$/,
-  /^character-voice-(new|validation|reading)(-.+)?\.(md|json)$/,
+  /^character-voice-(new|validation|reading|attribution)(-.+)?\.(md|json)$/,
   /^character-voice-extract-.+\.json$/,
   /^style-guide-(new|validation)\.(md|json)$/,
   /^wiki-.*\.md$/,

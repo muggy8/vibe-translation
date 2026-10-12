@@ -135,8 +135,29 @@ const REBUILD_SOURCE_STAGE = "rebuild";
 /** What a fact can be, and the only four values `status` accepts. */
 const FACT_STATUSES = ["active", "superseded", "disputed", "retracted"];
 
-/** Which stage of the pipeline wrote a fact (doc 03 §4). */
-const SOURCE_STAGES = ["extract", "merge", "repair", "verify", "import", "rebuild"];
+/**
+ * Which stage of the pipeline wrote a fact (doc 03 §4).
+ *
+ * `attribution` is the stamp an answer to "who is speaking these words?" writes. It is in this list
+ * because the alternative — letting that door stamp its rows `merge` — would make a challenger written by
+ * a bounded reading pass indistinguishable from a claim a merge adopted, and the render rule that keeps a
+ * dispute out of the published reference depends on being able to tell them apart. Like `rebuild`, adding
+ * the value changes no table and no constraint, so it needs no migration.
+ */
+const SOURCE_STAGES = ["extract", "merge", "repair", "verify", "import", "rebuild", "attribution"];
+
+/**
+ * What an answer to "who speaks the words this claim quotes" may be (slice 10).
+ *
+ * `confirmed` — the roster key the claim is filed under is the speaker. `reassign` — somebody else on the
+ * roster is. `narrator` — nobody is: the words are the narration's, which in a first-person book is a real
+ * answer and not a shrug. `unknown` — the question was asked and the scene does not say. The last one is in
+ * the vocabulary on purpose: an answer that admits it does not know is a finding a human can act on, while a
+ * missing row means nobody asked, and those two must not look the same in the record.
+ *
+ * @type {string[]}
+ */
+const ATTRIBUTION_ANSWERS = ["confirmed", "reassign", "narrator", "unknown"];
 
 /** The roles a character can play in a relational fact (doc 03 §2). */
 const FACT_CHARACTER_ROLES = ["subject", "agent", "patient", "witness"];
@@ -144,7 +165,7 @@ const FACT_CHARACTER_ROLES = ["subject", "agent", "patient", "witness"];
 // ─── Version ──────────────────────────────────────────────────────────────────
 
 /** The schema this build of the code writes. */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 /**
  * The migrations, oldest first. Version 1 is the whole design as built.
@@ -444,6 +465,42 @@ const MIGRATIONS = [
       `CREATE INDEX IF NOT EXISTS idx_facts_extracted_as ON facts(extracted_as) WHERE key IS NULL`,
     ],
   },
+  {
+    version: 7,
+    name: "slice 10 — an attribution question that was asked has an answer",
+    // `attribution.js` can tell, from the record alone, that a claim sits under a roster entry this
+    // volume's own text does not contain. That is a question, and answering it properly means reading the
+    // scene — which is the one part of this feature that costs a model call. A call whose answer is thrown
+    // away is a call the next run pays for again, and a run that cannot tell "nobody asked" from "somebody
+    // asked and agreed" is a run that reports the same doubt forever.
+    //
+    // So the answer is kept in the record. It is **not** an edit to the claim it answers: the claim's own
+    // row is untouched, and an answer that disagrees goes through `challenge_fact`, which is the door that
+    // already exists for contradicting a row you do not own. This table records the asking and the answer;
+    // `challenges` records the consequence.
+    //
+    // One row per (volume, roster entry) rather than per claim, because the doubt is a property of the
+    // entry — "this volume's text does not contain this name" — and the six claims that arrived under it
+    // were read in one scene and answered in one act. `claim_ids` names them, so the answer is still
+    // checkable claim by claim.
+    up: [
+      `CREATE TABLE IF NOT EXISTS attribution_answers (
+         volume          INTEGER NOT NULL,
+         key             TEXT NOT NULL REFERENCES cast(key),
+         claim_ids       TEXT NOT NULL DEFAULT '[]',
+         answer          TEXT NOT NULL CHECK (answer IN ('confirmed','reassign','narrator','unknown')),
+         speaker         TEXT,
+         reason          TEXT NOT NULL,
+         evidence        TEXT NOT NULL DEFAULT '[]',
+         asked_by_volume INTEGER NOT NULL,
+         asked_by_stage  TEXT NOT NULL,
+         asked_at        TEXT NOT NULL,
+         PRIMARY KEY (volume, key)
+       )`,
+
+      `CREATE INDEX IF NOT EXISTS idx_attribution_answers_volume ON attribution_answers(volume, answer)`,
+    ],
+  },
 ];
 
 /**
@@ -470,6 +527,7 @@ const COUNTED_TABLES = [
   "cast_presence",
   "cast_presence_match",
   "record_reopens",
+  "attribution_answers",
 ];
 
 // ─── Applying it ──────────────────────────────────────────────────────────────
@@ -560,6 +618,7 @@ module.exports = {
   FACT_STATUSES,
   SOURCE_STAGES,
   FACT_CHARACTER_ROLES,
+  ATTRIBUTION_ANSWERS,
   EVIDENCE_KINDS,
   EVIDENCE_MATCHES,
   EXTRACTION_SOURCE_STAGE,

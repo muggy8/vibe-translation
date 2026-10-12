@@ -47,6 +47,7 @@ const path = require("path");
 
 const { openReferenceStore } = require("./open");
 const { EXTRACTION_SOURCE_STAGE } = require("./schema");
+const { currentClaimSql } = require("./facts");
 const { refusal } = require("./refusals");
 const { moveArtifactAside } = require("./quarantine");
 require("../../types"); // JSDoc type definitions
@@ -131,7 +132,7 @@ function povClaimsInRecord(store, { volume } = {}) {
       "SELECT f.id, f.key, f.label, f.body, f.examples, f.ord, f.established_volume, f.established_chapter, " +
         "f.source_stage, c.display AS display " +
         "FROM facts f LEFT JOIN cast c ON c.key = f.key " +
-        "WHERE f.aspect = 'pov' AND f.source_stage != ? " +
+        `WHERE f.aspect = 'pov' AND f.source_stage != ? AND ${currentClaimSql("f")} ` +
         "AND (f.key IS NULL OR c.merged_into IS NULL) " +
         "AND f.established_volume <= ? " +
         "ORDER BY f.established_volume, f.ord, f.id"

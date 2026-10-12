@@ -360,6 +360,9 @@ function verifyStoredEvidence(facts, resolveVolume) {
 module.exports = {
   normalizeQuote,
   quoteSkeleton,
+  // The store's one minimum-length guard, named where the rule that uses it lives so a report can say
+  // why a two-kanji name is invisible to it without reaching into the glossary folder for it.
+  SKELETON_MIN_CHARS: GLOSSARY_SKELETON_MIN_CHARS,
   prepareLineForQuoteSearch,
   prepareQuoteForSearch,
   matchPreparedLine,

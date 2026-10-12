@@ -34,6 +34,7 @@
 
 const { normalizeQuote, matchQuoteOnLine } = require("./evidence");
 const { EXTRACTION_SOURCE_STAGE } = require("./schema");
+const { currentClaimSql } = require("./facts");
 const { readChapterLines } = require("./source-chapters");
 const { DOCUMENT_VOICE, storeDocumentProse, readDocumentProse, markDocumentMirrored } = require("./document-prose");
 require("../../types"); // JSDoc type definitions
@@ -407,7 +408,7 @@ function documentBulletAlreadyStored(store, key, body) {
   const needle = normalizeQuote(body);
   if (!needle) return false;
   const rows = store.db
-    .prepare("SELECT body FROM facts WHERE key IS ? AND source_stage != ?")
+    .prepare(`SELECT body FROM facts WHERE key IS ? AND source_stage != ? AND ${currentClaimSql("facts")}`)
     .all(key, EXTRACTION_SOURCE_STAGE);
   return rows.some((row) => normalizeQuote(row.body) === needle);
 }
@@ -428,7 +429,7 @@ function renderVoice(store, { title = VOICE_TITLE } = {}) {
     .prepare(
       "SELECT c.key, c.display, MIN(f.ord) AS first_ord FROM cast c JOIN facts f ON " +
         "(f.key = c.key OR f.key IN (SELECT m.key FROM cast m WHERE m.merged_into = c.key)) " +
-        "WHERE c.merged_into IS NULL AND f.source_stage != ? GROUP BY c.key ORDER BY first_ord, c.key"
+        `WHERE c.merged_into IS NULL AND f.source_stage != ? AND ${currentClaimSql("f")} GROUP BY c.key ORDER BY first_ord, c.key`
     )
     .all(EXTRACTION_SOURCE_STAGE);
 
@@ -452,7 +453,7 @@ function renderVoice(store, { title = VOICE_TITLE } = {}) {
   // retired, and "published facts quietly disappear" is the failure this layer is built to prevent.
   const bulletStmt = store.db.prepare(
     "SELECT key, label, body FROM facts WHERE key IS NOT NULL AND " +
-      "(key = ? OR key IN (SELECT m.key FROM cast m WHERE m.merged_into = ?)) AND source_stage != ? ORDER BY ord, id"
+      `(key = ? OR key IN (SELECT m.key FROM cast m WHERE m.merged_into = ?)) AND source_stage != ? AND ${currentClaimSql("facts")} ORDER BY ord, id`
   );
 
   for (const character of castRows) {

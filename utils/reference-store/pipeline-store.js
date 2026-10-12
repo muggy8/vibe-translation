@@ -55,6 +55,7 @@ const { referenceStorePath } = require("./paths");
 const { copyForwardStore, topUpVolumeRecord } = require("./copy-forward");
 const { volumeRecordIsStale, readReopenHistory } = require("./reopen");
 const { pronounKeyedRosterEntries, claimsFiledWithoutARosterEntry } = require("./integrity");
+const { attributionSummary } = require("./attribution");
 const { DOCUMENT_SOURCE_STAGE } = require("./schema");
 const { importGlossary } = require("./glossary-adapter");
 const { importVoice } = require("./voice-adapter");
@@ -530,6 +531,7 @@ function renderVolumeAuditReport(audit, { title, file, volume, refused = [], scr
     presence: audit.presence,
     glossary: audit.glossary || null,
     roster: audit.roster || null,
+    attribution: audit.attribution || null,
     refused,
     screened: screened.length ? screened : audit.screened || [],
     reopens: audit.reopens || [],
@@ -563,6 +565,7 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], screene
   const absent = absentCharacters(store);
   const glossary = glossaryContribution(store, store.volume);
   const roster = rosterReconciled(store, store.volume);
+  const attribution = attributionSummary(store, { volume: store.volume });
   // The fold's answer and the split the fold could not see, side by side: "no entry's heading names
   // another" is a true answer to the narrow question and a misleading one on its own.
   if (roster) roster.pronounEntries = pronounKeyedRosterEntries(store);
@@ -589,6 +592,7 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], screene
     presence,
     glossary,
     roster,
+    attribution,
     reopens,
     rebuilt: audit.rebuilt || [],
   };
@@ -609,6 +613,7 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], screene
     absent,
     glossary,
     roster,
+    attribution,
     reopens,
     rebuilt: audit.rebuilt || [],
   };

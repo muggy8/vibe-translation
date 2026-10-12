@@ -60,6 +60,7 @@ const path = require("path");
 const { openReferenceStore } = require("./open");
 const { readPlanOfRecord, installmentKey } = require("./paths");
 const { REBUILD_SOURCE_STAGE, EXTRACTION_SOURCE_STAGE, DOCUMENT_SOURCE_STAGE } = require("./schema");
+const { currentClaimSql } = require("./facts");
 const { resolveExtractionName } = require("./name-resolution");
 const { screenClaim } = require("./drafting");
 const { moveArtifactAside, ensureArtifactRejectIgnoreRule } = require("./quarantine");
@@ -894,7 +895,7 @@ function renderRebuiltVoice(store, { volume, title = REBUILT_VOICE_TITLE, preamb
       "SELECT f.id, f.key, f.label, f.body, f.examples, f.ord, f.established_volume, f.established_chapter, " +
         "c.display AS display " +
         "FROM facts f JOIN cast c ON c.key = f.key " +
-        "WHERE f.key IS NOT NULL AND f.source_stage != ? AND c.merged_into IS NULL " +
+        `WHERE f.key IS NOT NULL AND f.source_stage != ? AND ${currentClaimSql("f")} AND c.merged_into IS NULL ` +
         "ORDER BY f.established_volume, f.ord, f.id"
     )
     .all(EXTRACTION_SOURCE_STAGE);

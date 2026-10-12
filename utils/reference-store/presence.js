@@ -311,4 +311,5 @@ module.exports = {
   presenceDetail,
   presenceChapterCount,
   presenceMeasured,
+  namesForEntry,
 };

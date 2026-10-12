@@ -25,6 +25,7 @@ const { COUNTED_TABLES, EXTRACTION_SOURCE_STAGE } = require("./schema");
 const { tableCounts } = require("./queries");
 const { presenceMeasured, presenceChapterCount } = require("./presence");
 const { isBareFirstPersonPronoun, spanTokens, voicePrimaryName } = require("./name-resolution");
+const { attributionFindings } = require("./attribution");
 const { documentMirrored, DOCUMENT_VOICE, rebuildProvenanceCounts } = require("./document-prose");
 // `isVolumeSealed` lives with the sealing verb itself, so the "is this volume published?"
 // question has exactly one answer in this layer. facts.js does not require this file, so the
@@ -828,6 +829,14 @@ function integrityFindings(ctx, { volume = null, step = INTEGRITY_STEP, upTo, pu
   // see.
   const uncovered = uncoveredCharacters(ctx, limit);
   findings.push(...coverageFindings(ctx, uncovered, limit, step, volume));
+
+  // Slice 10 — who is speaking the words a claim quotes. Asked after the coverage question, because the
+  // two read the same measurement and this one is about a claim's *subject* rather than its existence:
+  // coverage asks whether the reference says anything about a person the volume contains, attribution
+  // asks whether the person this volume filed a claim under is the one whose words the claim quotes.
+  // A doubt is MEDIUM and an unresolved contest is HIGH — see `attributionFindings` for why the ladder
+  // is drawn there, and for the measurement that decided it.
+  findings.push(...attributionFindings(ctx, { volume: limit, step }));
 
   const rebuiltDocs = rebuiltDocuments(ctx, limit);
   // How the reference got here. MEDIUM, deliberately: a reference rebuilt from a volume's extraction

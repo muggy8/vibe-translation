@@ -139,6 +139,81 @@ volumes are regenerated too.
 **Key differences from glossary:** no research stage (quirks are text-intrinsic); produces two files instead
 of one; no agent turn anywhere in the stage.
 
+### 6.5 The attribution door — `attribute-voice.js`, and the one question the record could not answer
+
+A character-voice claim does two jobs at once and the record has only ever been able to answer one of them.
+It says **who the claim is about** — the roster entry its bullet is filed under — and it quotes **words
+somebody said**. A bullet about 三色院菫子 that quotes a line of narration is a correct bullet about the right
+person quoting the wrong speaker, and a bullet under a name this volume's text never prints is a bullet whose
+subject may not be in the book at all.
+
+This is a **door, not a stage**. Nothing in the pipeline calls it, it is not in `index.js`'s step list, and
+the character-voice stage's cost is unchanged by it: the stage still spends one extraction one-shot per
+chapter plus the grades, and the offline call baseline (93 calls in the default loop, 39 in the store loop)
+is exactly what it was.
+
+**The deterministic half asks when the answer is in doubt.** `utils/reference-store/attribution.js` reports a
+roster entry this volume filed claims under that this volume's own text does not measure as present. It does
+**not** name a speaker, and that is the load-bearing decision: the obvious rule — a cast name inside the
+cited line is the speaker — was run against both real records before any code was written and fires on **0**
+of volume 01's character claims and **10** of volume 02's, and every one of those 10 is the *addressee*
+(`「あすなろさん。君の気持ちは…」` is 秋野桜 talking **to** あすなろ). A check that names a speaker from inside
+a quote is wrong on every example this corpus gives it.
+
+Two more measurements shaped it. The doubt is asked against **the volume that established the claim**, not
+the volume being audited: measured the naive way the rule catches 8 claims in volume 2's record, measured
+against the establishing volume it catches **6**, all of them 蒲田's, and 0 in volume 1. And an absence can be
+a blind spot: 蒲田 *is* in volume 2 — the book prints 蒲かま田た, with the reading aids written *between* the
+two kanji — and the store's one matching rule needs a Han-character skeleton of 3 or more, so a two-kanji
+name is invisible to it. A narrow probe (`namePrintedWithReadingAids`) searches the kanji in order with only
+kana between them; swept over every cast entry both real records hold it fires on **1 of the 4 entries
+measured absent** and **0 of the other 3**. It is deliberately **not** wired into `presence.js` or
+`evidence.js`: widening the store's one matching rule to rescue one character is how a guard stops meaning
+what it says, and the coverage rule and the copy-forward guard are built on that rule answering the same
+question everywhere. `cast_alias` is the door that closes that case properly, and the report names it instead
+of walking through it.
+
+**The reading half is the only part that costs a model call**, and it is bounded four ways with no
+environment knob on any of them: one call per doubted entry (not per claim, chapter or character),
+`DETECTIVE_MAX_GROUPS` entries per run, `DETECTIVE_MAX_STEPS` **read-only** tool calls each, and
+`DETECTIVE_TOKEN_BUDGET` prompt tokens per run after which the remaining entries are reported as unanswered
+rather than paid for. The agent may read, in that volume's folder only; the write tools are not offered at
+all. What it may not do is decide.
+
+**What an answer does.** It is filed in `attribution_answers` (schema version 7), so the next run can tell
+"nobody asked" from "somebody asked and agreed" and does not pay for the same reading twice — running the
+command a second time over volume 02 costs **0 model calls**. An answer that agrees closes the question. An
+answer that disagrees opens one `challenge_fact` row per claim, owned by the asking volume, each with its own
+quote checked against the book, and the claim the reference already published is **not edited and not
+moved**: it is marked `disputed` and stays exactly where it is until somebody closes the dispute with
+`resolve_challenge`. A narrator answer files its challenger with **no roster entry at all**
+(`key = null`, `extracted_as = "narrator"`), which is the record's existing shape for a claim whose subject it
+refuses to invent — and since the coverage rule counts rows in `cast`, the narration is never asked to be a
+character. An answer whose challenge cannot be filed leaves no answer row either: the whole thing is one
+transaction.
+
+**Severity, stated because a reader will want to argue with it.** An unanswered doubt is **MEDIUM**
+(`reference-claim-attribution-in-doubt`): the record contradicts itself, and 蒲田's six claims are the case
+where the contradiction is the measurement being blind rather than the attribution being wrong, so a HIGH
+here would stop the next volume over a two-kanji name the store cannot see. A doubt somebody answered and
+said the wrong thing is **HIGH** (`reference-attribution-contested-unresolved`) while its challenge is open:
+the published reference is attributing those words one way while its own record disputes it, and that is
+damage. A roster entry keyed by the word for the narration is **HIGH**
+(`reference-narrator-counted-as-a-character`). An answered doubt with nothing contradicting it is not a
+finding at all — but it is still printed in the report, because an answer of "the name is printed in a
+spelling this record cannot see" closes the question without closing the blind spot.
+
+**Measured on the real volume 02.** 1 group, 6 claims (3 published, 3 extraction candidates), all six quoting
+dialogue. One model call: **8,208 prompt + 2,322 completion = 10,530 tokens**, 0 tool calls — the detective
+answered from the passage handed to it. The answer was `confirmed` → 蒲田, with the line that settles it
+quoted out of ch3:1243 (「私は……、一年の蒲かま田たです」) and ch3:1245's narration behind it. **No challenge was
+opened, no row was edited, and the published `character-voice.md` and `pov-map.md` are byte-identical to
+before.** The honest headline is that the check fired, the measurement is blind, and the attribution was
+right. Re-audited through the stage's own door: 3 findings, 0 HIGH, 1,360 citations re-checked (down from 4
+findings — the attribution MEDIUM is gone because the record now holds an answer), and three fresh acceptance
+grades of **80 / 80 / 79**, all "Pass with minor edits", with the grader's notes naming the three remaining
+MEDIUM findings instead of the 蒲田 contradiction. → gotcha 121.
+
 ## 7. Pipeline D: style-guide (`style-guide.js`)
 
 The 4th pipeline step — the "how do I write it" policy layer. The glossary says *what to call things*, character-voice says *how characters sound*, the wiki says *what is happening*; the style guide says *how source-language constructs are rendered in the target language* (honorifics, pronouns, sentence-ending particles, internal-monologue markers, onomatopoeia, interjections, POV/scene markers, tense, punctuation, wordplay, translator notes).

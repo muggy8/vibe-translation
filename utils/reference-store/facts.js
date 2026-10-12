@@ -713,7 +713,7 @@ function ownableRefusal(ctx, row, verb) {
  *
  * @param {{db: Object, scope: {volume: number, stage: string}, resolveVolume: Function}} ctx
  * @param {string} id - The fact being challenged.
- * @param {{reason: string, evidence: Array<Object>, body?: string, aspect?: string, label?: string, supersede?: boolean}} proposal
+ * @param {{reason: string, evidence: Array<Object>, body?: string, aspect?: string, label?: string, section?: string, key?: string|null, extractedAs?: string|null, supersede?: boolean}} proposal
  * @returns {{ok: boolean, fact: Object|null, target: Object|null, challengeId: number|null, supersede: boolean, refusal: ReferenceRefusal|null}}
  */
 function challengeFact(ctx, id, proposal) {
@@ -753,8 +753,20 @@ function challengeFact(ctx, id, proposal) {
   // cannot accidentally make the stronger claim.
   const supersede = proposal.supersedes === true || proposal.supersede === true;
 
+  // **The challenger's roster key defaults to the target's, and `key` says otherwise.** A challenge about
+  // *what a claim says* belongs under the same character, and that used to be the only thing this verb
+  // could file. A challenge about *who is speaking* is the case that cannot: its whole point is that the
+  // claim belongs somewhere else — under another roster entry, or under none at all when the words are the
+  // narrator's prose rather than anybody's speech. `key: null` files the challenger unattached, which is
+  // the record's existing shape for a claim with no subject (migration 6), and `extractedAs` is what names
+  // the answer afterwards. Omitting `key` keeps the old behaviour exactly.
+  const key = proposal.key === undefined ? target.key : proposal.key === null ? null : String(proposal.key).trim() || null;
+  const extractedAs =
+    proposal.extractedAs === undefined ? (key === null ? target.extracted_as || null : null) : proposal.extractedAs;
+
   const inserted = insertFact(ctx, {
-    key: target.key,
+    key,
+    extractedAs,
     aspect: proposal.aspect || target.aspect,
     label: proposal.label === undefined ? target.label : proposal.label,
     section: proposal.section === undefined ? target.section : proposal.section,
@@ -819,6 +831,37 @@ function listChallenges(ctx, { openOnly = true } = {}) {
         "ORDER BY c.outcome IS NOT NULL, c.id"
     )
     .all();
+}
+
+/**
+ * The SQL predicate that says "this facts row is the record's current claim".
+ *
+ * Written once, in the module that owns `challenges` and the status vocabulary, because two renderers
+ * (`voice-adapter.js` and `pov-map.js`) have to ask it and a third would be a third answer to one question.
+ * It is the store's own `showable_facts` view plus one rule that view does not have:
+ *
+ *   - **not retracted** — a withdrawn claim is not published content;
+ *   - **not superseded by a live row** — when a dispute is accepted, the row that replaced the old claim
+ *     is the record's claim, and publishing both is publishing the argument rather than its outcome;
+ *   - **not the challenger side of an open dispute** — this is the one the attribution feature needs. An
+ *     answer to "who is speaking these words?" that names a different character files its challenger
+ *     *under that character*. Without this clause the published reference grows a new bullet about
+ *     somebody, written by a bounded reading pass that has no authority to add claims to the record. With
+ *     it, the dispute stays where it belongs — in `challenges`, and in the audit report at HIGH — and the
+ *     reference keeps saying what it says until `resolve_challenge` decides otherwise.
+ *
+ * A `disputed` row is **kept**: the record still claims it, and the dispute is reported separately. That
+ * is what "a sealed row is never edited" costs, and it is paid on purpose.
+ *
+ * @param {string} alias - The alias the caller's query gives the `facts` table.
+ * @returns {string} A SQL fragment to AND into a `FROM facts <alias>` query.
+ */
+function currentClaimSql(alias) {
+  return (
+    `${alias}.status <> 'retracted' AND ` +
+    `NOT EXISTS (SELECT 1 FROM facts g WHERE g.supersedes = ${alias}.id AND g.status <> 'retracted') AND ` +
+    `NOT EXISTS (SELECT 1 FROM challenges c WHERE c.challenger_id = ${alias}.id AND c.outcome IS NULL)`
+  );
 }
 
 /**
@@ -1040,6 +1083,7 @@ module.exports = {
   deleteOwnFact,
   challengeFact,
   listChallenges,
+  currentClaimSql,
   resolveChallenge,
   sealVolume,
   isVolumeSealed,
