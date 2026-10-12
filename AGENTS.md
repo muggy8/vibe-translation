@@ -194,3 +194,32 @@ your final answer.
 - When you are producing your final answer, instead of using specialized jargon, you can use
   analogies or metaphors instead.
 - When analogies or metaphors fail, psuedo code can be used as a last resort.
+
+## 7. How work is dispatched here
+
+The working shape in this repository is **one conductor and a series of single-use workers**.
+The conductor (`.opencode/agents/conductor.md`, the `default_agent` in `.opencode/opencode.jsonc`)
+does not implement: it scopes the slice, measures the starting state, hands the work to a
+`builder` (`.opencode/agents/builder.md`), verifies the result against the disk, commits it,
+and keeps the conversation free for deciding with the account owner. A `verifier`
+(`.opencode/agents/verifier.md`) is read-only and checks a finished slice independently.
+`/slice <task>` and `/verify <claim>` are the shortcuts. The procedure is in the
+`dispatching-slices` skill (`.opencode/skills/dispatching-slices/SKILL.md`).
+
+Two rules in it are load-bearing, and they are here because they were learned expensively:
+
+1. **Every slice gets a brand-new worker session. Never resume one.** A worker session kept
+   alive across several tasks — measured here: 473 messages, 3.3M input tokens, 54M cache-read
+   tokens, 44 hours old — reported a finished slice with grades, token totals and a table of
+   findings, and **none of it existed**: the modules were not on disk, the row counts were
+   unchanged, and it invented a filename that appears nowhere in the tree and a book size of
+   1,911 characters for a book that is 149,606. A worker deep in a compressed history answers
+   by continuing its own story, and a continued story looks exactly like a report. The same
+   job given to a session started fresh — 480 messages, 854k input tokens, six minutes —
+   produced work that survived verification.
+2. **A worker's report is a hypothesis until it has been checked against the filesystem.**
+   `git status` for the files, `npm test` for the suite, a direct query for the rows, the
+   `# Tokens:` headers in `<SERIES_LOCATION>/.run/logs/` for the cost, and the checksums taken
+   before the dispatch for everything that was promised to survive. Nothing is committed on a
+   report's word, and a claim that does not match the disk is reported to the account owner
+   that plainly rather than patched over.
