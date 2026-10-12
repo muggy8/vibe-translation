@@ -66,6 +66,11 @@ const FACT_PROPOSAL_SCHEMA = z.strictObject({
   appliesToVolume: z.number().int().nullable().optional(),
   confidence: z.number().min(0).max(1).optional(),
   supersedes: z.string().min(1).nullable().optional(),
+  /**
+   * The name the extraction wrote for this claim, kept when the store files the claim somewhere else —
+   * onto a different roster entry, or under none at all. See migration 6.
+   */
+  extractedAs: z.string().min(1).nullable().optional(),
   characters: z.array(z.strictObject({ key: z.string().min(1), role: z.string().optional() })).optional(),
   cast: z
     .strictObject({
@@ -406,8 +411,8 @@ function insertFact(ctx, proposal) {
          id, key, aspect, label, section, body, examples, formality, evidence,
          established_volume, established_chapter, applies_from_volume, applies_to_volume,
          status, supersedes, confidence, source_stage, owner_volume, owner_stage, sealed,
-         created_at, updated_at, row_version, ord
-       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+         created_at, updated_at, row_version, ord, extracted_as
+       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     )
     .run(
       id,
@@ -434,7 +439,8 @@ function insertFact(ctx, proposal) {
       now,
       null,
       1,
-      nextOrd(ctx)
+      nextOrd(ctx),
+      value.extractedAs || null
     );
 
   if (Array.isArray(value.characters) && value.characters.length) {

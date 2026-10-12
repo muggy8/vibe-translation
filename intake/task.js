@@ -181,7 +181,7 @@ async function getTranslationTarget({ forceIntake = false, dryRun = false } = {}
   // and the litter then showed up as "existing folders" on the next intake).
   if (dryRun) {
     const committedPlan = await readUsableManifest(seriesDir, manifestPath, {
-      why: "previewing the committed plan instead",
+      why: "no preview of it is possible",
     });
     if (committedPlan) {
       harness.logLine(
@@ -191,6 +191,16 @@ async function getTranslationTarget({ forceIntake = false, dryRun = false } = {}
       logManifestSummary(committedPlan);
       return committedPlan;
     }
+    // The fallback is the opposite of the preview above, and saying so matters: the line
+    // `readUsableManifest` logs used to end "…previewing the committed plan instead" even when it had
+    // just REFUSED that manifest (it was written for another series location), and then this branch
+    // built a layout by scanning the folder. The log described a plan nobody used while a scan picked
+    // the volume's source file — which is how a dry run ended up reading the pipeline's own audit
+    // report as the novel.
+    harness.logLine(
+      `[get-translation-target] dry-run: no committed plan of record is usable here, so the layout is ` +
+        `being built by scanning ${seriesDir} with no AI call. This preview is NOT the committed plan.`
+    );
     const manifest = await buildDeterministicManifest(seriesDir, {
       sourceLanguage: overrides.sourceLanguage || "Japanese",
       targetLanguage: overrides.targetLanguage,

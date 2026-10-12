@@ -60,6 +60,7 @@ const {
   selfContradictions,
   screenClaim,
   unfinishedProseFindings,
+  resolveExtractionName,
   DOCUMENT_SOURCE_STAGE,
   REBUILD_SOURCE_STAGE,
   EXTRACTION_SOURCE_STAGE,
@@ -553,16 +554,21 @@ function scenarioTheAuditNamesEveryLineThatCarriesADraftingNote() {
 // ─── Scenario ────────────────────────────────────────────────────────────────
 
 /**
- * A character filed under a bare pronoun is named, and not merged.
+ * A bare first-person pronoun never becomes a roster entry, and the claims it was filed under are named.
  *
- * The fold that closes a split like this reads an entry's own heading, and on the read-then-assemble route
- * the heading is the key verbatim — so the signal it was written to notice is simply not in the record.
- * Volume 01's real redo produced exactly that: `俺` with 15 claims beside `如月雨露` with 215, and the
- * roster row still said "none". This scenario plants the same shape and checks that the audit says so.
+ * The old behaviour: the resolver fell through and created a cast entry keyed `俺`, so volume 01's real
+ * record held `俺` (20 claims) beside `如月雨露` (188) and volume 02's held `俺` (282) beside 如月雨露
+ * (190) — one person in two places, and a published reference whose protagonist section is headed with the
+ * word for "I" (gotcha 115). The guard that was supposed to close the split read an *authored* heading, and
+ * on the read-then-assemble route there is no authored heading to read.
+ *
+ * The new behaviour is checked here in both directions: the claims are **kept** (with the name the
+ * extraction used, in `extracted_as`) and **reported**, and the roster gains no entry. Nothing is merged,
+ * because deciding that 俺 is 如月雨露 is a decision about a person.
  *
  * @returns {void}
  */
-function scenarioACharacterFiledUnderAPronounIsNamedNotGuessed() {
+function scenarioAPronounIsNeverARosterEntry() {
   const series = fixtureStoreSeries("pronoun-roster");
   const entry = series.volumes[0];
   const opened = openVolumeRecord({ volume: 1, folder: entry.folder, seriesDir: series.dir });
@@ -588,24 +594,258 @@ function scenarioACharacterFiledUnderAPronounIsNamedNotGuessed() {
   ].join("\n");
   importVolumeArtifacts(store, { voiceMarkdown: markdown });
 
+  // No roster entry was made out of the pronoun.
+  const cast = store.db.prepare("SELECT key, merged_into AS mergedInto FROM cast ORDER BY key").all();
+  assert.ok(!cast.some((row) => row.key === "俺"), `the roster gained a pronoun entry: ${JSON.stringify(cast.map((r) => r.key))}`);
+  assert.ok(cast.every((row) => !row.mergedInto), `nothing was merged: ${JSON.stringify(cast)}`);
+
+  // The claims are still there, with the name they were written under.
+  const unattached = store.db
+    .prepare("SELECT id, key, extracted_as AS extractedAs FROM facts WHERE key IS NULL AND extracted_as IS NOT NULL")
+    .all();
+  assert.strictEqual(unattached.length, 1, JSON.stringify(unattached));
+  assert.strictEqual(unattached[0].extractedAs, "俺", "the claim kept the heading it was published under");
+
   const audit = auditVolumeRecord(store, { title: "Character-voice reference", file: "character-voice.md", markdown });
-  const pronoun = audit.findings.filter((f) => f.kind === "reference-character-keyed-by-a-pronoun");
-  assert.strictEqual(pronoun.length, 1, `the split is reported: ${JSON.stringify(audit.findings.map((f) => f.kind))}`);
-  assert.strictEqual(pronoun[0].severity, "MEDIUM", "the claims are real; what is wrong is the name over them");
-  assert.ok(pronoun[0].message.includes("俺"), pronoun[0].message);
-  assert.ok(pronoun[0].message.includes("cast_alias"), "and the fix it names is the door a person uses, not a rule that picks a person");
-
-  // The roster row cannot be allowed to say "none" on its own.
-  assert.ok(audit.markdown.includes("keyed by a bare first-person pronoun"), audit.markdown.slice(0, 600));
-  assert.ok(!audit.markdown.includes("| roster entries that are the same person | none — no entry's own heading names another entry on the roster |"), "the fold's true answer is not the whole answer");
-
-  // And nothing was merged: the two entries are still two entries, because merging them is a decision.
-  const cast = store.db.prepare("SELECT key, merged_into FROM cast WHERE key IN ('俺', '如月雨露') ORDER BY key").all();
-  assert.strictEqual(cast.length, 2, JSON.stringify(cast));
-  assert.ok(cast.every((row) => !row.merged_into), `no merge happened: ${JSON.stringify(cast)}`);
+  const finding = audit.findings.filter((f) => f.kind === "reference-claim-filed-without-a-roster-entry");
+  assert.strictEqual(finding.length, 1, JSON.stringify(audit.findings.map((f) => f.kind)));
+  assert.strictEqual(finding[0].severity, "MEDIUM", "the claims are real; what is missing is who they belong to");
+  assert.ok(finding[0].message.includes("俺"), finding[0].message);
+  assert.ok(finding[0].message.includes("cast_alias"), "and the fix it names is the door a person uses, not a rule that picks a person");
+  assert.ok(audit.markdown.includes("claims filed with no roster entry"), audit.markdown.slice(0, 900));
+  assert.ok(audit.markdown.includes("「俺」"), audit.markdown.slice(0, 900));
 
   store.close();
-  console.log("  a character filed under a bare pronoun is named in the audit, and left alone");
+  console.log("  a bare pronoun is never a roster entry, and the claim it was filed under is kept and named");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The glossary already says whose "I" this is, and the store now reads that sentence.
+ *
+ * Volume 1's real Characters row for 如月雨露 ends: "Narrator: switches between 僕 and 俺 (see 僕／俺)".
+ * That is the only place in the pipeline where the answer is written, and until now nothing read it — which
+ * is why `俺（ジョーロ）` resolved to nobody and 282 claims landed under a pronoun.
+ *
+ * Measured against all 17 real glossaries before the rule was pinned: 17 hits, one per volume, all of them
+ * this same row. Zero hits on any other character row. That measurement is why the rule is "a Characters
+ * row whose notes name a bare pronoun" and not a nickname-section rule — see `firstPersonAliasDeclarations`.
+ *
+ * @returns {void}
+ */
+function scenarioTheGlossarysOwnRowResolvesThePronoun() {
+  const series = fixtureStoreSeries("pronoun-declared");
+  const entry = series.volumes[0];
+  const opened = openVolumeRecord({ volume: 1, folder: entry.folder, seriesDir: series.dir });
+  assert.ok(opened.ok, JSON.stringify(opened.refusal));
+  const store = opened.store;
+  store.registerChaptersFromSource();
+
+  const narratorGlossary = GLOSSARY_01.replace(
+    "| 如月雨露 | Kisaragi Amatsuyu | Protagonist; the narrator |",
+    "| 如月雨露 | Kisaragi Amatsuyu | Protagonist. Narrator: switches between 僕 and 俺 |"
+  );
+  const imported = importVolumeArtifacts(store, { glossaryMarkdown: narratorGlossary });
+  assert.ok(imported.glossary, JSON.stringify(imported));
+
+  const row = store.db.prepare("SELECT key, aliases FROM cast WHERE key = ?").get("如月雨露");
+  const aliases = JSON.parse(row.aliases || "[]");
+  assert.ok(aliases.includes("俺"), `the pronoun is declared as an alias: ${JSON.stringify(aliases)}`);
+  assert.ok(aliases.includes("僕"), `both first-person forms are declared: ${JSON.stringify(aliases)}`);
+
+  // The name the real volume 02 extraction used for the protagonist, resolved.
+  const ore = resolveExtractionName(store, "俺（ジョーロ）");
+  assert.strictEqual(ore.key, "如月雨露", ore.how);
+  assert.strictEqual(ore.resolved, true, ore.how);
+  assert.ok(ore.how.includes("alias"), ore.how);
+
+  // And the name the real volume 01 extraction used, which names no nickname at all: the pronoun is the
+  // declared one, so it resolves too.
+  const protagonist = resolveExtractionName(store, "俺（主人公）");
+  assert.strictEqual(protagonist.key, "如月雨露", protagonist.how);
+
+  // A pronoun nobody declared still resolves to nobody: the declaration is what makes the difference, and
+  // the same store asked about a pronoun it was never told about answers honestly.
+  const boku = resolveExtractionName(store, "私（クラスメイト）");
+  assert.strictEqual(boku.key, null, boku.how);
+  assert.strictEqual(boku.unattached, true, boku.how);
+
+  // Filing through the document door puts the bullets on the person, not on the pronoun.
+  const markdown = [
+    "# Character voice reference",
+    "",
+    "## Characters",
+    "",
+    "### 俺（ジョーロ）",
+    "",
+    "- **Pronouns**: First person is 俺. — e.g. 「さぁ、今日も俺の熱き血潮を迸らせるぜ！」",
+    "",
+  ].join("\n");
+  importVolumeArtifacts(store, { voiceMarkdown: markdown });
+  const cast = store.db.prepare("SELECT key FROM cast ORDER BY key").all().map((r) => r.key);
+  assert.ok(!cast.includes("俺"), `no pronoun entry: ${JSON.stringify(cast)}`);
+  const filed = store.db
+    .prepare("SELECT key, extracted_as AS extractedAs FROM facts WHERE aspect = 'pronoun' AND body LIKE ?")
+    .all("%熱き血潮%");
+  assert.strictEqual(filed.length, 1, JSON.stringify(filed));
+  assert.strictEqual(filed[0].key, "如月雨露", "the bullet landed on the character the glossary names");
+  assert.strictEqual(filed[0].extractedAs, "俺（ジョーロ）", "and the record keeps the name the heading used");
+
+  store.close();
+  console.log("  the glossary's own narrator row resolves the pronoun onto the character it names");
+}
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * Two characters declaring the same "I" is not a tie to break.
+ *
+ * A first-person novel with two narrators is the case the rule has to answer without guessing: if both
+ * Characters rows name 俺, picking whichever row the table reaches first would file one narrator's claims
+ * under the other, and a merge is the one operation in this layer that makes claims quietly change hands.
+ * So the declaration is refused, the name is reported as ambiguous, and the claims wait unattached.
+ *
+ * @returns {void}
+ */
+function scenarioTwoNarratorsRefuseToBePickedBetween() {
+  const series = fixtureStoreSeries("pronoun-ambiguous");
+  const entry = series.volumes[0];
+  const opened = openVolumeRecord({ volume: 1, folder: entry.folder, seriesDir: series.dir });
+  assert.ok(opened.ok, JSON.stringify(opened.refusal));
+  const store = opened.store;
+  store.registerChaptersFromSource();
+
+  const twoNarrators = GLOSSARY_01.replace(
+    "| 如月雨露 | Kisaragi Amatsuyu | Protagonist; the narrator |",
+    "| 如月雨露 | Kisaragi Amatsuyu | Protagonist. Narrator: switches between 僕 and 俺 |"
+  ).replace(
+    "| 大賀太陽 | Oga Taiyo | Best friend since junior high |",
+    "| 大賀太陽 | Oga Taiyo | The other narrator: this chapter is told in 俺 |"
+  );
+  const imported = importVolumeArtifacts(store, { glossaryMarkdown: twoNarrators });
+  const glossary = imported.glossary;
+  assert.strictEqual(glossary.ambiguousAliases.length, 1, JSON.stringify(glossary.ambiguousAliases));
+  assert.strictEqual(glossary.ambiguousAliases[0].alias, "俺");
+  assert.deepStrictEqual(glossary.ambiguousAliases[0].keys, ["如月雨露", "大賀太陽"], JSON.stringify(glossary.ambiguousAliases));
+  assert.strictEqual(glossary.aliasesDeclared.filter((a) => a.alias === "俺").length, 0, "neither declaration was applied");
+
+  const resolved = resolveExtractionName(store, "俺（二人目）");
+  assert.strictEqual(resolved.key, null, resolved.how);
+  assert.strictEqual(resolved.ambiguous, false, "the declarations were refused, so the name is simply unresolved now");
+  assert.strictEqual(resolved.unattached, true, resolved.how);
+  assert.ok(resolved.how.includes('the word for "I"'), resolved.how);
+
+  // If somebody declares it on both entries anyway, the resolver still refuses to pick.
+  assert.ok(store.castAlias("如月雨露", "俺", "declared by hand for the test").ok);
+  assert.ok(store.castAlias("大賀太陽", "俺", "declared by hand for the test").ok);
+  const both = resolveExtractionName(store, "俺（二人目）");
+  assert.strictEqual(both.key, null, both.how);
+  assert.strictEqual(both.ambiguous, true, both.how);
+  assert.ok(both.how.includes("如月雨露") && both.how.includes("大賀太陽"), both.how);
+
+  store.close();
+  console.log("  two characters declaring the same pronoun are reported as a question, not resolved by table order");
+}
+
+
+// ─── Scenario ────────────────────────────────────────────────────────────────
+
+/**
+ * The extractor's own label is taken off the published claim, and the claim survives.
+ *
+ * `NEW CHARACTER. Uses あんた as second-person pronoun for ジョーロ.` — three of those reached volume 02's
+ * published reference. The observation is real; the label is the extraction pass writing in the field it
+ * was filling in, and the record already says the same thing as `established_volume`.
+ *
+ * Measured before it was pinned: 2,744 claim bodies — every bullet of the two published references that
+ * exist (227 and 583) plus every row of both real records (574 and 1,360) — and the shape fires 9 times, on
+ * one distinct label, all in volume 02. Zero false positives. That is the number that made it a rule; the
+ * two shapes above were pinned the same way (gotcha 112).
+ *
+ * @returns {void}
+ */
+function scenarioTheExtractorSLabelIsTakenOffAndTheClaimSurvives() {
+  const series = fixtureStoreSeries("scaffolding-label");
+  const entry = series.volumes[0];
+  const roster = openReferenceStore({ volume: 1, folder: entry.folder, seriesDir: series.dir, stage: DOCUMENT_SOURCE_STAGE });
+  roster.registerChaptersFromSource();
+  importVolumeArtifacts(roster, { glossaryMarkdown: GLOSSARY_01 });
+  roster.close();
+
+  const opened = openReferenceStore({ volume: 1, folder: entry.folder, seriesDir: series.dir, stage: REBUILD_SOURCE_STAGE });
+  assertInsideFixture(opened.file, series.dir);
+  opened.registerChaptersFromSource();
+
+  const entries = [
+    {
+      type: "voice",
+      character: "三色院菫子（パンジー）",
+      quirkType: "vocabulary",
+      description: "NEW CHARACTER. Narration about her is flat and bookish.",
+      examples: ["三色院菫子は本を読んでいた。"],
+    },
+    {
+      type: "voice",
+      character: "三色院菫子（パンジー）",
+      quirkType: "vocabulary",
+      description: "Her register is flat and bookish, and nothing about it is new.",
+      examples: ["三色院菫子は本を読んでいた。"],
+    },
+  ];
+
+  const candidateHandle = openReferenceStore({
+    volume: 1,
+    folder: series.volumes[0].folder,
+    seriesDir: series.dir,
+    stage: EXTRACTION_SOURCE_STAGE,
+  });
+  let result;
+  try {
+    result = rebuildVoiceFromExtraction(opened, entries, { candidateStore: candidateHandle });
+  } finally {
+    candidateHandle.close();
+  }
+  assert.strictEqual(result.refusal, null, JSON.stringify(result.refusal));
+
+  const adopted = opened.db
+    .prepare("SELECT body FROM facts WHERE source_stage = ? AND aspect = 'register' ORDER BY ord")
+    .all(REBUILD_SOURCE_STAGE)
+    .map((row) => row.body);
+  assert.ok(adopted.includes("Narration about her is flat and bookish."), `the label is off the published claim: ${JSON.stringify(adopted)}`);
+  assert.ok(!adopted.some((body) => body.startsWith("NEW CHARACTER")), `no published claim opens with the label: ${JSON.stringify(adopted)}`);
+  assert.strictEqual(adopted.length, 2, "and the claim was not thrown away: " + JSON.stringify(adopted));
+
+  const candidate = opened.db
+    .prepare("SELECT body FROM facts WHERE source_stage = ? AND body LIKE ?")
+    .all(EXTRACTION_SOURCE_STAGE, "NEW CHARACTER%");
+  assert.strictEqual(candidate.length, 1, `the extraction's own copy keeps the label: ${JSON.stringify(candidate)}`);
+
+  const labelled = result.screened.filter((item) => item.dropped.some((d) => d.example.startsWith("label:")));
+  assert.strictEqual(labelled.length, 1, JSON.stringify(result.screened));
+  assert.ok(labelled[0].dropped[0].because.includes("NEW CHARACTER"), JSON.stringify(labelled[0].dropped));
+
+  // And the audit names it when a published file carries one — the authored route writes its own prose.
+  const markdown = [
+    "# Character voice reference",
+    "",
+    "## Characters",
+    "",
+    "### 三色院菫子",
+    "",
+    "- **Vocabulary register**: NEW CHARACTER. Narration about her is flat and bookish. — e.g. 「三色院菫子は本を読んでいた。」",
+    "- **Vocabulary register**: Her register is flat and bookish. — e.g. 「三色院菫子は本を読んでいた。」",
+    "",
+  ].join("\n");
+  const audit = auditVolumeRecord(opened, { title: "Character-voice reference", file: "character-voice.md", markdown });
+  const finding = audit.findings.filter((f) => f.kind === "reference-claim-carries-unfinished-prose");
+  assert.strictEqual(finding.length, 1, JSON.stringify(audit.findings.map((f) => f.kind)));
+  assert.ok(finding[0].message.includes("line 7"), finding[0].message);
+  assert.ok(!finding[0].message.includes("line 8"), `the legitimate bullet is not named: ${finding[0].message}`);
+  assert.ok(finding[0].message.includes("NEW CHARACTER"), finding[0].message);
+
+  opened.close();
+  console.log("  the extractor's own label is taken off the published claim, kept in the candidate, and named in the audit");
 }
 
 // ─── Runner ──────────────────────────────────────────────────────────────────
@@ -620,6 +860,9 @@ scenarioAReopenVoidstheGradesOfTheRecordItRetires();
 scenarioTheDetectorFiresOnTheTwoRealDefectsAndNowhereElse();
 scenarioFilingRefusesUnfinishedProseAndDropsADirtyCitation();
 scenarioTheAuditNamesEveryLineThatCarriesADraftingNote();
-scenarioACharacterFiledUnderAPronounIsNamedNotGuessed();
+scenarioAPronounIsNeverARosterEntry();
+scenarioTheGlossarysOwnRowResolvesThePronoun();
+scenarioTwoNarratorsRefuseToBePickedBetween();
+scenarioTheExtractorSLabelIsTakenOffAndTheClaimSurvives();
 
 console.log("\nreference-store reopen: all checks passed.");

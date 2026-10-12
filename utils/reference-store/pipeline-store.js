@@ -54,7 +54,7 @@ const { openReferenceStore } = require("./open");
 const { referenceStorePath } = require("./paths");
 const { copyForwardStore, topUpVolumeRecord } = require("./copy-forward");
 const { volumeRecordIsStale, readReopenHistory } = require("./reopen");
-const { pronounKeyedRosterEntries } = require("./integrity");
+const { pronounKeyedRosterEntries, claimsFiledWithoutARosterEntry } = require("./integrity");
 const { DOCUMENT_SOURCE_STAGE } = require("./schema");
 const { importGlossary } = require("./glossary-adapter");
 const { importVoice } = require("./voice-adapter");
@@ -566,6 +566,10 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], screene
   // The fold's answer and the split the fold could not see, side by side: "no entry's heading names
   // another" is a true answer to the narrow question and a misleading one on its own.
   if (roster) roster.pronounEntries = pronounKeyedRosterEntries(store);
+  // The other half of the same question: claims the store could not attach to anybody, with the name the
+  // extraction gave them. A record with no pronoun-keyed entry and no unattached claims is a record that
+  // knows who narrates it; one with the second and not the first is a record that refused to guess.
+  if (roster) roster.unattached = claimsFiledWithoutARosterEntry(store);
   // Read out of the record itself, so a redo is visible to whoever opens the audit report months later
   // even if the run that did it is long gone and its console output with it.
   // Every reopen row, not just this volume's: the copy-forward carries its source's reopen history in,

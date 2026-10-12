@@ -285,6 +285,8 @@ function importVoice(store, markdown, { volume } = {}) {
   const carried = [];
   /** @type {Array<{heading: string, key: string, how: string}>} Sections whose heading resolved onto a different roster entry than its own primary name. */
   const rekeyed = [];
+  /** @type {Array<{heading: string, bullets: number, because: string}>} Sections the store refused to key by a name it cannot answer for. */
+  const unattachedSections = [];
 
   for (const character of parsed.characters) {
     // The heading is a name, and this store has one module that answers "which roster entry is this
@@ -300,22 +302,30 @@ function importVoice(store, markdown, { volume } = {}) {
     const { resolveExtractionName } = require("./name-resolution");
     const resolved = resolveExtractionName(store, character.display);
     const key = resolved.key;
+    // A heading the roster cannot answer for — a section headed with the word for "I", which is what a
+    // published reference looks like when the extraction never resolved the narrator (gotcha 115) — does
+    // not get a roster entry made out of it either. Its bullets are filed unattached, carrying the
+    // heading they were published under, and the audit prints them.
+    const unattached = key === null;
+    if (unattached) unattachedSections.push({ heading: character.display, bullets: character.entries.length, because: resolved.how });
     // A heading that resolves onto an existing entry does not get to rename it.
     const display = key === character.key ? character.display : resolved.display || character.display;
-    if (key !== character.key) rekeyed.push({ heading: character.display, key, how: resolved.how });
+    if (!unattached && key !== character.key) rekeyed.push({ heading: character.display, key, how: resolved.how });
 
-    const castResult = store.upsertCast({
-      key,
-      display,
-      persona: character.persona,
-      aliases: [],
-      firstSeenVolume: vol,
-    });
-    if (!castResult.ok) {
-      for (const entry of character.entries) {
-        refused.push({ character: character.display, label: entry.label, because: castResult.refusal.because });
+    if (!unattached) {
+      const castResult = store.upsertCast({
+        key,
+        display,
+        persona: character.persona,
+        aliases: [],
+        firstSeenVolume: vol,
+      });
+      if (!castResult.ok) {
+        for (const entry of character.entries) {
+          refused.push({ character: character.display, label: entry.label, because: castResult.refusal.because });
+        }
+        continue;
       }
-      continue;
     }
 
     let importedForThisCharacter = 0;
@@ -346,6 +356,7 @@ function importVoice(store, markdown, { volume } = {}) {
         section: VOICE_SECTION,
         body,
         examples: quoteCandidates(body, "").slice(0, 4),
+        extractedAs: key !== character.display ? character.display : null,
         evidence,
         establishedVolume: vol,
         appliesFromVolume: vol,
@@ -374,6 +385,7 @@ function importVoice(store, markdown, { volume } = {}) {
     carried,
     refused,
     rekeyed,
+    unattachedSections,
     facts: imported,
     proseStored,
   };
@@ -395,7 +407,7 @@ function documentBulletAlreadyStored(store, key, body) {
   const needle = normalizeQuote(body);
   if (!needle) return false;
   const rows = store.db
-    .prepare("SELECT body FROM facts WHERE key = ? AND source_stage != ?")
+    .prepare("SELECT body FROM facts WHERE key IS ? AND source_stage != ?")
     .all(key, EXTRACTION_SOURCE_STAGE);
   return rows.some((row) => normalizeQuote(row.body) === needle);
 }

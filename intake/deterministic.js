@@ -78,14 +78,24 @@ function isSourceEntry(entry) {
  * Recognising only the first one made --dry-run re-stage every book into a
  * SECOND set of folders next to the committed ones.
  *
+ * **A book container is chosen before a loose text file, and before the sort order.** The old rule
+ * tried `<folder>.md` first and otherwise took the first name in natural sort. Both halves of that
+ * guessed, and a guess here is not a small mistake: this function decides which file a whole volume is
+ * read from. Measured on a copy of the real volume 1 whose folder held the pipeline's own reports, the
+ * sort order put `character-voice.md-audit.md` ahead of `俺を好きなのはお前だけかよ(1).epub` (Latin sorts
+ * before Japanese), and every stage in that run was pointed at an 8,803-byte audit report instead of a
+ * 151,548-character novel — 2,394 tokens where the book is 106,214, and a mode decision that said the
+ * volume had one segment and no chapter-by-chapter path.
+ *
+ * The order is now: a real book container (`.epub`), then the legacy staged name, then — only if neither
+ * exists — the first text file, **said out loud**, because that is the case where this function is
+ * guessing and the reader of a dry-run preview has to be able to see it.
+ *
  * @param {string} volumeDir - The volume folder.
  * @param {string} folderName - Its name (used for the legacy convention).
  * @returns {Promise<string|null>} The file name inside the folder, or null.
  */
 async function firstSourceInVolumeDir(volumeDir, folderName) {
-  for (const candidate of [`${folderName}.md`, `${folderName}.epub`, `${folderName}.txt`]) {
-    if (await fileExists(path.join(volumeDir, candidate))) return candidate;
-  }
   let names;
   try {
     names = await fs.readdir(volumeDir);
@@ -99,7 +109,36 @@ async function firstSourceInVolumeDir(volumeDir, folderName) {
       !isVolumeArtifact(name)
   );
   if (sources.length === 0) return null;
-  return orderBy(sources)[0];
+
+  // 1. A book container. An .epub carries its own catalog card and contents list, which is what the
+  //    intake judges a volume by; a loose .md may be a staged book or may be something the pipeline
+  //    wrote and this list has not learned yet. When both are present, the book wins.
+  const containers = sources.filter((name) => /\.epub$/i.test(name));
+  if (containers.length === 1) return containers[0];
+  if (containers.length > 1) {
+    const chosen = orderBy(containers)[0];
+    harness.logLine(
+      `[get-translation-target] volume folder "${folderName}" holds ${containers.length} books ` +
+        `(${containers.join(", ")}); the deterministic layout takes "${chosen}". A live run asks the ` +
+        `intake agent which of them this volume is.`
+    );
+    return chosen;
+  }
+
+  // 2. The legacy staged name — a plain-text book laid out as "<folder>.md" / ".txt".
+  const staged = [`${folderName}.md`, `${folderName}.txt`].find((candidate) => sources.includes(candidate));
+  if (staged) return staged;
+
+  // 3. Nothing matches either shape. Take the first text file and say that this is a guess, because
+  //    this is exactly the hole the audit report fell through.
+  const guess = orderBy(sources)[0];
+  harness.logLine(
+    `[get-translation-target] volume folder "${folderName}" holds no book container and no file named ` +
+      `after the folder; the deterministic layout reads "${guess}" out of ${sources.length} text ` +
+      `file(s) (${sources.slice(0, 6).join(", ")}${sources.length > 6 ? ", …" : ""}). A dry-run preview ` +
+      `built this way is not the committed plan of record.`
+  );
+  return guess;
 }
 
 

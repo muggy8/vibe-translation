@@ -160,7 +160,25 @@ function anOverlongClaim() {
 function scenarioRebuildFilesClaimsAsRenderableRows() {
   const series = fixtureStoreSeries("rebuild-renderable");
   withRoster(series);
-  const { store, result } = rebuildFixture(series);
+  // The declaration the real volume 01 glossary carries in its own Characters row ("Narrator: switches
+  // between 僕 and 俺"), applied through the store's alias door. Without it, EXTRACTION_01's
+  // `俺（主人公）` entry resolves to nobody and its claim is filed unattached — which is the honest
+  // answer, and also a claim that never reaches the published file. See
+  // `scenarioAPronounIsNeverARosterEntry` in `test-reference-store-reopen.js` for that case.
+  const { store, result } = rebuildFixture(series, {
+    aliases: [{ key: "如月雨露", alias: "俺", reason: "the glossary's Characters row says the narrator switches between 僕 and 俺" }],
+  });
+
+  assert.strictEqual(result.aliasResult.applied.length, 1, JSON.stringify(result.aliasResult));
+  assert.ok(
+    !store.db.prepare("SELECT key FROM cast WHERE key = ?").get("俺"),
+    "the rebuild did not make a roster entry out of the word for \"I\""
+  );
+  assert.strictEqual(
+    store.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE key = ? AND extracted_as = ?").get("如月雨露", "俺（主人公）").n,
+    2,
+    "the pronoun-keyed claim landed on the character the glossary names, candidate included"
+  );
 
   assert.strictEqual(result.rebuild.refusal, null, "the rebuild ran");
   assert.ok(result.rebuild.filedCount >= 7, `claims filed: ${result.rebuild.filedCount}`);
@@ -327,7 +345,8 @@ function scenarioNamesResolveOntoTheRoster() {
 
   const unknown = resolveExtractionName(store, "俺（主人公）");
   assert.strictEqual(unknown.resolved, false, "a name nothing in the roster carries stays unresolved");
-  assert.strictEqual(unknown.key, "俺", "and is reported under the name it would create");
+  assert.strictEqual(unknown.key, null, 'and the store does not create a roster entry keyed by the word for "I"');
+  assert.strictEqual(unknown.unattached, true, unknown.how);
 
   // The narrowness is the point: 女 is a substring of 一人の女子生徒, and a substring match would
   // make a character look covered when nothing was written about them.
@@ -1087,7 +1106,11 @@ function scenarioARecordedAliasOutlivesTheRunThatCreatedTheRosterEntry() {
       .map((row) => [row.key, row.n])
   );
   assert.ok((firstCounts.get("如月雨露") || 0) > 0, `the alias carried its claims: ${JSON.stringify([...firstCounts])}`);
-  assert.ok(firstCounts.has("俺"), "and the unlinked spelling became its own roster entry");
+  assert.ok(!firstCounts.has("俺"), `the unlinked spelling did not become a roster entry: ${JSON.stringify([...firstCounts])}`);
+  const unlinked = reader.db
+    .prepare("SELECT COUNT(*) AS n FROM facts WHERE key IS NULL AND extracted_as = ?")
+    .get("俺（第二章の別人格）").n;
+  assert.strictEqual(unlinked, 2, "the unlinked spelling's claim is filed unattached, candidate included, and reported");
 
   const resolved = resolveExtractionName(reader, "俺（主人公）");
   assert.strictEqual(resolved.key, "如月雨露", JSON.stringify(resolved));

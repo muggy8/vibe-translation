@@ -258,6 +258,10 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
     // volume ever published — including this adapter's own contribution to the coverage rule.
     const resolved = resolveExtractionName(store, name);
     const key = resolved.key;
+    // The name the extraction wrote, kept whenever it is not the name the claim is filed under — which is
+    // how an unattached claim stays attributable to something a human can read, and how a claim folded
+    // onto a roster entry shows where it came from.
+    const extractedAs = key && key !== name ? name : key === null ? name : null;
 
     const row = voiceCandidateRow(entry, key);
     if (extractionClaimAlreadyStored(store, { key, aspect: row.aspect, body: row.body })) {
@@ -286,14 +290,21 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
     // document uses for them (如月雨露（ジョーロ）【俺人格】) is the one the renderer puts back in the
     // file, and an extraction entry naming them 如月雨露 must not overwrite it. When they are new,
     // the store falls back to the key, which is the name the extraction gave them.
-    const castResult = store.upsertCast({ key, firstSeenVolume: vol });
-    if (!castResult.ok) {
-      refused.push({ kind: "voice", character: name, key, because: castResult.refusal.because });
-      continue;
+    //
+    // And no entry at all when the name resolved to nobody: `key === null` is the store refusing to make
+    // a character out of the word for "I", and the claim is filed with no subject rather than with a
+    // false one. It is reported by `auditVolumeRecord` under "claims the store could not attach".
+    if (key) {
+      const castResult = store.upsertCast({ key, firstSeenVolume: vol });
+      if (!castResult.ok) {
+        refused.push({ kind: "voice", character: name, key, because: castResult.refusal.because });
+        continue;
+      }
     }
 
     const result = store.insertFact({
       ...row,
+      extractedAs,
       evidence,
       establishedVolume: vol,
       appliesFromVolume: vol,
@@ -303,8 +314,8 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
       continue;
     }
     imported.push(result.fact);
-    characters.add(key);
-    if (!resolved.resolved) unresolved.push({ name, key, because: resolved.how });
+    if (key) characters.add(key);
+    if (!resolved.resolved) unresolved.push({ name, key, because: resolved.how, unattached: resolved.unattached });
   }
 
   return {
@@ -360,6 +371,7 @@ function importPovEntry(store, entry, vol, chapters) {
 
   const result = store.insertFact({
     ...row,
+    extractedAs: assigned && (!key || key !== assigned) ? assigned : null,
     evidence,
     establishedVolume: vol,
     appliesFromVolume: vol,
@@ -369,7 +381,7 @@ function importPovEntry(store, entry, vol, chapters) {
     ok: true,
     fact: result.fact,
     because: null,
-    unresolved: resolved && !resolved.resolved ? { name: assigned, key, because: resolved.how } : null,
+    unresolved: resolved && !resolved.resolved ? { name: assigned, key, because: resolved.how, unattached: resolved.unattached } : null,
   };
 }
 

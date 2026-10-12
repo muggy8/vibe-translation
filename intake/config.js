@@ -73,7 +73,24 @@ const VOLUME_ARTIFACT_FILES = [
 ];
 
 
-/** Name patterns for the same idea (per-chapter and per-stage outputs). */
+/**
+ * Name patterns for the same idea (per-chapter and per-stage outputs).
+ *
+ * This list is the only thing standing between a folder scan and the pipeline's own notebooks. It was
+ * written for the artifacts that existed when it was written, and every artifact added since then has
+ * been a file the scan can mistake for a book: the deterministic `--dry-run` layout picks a volume's
+ * source by listing its folder and taking the first name that is not on this list, in natural sort
+ * order, and Latin sorts before Japanese — so when volume 1's folder held `character-voice.md-audit.md`
+ * the preview read **the pipeline's own audit report as the novel**, measured it at 2,394 tokens against
+ * the real book's 106,214, concluded the volume was a single segment with no chapter-by-chapter path,
+ * and picked the opposite processing mode. Every stage inherits that manifest, so every stage in that
+ * preview was reading the wrong file; the translate stage failed outright on it.
+ *
+ * The additions are the families the redo slice introduced, matched on the exact suffixes the pipeline
+ * writes rather than on loose substrings: a staged book is always `<folder name>.<ext>`, so a rule that
+ * only fires on the pipeline's own suffixes cannot swallow a real book whose folder happens to be named
+ * `Rejected(03)` or `Audit(07)`.
+ */
 const VOLUME_ARTIFACT_PATTERNS = [
   /^translation(-.+)?\.(md|json)$/,
   /^polished-.+\.md$/,
@@ -81,7 +98,8 @@ const VOLUME_ARTIFACT_PATTERNS = [
   /^polish-verification\.json$/,
   /^glossary-(research|coverage|new-terms)\.(md|json)$/,
   /^.*-rolling-state\.json$/,
-  /^character-voice-(new|validation)\.(md|json)$/,
+  /^character-voice-(new|validation|reading)(-.+)?\.(md|json)$/,
+  /^character-voice-extract-.+\.json$/,
   /^style-guide-(new|validation)\.(md|json)$/,
   /^wiki-.*\.md$/,
   /^.*-validation.*\.md$/,
@@ -89,6 +107,20 @@ const VOLUME_ARTIFACT_PATTERNS = [
   /^.*-bundle\.meta\.json$/,
   /^.*-whole\.md$/,
   /^.*-ch\d+(\.\d+)?\.md$/,
+  // A plain-text book too big for one call is split into part files in the volume folder. Those are
+  // derived slices of the book, exactly like `-whole.md`, and a scan that missed them would pick one
+  // part as the volume's entire source.
+  /^.*-part-\d+\.md$/,
+  // The deterministic audit reports, written next to the artifact they judge (`character-voice.md-audit.md`).
+  /-audit\.md$/,
+  // The quarantine family: a rejected artifact is kept, numbered, and is not a book.
+  /\.rejected(\.\d+)?$/,
+  // The retired family: a record or an acceptance window moved aside by the reopen act.
+  /\.retired-\d{8}T\d{6}(\.\d+)?$/,
+  // A superseded extraction notebook, moved aside rather than deleted.
+  /\.superseded-\d{8}$/,
+  // The volume's reference record and its write-ahead-log side files.
+  /^series\.db(-shm|-wal)?$/,
 ];
 
 

@@ -24,7 +24,7 @@ const { verifyStoredEvidence } = require("./evidence");
 const { COUNTED_TABLES, EXTRACTION_SOURCE_STAGE } = require("./schema");
 const { tableCounts } = require("./queries");
 const { presenceMeasured, presenceChapterCount } = require("./presence");
-const { isBareFirstPersonPronoun, spanTokens } = require("./name-resolution");
+const { isBareFirstPersonPronoun, spanTokens, voicePrimaryName } = require("./name-resolution");
 const { documentMirrored, DOCUMENT_VOICE, rebuildProvenanceCounts } = require("./document-prose");
 // `isVolumeSealed` lives with the sealing verb itself, so the "is this volume published?"
 // question has exactly one answer in this layer. facts.js does not require this file, so the
@@ -226,6 +226,46 @@ function pronounKeyedRosterEntries(ctx) {
     out.push({ key: row.key, claims: claims.n, establishedVolumes: vols, candidates });
   }
   return out;
+}
+
+/**
+ * Claims the store filed with no roster entry, grouped by the name the extraction gave them.
+ *
+ * The record has always been able to hold a claim about nobody: a point-of-view observation the
+ * extraction could not assign is stored with a null key, and the POV map publishes it under the chapter
+ * it describes. What it could not do until migration 6 was say **what the extraction called it** — a null
+ * key with nothing beside it is a claim that lost its subject, and "the store could not tell who narrates
+ * this" was invisible unless somebody remembered which run said so in a log.
+ *
+ * This is the other half of the pronoun rule. `resolveExtractionName` refuses to make a roster entry out
+ * of the word for "I"; this is where those claims are found again, so the refusal is a named gap in a
+ * report rather than a quiet hole in a record. A row whose `extracted_as` is a bare pronoun is the shape
+ * that says *the book narrates in the first person and this record has never been told whose first person
+ * it is* — which a human closes with `castAlias(key, "俺", reason)`, not with a flag.
+ *
+ * @param {{db: Object}} ctx
+ * @returns {Array<{extractedAs: string, claims: number, aspects: string[], pronoun: boolean}>}
+ */
+function claimsFiledWithoutARosterEntry(ctx) {
+  const rows = ctx.db
+    .prepare(
+      "SELECT extracted_as AS extractedAs, aspect, COUNT(*) AS n FROM facts " +
+        "WHERE key IS NULL AND extracted_as IS NOT NULL AND status != 'retracted' " +
+        "GROUP BY extracted_as, aspect ORDER BY n DESC, extracted_as"
+    )
+    .all();
+  /** @type {Map<string, {extractedAs: string, claims: number, aspects: string[], pronoun: boolean}>} */
+  const grouped = new Map();
+  for (const row of rows) {
+    const name = String(row.extractedAs);
+    if (!grouped.has(name)) {
+      grouped.set(name, { extractedAs: name, claims: 0, aspects: [], pronoun: isBareFirstPersonPronoun(voicePrimaryName(name) || name) });
+    }
+    const entry = grouped.get(name);
+    entry.claims += row.n;
+    entry.aspects.push(row.aspect);
+  }
+  return [...grouped.values()].sort((a, b) => b.claims - a.claims || a.extractedAs.localeCompare(b.extractedAs, "ja"));
 }
 
 /**
@@ -718,6 +758,29 @@ function integrityFindings(ctx, { volume = null, step = INTEGRITY_STEP, upTo, pu
     );
   }
 
+  // Claims the store filed with no roster entry. MEDIUM, not HIGH: this is the record saying out loud
+  // that it does not know whose claim this is, which is the honest state of a record that was never told,
+  // and a run must not be stopped for a thing the pipeline is correct to admit. It is not silent either —
+  // the name the extraction used is printed, and for a first-person novel that name is the answer to a
+  // question a human can settle in one `cast_alias` call.
+  for (const item of claimsFiledWithoutARosterEntry(ctx)) {
+    findings.push(
+      finding(
+        "MEDIUM",
+        "reference-claim-filed-without-a-roster-entry",
+        step,
+        volume,
+        "series.db",
+        `${item.claims} claim(s) were extracted under 「${item.extractedAs}」 and filed with no roster entry (aspect(s): ${item.aspects.join(", ")}). ` +
+          (item.pronoun
+            ? "The name is the word for \"I\", and nothing in this record declares whose \"I\" it is; the store refused to make a character out of it. " +
+              `The door that closes this is cast_alias(<character>, "${item.extractedAs}", <reason>) — the glossary's own Characters row is usually where the answer already is. `
+            : "Nothing in the roster carries this name, so the claim is kept rather than thrown away and reported rather than guessed at. ") +
+          "It is in the record and in this report; it is not in the published reference, which renders a section per roster entry."
+      )
+    );
+  }
+
   // §3.2 — an unsealed volume is a draft, and a draft is not something the next volume may
   // start from. HIGH, because copy-forward refuses on HIGH and this is the check that keeps
   // "published" meaning published. Asked up to `publishedVolume` only: a store open for volume N
@@ -828,6 +891,7 @@ module.exports = {
   uncoveredCharacters,
   coverageFindings,
   pronounKeyedRosterEntries,
+  claimsFiledWithoutARosterEntry,
   rebuiltDocuments,
   integrityFindings,
 };

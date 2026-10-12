@@ -17,6 +17,7 @@
  */
 
 const fs = require("fs").promises;
+const path = require("path");
 require("../types"); // JSDoc type definitions
 const {
   openVolumeRecord,
@@ -28,6 +29,8 @@ const {
   buildGradeSample,
   voiceNewestSections,
   rosterReconciliationLog,
+  moveArtifactAside,
+  ensureArtifactRejectIgnoreRule,
 } = require("../utils/reference-store");
 
 /** The artifact this stage publishes, for the audit report's headings. */
@@ -214,9 +217,26 @@ async function auditAssembledArtifacts(ctx, { refused = [] } = {}) {
   ctx.storeAudit = audit;
   ctx.storeImport = { refused };
 
-  const report = ctx.readingReport || "";
+const report = ctx.readingReport || "";
   const full = report ? `${audit.markdown}\n${report}` : audit.markdown;
   await fs.writeFile(ctx.validationOutputFile, full, "utf8");
+
+  // The audit report **next to the artifact it judges**, the way `rebuild-voice.js` writes it.
+  //
+  // The stage route ran the audit and folded its text into the validation report, and never wrote this
+  // file — so both real volume folders held a `character-voice.md-audit.md` from a run months old,
+  // describing a record that had since been retired, sitting beside a reference that no longer matched
+  // it. A stale report beside an artifact is worse than no report: it is the document a person opens
+  // when they want to know what the record says about the file in front of them. The superseded one is
+  // kept, numbered, like every other artifact this pipeline replaces.
+  const volumeDir = path.dirname(ctx.voiceOutputFile);
+  const auditFile = `${VOICE_ARTIFACT_NAME}-audit.md`;
+  const aside = moveArtifactAside(volumeDir, auditFile);
+  if (aside.ok) {
+    await fs.writeFile(path.join(volumeDir, auditFile), audit.markdown, "utf8");
+    ensureArtifactRejectIgnoreRule(volumeDir);
+  }
+
   console.log(
     `Volume ${ctx.values.INSTALLMENT_NUMBER}: deterministic audit — ${audit.findings.length} finding(s), ` +
       `${audit.highFindings.length} at HIGH; ${audit.checked} citation(s) re-checked against the source text.`

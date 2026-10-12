@@ -433,6 +433,17 @@ function renderAuditReport({
     }
     out.push(`| roster entries that are the same person | ${rosterAnswer} |`);
   }
+  if (roster && Array.isArray(roster.unattached)) {
+    out.push(
+      `| claims filed with no roster entry | ${
+        roster.unattached.length
+          ? `**${roster.unattached.reduce((n, item) => n + item.claims, 0)} claim(s)** — ` +
+            roster.unattached.map((item) => `「${item.extractedAs}」 (${item.claims})`).join(", ") +
+            ". The store refused to invent a character for them; they are in the record and in the findings, not in the published reference."
+          : "none"
+      } |`
+    );
+  }
   out.push(`| evidence re-checked against the source text | ${checked === undefined ? "—" : checked} |`);
   out.push(
     `| does the reference cover every character in the volume | ${

@@ -54,6 +54,22 @@
  * `俺（如月雨露の友人）`: a label that mentions a character in prose is a translation decision, and
  * `castAlias` is the door for a decision.
  *
+ * **And a bare first-person pronoun is never a roster entry.** The rule above reads a pronoun's label, and
+ * when the label names nothing the name used to fall through and *become* an entry. Volume 02 measured
+ * what that costs: its extractor wrote `俺（ジョーロ）` for the protagonist, the primary form of that name
+ * is the pronoun, and 282 of his claims landed under an entry keyed `俺` while 190 landed under 如月雨露 —
+ * one person, two roster entries, and a published reference whose protagonist section is headed with the
+ * word for "I" (gotcha 115). Now such a claim is filed **unattached**: no roster entry, the name it was
+ * written under kept in `facts.extracted_as`, and the audit prints it. The claim is not lost and the
+ * record does not pretend to know something it does not.
+ *
+ * The pronoun is resolved rather than refused whenever the record does know whose "I" it is, and the only
+ * thing that counts as knowing is a **declared alias**: `如月雨露` carries `俺` in its `aliases`, so
+ * `俺（ジョーロ）` resolves onto him. Volume 1's glossary says so in its own Characters row — "Narrator:
+ * switches between 僕 and 俺" — and `importGlossary` now reads that declaration out of the glossary it is
+ * already importing (see `glossary-adapter.js`). Two entries declaring the same pronoun is not a tie to
+ * break: the name is reported as ambiguous and the claims stay unattached until somebody says whose it is.
+ *
  * @module utils/reference-store/name-resolution
  */
 
@@ -206,9 +222,13 @@ function rosterIdentityConflicts(ctx) {
  *
  * @param {{db: Object}} ctx - Anything with a `db` holding the `cast` table.
  * @param {string} name - The name as the extraction or the document wrote it.
- * @returns {{key: string, display: string, resolved: boolean, how: string}}
- *   `resolved: false` means the roster does not carry this name: `key` is then the name's primary
- *   form, and the caller is filing a NEW roster entry rather than attaching to an existing one.
+ * @returns {{key: string|null, display: string, resolved: boolean, how: string, unattached: boolean, ambiguous: boolean}}
+ *   `resolved: false` means the roster does not carry this name. Then `key` is where the claim goes:
+ *   the name's primary form when the store may create a new roster entry for it, or **null** when it may
+ *   not — which is the case `unattached: true` reports, and it happens when the name is the word for "I"
+ *   (see this module's header) or when two entries both claim it (`ambiguous: true`). A null key is not a
+ *   lost claim: the claim is stored with the name it was written under in `extracted_as`, and the audit
+ *   prints it.
  */
 function resolveExtractionName(ctx, name) {
   const raw = String(name || "").trim();
@@ -229,6 +249,36 @@ function resolveExtractionName(ctx, name) {
     return cast.find((candidate) => candidate.key === row.mergedInto) || row;
   };
 
+  /**
+   * One answer, or none, from a set of roster rows the rule matched.
+   *
+   * Two entries matching the same name is not a tie to break. It is the record saying two different
+   * people go by this name, and picking one by table order would file the claims under a person the
+   * evidence does not single out. It is reported instead, and the claims wait where a human can see them.
+   *
+   * @param {Object[]} matches - Roster rows the rule matched.
+   * @param {string} because - How the rule matched, for the report.
+   * @returns {{key: string, display: string, resolved: true, how: string, unattached: false, ambiguous: false}|{key: null, display: string, resolved: false, how: string, unattached: true, ambiguous: true}}
+   */
+  const oneOrNeither = (matches, because) => {
+    const survivors = [];
+    for (const row of matches) {
+      const survivor = survivorOf(row);
+      if (!survivors.some((seen) => seen.key === survivor.key)) survivors.push(survivor);
+    }
+    if (survivors.length === 1) {
+      return { key: survivors[0].key, display: survivors[0].display, resolved: true, how: because, unattached: false, ambiguous: false };
+    }
+    return {
+      key: null,
+      display: raw,
+      resolved: false,
+      how: `${because}, and that names ${survivors.length} different roster entries (${survivors.map((row) => row.key).join(", ")}), so the record does not know whose name this is`,
+      unattached: true,
+      ambiguous: true,
+    };
+  };
+
   const exact = cast.find((row) => row.key === raw);
   if (exact) {
     const survivor = survivorOf(exact);
@@ -240,6 +290,8 @@ function resolveExtractionName(ctx, name) {
         survivor.key === exact.key
           ? "the roster already has this name"
           : `the roster has this name, and that entry is merged into ${survivor.key}`,
+      unattached: false,
+      ambiguous: false,
     };
   }
 
@@ -247,45 +299,32 @@ function resolveExtractionName(ctx, name) {
   // declared with a reason; "the primary name happens to be a key" is a guess, and it is a guess whose
   // answer changes between the first run and the second, because the first run may have created the key
   // it then matches. See this module's header for the volume-01 measurement.
-  for (const row of cast) {
+  const aliasMatches = cast.filter((row) => {
     let aliases = [];
     try {
       aliases = JSON.parse(row.aliases || "[]");
     } catch {
       aliases = [];
     }
-    if (aliases.some((alias) => alias === raw || alias === primary)) {
-      const survivor = survivorOf(row);
-      return {
-        key: survivor.key,
-        display: survivor.display,
-        resolved: true,
-        how: `${primary} is an alias recorded on ${survivor.key}`,
-      };
-    }
+    return aliases.some((alias) => alias === raw || alias === primary);
+  });
+  if (aliasMatches.length) {
+    return oneOrNeither(aliasMatches, `${primary} is an alias recorded on ${aliasMatches.map((row) => survivorOf(row).key).join(", ")}`);
   }
 
-  const byKey = cast.find((row) => row.key === primary);
-  if (byKey) {
-    const survivor = survivorOf(byKey);
-    return {
-      key: survivor.key,
-      display: survivor.display,
-      resolved: true,
-      how: `its primary name ${primary} is a roster entry${survivor.key === byKey.key ? "" : `, which ${byKey.key} is merged into`}`,
-    };
+  const byKey = cast.filter((row) => row.key === primary);
+  if (byKey.length) {
+    return oneOrNeither(byKey, `its primary name ${primary} is a roster entry`);
   }
 
-  for (const row of cast) {
-    if (displayAliasSpans(row.display).some((span) => span === raw || span === primary)) {
-      const survivor = survivorOf(row);
-      return {
-        key: survivor.key,
-        display: survivor.display,
-        resolved: true,
-        how: `${primary} is an alias in the heading of ${survivor.key}`,
-      };
-    }
+  const headingMatches = cast.filter(
+    (row) => displayAliasSpans(row.display).some((span) => span === raw || span === primary)
+  );
+  if (headingMatches.length) {
+    return oneOrNeither(
+      headingMatches,
+      `${primary} is an alias in the heading of ${headingMatches.map((row) => survivorOf(row).key).join(", ")}`
+    );
   }
 
   // Last, and only after every explicit link has failed: the name's own bracketed label contains a
@@ -295,26 +334,43 @@ function resolveExtractionName(ctx, name) {
   // linked somewhere else; gated on the pronoun, it cannot fold a character into their own nickname.
   if (isBareFirstPersonPronoun(primary)) {
     const spans = displayAliasSpans(raw);
-    for (const row of cast) {
-      if (row.key === primary || row.key === raw) continue;
-      if (spans.some((span) => spanTokens(span).includes(row.key))) {
-        const survivor = survivorOf(row);
-        return {
-          key: survivor.key,
-          display: survivor.display,
-          resolved: true,
-          how: `its own label names ${row.key}, which is a roster entry`,
-        };
-      }
+    const labelMatches = cast.filter((row) => {
+      if (row.key === primary || row.key === raw) return false;
+      return spans.some((span) => spanTokens(span).includes(row.key));
+    });
+    if (labelMatches.length) {
+      return oneOrNeither(labelMatches, `its own label names ${labelMatches.map((row) => row.key).join(", ")}, which is a roster entry`);
     }
+
+    // **A bare first-person pronoun is never a roster key.** It used to fall through to the last line of
+    // this function and become one, and that is how volume 02 ended up with 282 of the protagonist's
+    // claims under `俺` and 190 under 如月雨露: the extractor wrote `俺（ジョーロ）`, whose primary form is
+    // the pronoun, and the store made a character out of the word for "I" (gotcha 115).
+    //
+    // The rule is not "refuse the claim", it is "refuse to invent a person". The claim is filed with no
+    // roster entry, carrying the name it was written under, and the audit prints it. That is the same
+    // shape the record already uses for a point-of-view claim that names nobody, and it is the shape a
+    // human can act on: `castAlias(key, "俺", reason)` is the door that says whose "I" this is, and it
+    // requires the reason the record is missing.
+    return {
+      key: null,
+      display: raw,
+      resolved: false,
+      how:
+        `"${primary}" is the word for "I", not a name this book gives anybody, and nothing in the record says whose "I" it is. ` +
+        "The claim is filed unattached rather than under a pronoun dressed as a character name.",
+      unattached: true,
+      ambiguous: false,
+    };
   }
 
-  return { key: primary, display: raw, resolved: false, how: "nothing in the roster carries this name" };
+  return { key: primary, display: raw, resolved: false, how: "nothing in the roster carries this name", unattached: false, ambiguous: false };
 }
 
 module.exports = {
   BARE_FIRST_PERSON_PRONOUNS,
   isBareFirstPersonPronoun,
+  voicePrimaryName,
   displayAliasSpans,
   spanTokens,
   rosterIdentityConflicts,

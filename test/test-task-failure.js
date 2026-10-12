@@ -418,6 +418,15 @@ async function scenarioAssembledGateRefusalQuarantinesAndFails() {
   assert.ok(fs.existsSync(path.join(volumeDir, "pov-map.md.rejected")), "and so is the map");
   assert.ok(fs.existsSync(path.join(volumeDir, "character-voice-validation.md")), "and the report that refused them is still there to read");
 
+  // The audit report beside the artifact it judges. `rebuild-voice.js` has always written it; the stage
+  // route ran the audit and folded it into the validation report without ever writing this file, which
+  // left a report from a long-retired record sitting next to a reference that did not match it.
+  const auditReportPath = path.join(volumeDir, "character-voice.md-audit.md");
+  assert.ok(fs.existsSync(auditReportPath), "the audit report is written next to the artifact it judges, on this route too");
+  const auditReport = fs.readFileSync(auditReportPath, "utf8");
+  assert.ok(auditReport.includes("claims filed with no roster entry"), auditReport.slice(0, 600));
+  assert.ok(auditReport.includes("roster entries that are the same person"), auditReport.slice(0, 600));
+
   const store = openReferenceStore({ volume: 1, folder: "Book(01)", seriesDir, stage: "render", create: false });
   try {
     assert.strictEqual(isVolumeSealed(store, 1), false, "the record stays a draft, because sealing is the last act of a volume that finished");

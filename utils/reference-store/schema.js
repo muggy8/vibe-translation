@@ -144,7 +144,7 @@ const FACT_CHARACTER_ROLES = ["subject", "agent", "patient", "witness"];
 // ─── Version ──────────────────────────────────────────────────────────────────
 
 /** The schema this build of the code writes. */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 /**
  * The migrations, oldest first. Version 1 is the whole design as built.
@@ -421,6 +421,27 @@ const MIGRATIONS = [
        )`,
 
       `CREATE INDEX IF NOT EXISTS idx_record_reopens_volume ON record_reopens(volume, reopened_at)`,
+    ],
+  },
+  {
+    version: 6,
+    name: "slice 9 — the name the extraction gave a claim, kept when the store files it elsewhere",
+    // A claim's roster key used to be the only place this record remembered who the claim was about. That
+    // is fine while every name the extraction produced becomes a roster entry, and it stops being fine
+    // the moment the store refuses to make one: a bare first-person pronoun is not a character name, and
+    // filing 282 claims under `俺` put the protagonist in two places at once (gotcha 115).
+    //
+    // So the store now sometimes files a claim under a different entry than the name it was written
+    // under, and sometimes files it with no entry at all. Both are decisions a reader has to be able to
+    // check, and a null key with nothing beside it is not a decision — it is a claim that lost its
+    // subject. `extracted_as` is the name the extraction actually wrote, kept beside the claim whether
+    // the store resolved it onto somebody or refused to invent somebody for it.
+    up: [
+      `ALTER TABLE facts ADD COLUMN extracted_as TEXT`,
+
+      // The audit's question is "which claims are floating, and what did the extraction call them", so
+      // the unattached ones have to be findable without scanning every row.
+      `CREATE INDEX IF NOT EXISTS idx_facts_extracted_as ON facts(extracted_as) WHERE key IS NULL`,
     ],
   },
 ];

@@ -116,6 +116,33 @@ const REPEATED_TOKEN_MIN = 3;
 const TOKEN_PATTERNS = Object.freeze([/'([^'\n]{1,80})'/g, /“([^”\n]{1,80})”/g]);
 
 /**
+ * A label the extractor wrote for itself, sitting at the head of a claim.
+ *
+ * `NEW CHARACTER. Uses あんた as second-person pronoun for ジョーロ.` is a real observation about a real
+ * character with the extraction pass's own scaffolding glued to the front of it. The label is not a claim
+ * about the book: it is a note the extractor left in the field it was filling in, and it lands in a
+ * document a translator is told to trust. The record already says the same thing properly — a character
+ * new in this volume has `established_volume` = this volume — so the label adds nothing a reader needed.
+ *
+ * Measured against the corpus before it was pinned, in the same way the two shapes above were: **2,744
+ * claim bodies** — every bullet of the two published character-voice references that exist (volume 01's
+ * 227 and volume 02's 583), plus every row of both real reference records (574 rows and 1,360 rows) — and
+ * the shape fires **9 times, on one distinct label (`NEW CHARACTER`), all of them in volume 02**: 3 in the
+ * published file and 6 in the record, the adopted row and its extraction candidate for each of the three
+ * characters. No legitimate claim body in either file opens with an all-caps Latin label.
+ * The false-positive rate is 0 / 2,744, which is why this is a rule and not a guess.
+ *
+ * It is stripped, not refused, and that is a different answer from the two shapes above on purpose: an
+ * unfinished sentence is a claim that does not assert anything, while this is a claim with a sticker on it.
+ * Throwing away three real observations about three characters to remove three words nobody needed would
+ * be the guard doing damage. The extraction's own copy of the claim keeps the label (see `rebuild.js`), so
+ * the gap between what the extractor wrote and what the reference published stays queryable.
+ *
+ * @type {RegExp}
+ */
+const SCAFFOLDING_LABEL = /^([A-Z][A-Z0-9 &/+-]{2,30})[.:]\s*/;
+
+/**
  * Whether a quoted token is a token and not a parsing artifact.
  *
  * `'…'` inside English prose splits on apostrophes — `僕's observation` yields `','`. A token has to
@@ -215,6 +242,32 @@ function selfContradictions(text) {
 }
 
 /**
+ * The extractor's scaffolding label at the head of a claim, if it has one.
+ *
+ * @param {string} text - A claim body, or a published bullet.
+ * @returns {{kind: "scaffolding-label", span: string, marker: string}|null}
+ */
+function scaffoldingLabelIn(text) {
+  const body = String(text || "").trim();
+  const match = SCAFFOLDING_LABEL.exec(body);
+  if (!match) return null;
+  return { kind: "scaffolding-label", span: match[1], marker: match[0] };
+}
+
+/**
+ * Strip the scaffolding label off a claim body.
+ *
+ * @param {string} text - A claim body.
+ * @returns {string} The body without its leading label; unchanged when it has none.
+ */
+function stripScaffoldingLabel(text) {
+  const body = String(text || "");
+  const match = SCAFFOLDING_LABEL.exec(body.trim());
+  if (!match) return body;
+  return body.trim().slice(match[0].length).trim();
+}
+
+/**
  * Every unfinished-prose defect in one piece of text, in one shape a caller can report.
  *
  * @param {string} text
@@ -244,6 +297,8 @@ function unfinishedProseFindings(markdown, { file, volume, step = "reference-aud
   lines.forEach((line, index) => {
     if (!line.trim()) return;
     const defects = unfinishedProseIn(line);
+    const label = scaffoldingLabelIn(bulletBodyOf(line));
+    if (label) defects.push(label);
     if (defects.length) flagged.push({ line: index + 1, text: line, defects });
   });
   if (!flagged.length) return [];
@@ -251,7 +306,9 @@ function unfinishedProseFindings(markdown, { file, volume, step = "reference-aud
   const detail = flagged
     .map((f) => `  - line ${f.line}: ${f.defects.map((d) => (d.kind === "aside"
       ? `a drafting aside — (${d.span}) — flagged by «${d.marker}»`
-      : `quotes '${d.span}' ${d.times} times in one bullet, beside its own correction (${d.label})`)).join("; ")}`)
+      : d.kind === "scaffolding-label"
+        ? `the extractor's own label 「${d.span}」 typed into the claim itself`
+        : `quotes '${d.span}' ${d.times} times in one bullet, beside its own correction (${d.label})`)).join("; ")}`)
     .join("\n");
 
   return [
@@ -265,34 +322,55 @@ function unfinishedProseFindings(markdown, { file, volume, step = "reference-aud
         `the book:\n${detail}\n` +
         "A drafting aside is a note the writer left itself about a job it had not finished; a claim that " +
         "quotes the same span three times while saying it is not present is the writer arguing with itself " +
-        "mid-sentence. Neither is guidance a translator can use, and both are fixable by re-reading the " +
-        "chapter the claim cites."
+        "mid-sentence; a claim that opens with the extraction pass's own label is scaffolding left in a " +
+        "document a translator is told to trust. None of the three is guidance a translator can use, and " +
+        "all three are fixable by re-reading the chapter the claim cites."
     ),
   ];
 }
 
 /**
+ * The claim inside one published bullet, without its `**Label**:` prefix.
+ *
+ * The scaffolding label sits after the bullet's own label and before the claim: `- **Pronouns**: NEW
+ * CHARACTER. Uses 私 …`. Matching the shape against the whole line would never fire, because the line
+ * starts with a dash.
+ *
+ * @param {string} line - One line of a rendered artifact.
+ * @returns {string}
+ */
+function bulletBodyOf(line) {
+  const match = /^-\s+\*\*[^*]+\*\*:\s*(.*)$/.exec(String(line || "").trim());
+  return match ? match[1] : String(line || "");
+}
+
+/**
  * Screen one claim before it is filed.
  *
- * The two shapes get different answers, because they are different defects:
+ * The three shapes get different answers, because they are three different defects:
  *
  *   - a **body** with unfinished prose is the claim's own assertion being unfinished or self-contradicting,
  *     so the claim is refused;
  *   - an **example** with a drafting aside glued to it is a citation that is not a citation. The claim
- *     stands — its evidence is proved separately — and the dirty citation is dropped and named.
+ *     stands — its evidence is proved separately — and the dirty citation is dropped and named;
+ *   - a **body** that opens with the extraction pass's own label is a claim with scaffolding on it. The
+ *     claim stands and the label is taken off, in `body`, and named in `dropped`. Stripping is the whole
+ *     answer here: the label asserts nothing about the book, and the record already says the same thing
+ *     as `established_volume`.
  *
- * Nothing here edits prose. A defective span is refused whole, and the refusal is reported.
+ * Nothing else here edits prose. A defective span is refused whole, and the refusal is reported.
  *
  * @param {Object} claim
  * @param {string} claim.body - The claim's own assertion.
  * @param {Array<string>} [claim.examples] - The spans it offers as evidence.
- * @returns {{ok: boolean, examples: Array<string>, dropped: Array<{example: string, because: string}>, because: string|null}}
+ * @returns {{ok: boolean, body: string, examples: Array<string>, dropped: Array<{example: string, because: string}>, because: string|null}}
  */
 function screenClaim({ body, examples = [] }) {
   const bodyDefects = unfinishedProseIn(body);
   if (bodyDefects.length) {
     return {
       ok: false,
+      body,
       examples: Array.isArray(examples) ? examples : [],
       dropped: [],
       because: bodyDefects
@@ -303,10 +381,19 @@ function screenClaim({ body, examples = [] }) {
     };
   }
 
+  const label = scaffoldingLabelIn(body);
+  const strippedBody = label ? stripScaffoldingLabel(body) : body;
+
   /** @type {Array<string>} */
   const kept = [];
   /** @type {Array<{example: string, because: string}>} */
   const dropped = [];
+  if (label) {
+    dropped.push({
+      example: `label: ${label.span}`,
+      because: `the claim opens with the extraction pass's own label 「${label.span}」, which is scaffolding, not a claim about the book`,
+    });
+  }
   for (const example of Array.isArray(examples) ? examples : []) {
     const defects = draftingAsides(example);
     if (defects.length) {
@@ -315,7 +402,7 @@ function screenClaim({ body, examples = [] }) {
     }
     kept.push(example);
   }
-  return { ok: true, examples: kept, dropped, because: null };
+  return { ok: true, body: strippedBody, examples: kept, dropped, because: null };
 }
 
 module.exports = {
@@ -324,6 +411,8 @@ module.exports = {
   REPEATED_TOKEN_MIN,
   draftingAsides,
   selfContradictions,
+  scaffoldingLabelIn,
+  stripScaffoldingLabel,
   unfinishedProseIn,
   unfinishedProseFindings,
   screenClaim,

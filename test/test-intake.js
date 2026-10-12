@@ -1219,6 +1219,75 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
     "and the book that is really there is still found"
   );
 
+  // ─── the scan must never mistake the pipeline's own notebooks for the book ─
+  // Measured live: a copy of the real volume 1 whose folder held the stage artifacts made the
+  // deterministic --dry-run layout read `character-voice.md-audit.md` as the novel, because the old rule
+  // took the first name in natural sort and Latin sorts before Japanese. Every stage in that preview was
+  // pointed at an 8,803-byte audit report instead of a 151,548-character book.
+  const artifactScan = makeTmpDir("ai-client-artifact-scan-");
+  for (const name of [
+    "俺を好きなのはお前だけかよ(1).epub",
+    "俺を好きなのはお前だけかよ(1)-whole.md",
+    "俺を好きなのはお前だけかよ(1)-ch0.md",
+    "俺を好きなのはお前だけかよ(1)-part-01.md",
+    "俺を好きなのはお前だけかよ(1)-bundle.meta.json",
+    "character-voice.md",
+    "character-voice.md-audit.md",
+    "character-voice.md.rejected",
+    "character-voice.md.rejected.3",
+    "character-voice-new.json",
+    "character-voice-extract-ch0.json",
+    "character-voice-reading.md",
+    "character-voice-validation-rolling-state.json",
+    "character-voice-validation-rolling-state.json.retired-20261012T092947",
+    "character-voice-new.json.superseded-20261012",
+    "pov-map.md",
+    "pov-map.md.rejected",
+    "glossary-coverage.md",
+    "series.db",
+    "series.db-wal",
+  ]) {
+    await fs.promises.writeFile(path.join(artifactScan, name), "x", "utf8");
+  }
+  assert.strictEqual(
+    await firstSourceInVolumeDir(artifactScan, "俺を好きなのはお前だけかよ(01)"),
+    "俺を好きなのはお前だけかよ(1).epub",
+    "the book wins over every report in the folder, whatever the sort order says"
+  );
+  for (const name of [
+    "character-voice.md-audit.md",
+    "character-voice.md.rejected",
+    "character-voice.md.rejected.3",
+    "character-voice-reading.md",
+    "character-voice-extract-ch0.json",
+    "俺を好きなのはお前だけかよ(1)-part-01.md",
+    "character-voice-validation-rolling-state.json.retired-20261012T092947",
+    "character-voice-new.json.superseded-20261012",
+    "series.db",
+    "series.db-wal",
+  ]) {
+    assert.strictEqual(isVolumeArtifact(name), true, `"${name}" is pipeline output, not a book`);
+  }
+  for (const name of ["Audit(07).md", "Rejected(03).md", "Part(02).md", "series-01.epub"]) {
+    assert.strictEqual(isVolumeArtifact(name), false, `a staged book named "${name}" is still a book`);
+  }
+
+  // No book container and no staged name: the scan still guesses, and it says so.
+  const guessLogs = [];
+  const realLog = harness.logLine;
+  harness.logLine = (line) => { guessLogs.push(line); };
+  const guessScan = makeTmpDir("ai-client-guess-scan-");
+  await fs.promises.writeFile(path.join(guessScan, "loose-text.md"), "x", "utf8");
+  try {
+    assert.strictEqual(await firstSourceInVolumeDir(guessScan, "Series(01)"), "loose-text.md");
+  } finally {
+    harness.logLine = realLog;
+  }
+  assert.ok(
+    guessLogs.some((l) => /no book container and no file named after the folder/.test(l)),
+    `the guess is named, not silent: ${JSON.stringify(guessLogs)}`
+  );
+
   // ─── the deterministic (--dry-run) layout: a flat pile gets staged ─────────
   const flatDir = makeTmpDir("ai-client-flat-");
   await writeEpub(flatDir, "side-story.epub", {

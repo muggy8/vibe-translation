@@ -80,6 +80,7 @@ const {
 const { auditVolumeRecord, renderVolumeAuditReport, resetDocumentMirror, volumeRecordExists } = require("./pipeline-store");
 const { renderPovMap, writePovMapFile, POV_MAP_FILE } = require("./pov-map");
 const { refusal } = require("./refusals");
+const { parseGlossaryMarkdown, firstPersonAliasDeclarations } = require("./glossary-adapter");
 require("../../types"); // JSDoc type definitions
 
 /** The heading the rebuilt file opens with — the same title the authored artifact uses. */
@@ -170,6 +171,29 @@ function applyAliasDeclarations(store, aliases = []) {
     else refused.push({ key, alias, because: result.refusal.because });
   }
   return { applied, refused };
+}
+
+/**
+ * The first-person declarations this volume's own published glossary carries.
+ *
+ * `importGlossary` applies these when the stage imports the glossary; `rebuildVoiceVolume` never imports
+ * it, so the same rule is read from the same file here. One rule, two doors, one answer.
+ *
+ * A glossary that is not there is not a failure: a volume may be rebuilt before its glossary exists, and
+ * the pronoun rule then simply has nothing to say, which is what `resolveExtractionName` reports.
+ *
+ * @param {string} volumeDir - The volume folder.
+ * @returns {{declarations: Array<{key: string, alias: string, reason: string}>, ambiguous: Array<{alias: string, keys: string[]}>}}
+ */
+function declarationsFromVolumeGlossary(volumeDir) {
+  const file = path.join(volumeDir, "glossary.md");
+  let markdown;
+  try {
+    markdown = fs.readFileSync(file, "utf8");
+  } catch {
+    return { declarations: [], ambiguous: [] };
+  }
+  return firstPersonAliasDeclarations(parseGlossaryMarkdown(markdown));
 }
 
 /**
@@ -439,7 +463,7 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
    * @type {Array<{kind: string, character: string|null, dropped: Array<{example: string, because: string}>}>}
    */
   const screened = [];
-  /** @type {Map<string, {key: string, display: string, resolved: boolean, how: string, registered?: boolean}>} */
+  /** @type {Map<string, {key: string|null, display: string, resolved: boolean, how: string, unattached: boolean, ambiguous: boolean, registered?: boolean}>} */
   const nameMap = new Map();
   let povAttached = 0;
   let povUnattached = 0;
@@ -448,7 +472,7 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
    * Resolve one extraction name to a roster entry, without creating anything.
    *
    * @param {string} name
-   * @returns {{key: string, display: string, resolved: boolean, how: string, registered?: boolean}}
+   * @returns {{key: string|null, display: string, resolved: boolean, how: string, unattached: boolean, ambiguous: boolean, registered?: boolean}}
    */
   const resolveName = (name) => {
     const known = nameMap.get(name);
@@ -465,15 +489,24 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
    * character in the roster, and the coverage check would then demand a voice entry for somebody
    * this volume's text never printed.
    *
+   * A name that resolved to **nobody** registers nothing and is not a failure: `key: null` is the resolver
+   * refusing to make a roster entry out of the word for "I", and the claim goes on to be filed unattached
+   * with the name it was written under. Reporting it as a failed registration would read as though the
+   * claim had been refused, when what happened is that the store declined to invent somebody for it.
+   *
    * @param {string} name
-   * @returns {{key: string, display: string, resolved: boolean, registered: boolean}}
+   * @returns {{key: string|null, display: string, resolved: boolean, how: string, registered: boolean}}
    */
   const registerName = (name) => {
     const resolved = resolveName(name);
     if (resolved.registered === undefined) {
-      const upsert = store.upsertCast({ key: resolved.key, display: resolved.display, firstSeenVolume: vol });
-      resolved.registered = upsert.ok;
-      if (!upsert.ok) refused.push({ kind: "voice", character: name, because: upsert.refusal.because });
+      if (resolved.key === null) {
+        resolved.registered = true;
+      } else {
+        const upsert = store.upsertCast({ key: resolved.key, display: resolved.display, firstSeenVolume: vol });
+        resolved.registered = upsert.ok;
+        if (!upsert.ok) refused.push({ kind: "voice", character: name, because: upsert.refusal.because });
+      }
     }
     return resolved;
   };
@@ -536,9 +569,16 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
       refused.push({ kind: "pov", because: "the POV entry carries no description and no marker." });
       return;
     }
+    // The extraction's own name for the eyes this section is seen through, kept whenever the store filed
+    // the claim under somebody else or under nobody at all.
+    candidate.extractedAs = assigned && (!aspectKey || aspectKey !== assigned) ? assigned : null;
     const body = candidate.body;
+    const screen = screenClaim({
+      body,
+      examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string"),
+    });
 
-    const adoptedAlready = rebuildClaimAlreadyStored(store, { key: aspectKey, aspect: "pov", body });
+    const adoptedAlready = rebuildClaimAlreadyStored(store, { key: aspectKey, aspect: "pov", body: screen.body });
     if (adoptedAlready && !candidateMissing(candidate)) {
       carried.push({ kind: "pov", character: aspectKey });
       return;
@@ -559,10 +599,6 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
       return;
     }
 
-    const screen = screenClaim({
-      body,
-      examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string"),
-    });
     if (!screen.ok) {
       refused.push({
         kind: "pov",
@@ -578,8 +614,9 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
       aspect: "pov",
       label: POV_VOICE_LABEL,
       section: null,
-      body,
+      body: screen.body,
       examples: screen.examples.slice(0, REBUILT_EXAMPLES_PER_BULLET),
+      extractedAs: candidate.extractedAs,
       evidence,
       establishedVolume: vol,
       appliesFromVolume: vol,
@@ -612,9 +649,21 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
     const label = QUIRK_TYPE_TO_VOICE_LABEL[quirk.toLowerCase()] || (quirk || UNLABELED_VOICE_LABEL);
     const description = typeof entry.description === "string" ? entry.description.trim() : "";
     const body = description || label;
+    // Screened before anything is compared, because the adoption is stored with the screened body: a
+    // claim whose scaffolding label was taken off has to be recognised as the same claim on the next run,
+    // or a re-run files it a second time under the stripped wording. The candidate below deliberately
+    // keeps the extractor's own text.
+    const screen = screenClaim({
+      body,
+      examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string"),
+    });
     const candidate = voiceCandidateRow(entry, who.key);
+    // Kept on both copies of the claim: the extraction's own name, whenever the store filed the claim
+    // somewhere else or nowhere at all.
+    const extractedAs = name && (!who.key || who.key !== name) ? name : null;
+    candidate.extractedAs = extractedAs;
 
-    const adoptedAlready = rebuildClaimAlreadyStored(store, { key: who.key, aspect, body });
+    const adoptedAlready = rebuildClaimAlreadyStored(store, { key: who.key, aspect, body: screen.body });
     if (adoptedAlready && !candidateMissing(candidate)) {
       carried.push({ kind: "voice", character: who.key, label });
       return;
@@ -648,12 +697,9 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
     /**
      * The adoption is held to a stricter standard than the candidate: a claim whose own prose is
      * unfinished, or that quotes the same span three times while saying it is not there, is the writer's
-     * work rather than a claim about the book, and it does not get to become a published bullet.
+     * work rather than a claim about the book, and it does not get to become a published bullet. A claim
+     * that merely opens with the extractor's label is published with the label taken off.
      */
-    const screen = screenClaim({
-      body,
-      examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string"),
-    });
     if (!screen.ok) {
       refused.push({
         kind: "voice",
@@ -670,9 +716,10 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
       aspect,
       label,
       section: null,
-      body,
+      body: screen.body,
       examples: screen.examples.slice(0, REBUILT_EXAMPLES_PER_BULLET),
       formality: typeof entry.formalityLevel === "string" && entry.formalityLevel.trim() ? entry.formalityLevel.trim() : null,
+      extractedAs,
       evidence,
       establishedVolume: vol,
       appliesFromVolume: vol,
@@ -697,7 +744,7 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
   const unresolved = [];
   for (const [name, entry] of nameMap) {
     if (entry.resolved) resolved.push({ name, key: entry.key, how: entry.how });
-    else unresolved.push({ name, key: entry.key });
+    else unresolved.push({ name, key: entry.key, because: entry.how, unattached: entry.unattached, ambiguous: entry.ambiguous });
   }
   resolved.sort((a, b) => a.name.localeCompare(b.name, "ja"));
   unresolved.sort((a, b) => a.name.localeCompare(b.name, "ja"));
@@ -1199,7 +1246,15 @@ function rebuildVoiceVolume({ volume, folder, seriesDir, entries, aliases = [], 
       return needsCarryingFirst();
     }
 
-    const aliasResult = applyAliasDeclarations(opened, aliases);
+    // The glossary's own declaration of who narrates in the first person, read from the volume folder.
+    //
+    // The pipeline's door gets this from `importGlossary`, which the rebuild path does not run — it files
+    // claims, it does not re-import a glossary the volume already published. Asked here instead, so the
+    // two doors cannot give two different answers to `俺（ジョーロ）`: a volume rebuilt through
+    // `rebuild-voice` and a volume rebuilt through the stage must agree about whose "I" that is, or the
+    // pronoun split this rule exists to prevent comes back through the door that bypasses the stage.
+    const fromGlossary = declarationsFromVolumeGlossary(path.join(seriesDir, folder));
+    const aliasResult = applyAliasDeclarations(opened, [...fromGlossary.declarations, ...aliases]);
 
     // The candidate copies are filed through a second handle on the same file, opened as the extraction
     // stage. That is not a workaround: a row's kind comes from the scope its handle was opened with, so
