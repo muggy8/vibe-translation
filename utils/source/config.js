@@ -53,11 +53,18 @@ const DEFAULT_CHUNK_THRESHOLD_CHARS = 120000;
  * aside is harvested beside the bundle (`<base>-ruby-guides.json`, utils/source/ruby-guides.js).
  * Measured on the 17 archives of the live series: 45,497 guides (45,429 of them landing in a chapter
  * and 68 on pages the books declare as packaging), 146,352 characters, 5.6% of the series' text and
- * 11.25% of volume 8.)
+ * 11.25% of volume 8.; v8: the harvest records each annotation AS IT WAS ANNOTATED (蒲 carrying かま,
+ * then 田 carrying た — harvest schema 2), which is what lets the extraction rebuild the string the old
+ * converter produced and search its own chapters for it, so every segment now carries that
+ * measurement (`guideSplitForms`, 0 on a correct extraction) and the audit can report a guide-split
+ * string at HIGH; and every segment carries `declaresPackaging`, the book's own declaration read back
+ * per segment, so an empty cover plate on the contents-list fallback path is a fact rather than a title
+ * match (gotcha 126). Measured on the same 17 archives: 21,647 of the 45,429 harvested annotations carry
+ * two or more annotated pieces, and 0 guide-split strings are present in the extracted text.)
  *
  * @type {number}
  */
-const BUNDLE_SCHEMA_VERSION = 7;
+const BUNDLE_SCHEMA_VERSION = 8;
 
 /**
  * What the CURRENT schema changed, in the sentence an operator sees when a cached bundle is thrown
@@ -71,8 +78,9 @@ const BUNDLE_SCHEMA_VERSION = 7;
  * @type {string}
  */
 const SCHEMA_CHANGE_NOTE =
-  "pronunciation guides are now set aside instead of pasted into the words they annotate, and each " +
-  "volume's guides are harvested to <base>-ruby-guides.json";
+  "pronunciation guides are now harvested as they were annotated (which base character carried which " +
+  "reading), every chapter is searched for a guide-split string the converter failed to set aside, and " +
+  "every segment records whether the book declared it packaging";
 
 
 /**

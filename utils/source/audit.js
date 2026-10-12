@@ -2,7 +2,7 @@
  * utils/source/audit.js — the extraction audit's public surface.
  *
  * The thin barrel over `utils/source/audit/`: `audit/audit.js` (the entry point and its result type),
- * `audit/checks.js` (the five checks), `audit/rules.js` (the vocabulary they share — the kinds, the
+ * `audit/checks.js` (the six checks), `audit/rules.js` (the vocabulary they share — the kinds, the
  * step name, and the small questions every check asks). Node resolves this file before the folder of
  * the same name, so `require("./source/audit")` and the `utils/source.js` re-export keep working
  * unchanged (AGENTS.md §3).
@@ -26,6 +26,7 @@ module.exports = {
   auditSourceIsArchive: checks.auditSourceIsArchive,
   auditHasUsableChapter: checks.auditHasUsableChapter,
   auditEmptyChapters: checks.auditEmptyChapters,
+  auditGuideSplitSurvives: checks.auditGuideSplitSurvives,
   auditTitlesAreTitles: checks.auditTitlesAreTitles,
   auditGuideHarvest: checks.auditGuideHarvest,
   auditExtractedVolume: audit.auditExtractedVolume,

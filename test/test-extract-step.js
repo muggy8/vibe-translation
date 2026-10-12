@@ -418,6 +418,65 @@ async function scenarioMediumContinues() {
   await dispose(fx);
 }
 
+// ─── 3b. the guide-split tripwire fails the step too ─────────────────────────
+
+/**
+ * The sixth check is HIGH, and a HIGH is a STOP. This is the delivery consequence of the tripwire: a
+ * book whose text still carries 蒲かま田た stops the run at the free step, before a glossary stage spends
+ * tokens turning that string into a glossary entry.
+ */
+async function scenarioGuideSplitFailsTheStep() {
+  const fx = await fixtureSeries("guidesplit", [
+    {
+      installment: "01",
+      folder: "Split Step Series(01)",
+      sourceName: "splitstep(1).epub",
+      write: () =>
+        buildBookEpub({
+          title: "Split Step Series 1",
+          pages: [
+            {
+              file: "p-001.xhtml",
+              pageTitle: "第一章",
+              navTitle: "第一章",
+              body:
+                `<p>第一章</p><p>彼は<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>を見た。</p>${prose("第一章")}` +
+                `<p>壊れた変換が残した 蒲かま田た という文字列が、この章の本文にそのまま残っている。</p>`,
+            },
+          ],
+        }),
+    },
+    {
+      installment: "02",
+      folder: "Split Step Series(02)",
+      sourceName: "splitstep(2).epub",
+      write: () =>
+        buildBookEpub({
+          title: "Split Step Series 2",
+          pages: [CHAPTER("p-001.xhtml", "第一章"), CHAPTER("p-002.xhtml", "第二章")],
+        }),
+    },
+  ]);
+
+  const { logs, error: thrown } = await capture(() => runStep());
+  assert.ok(thrown, "a guide-split string in a chapter fails the step");
+  assert.strictEqual(thrown.structural, true, "and structurally — no run policy walks past a book the converter mangled");
+  assert.ok(/guide-split-in-text/.test(thrown.message), `the error names the kind: ${thrown.message}`);
+  assert.ok(/01/.test(thrown.message), `and the volume: ${thrown.message}`);
+  assert.ok(
+    logs.some((l) => /\[extract\] Volume 01 · \[HIGH\] guide-split-in-text/.test(l)),
+    `the finding is printed with the string it found:\n${logs.join("\n")}`
+  );
+  ok("the guide-split tripwire is a HIGH the step stops the run on");
+
+  const summary = JSON.parse(fs.readFileSync(path.join(postMortemDir(), "extraction-summary.json"), "utf8"));
+  assert.strictEqual(summary.totals.HIGH, 1, "one HIGH across the series");
+  assert.strictEqual(summary.volumes[1].counts.HIGH, 0, "the clean volume is still clean, and audited anyway");
+  ok("the clean volume is audited and reported even though its neighbour stopped the run");
+
+  await dispose(fx);
+}
+
 // ─── 4. a warm cache is verified, not re-extracted, and the log says which ────
 
 /**
@@ -656,6 +715,7 @@ async function scenarioUnreadableBook() {
   await scenarioRegistered();
   await scenarioHighFailsTheStep();
   await scenarioMediumContinues();
+  await scenarioGuideSplitFailsTheStep();
   await scenarioWarmCache();
   await scenarioReportLocation();
   await scenarioNoModelCalls();

@@ -13,14 +13,15 @@ Per volume, and nothing else: **no model call, no prompt, no agent.** `npx gulp 
 1. **Resolve the volume's source** through the same `resolveSourceBundle` the other eleven callers use —
    the same door, the same cache, no second implementation of "is this extraction current".
 2. **Say what happened to that volume's bundle**, per volume, in the log and in the report: **VERIFIED**
-   (the bundle on disk matches the archive and schema 7 — nothing re-extracted), **RE-EXTRACTED** (a
+   (the bundle on disk matches the archive and schema 8 — nothing re-extracted), **RE-EXTRACTED** (a
    bundle was there and is no longer current), **EXTRACTED** (none existed yet), **READ** (a plain-text
    book has no cache to verify, and calling that "re-extracted" would report work that did not happen).
-   The second run over the same 17 books costs 154 ms against the first run's 1,840 ms and re-extracts
+   The second run over the same 17 books costs 342–350 ms against the first run's 2,234 ms and re-extracts
    nothing.
-3. **Run the five deterministic checks** (`utils/source/audit.js` — `source-not-archive`,
-   `no-usable-chapter`, `chapter-extracted-empty`, `title-is-filename`, `ruby-guide-harvest`) and count
-   what the volume holds: chapters, packaging groups, characters, pronunciation guides set aside, images.
+3. **Run the six deterministic checks** (`utils/source/audit.js` — `source-not-archive`,
+   `no-usable-chapter`, `chapter-extracted-empty`, `title-is-filename`, `ruby-harvest-missing`,
+   `guide-split-in-text`) and count what the volume holds: chapters, packaging groups, characters,
+   pronunciation guides set aside, images.
 4. **Write the record**: `extraction-<NN>.md` + `.json` per volume and `extraction-summary.md` + `.json`
    for the series, all under the run's own records folder (`.run/postmortem/`). **Nothing is written into
    a volume folder by this step** beyond the bundle files the extraction itself already writes, and every
@@ -34,7 +35,7 @@ Per volume, and nothing else: **no model call, no prompt, no agent.** `npx gulp 
    that could not be read, `**FAILED**` in its own report, and is fatal to the step.
 
 Measured over a **copy** of all 17 real archives: 133 chapters, 109 packaging groups, 2,450,415
-characters, 45,429 pronunciation guides, 457 images, **0 HIGH and 0 MEDIUM** — the five checks produce no
+characters, 45,429 pronunciation guides, 457 images, **0 HIGH and 0 MEDIUM** — the six checks produce no
 false positives on legitimate material. Measured on the offline loop's plain-text fixture: 2 volumes,
 2 chapters, **0 HIGH and 2 MEDIUM** (`title-is-filename`, one per volume — a `.txt` book that declares no
 heading of its own is titled after its file), and the loop continues.

@@ -347,6 +347,16 @@ function materializeBundle(meta, { originalPath, volumeDir, cacheHit }) {
       // book's contents did not name it and it prints no heading of its own) —
       // the merge then prints no heading rather than inventing one.
       syntheticTitle: s.syntheticTitle === true,
+      // True when every page this segment was built from declared itself the book's packaging (a cover
+      // plate, an inserted illustration, the colophon). Only the fallback paths produce a segment like
+      // this, and only this mark tells a later check that an empty one is a cover plate rather than a
+      // missing chapter — its title is often just its file name. undefined on a cache written before
+      // schema 8, which is why the audit still reads the title as well. → AGENTS.md gotcha 126.
+      declaresPackaging: s.declaresPackaging,
+      // The extraction's own guide-split measurement for this chapter (0 for a correct extraction).
+      // undefined on a cache written before schema 8 — the audit then cannot answer, and says so.
+      guideSplitForms: s.guideSplitForms,
+      guideSplitExamples: s.guideSplitExamples,
       // Persisted by the extraction (schema 6). null on an older cache — the
       // token rule then falls back to the character rule and says so.
       scriptMix: s.scriptMix || null,

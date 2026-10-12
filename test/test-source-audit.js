@@ -1,5 +1,5 @@
 /**
- * test/test-source-audit.js — the extraction audit: five checks, each one fired and each one kept
+ * test/test-source-audit.js — the extraction audit: six checks, each one fired and each one kept
  * silent, on fixtures (no AI, no network, no real volume).
  *
  * The audit (`utils/source/audit.js` + `utils/source/audit/`) is the check that was missing when four
@@ -9,14 +9,17 @@
  * fixture book built with jszip, run through the real `resolveSourceBundle`, and audited — the same
  * bundle the nine pipeline stages would have received.
  *
- * Each of the five checks gets two fixtures: one planted so it fires at the right severity with the
+ * Each of the six checks gets two fixtures: one planted so it fires at the right severity with the
  * right `kind`, and one clean so it stays silent. A check that only has the firing fixture is a check
  * that can be made to fire on anything.
  *
  * The packaging exemption is tested from both sides, because it is the one place this audit could
  * invent holes that are not there: the pages the book declares as packaging (a cover plate, the
  * contents page, the colophon) legitimately have no story text, and reporting them as missing chapters
- * is the exact phantom-"EMPTY IN SOURCE" failure gotcha 52 records.
+ * is the exact phantom-"EMPTY IN SOURCE" failure gotcha 52 records. The fixture that used to be the
+ * exemption's blind spot — a cover plate the book names after its own FILE, which no packaging word
+ * list can recognise — is here too, and it is the reason a segment now carries the book's declaration
+ * as a fact (gotcha 126).
  *
  * Run: node test/test-source-audit.js
  */
@@ -254,7 +257,7 @@ async function scenarioCleanBook() {
   assertFindings(result, [], "a clean book");
   assert.strictEqual(result.counts.chapters, 3, "the audit reports what the bundle holds");
   assert.strictEqual(result.counts.packaging, 3, "including the pages the book declares as packaging");
-  ok("a clean book produces no findings at all — five checks, zero hits");
+  ok("a clean book produces no findings at all — six checks, zero hits");
 
   // The empty pages are the book's OWN packaging, and they are the reason the empty-chapter check has
   // an exemption: 表紙 / 目次 / 奥付 hold no story text and are not missing chapters.
@@ -643,7 +646,166 @@ async function scenarioGuideHarvest() {
   await fs.promises.rm(dir, { recursive: true, force: true });
 }
 
-// ─── 7. the audit itself: no model, no store, no writes, and never silently clean ───
+// ─── 7. check 6 · a guide-split string still in the extracted text (HIGH) ─────
+
+/**
+ * A book whose chapter text holds the string the broken converter produced, alongside the very ruby
+ * that annotation came from. The harvest knows 蒲 carried かま and 田 carried た; the audit reports the
+ * chapter that still prints 蒲かま田た.
+ *
+ * @returns {Promise<Object>}
+ */
+async function splitBook() {
+  return fixtureVolume("split", {
+    title: "Split Series",
+    sourceName: "split(1).epub",
+    pages: [
+      {
+        file: "p-001.xhtml",
+        pageTitle: "第一章",
+        navTitle: "第一章",
+        body:
+          `<p>第一章</p><p>彼は<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>を見た。</p>${prose("第一章")}` +
+          `<p>壊れた変換がそのまま残した 蒲かま田た という文字列を、この章は意図的に含む。</p>`,
+      },
+      {
+        file: "p-002.xhtml",
+        pageTitle: "第二章",
+        navTitle: "第二章",
+        body: `<p>第二章</p><p>こちらも<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>だが、本文は正しい。</p>${prose("第二章")}`,
+      },
+    ],
+  });
+}
+
+/**
+ * Check 6: fired on a planted guide-split string, silent on the same ruby extracted correctly, and
+ * silent (not answerable) on a bundle that never recorded the measurement.
+ */
+async function scenarioGuideSplitInText() {
+  const fx = await splitBook();
+  const result = auditExtractedVolume({ volume: fx.volume, bundle: fx.bundle, volumeFiles: await listingOf(fx.volumeDir) });
+  assertFindings(result, [{ severity: "HIGH", kind: "guide-split-in-text" }], "a chapter that still prints 蒲かま田た");
+  const finding = result.findings[0];
+  assert.strictEqual(finding.file, "Split Series(01)/split(1)-ch1.md", `the finding points at the chapter file: ${finding.file}`);
+  assert.ok(finding.message.includes("蒲かま田た"), `the finding quotes the string it found: ${finding.message}`);
+  assert.ok(finding.message.includes("第一章"), `and names the chapter: ${finding.message}`);
+  assert.strictEqual(fx.bundle.segments[1].guideSplitForms, 0, "the chapter with the same ruby, extracted correctly, records 0");
+  ok("a guide-split string still in a chapter's text is HIGH, and only that chapter is reported");
+
+  // The silent counterpart from the clean fixture: the same ruby, extracted the right way, in a book
+  // whose chapters hold ordinary Japanese.
+  const clean = await cleanBook();
+  const cleanAudit = auditExtractedVolume({ volume: clean.volume, bundle: clean.bundle, volumeFiles: await listingOf(clean.volumeDir) });
+  assertFindings(cleanAudit, [], "a clean book with the same ruby in it");
+  assert.ok(
+    clean.bundle.segments.every((s) => s.guideSplitForms === 0),
+    `every chapter of the clean book measured 0: ${clean.bundle.segments.map((s) => `${s.id}=${s.guideSplitForms}`).join(", ")}`
+  );
+  ok("the tripwire is silent on a correct extraction — the same annotation, the same books, zero hits");
+
+  // A bundle that never recorded the measurement (a cache written before the schema that measures it)
+  // is NOT reported as clean: the check cannot answer, and silence here is the documented limit.
+  const unmeasured = {
+    ...clean.bundle,
+    segments: clean.bundle.segments.map(({ guideSplitForms, guideSplitExamples, ...rest }) => rest),
+  };
+  assertFindings(
+    auditExtractedVolume({ volume: clean.volume, bundle: unmeasured, volumeFiles: await listingOf(clean.volumeDir) }),
+    [],
+    "a bundle with no recorded measurement"
+  );
+  ok("a segment with no recorded measurement is not answered — which is why the schema bump is part of this check");
+
+  // And the audit reports what the extraction recorded, at the volume's own file granularity.
+  const volume = { installmentNumber: "01", folder: "Split(01)", sourceFile: "Split(01)/split(1).epub" };
+  const planted = {
+    format: "epub",
+    originalPath: "/fixture/Split(01)/split(1).epub",
+    base: "split(1)",
+    volumeDir: "/fixture/Split(01)",
+    segments: [
+      { id: "ch1", file: "split(1)-ch1.md", title: "第一章", empty: false, bodyChars: 4000, guideSplitForms: 3, guideSplitExamples: ["蒲かま田た", "上じよう機き嫌げん"] },
+      { id: "ch2", file: "split(1)-ch2.md", title: "第二章", empty: false, bodyChars: 4000, guideSplitForms: 0, guideSplitExamples: [] },
+    ],
+    packaging: [],
+    rubyGuides: { file: "split(1)-ruby-guides.json", guides: 40 },
+  };
+  const plantedAudit = auditExtractedVolume({ volume, bundle: planted, volumeFiles: ["split(1).epub", "split(1)-ruby-guides.json"] });
+  assertFindings(plantedAudit, [{ severity: "HIGH", kind: "guide-split-in-text" }], "a recorded measurement of 3");
+  assert.ok(plantedAudit.findings[0].message.includes("3 guide-split string"), plantedAudit.findings[0].message);
+  assert.ok(
+    plantedAudit.findings[0].message.includes("蒲かま田た") && plantedAudit.findings[0].message.includes("上じよう機き嫌げん"),
+    `the finding quotes the recorded examples: ${plantedAudit.findings[0].message}`
+  );
+  ok("the audit reads the extraction's own measurement, chapter by chapter, and quotes what it found");
+
+  await fs.promises.rm(fx.seriesDir, { recursive: true, force: true });
+  await fs.promises.rm(clean.seriesDir, { recursive: true, force: true });
+}
+
+// ─── 8. the packaging mark: a cover plate named after its own file ────────────
+
+/**
+ * The blind spot gotcha 126 recorded, reproduced. The live series titles five of its packaging pages
+ * `p-fmatter-002.xhtml`; a page like that which the contents list names, and which holds no story text,
+ * becomes a segment whose title no packaging word list can recognise. Before the per-segment mark that
+ * was a phantom "chapter extracted to nothing" — a HIGH that stops a run over a cover plate.
+ */
+async function scenarioPackagingMark() {
+  const fx = await fixtureVolume("packaging-mark", {
+    title: "Mark Series",
+    sourceName: "mark(1).epub",
+    pages: [
+      {
+        file: "p-cover.xhtml",
+        pageTitle: "p-cover.xhtml",
+        navTitle: "p-cover.xhtml",
+        bodyClass: "p-cover",
+        body: `<p><img src="images/plate.png" alt=""/></p>`,
+      },
+      { file: "p-002.xhtml", pageTitle: "第一章", navTitle: "第一章", body: `<p>第一章</p>${prose("第一章")}` },
+      { file: "p-003.xhtml", pageTitle: "第二章", navTitle: "第二章", body: `<p>第二章</p>${prose("第二章")}` },
+    ],
+  });
+
+  const cover = fx.bundle.segments[0];
+  assert.strictEqual(cover.title, "p-cover.xhtml", "the segment is titled after its file — the shape the real books produce");
+  assert.strictEqual(cover.empty, true, "it converted to nothing, as a cover plate does");
+  assert.strictEqual(cover.declaresPackaging, true, "and the bundle records that the BOOK declared it packaging");
+  assert.strictEqual(fx.bundle.segments[1].declaresPackaging, false, "an ordinary chapter carries the mark as false");
+  assert.strictEqual(fx.bundle.segments[2].declaresPackaging, false, "and so does the next one");
+
+  const result = auditExtractedVolume({ volume: fx.volume, bundle: fx.bundle, volumeFiles: await listingOf(fx.volumeDir) });
+  assertFindings(result, [{ severity: "MEDIUM", kind: "title-is-filename" }], "a cover plate the book named after its own file");
+  assert.strictEqual(
+    result.findings.filter((f) => f.kind === "chapter-extracted-empty").length,
+    0,
+    `no phantom missing chapter was invented for the cover plate: ${result.findings.map((f) => f.message).join("\n")}`
+  );
+  assert.strictEqual(result.counts.HIGH, 0, "and the run is not stopped over a cover plate");
+  ok("an empty cover plate named p-cover.xhtml is exempted by the mark, not by a title guess (gotcha 126)");
+
+  // The mark does not weaken the check: a NAMED CHAPTER that converted to nothing and declared nothing
+  // is still the hole it has always been.
+  const hole = await fixtureVolume("packaging-hole", {
+    title: "Mark Hole Series",
+    sourceName: "hole(1).epub",
+    pages: [
+      { file: "p-001.xhtml", pageTitle: "第一章", navTitle: "第一章", body: `<p>第一章</p>${prose("第一章")}` },
+      { file: "p-002.xhtml", pageTitle: "第二章", navTitle: "第二章", body: `<p><img src="images/plate.png" alt="挿絵"/></p>` },
+    ],
+  });
+  assert.strictEqual(hole.bundle.segments[1].declaresPackaging, false, "the page declared nothing, so the mark says nothing");
+  const holeAudit = auditExtractedVolume({ volume: hole.volume, bundle: hole.bundle, volumeFiles: await listingOf(hole.volumeDir) });
+  assertFindings(holeAudit, [{ severity: "HIGH", kind: "chapter-extracted-empty" }], "a real chapter that converted to nothing");
+  ok("the mark exempts only what the book declared — an undeclared empty chapter is still HIGH");
+
+  await fs.promises.rm(fx.seriesDir, { recursive: true, force: true });
+  await fs.promises.rm(hole.seriesDir, { recursive: true, force: true });
+}
+
+// ─── 9. the audit itself: no model, no store, no writes, and never silently clean ───
 
 /**
  * The guarantees about the audit itself: no model, no store, no writes, a STRUCTURAL refusal instead of
@@ -678,10 +840,18 @@ async function scenarioGuarantees() {
   // Every kind the audit can emit is declared, and every declared kind is one the audit emits.
   const kinds = new Set(Object.keys(EXTRACTION_AUDIT_KINDS));
   const emitted = new Set();
-  for (const name of ["auditSourceIsArchive", "auditHasUsableChapter", "auditEmptyChapters", "auditTitlesAreTitles", "auditGuideHarvest"]) {
+  for (const name of [
+    "auditSourceIsArchive",
+    "auditHasUsableChapter",
+    "auditEmptyChapters",
+    "auditGuideSplitSurvives",
+    "auditTitlesAreTitles",
+    "auditGuideHarvest",
+  ]) {
     const fn = require("../utils/source")[name];
     assert.strictEqual(typeof fn, "function", `${name} is reachable from the source barrel`);
   }
+  ok("all six checks are reachable from the source barrel");
   // A volume entry with no installment number still produces findings the post-mortem can read: the
   // `volume` field is null (its documented shape for a finding that is not about one installment), never
   // undefined.
@@ -724,13 +894,15 @@ async function scenarioGuarantees() {
 }
 
 (async () => {
-  console.log("source-audit: five deterministic checks over an extracted volume");
+  console.log("source-audit: six deterministic checks over an extracted volume");
   await scenarioCleanBook();
   await scenarioSourceNotArchive();
   await scenarioNoUsableChapter();
   await scenarioEmptyChapter();
   await scenarioTitleIsFilename();
   await scenarioGuideHarvest();
+  await scenarioGuideSplitInText();
+  await scenarioPackagingMark();
   await scenarioGuarantees();
   console.log(`\nsource-audit: all ${passed} checks passed.`);
 })().catch((err) => {

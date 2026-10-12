@@ -43,6 +43,7 @@ const EXTRACTION_AUDIT_KINDS = {
   "source-not-archive": "HIGH",
   "no-usable-chapter": "HIGH",
   "chapter-extracted-empty": "HIGH",
+  "guide-split-in-text": "HIGH",
   "title-is-filename": "MEDIUM",
   "ruby-harvest-missing": "MEDIUM",
 };
@@ -135,20 +136,28 @@ function segmentHasNoBody(segment) {
  *
  * This is the exemption that keeps the empty-chapter check honest. Under the normal path a packaging
  * page never becomes a segment at all (it is recorded in `bundle.packaging` instead), so the check
- * never sees one. Under the two fallbacks in `extract.js` — the book's contents list names none of its
- * pages, or names only packaging — every page stands alone as a chapter, cover plates and all, and a
- * cover plate that converted to nothing is not a missing chapter. The evidence available per segment is
- * the title the book's own navigation gave it, so that is what is asked, using the same
- * `PACKAGING_TITLE_RE` the extraction used to decide in the first place rather than a second list of
- * packaging words that would drift from it. The exemption is narrow, not complete: a fallback-path page
- * whose title is not a packaging word is indistinguishable from a chapter that converted to nothing, and
- * closing that needs a per-segment packaging mark in the bundle meta. → AGENTS.md gotcha 126.
+ * never sees one. Under the two fallbacks in `utils/source/extract.js` — the book's contents list names
+ * none of its pages, or names only packaging — every page stands alone as a chapter, cover plates and
+ * all, and a cover plate that converted to nothing is not a missing chapter.
+ *
+ * The evidence is asked for in the order it can be trusted:
+ *   1. `segment.declaresPackaging` — the extraction's own per-segment mark, persisted in the bundle meta
+ *      from schema 8 on. It is the page declaring what it IS (its `p-cover` / `p-colophon` body class, its
+ *      `epub:type`), which is the only evidence that survives a packaging page named after its own file:
+ *      the live series titles five of them `p-fmatter-002.xhtml`, and no word list can recognise that as
+ *      a cover.
+ *   2. the title, using the same `PACKAGING_TITLE_RE` the extraction used to decide in the first place
+ *      rather than a second list of packaging words that would drift from it, plus the bundle's own
+ *      packaging list — which is what a bundle cached under schema 7 has, and why the title read stays.
+ *
+ * The mark is what closed AGENTS.md gotcha 126; the title read is what keeps an older cache answerable.
  *
  * @param {SourceSegment|null} segment - One bundle segment.
  * @param {Set<string>} packagingTitles - Normalised titles of the groups the bundle recorded as packaging.
  * @returns {boolean} True when this segment is the book's packaging rather than a chapter of its story.
  */
 function segmentDeclaresPackaging(segment, packagingTitles) {
+  if (segment && segment.declaresPackaging === true) return true;
   const title = String((segment && segment.title) || "").trim();
   if (!title) return false;
   if (PACKAGING_TITLE_RE.test(title)) return true;

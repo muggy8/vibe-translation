@@ -60,6 +60,9 @@
  * @property {number} [bodyChars] — Characters of text the section converted to (undefined when the extraction did not measure it).
  * @property {boolean} [empty] — True when the section converted to (almost) nothing: a blank page, an image-only page, text in a structure the converter does not map.
  * @property {boolean} [syntheticTitle] — True when `title` is the pipeline's placeholder, not a title the book prints.
+ * @property {boolean} [declaresPackaging] — True when every page this segment was built from declared itself the book's packaging (cover plate, inserted illustration, notice, colophon). Produced only by the contents-list fallbacks, where a packaging page has to become a chapter because the book named none. undefined on a bundle cached before schema 8.
+ * @property {number} [guideSplitForms] — How many times a string this volume's own pronunciation guides would have interleaved into the text (蒲かま田た) still appears in this segment's file. 0 is the answer for a correct extraction; the field is absent on a bundle cached before schema 8, which is when the audit cannot answer the question.
+ * @property {string[]} [guideSplitExamples] — Up to a few of those strings, so a report can quote what it found instead of only counting it.
  * @property {string} [path] — Absolute path (set by materializeBundle).
  */
 
@@ -88,11 +91,24 @@
 // ─── Pronunciation guides (utils/source/ruby-guides.js) ─────────────────────
 
 /**
+ * @typedef {Object} RubyGuideAnnotation
+ * One annotated piece of a word, in the order the book annotated it: the base it printed and the guide
+ * that sat on it. `<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>` is two of these — 蒲 carrying かま, then 田
+ * carrying た — and interleaving them (蒲かま田た) is exactly the string the converter used to leave in
+ * the text.
+ * @property {string} base    — The base characters this guide sat on ("" when the guide had no base of its own).
+ * @property {string} reading — The guide the author wrote for them ("" when base text carried no guide).
+ */
+
+/**
  * @typedef {Object} RubyGuide
  * One pronunciation guide a converter set aside, as the conversion removed it.
  * @property {string} base        — The word the book prints, guides taken out (蒲田, 上機嫌).
  * @property {string} reading     — The guide the author wrote for it, in document order (かまた).
  * @property {number} annotations — How many guide parts carried it (2 for 蒲かま田た, 1 for 三色院パンジー).
+ * @property {RubyGuideAnnotation[]} annotated — The same annotation as it was annotated: each base piece
+ *   and the reading it carried, in document order. This is what makes the guide-split string
+ *   reconstructable; the joined pair alone cannot say which character carried which reading.
  */
 
 /**
@@ -101,6 +117,7 @@
  * @property {string} word        — RubyGuide.base.
  * @property {string} reading     — RubyGuide.reading.
  * @property {number} annotations — RubyGuide.annotations.
+ * @property {RubyGuideAnnotation[]} annotated — RubyGuide.annotated.
  * @property {string} chapter     — The segment id (ch1, ch5.1, …) this guide occurred in.
  */
 
@@ -112,6 +129,8 @@
  * @property {number} count        — How many times this volume guided this word this way.
  * @property {string[]} chapters   — The segment ids it occurred in, in reading order.
  * @property {"katakana"|"hiragana"|"latin"|"han"|"other"} readingScript — Which writing system the reading is written in; katakana is how this series marks a reading that is not the Japanese pronunciation.
+ * @property {RubyGuideAnnotation[]} annotated — The annotation's own sequence, in the order the book wrote it (蒲→かま, 田→た). Absent on a harvest written under schema 1.
+ * @property {RubyGuideAnnotation[][]} [annotatedVariants] — The other shapes this same pair was marked up in, most-used first. Absent when this volume marked it one way.
  */
 
 /**
@@ -125,6 +144,7 @@
  * @property {number} wordsWithMoreThanOneReading — Words guided two or more ways.
  * @property {number} wordsGuidedInKatakana — Words the author overrode with a foreign reading.
  * @property {number} chapters — Chapters the harvest covers.
+ * @property {number} rowsWithMoreThanOneAnnotationShape — Rows marked up in more than one order, so the split-string search has to try more than one shape.
  */
 
 // ─── Epub container (utils/source.js openEpub) ──────────────────────────────

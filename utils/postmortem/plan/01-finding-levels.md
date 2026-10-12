@@ -135,6 +135,16 @@ volume, which is the one state every check in this layer is written to avoid.
 
 Twenty-eight finding types exist today. Every one gets a level, declared in code.
 
+**And a correction made on 2026-10-12 while slice 4 of the extraction plan was being built:** the
+twenty-eight names below are the delivery layer's own. **The extraction audit's kinds are not among them**
+— `source-not-archive`, `no-usable-chapter`, `chapter-extracted-empty`, `guide-split-in-text` (added the
+same day, HIGH), `title-is-filename`, `ruby-harvest-missing` — so the level table this plan has to write
+covers **34**, not 28, and the test that pins "every emitted kind has a declared level" (§6) fails on the
+six extraction kinds until the table includes them. That is not a defect in the extraction audit: its kinds
+are declared in `utils/source/audit/rules.js` `EXTRACTION_AUDIT_KINDS` with the severity each one is emitted
+at, which is the shape this plan wants for every kind. It is a gap in this plan's list, and it is said here
+rather than discovered later by whoever builds slice 1.
+
 **STOP** — halt now.
 `missing-required` · `missing-volume-folder` · `empty-or-stub` · `bad-json` · `audit-verdict-fail` ·
 `record-unreadable` · `run-lock-stale`
@@ -243,7 +253,7 @@ that reaches its final slice before noticing that has a hole in the middle of it
 | measure | today | after |
 |---|---|---|
 | kinds the triage calls damage that can actually reach its decision | **6 of 10** (`missing-required`, `missing-volume-folder`, `empty-or-stub`, `bad-json`, `audit-verdict-fail`, `step-undeclared`) | **10 of 10** |
-| finding kinds with a declared level and a route | 0 — routing is by severity alone | **all 28** |
+| finding kinds with a declared level and a route | 0 — routing is by severity alone | **all 34** (the 28 listed in §4 plus the 6 the extraction audit emits) |
 | chapters of the book that were never translated, caught by the layer | **0** — the check exists and its output is discarded | every one, at MAJOR |
 | volumes published with no grader signing off, caught | **0** — same | every one, at MAJOR |
 | investigations per run | 1 kind (`quarantine-present`) | bounded by (kind × step), counted in the offline loop |
@@ -290,10 +300,16 @@ wrong and this plan is wrong, and that is the cheapest possible way to find out.
 MEDIUM**. That decision was made against the routing that exists today, and today "warn" means
 "discarded".
 
-Under this plan the extraction audit's three MEDIUM checks — a character name that only ever appears
-broken apart, a chapter titled with a filename, a cache missing its pronunciation-guide file — become
-**investigated** rather than printed. The name-split one is MAJOR, because every later volume measures
-characters against a record built from that text; the other two are MINOR.
+Under this plan the extraction audit's two MEDIUM checks that exist today — a chapter titled with a
+filename, a cache missing its pronunciation-guide file — become **investigated** rather than printed, both
+at **MINOR**. The third MEDIUM the extraction plan lists (a character name that only ever appears broken
+apart) is still **deferred**: it needs a roster, and no roster exists at extraction time
+(`utils/source/plan/01-extraction-step.md` §3), so it has no level to be declared at until it exists.
+
+**And the extraction audit's fourth HIGH check, added the same day this plan was written, is a STOP** —
+`guide-split-in-text`, a pronunciation guide still pasted inside the word it annotates. It belongs under
+STOP with the other HIGH extraction kinds: it names text every downstream artifact is built from, and the
+defect it hunts sat in all 17 volumes unnoticed once already.
 
 The extraction plan's own decision stands — a converter change should not halt a run over a filename —
 but it now means *MINOR rather than ignored*, which is a different promise than the one written on

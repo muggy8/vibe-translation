@@ -31,6 +31,10 @@ require("../../types"); // JSDoc type definitions
 const fs = require("fs").promises;
 const path = require("path");
 
+// The same whitespace rule the converters use, imported rather than re-written: a harvest that trims a
+// guide differently from the text it came out of is a harvest that cannot be matched against that text.
+const { normalizeSpaces } = require("./html");
+
 /**
  * The suffix every volume's harvest file is written under: `<source base>` + this.
  *
@@ -49,9 +53,39 @@ const RUBY_GUIDE_FILE_SUFFIX = "-ruby-guides.json";
  * The shape of the harvest file. Bump it when the row shape changes, so a reader can tell an
  * older harvest from a current one instead of guessing from missing fields.
  *
+ * (v1: one row per (word, reading) pair — 蒲田 / かまた. v2: each row also carries the annotation's OWN
+ * sequence, the base characters and the reading each one carried, in the order the book annotated them
+ * (蒲→かま, 田→た). The joined pair cannot answer which character carried which reading, so nothing
+ * could rebuild the string the old converter produced (蒲かま田た) to search for. That is why the
+ * guide-split tripwire was deferred (`utils/source/plan/01-extraction-step.md` §3), and schema 2 is what
+ * un-defers it. → AGENTS.md gotcha 123.)
+ *
  * @type {number}
  */
-const RUBY_GUIDE_SCHEMA = 1;
+const RUBY_GUIDE_SCHEMA = 2;
+
+/**
+ * How many annotated pieces an annotation must carry before its interleaved form counts as a
+ * guide-split string.
+ *
+ * Measured, not guessed. A single-piece annotation (三色院 → パンジー, 出 → だ) produces 三色院パンジー /
+ * 出だ — and those strings are indistinguishable from ordinary Japanese the author wrote themselves: a
+ * book that annotates 言 as い contains 言い inside 言いつける whether or not a converter ever regressed.
+ * A two-piece annotation (蒲→かま, 田→た) produces 蒲かま田た, which is a base character sitting in the
+ * MIDDLE of its own reading — a shape ordinary prose does not produce.
+ *
+ * Measured over all 17 archives of the live series (a copy, re-extracted with this harvest shape):
+ * 45,429 harvested annotations, 21,647 of them carrying two or more annotated pieces, 10,018 distinct
+ * interleaved strings at a floor of 1 against 5,612 at a floor of 2 — and the extracted text holds
+ * **666** of the first set (出だ, 言い, 回まわ, 聞き, 直す … every one of them ordinary prose) and
+ * **0** of the second. The floor is what turns a check that cries wolf 666 times into one that cries
+ * never, and it is the difference between a tripwire and a noise machine.
+ *
+ * Pinned by `test/test-source-ruby.js`.
+ *
+ * @type {number}
+ */
+const GUIDE_SPLIT_MIN_PIECES = 2;
 
 /**
  * Which writing system the author used for the reading.
@@ -83,11 +117,74 @@ function rubyGuideFileName(base) {
 }
 
 /**
+ * Normalise one annotation sequence into the shape the harvest stores.
+ *
+ * Strings only, whitespace collapsed, and a piece with neither base nor reading dropped — a piece of
+ * markup that carries nothing is not evidence of anything.
+ *
+ * @param {RubyGuideAnnotation[]|undefined} annotated - The sequence as the conversion recorded it.
+ * @returns {RubyGuideAnnotation[]} The normalised sequence (empty when there was none).
+ */
+function normalizeRubyAnnotation(annotated) {
+  return (Array.isArray(annotated) ? annotated : [])
+    .map((unit) => ({
+      base: normalizeSpaces(unit && unit.base),
+      reading: normalizeSpaces(unit && unit.reading),
+    }))
+    .filter((unit) => unit.base || unit.reading);
+}
+
+/**
+ * A comparable key for one annotation sequence, so two occurrences of the same word guided the same way
+ * but marked up differently can be told apart.
+ *
+ * @param {RubyGuideAnnotation[]} annotated
+ * @returns {string}
+ */
+function rubyAnnotationShapeKey(annotated) {
+  return JSON.stringify(annotated.map((unit) => [unit.base, unit.reading]));
+}
+
+/**
+ * Rebuild the string the OLD converter would have left in the text for one annotation sequence.
+ *
+ * The defect kept everything inside a <ruby> in document order, so the broken string is exactly the
+ * sequence interleaved: 蒲 かま 田 た → 蒲かま田た. This is the only place that string is built, which is
+ * what makes the tripwire exact instead of a pattern match: it searches for a string derived from what
+ * this book actually annotated, not for "kanji followed by hiragana", which fires on ordinary Japanese
+ * constantly.
+ *
+ * Returns "" for a sequence that carries no guide at all (its interleaving is just the word) and for one
+ * carrying fewer than `GUIDE_SPLIT_MIN_PIECES` annotated pieces — see that constant for why the
+ * single-piece shape is not searched for.
+ *
+ * @param {RubyGuideAnnotation[]|undefined} annotated - One annotation's own sequence.
+ * @returns {string} The guide-split string to look for, or "" when this annotation has no split shape.
+ */
+function rubyGuideSplitFormOf(annotated) {
+  const units = normalizeRubyAnnotation(annotated);
+  if (units.length < GUIDE_SPLIT_MIN_PIECES) return "";
+  const form = units.map((unit) => `${unit.base}${unit.reading}`).join("");
+  const word = units.map((unit) => unit.base).join("");
+  // A sequence whose guides are all empty interleaves into the word itself: searching for it would
+  // report every guided word as its own defect.
+  if (!form || form === word) return "";
+  return form;
+}
+
+/**
  * Fold the guides one conversion removed into one row per (word, reading) pair.
  *
  * A pair, not one row per word, because a word guided two ways is two answers and the file has
  * to be able to say both: 嬉 is guided うれ 669 times and うれし twice, and a row that averaged
  * them would answer the question wrongly. `chapters` is in reading order, deduplicated.
+ *
+ * Each row also carries `annotated`: the sequence this word was annotated in most often — the base
+ * characters and the reading each one carried, in the order the book wrote them. When the same pair was
+ * marked up in more than one shape (`<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>` and
+ * `<ruby><rb>蒲</rb><rb>田</rb><rt>かま</rt><rt>た</rt></ruby>` are the same pair, interleaved
+ * differently) the other shapes go in `annotatedVariants`, so the split-string search sees every shape
+ * this volume actually used and not just the commonest one.
  *
  * Rows are sorted by how often the author used that reading (most first), then by the word, then
  * by the reading — so the file is stable across runs and the words that matter are at the top.
@@ -96,7 +193,7 @@ function rubyGuideFileName(base) {
  * @returns {{rows: RubyGuideRow[], totals: RubyGuideTotals}}
  */
 function aggregateRubyGuides(occurrences) {
-  /** @type {Map<string, RubyGuideRow & { _chapters: Set<string> }>} */
+  /** @type {Map<string, {word: string, reading: string, count: number, readingScript: string, chapters: string[], chapterSet: Set<string>, shapes: Map<string, {units: RubyGuideAnnotation[], count: number}>}>} */
   const byPair = new Map();
   /** @type {Map<string, Set<string>>} word -> the readings that word was given */
   const readingsByWord = new Map();
@@ -118,22 +215,59 @@ function aggregateRubyGuides(occurrences) {
     const key = `${word}\u0000${reading}`;
     let row = byPair.get(key);
     if (!row) {
-      row = { word, reading, count: 0, readingScript: readingScriptOf(reading), chapters: [] };
+      row = {
+        word,
+        reading,
+        count: 0,
+        readingScript: readingScriptOf(reading),
+        chapters: [],
+        chapterSet: new Set(),
+        shapes: new Map(),
+      };
       byPair.set(key, row);
     }
     row.count += 1;
-    if (chapter && !row.chapters.includes(chapter)) row.chapters.push(chapter);
+    if (chapter && !row.chapterSet.has(chapter)) {
+      row.chapterSet.add(chapter);
+      row.chapters.push(chapter);
+    }
+
+    const units = normalizeRubyAnnotation(occ.annotated);
+    const shapeKey = rubyAnnotationShapeKey(units);
+    let shape = row.shapes.get(shapeKey);
+    if (!shape) {
+      shape = { units, count: 0 };
+      row.shapes.set(shapeKey, shape);
+    }
+    shape.count += 1;
 
     if (!readingsByWord.has(word)) readingsByWord.set(word, new Set());
     if (reading) readingsByWord.get(word).add(reading);
   }
 
-  const rows = [...byPair.values()].sort(
-    (a, b) =>
-      b.count - a.count ||
-      (a.word < b.word ? -1 : a.word > b.word ? 1 : 0) ||
-      (a.reading < b.reading ? -1 : a.reading > b.reading ? 1 : 0)
-  );
+  /** @type {RubyGuideRow[]} */
+  const rows = [...byPair.values()]
+    .map((row) => {
+      const shapes = [...row.shapes.values()].sort(
+        (a, b) => b.count - a.count || (rubyAnnotationShapeKey(a.units) < rubyAnnotationShapeKey(b.units) ? -1 : 1)
+      );
+      const built = {
+        word: row.word,
+        reading: row.reading,
+        count: row.count,
+        readingScript: row.readingScript,
+        chapters: row.chapters,
+        annotated: shapes[0].units,
+      };
+      if (shapes.length > 1) built.annotatedVariants = shapes.slice(1).map((s) => s.units);
+      return built;
+    })
+    .sort(
+      (a, b) =>
+        b.count - a.count ||
+        (a.word < b.word ? -1 : a.word > b.word ? 1 : 0) ||
+        (a.reading < b.reading ? -1 : a.reading > b.reading ? 1 : 0)
+    );
 
   let multiReadingWords = 0;
   let katakanaGuidedWords = 0;
@@ -153,6 +287,7 @@ function aggregateRubyGuides(occurrences) {
       wordsWithMoreThanOneReading: multiReadingWords,
       wordsGuidedInKatakana: katakanaGuidedWords,
       chapters: chaptersSeen.size,
+      rowsWithMoreThanOneAnnotationShape: rows.filter((r) => Array.isArray(r.annotatedVariants)).length,
     },
   };
 }
@@ -170,9 +305,10 @@ async function writeRubyGuideFile({ volumeDir, base, sourceFile, bundleSchema, o
     schema: RUBY_GUIDE_SCHEMA,
     whatThisIs:
       "Every pronunciation guide (ruby) this volume's converter set aside while extracting the " +
-      "text, in the form: this word, read this way, this many times, in these chapters. The " +
-      "extracted text keeps the word alone; the reading lives only here.",
-    generatedBy: `utils/source/ruby-guides.js (bundle schema ${bundleSchema})`,
+      "text, in the form: this word, read this way, this many times, in these chapters, annotated in " +
+      "this order (which base character carried which reading). The extracted text keeps the word " +
+      "alone; the reading lives only here.",
+    generatedBy: `utils/source/ruby-guides.js (bundle schema ${bundleSchema}, harvest schema ${RUBY_GUIDE_SCHEMA})`,
     sourceFile,
     totals,
     guides: rows,
@@ -201,6 +337,50 @@ async function readRubyGuideFile(volumeDir, base) {
 }
 
 /**
+ * The distinct guide-split strings a set of annotations would produce, and how many times each one
+ * appears in a piece of extracted text.
+ *
+ * This is the tripwire's whole rule, in one place: take the sequences the conversion recorded, rebuild
+ * the string the old converter would have left behind for each, and look for THAT string. No pattern
+ * matching, no "looks like furigana", no second parser — a plain substring search for a string derived
+ * from what this book actually annotated.
+ *
+ * Accepts anything carrying `annotated`: the `RubyGuide[]` a conversion set aside, or the
+ * `RubyGuideRow[]` read back out of a volume's harvest file.
+ *
+ * @param {string} text - Extracted text to search (a chapter's body, the whole-volume file).
+ * @param {Array<{annotated?: RubyGuideAnnotation[]}>} annotatedItems - Annotations to rebuild forms from.
+ * @returns {{occurrences: number, forms: string[]}} How many times a split string appears, and which ones.
+ */
+function findRubyGuideSplitForms(text, annotatedItems) {
+  const haystack = String(text || "");
+  if (!haystack) return { occurrences: 0, forms: [] };
+  /** @type {Set<string>} */
+  const forms = new Set();
+  for (const item of annotatedItems || []) {
+    const form = rubyGuideSplitFormOf(item && item.annotated);
+    if (form) forms.add(form);
+  }
+  if (forms.size === 0) return { occurrences: 0, forms: [] };
+  let occurrences = 0;
+  /** @type {string[]} */
+  const hits = [];
+  for (const form of forms) {
+    let at = haystack.indexOf(form);
+    let count = 0;
+    while (at !== -1) {
+      count += 1;
+      at = haystack.indexOf(form, at + form.length);
+    }
+    if (count > 0) {
+      occurrences += count;
+      hits.push(form);
+    }
+  }
+  return { occurrences, forms: hits };
+}
+
+/**
  * Answer "what did the author say this word is read as?" for one word.
  *
  * Exact match on the word as the book prints it. Empty when the volume never guided that word —
@@ -218,8 +398,11 @@ function rubyGuideReadingsFor(harvest, word) {
 module.exports = {
   RUBY_GUIDE_FILE_SUFFIX,
   RUBY_GUIDE_SCHEMA,
+  GUIDE_SPLIT_MIN_PIECES,
   readingScriptOf,
   rubyGuideFileName,
+  rubyGuideSplitFormOf,
+  findRubyGuideSplitForms,
   aggregateRubyGuides,
   writeRubyGuideFile,
   readRubyGuideFile,

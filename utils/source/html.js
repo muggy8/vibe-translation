@@ -26,6 +26,11 @@
  * their `onRubyGuide` callback, and `utils/source/ruby-guides.js` harvests what those
  * callbacks receive. The harvest is produced BY the removal, so it cannot drift from it.
  *
+ * AND IT IS HARVESTED AS IT WAS ANNOTATED. Each guide also carries its own sequence — 蒲 carrying かま,
+ * then 田 carrying た — because the joined pair alone cannot answer which character carried which
+ * reading, and without that answer nothing can rebuild the string the old converter produced
+ * (蒲かま田た) in order to look for it. `pushRubyUnit` is the one pairing rule both converters use.
+ *
  * BOTH CONVERTERS, OR NOTHING. `xhtmlToMarkdown` builds the text the stages read and
  * `htmlToPlainText` builds the size the intake reports a book by; if they disagree, the
  * intake is measuring one book and the pipeline is reading another — the class of bug
@@ -61,7 +66,53 @@ function normalizeSpaces(text) {
 }
 
 /**
- * Split one <ruby> element into the word the book prints and the reading the author wrote.
+ * Open one annotation unit in the sequence: the base the book printed, and the guide that sat on it.
+ *
+ * THE SEQUENCE IS THE POINT. `<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>` annotates 蒲 with かま and 田
+ * with た, and the defect this layer fixed interleaved them exactly that way (蒲かま田た). A row that
+ * only says 蒲田 / かまた cannot answer "which character carried which guide", so nothing downstream
+ * can rebuild the broken string to look for. `utils/source/plan/01-extraction-step.md` §3 names that
+ * as the reason the guide-split tripwire was deferred, and this pairing is what un-defers it.
+ *
+ * Pairing is by DOCUMENT ORDER, which is the order the old converter kept: a guide belongs to the base
+ * text that precedes it. A guide with no base of its own (<ruby>蒲<rt>かま</rt><rt>た</rt></ruby>) is a
+ * second reading on the base already open, so it joins that unit rather than opening an empty one.
+ * Base left over after the last guide (<ruby>蒲<rt>かま</rt>田</ruby>) is a unit with no reading — the
+ * book annotated part of the word and left the rest alone.
+ *
+ * MUTATED by design: both converters build the same units through this one function, so the pairing
+ * rule cannot drift between them (the same reason RUBY_GUIDE_TAGS is one constant).
+ *
+ * @param {RubyGuideAnnotation[]} units - The units found so far, in document order.
+ * @param {string} pendingBase - Base text accumulated since the previous guide.
+ * @param {string} guideText - The guide that follows it.
+ * @returns {void}
+ */
+function pushRubyUnit(units, pendingBase, guideText) {
+  const base = normalizeSpaces(pendingBase);
+  const reading = normalizeSpaces(guideText);
+  if (!base && units.length > 0) {
+    units[units.length - 1].reading = normalizeSpaces(units[units.length - 1].reading + reading);
+    return;
+  }
+  units.push({ base, reading });
+}
+
+/**
+ * Close the sequence: base text the ruby printed after its last guide, which carries no guide of its own.
+ *
+ * @param {RubyGuideAnnotation[]} units - The units found so far, in document order.
+ * @param {string} pendingBase - Base text left over after the last guide.
+ * @returns {void}
+ */
+function closeRubyUnits(units, pendingBase) {
+  const base = normalizeSpaces(pendingBase);
+  if (base) units.push({ base, reading: "" });
+}
+
+/**
+ * Split one <ruby> element into the word the book prints, the reading the author wrote, and the
+ * sequence the annotation was made in.
  *
  * Base text is the ruby's own text nodes plus every non-guide child (a <rb>/<rbc> ruby base,
  * or a <span> the packager wrapped around part of the word). Guide text is every <rt>/<rtc>/<rp>
@@ -70,27 +121,37 @@ function normalizeSpaces(text) {
  *
  * @param {import("cheerio").CheerioAPI} $ - The cheerio API for this document.
  * @param {import("cheerio").Cheerio<Element>} rubyEl - One <ruby> element.
- * @returns {RubyGuide} The word, the reading, and how many guide parts carried it.
+ * @returns {RubyGuide} The word, the reading, how many guide parts carried it, and the annotation sequence.
  */
 function splitRuby($, rubyEl) {
   let base = "";
   let reading = "";
   let annotations = 0;
+  let pending = "";
+  /** @type {RubyGuideAnnotation[]} */
+  const annotated = [];
   rubyEl.contents().each((i, node) => {
     if (node.type === "text") {
       base += node.data || "";
+      pending += node.data || "";
       return;
     }
     if (node.type !== "tag") return;
     const tag = (node.name || "").toLowerCase();
     if (RUBY_GUIDE_TAGS.has(tag)) {
-      reading += $(node).text() || "";
+      const guideText = $(node).text() || "";
+      reading += guideText;
       annotations += 1;
+      pushRubyUnit(annotated, pending, guideText);
+      pending = "";
       return;
     }
-    base += $(node).text() || "";
+    const own = $(node).text() || "";
+    base += own;
+    pending += own;
   });
-  return { base: normalizeSpaces(base), reading: normalizeSpaces(reading), annotations };
+  closeRubyUnits(annotated, pending);
+  return { base: normalizeSpaces(base), reading: normalizeSpaces(reading), annotations, annotated };
 }
 
 /**
@@ -381,18 +442,28 @@ function inlineTextOf(node, onRubyGuide) {
     let base = "";
     let reading = "";
     let annotations = 0;
+    let pending = "";
+    /** @type {RubyGuideAnnotation[]} */
+    const annotated = [];
     for (const child of node.children || []) {
       if (child && child.type === "tag" && RUBY_GUIDE_TAGS.has((child.name || "").toLowerCase())) {
-        reading += inlineTextOf(child) || "";
+        const guideText = inlineTextOf(child) || "";
+        reading += guideText;
         annotations += 1;
+        pushRubyUnit(annotated, pending, guideText);
+        pending = "";
         continue;
       }
-      base += inlineTextOf(child, onRubyGuide);
+      const own = inlineTextOf(child, onRubyGuide);
+      base += own;
+      pending += own;
     }
+    closeRubyUnits(annotated, pending);
     const entry = {
       base: normalizeSpaces(base),
       reading: normalizeSpaces(reading),
       annotations,
+      annotated,
     };
     if (onRubyGuide && (entry.base || entry.reading)) onRubyGuide(entry);
     return entry.base || entry.reading;
@@ -469,6 +540,8 @@ function htmlToPlainText(html, onRubyGuide) {
 module.exports = {
   RUBY_GUIDE_TAGS,
   normalizeSpaces,
+  pushRubyUnit,
+  closeRubyUnits,
   splitRuby,
   renderRuby,
   textWithoutGuides,

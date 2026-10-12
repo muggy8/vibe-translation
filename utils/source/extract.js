@@ -31,7 +31,7 @@ const { PACKAGING_CLASS_RE, PACKAGING_TITLE_RE, assignSegmentIds, classifySectio
 const { firstHeadingText, normalizeSpaces, xhtmlToMarkdown } = require("./html");
 const { normalizeZipPath, openEpub } = require("./epub");
 const { ImageRegistry } = require("./images");
-const { writeRubyGuideFile } = require("./ruby-guides");
+const { writeRubyGuideFile, findRubyGuideSplitForms } = require("./ruby-guides");
 
 /**
  * @typedef {Object} ReadSection - One readable page of the archive, converted to Markdown.
@@ -52,6 +52,13 @@ const { writeRubyGuideFile } = require("./ruby-guides");
  * @property {string} body
  * @property {boolean} syntheticTitle - True when the title is ours rather than the book's.
  * @property {RubyGuide[]} guides - The guides the pages in this group had set aside.
+ * @property {boolean} declaresPackaging - True when EVERY page in this group declared itself packaging
+ *   (a cover plate, an inserted illustration, the colophon). Under the normal path a group like this is
+ *   never a chapter, so it is false for every chapter the pipeline normally produces; it is true only on
+ *   the fallback path, where a book whose contents list names nothing leaves the extraction no choice but
+ *   to make a chapter out of a cover plate. Persisted on the segment, because the title is not always
+ *   evidence — these books name their packaging pages `p-fmatter-002.xhtml`, which no packaging word list
+ *   can recognise. → AGENTS.md gotcha 126.
  */
 
 /**
@@ -224,6 +231,10 @@ function groupSectionsIntoChapters(base, sections, navEntries) {
       body,
       syntheticTitle: own.synthetic,
       guides: pages.reduce((all, p) => all.concat(p.guides || []), []),
+      // The book's own declaration, read back. A group whose EVERY page declared itself packaging is
+      // packaging that the grouping pass had to make a chapter out of — a fact about the segment, not a
+      // guess from its title. A chapter with one illustration page inside it is not.
+      declaresPackaging: pages.length > 0 && pages.every((p) => p.declaresPackaging),
     });
   }
 
@@ -265,6 +276,10 @@ function reportGrouping(base, { grouped, groups, sections, chapterGroups, packag
         body: stripRepeatedHeading(s.md, s.title),
         syntheticTitle: !s.heading,
         guides: s.guides || [],
+        // Every page stands alone here, so the page's own declaration IS the segment's declaration.
+        // This is the path where a cover plate really does arrive as a chapter, and the only durable
+        // evidence that it is one is this mark: its title may be nothing but its file name.
+        declaresPackaging: s.declaresPackaging === true,
       }))
     );
     packaging.length = 0;
@@ -273,6 +288,18 @@ function reportGrouping(base, { grouped, groups, sections, chapterGroups, packag
 
   const chapterChars = chapterGroups.reduce((n, c) => n + c.body.length, 0);
   const packagingChars = packaging.reduce((n, p) => n + p.bodyChars, 0);
+  // The fallback's own blind spot, said out loud: pages the BOOK declared as packaging (a cover plate,
+  // a colophon) are standing here as chapters because the book named nothing else. They carry the
+  // declaration as a mark on the segment, which is what keeps the audit from reporting them as holes.
+  const markedPackaging = chapterGroups.filter((c) => c.declaresPackaging);
+  if (markedPackaging.length > 0) {
+    console.warn(
+      `[source] ${base}: ${markedPackaging.length} of those chapter(s) are pages the book itself declared ` +
+        `as packaging (${markedPackaging.map((c) => `"${c.title}"`).join(", ")}) — kept as chapters because ` +
+        `the contents list named no chapter, and marked as packaging so nothing downstream calls them ` +
+        `missing text.`
+    );
+  }
   console.log(
     `[source] ${base}: ${sections.length} spine page(s) group into ${chapterGroups.length} ` +
       `chapter(s)${grouped ? " using the book's own contents list" : " (one per page)"}; ` +
@@ -341,6 +368,20 @@ async function writeChapterFiles(base, volumeDir, chapterGroups) {
     const content = `# ${title}\n\n${body}`.trim() + "\n";
     const file = `${base}-${ids[i]}.md`;
     await fs.writeFile(path.join(volumeDir, file), content, "utf-8");
+    // THE GUIDE-SPLIT TRIPWIRE, measured at the moment the text is written. The harvest knows how this
+    // chapter's words were ANNOTATED (蒲 carrying かま, 田 carrying た); rebuilding that sequence in order
+    // gives the exact string the old converter left behind (蒲かま田た). Searching for THAT string — not
+    // for "kanji followed by hiragana", which fires on ordinary Japanese constantly — is what makes the
+    // check exact. The answer is persisted on the segment so the audit can report it without opening the
+    // book again, and so a cache hit re-reports the same answer for free.
+    const splitForms = findRubyGuideSplitForms(content, chapterGroups[i].guides || []);
+    if (splitForms.occurrences > 0) {
+      console.warn(
+        `[source] ${base} ${ids[i]} ("${title}"): ${splitForms.occurrences} guide-split string(s) are still ` +
+          `in this chapter's text (${splitForms.forms.slice(0, 3).join(", ")}) — the converter is pasting ` +
+          `pronunciation guides back into the words they annotate.`
+      );
+    }
     segments.push({
       id: ids[i],
       file,
@@ -353,6 +394,14 @@ async function writeChapterFiles(base, volumeDir, chapterGroups) {
       bodyChars: body.trim().length,
       empty,
       syntheticTitle: chapterGroups[i].syntheticTitle === true,
+      // Persisted so "this segment used to be a cover plate" is a FACT a later check can read, instead
+      // of a title it has to guess from (AGENTS.md gotcha 126). False on an ordinary chapter; absent on
+      // a cache written before schema 8.
+      declaresPackaging: chapterGroups[i].declaresPackaging === true,
+      // The tripwire's measurement for this chapter: 0 is the answer for a correct extraction, and the
+      // examples are what a report can quote. See utils/source/ruby-guides.js.
+      guideSplitForms: splitForms.occurrences,
+      guideSplitExamples: splitForms.forms.slice(0, 3),
     });
     contents.push(content.trim());
     for (const guide of chapterGroups[i].guides || []) {
@@ -360,6 +409,7 @@ async function writeChapterFiles(base, volumeDir, chapterGroups) {
         word: guide.base,
         reading: guide.reading,
         annotations: guide.annotations,
+        annotated: guide.annotated,
         chapter: ids[i],
       });
     }
@@ -482,8 +532,16 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
     scriptMix: scriptMixOf(whole),
     // The harvest lives in its own file (see utils/source/ruby-guides.js); the meta records where
     // it is and how big it is, so a cache hit can check the file is still there and a reader can
-    // find it without opening it.
-    rubyGuides: { file: harvest.file, ...harvest.totals, guidesOnPackagingPages: guidesOnPages - guideOccurrences.length },
+    // find it without opening it. `splitForms` is the same volume's guide-split tripwire total: how many
+    // times a string this volume's own annotations would have interleaved still appears in its extracted
+    // chapters. 0 is the answer for a correct converter.
+    rubyGuides: {
+      file: harvest.file,
+      ...harvest.totals,
+      guidesOnPackagingPages: guidesOnPages - guideOccurrences.length,
+      splitForms: segments.reduce((n, s) => n + (s.guideSplitForms || 0), 0),
+      splitFormChapters: segments.filter((s) => (s.guideSplitForms || 0) > 0).length,
+    },
   };
 }
 

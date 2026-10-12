@@ -1,10 +1,12 @@
 /**
- * utils/source/audit/checks.js — the five questions the extraction layer can answer about itself.
+ * utils/source/audit/checks.js — the six questions the extraction layer can answer about itself.
  *
- * Exactly the five `utils/source/plan/01-extraction-step.md` §3 measured as computable from what
- * extraction already produces. The two it deferred are NOT here, and the plan says why: a guide-split
- * string cannot be rebuilt from a harvest that stores only the joined (word, reading) pair, and "is
- * this a character name?" has no roster to ask at extraction time.
+ * The five `utils/source/plan/01-extraction-step.md` §3 measured as computable from what extraction
+ * already produces, plus the guide-split tripwire §3 deferred — deferred because the harvest could not
+ * answer it (a row was 蒲田 / かまた, and a joined pair cannot say which character carried which reading,
+ * so the broken string could not be rebuilt). The harvest now records each annotation's own sequence
+ * (`RubyGuide.annotated`, harvest schema 2), which is what made the sixth check writable. The other
+ * deferral still stands: "is this a character name?" has no roster to ask at extraction time.
  *
  * Every check is a pure function over `{volume, bundle, names, segments, packagingTitles}` returning
  * `PostMortemFinding[]`. No file reads, no model, no writes, no agent — the plan's §4 is explicit that
@@ -259,10 +261,61 @@ function auditGuideHarvest({ volume, bundle, names }) {
   ];
 }
 
+/**
+ * Check 6 (HIGH) — a pronunciation guide is still pasted inside the word it annotates.
+ *
+ * This is the regression tripwire for the 2026-10-12 fix (gotcha 123): `<ruby>蒲<rt>かま</rt>田<rt>た
+ * </rt></ruby>` must extract as 蒲田, and the defect that made it extract as 蒲かま田た sat in all 17
+ * volumes of the live series unnoticed, splitting 193 published glossary terms and hiding character names
+ * from the rule that looks for them.
+ *
+ * It is EXACT, and only exactness makes it worth having. The string to look for is rebuilt from the
+ * annotation's own sequence — the base characters and the reading each one carried, in the order the book
+ * annotated them — which is the string the old converter produced, character for character. Pattern
+ * matching is deliberately not used: "kanji followed by its own reading" fires 666 times on the 17 real
+ * books' ordinary prose (出だ, 言い, 回まわ, 聞き), and a check that cries wolf 666 times is a check
+ * somebody switches off. The floor that keeps it silent (`GUIDE_SPLIT_MIN_PIECES`) is documented in
+ * `utils/source/ruby-guides.js`.
+ *
+ * The check READS the extraction's own measurement (`segment.guideSplitForms`, written by
+ * `utils/source/extract.js` as it writes each chapter file) rather than re-reading the book: the audit is
+ * pure, and a cache hit re-reports the same answer for free. A segment with no recorded measurement — a
+ * bundle cached before schema 8, or a hand-built fixture — is not reported as clean; it is not answerable,
+ * and `BUNDLE_SCHEMA_VERSION` is what guarantees every bundle the pipeline resolves has the measurement.
+ *
+ * @param {{volume: TranslationTargetVolume, segments: SourceSegment[]}} p
+ * @returns {PostMortemFinding[]} One HIGH finding per chapter whose text still holds a guide-split string.
+ */
+function auditGuideSplitSurvives({ volume, segments }) {
+  const findings = [];
+  for (const segment of segments) {
+    const occurrences = Number.isFinite(segment.guideSplitForms) ? segment.guideSplitForms : null;
+    if (occurrences === null || occurrences === 0) continue;
+    const examples = (Array.isArray(segment.guideSplitExamples) ? segment.guideSplitExamples : []).slice(0, 3);
+    findings.push(
+      finding(
+        "HIGH",
+        "guide-split-in-text",
+        EXTRACTION_STEP,
+        volume.installmentNumber || null,
+        findingFile(volume, segment.file),
+        `Chapter "${segment.id}" ("${segment.title}") holds ${occurrences} guide-split string(s)` +
+          `${examples.length ? ` — ${examples.join(", ")}` : ""} — in its text. That is the shape a ` +
+          `pronunciation guide used to take: the book writes 蒲田 read かまた and the converter pasted ` +
+          `the reading into the word, producing 蒲かま田た. Every word of this shape in the text is a word ` +
+          `the glossary will record wrongly and a name the character rules cannot see. The fix is in the ` +
+          `converter (utils/source/html.js), never in the extracted file.`
+      )
+    );
+  }
+  return findings;
+}
+
 module.exports = {
   auditSourceIsArchive,
   auditHasUsableChapter,
   auditEmptyChapters,
   auditTitlesAreTitles,
   auditGuideHarvest,
+  auditGuideSplitSurvives,
 };
