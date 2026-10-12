@@ -12,6 +12,13 @@ it to look at one function.
 
 One slice per dispatch. If you find yourself writing "and also", that is two dispatches.
 
+**One dispatch in flight at a time.** Wait for it to return, verify it, commit it, then start
+the next. Never run two workers side by side — not two investigators, and not a builder
+together with a verifier. Every measurement you take afterwards describes the repository at
+the instant it runs; a worker writing while another one measures gives you a reading of a state
+that never existed, and you will end up reporting it as fact. Dispatch → wait → verify →
+commit → dispatch.
+
 ## Scope the slice before you write it
 
 Write down, for yourself:

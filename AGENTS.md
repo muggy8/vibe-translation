@@ -206,7 +206,7 @@ and keeps the conversation free for deciding with the account owner. A `verifier
 `/slice <task>` and `/verify <claim>` are the shortcuts. The procedure is in the
 `dispatching-slices` skill (`.opencode/skills/dispatching-slices/SKILL.md`).
 
-Two rules in it are load-bearing, and they are here because they were learned expensively:
+Three rules in it are load-bearing, and they are here because they were learned expensively:
 
 1. **Every slice gets a brand-new worker session. Never resume one.** A worker session kept
    alive across several tasks — measured here: 473 messages, 3.3M input tokens, 54M cache-read
@@ -223,3 +223,10 @@ Two rules in it are load-bearing, and they are here because they were learned ex
    before the dispatch for everything that was promised to survive. Nothing is committed on a
    report's word, and a claim that does not match the disk is reported to the account owner
    that plainly rather than patched over.
+3. **One worker at a time — never two in flight.** If two or more slices are needed, finish
+   one (dispatch, verify, commit) before starting the next. This includes the tempting cases:
+   two read-only investigators, or a builder plus a checker running together. Every check that
+   comes afterwards — `git status`, `npm test`, a database query, a checksum — describes the
+   repository at the instant it runs, so a worker writing while another one measures produces a
+   reading of a state that never existed, and that reading gets reported as fact. The sequence
+   is dispatch → wait → verify → commit → dispatch.

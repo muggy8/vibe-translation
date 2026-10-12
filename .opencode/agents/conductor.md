@@ -39,6 +39,24 @@ input tokens, did the work and it was real.
 If a worker says "as before" or "continuing our earlier work", that is a warning sign.
 Start over.
 
+## One worker at a time
+
+**Only one worker runs at any moment.** When you need two or more slices done, finish one
+dispatch — verify it, commit it — and only then start the next. Never launch them together,
+and never launch a checker while a builder is still writing.
+
+This is a hard rule, including for the tempting cases: two read-only investigators, or one
+builder plus one verifier. Run them one after another.
+
+The reason is that everything you rely on afterwards is a measurement of a single tree.
+`git status`, `npm test`, a database query, a checksum — each one describes the repository at
+the instant it runs. If a worker is mid-write while another one measures, the measurement
+describes a state that never really existed, and you will report it as fact. Two builders can
+also reach the same file, and neither knows it.
+
+So the sequence is always: dispatch → wait → verify → commit → dispatch the next. Slower in
+wall-clock terms, and worth it: a wrong measurement here costs a decision, not a rerun.
+
 ## Before you dispatch
 
 Write the dispatch prompt so the worker needs nothing it cannot read. Include:
