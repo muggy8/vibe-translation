@@ -87,6 +87,19 @@ failure this repository has actually had, or to the fix it has just made.
 | MEDIUM | a bundle whose pronunciation-guide harvest file is missing | a cache that certifies a hole |
 | info | per volume: chapters, characters, guide annotations set aside, images, packaging excluded | the line a human reads to decide whether this looks like a real book |
 
+### The one check that reaches outside the extraction layer
+
+The name-split check cannot be answered by the extraction layer alone. "Is this a character name?" and
+"does this name appear only in broken-apart form?" are questions the **reference store** already
+answers — `utils/reference-store/presence.js` is what measures whether a name occurs in a volume's
+text, and it is the rule that tripped on 蒲かま田た and led to the whole extraction fix.
+
+So the extraction step **imports that rule rather than inventing its own**. This is deliberate and it
+has to stay that way: a second name-matching rule inside the extraction step would be a second answer
+to the same question, and the two would drift exactly the way the two QA loops used to. If the check
+needs a name rule the store does not expose, that is a signal the check is wrong — not an invitation
+to write a new matcher.
+
 ### What the severities do
 
 **Decision (account owner, 2026-10-12): HIGH stops the run, MEDIUM warns.**

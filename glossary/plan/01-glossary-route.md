@@ -164,6 +164,13 @@ before it is reported as done.
 (`utils/source/plan/01-extraction-step.md` §6), and it runs first. Clean extracted text is a
 precondition of slices 1–6, not a task inside them.
 
+**Where the comparison data lives:** the 17 authored glossaries, the 468 tagged rows and the
+authored POV maps are in the **books' repository** (`/mnt/windows/weeb/oresuki`, a different git
+repository from this one) at the tag `pre-extraction-fix-2026-10-12`. They are read with
+`git -C /mnt/windows/weeb/oresuki show <tag>:<path>` — never by checking that repository out, and
+never with `git add -A` there (`AGENTS.md` gotcha 10). Slices 2 and 5 both depend on this, and a
+worker that does not know the two repositories exist will look for files that are not in this tree.
+
 | # | slice | acceptance test |
 |---|---|---|
 | 1 | The record becomes unconditional: open it per volume, file the extraction's terms, seal after the grade. Delete `GLOSSARY_STORE_VALIDATORS`. | The store loop's glossary path *is* the default loop's glossary path; the flag's name appears nowhere in the repository. |

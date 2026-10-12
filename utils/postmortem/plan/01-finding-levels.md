@@ -92,10 +92,42 @@ about how bad the text looks.
 | **MINOR** | wrong in one file of one volume, or in the run's own records; nothing downstream inherits it | no | investigate, batched | **minor**: one file, one volume, a re-run |
 | **NOTE** | a measurement, or a leftover that is doing its job | no | report only | none |
 
-**MAJOR pausing at the volume boundary is the load-bearing choice.** A step is the smallest unit this
-runner can restart, so "pause" means: finish the volume you are in, do not start the next one, get
-the answer, then continue. Pausing mid-chapter would leave a half-built volume, which is the one
-state every check in this layer is written to avoid.
+**MAJOR pausing at the volume boundary is the load-bearing choice** — and it is also the one thing
+in this plan the current architecture **cannot do**. That has to be said here rather than discovered
+in slice 4.
+
+### 3.1 The pause does not exist yet, measured
+
+A step runs **all of its volumes inside one process**, and the assessment runs **after the step
+returns**:
+
+- `index/main.js` spawns one gulp process per step; the step's own task walks the volumes inside it.
+- Seven of the stages walk those volumes through one shared loop — `runVolumeSeries` / `walkVolumes`
+  in `utils/series-run/loop.js` (`glossary`, `character-voice`, `style-guide`, `jump-in-wiki`,
+  `translate`, `verify-translate`, `polish`).
+- That loop takes `processVolume` per volume and `afterVolumes` **after all of them**. There is no
+  hook after **one** volume.
+
+So today a MAJOR finding at volume 3 is discovered **after volumes 4–17 have already been built on
+it** — which is exactly the damage the pause exists to prevent. A plan that says "pause at the volume
+boundary" without saying where the pause lives is a plan that describes an outcome, not a change.
+
+### 3.2 Where the pause has to live
+
+**One place, not seven.** The gate belongs in `walkVolumes`: after a volume's work completes, assess
+that volume for that step, and if the result is STOP or MAJOR, stop the walk and exit with a distinct
+code. Seven stages get it by inheriting it; the stages that do not use the shared loop get named as
+exceptions rather than silently missing the gate.
+
+**What it costs.** The assessment is free of model calls but not free of time, and per-volume means
+**17 volumes × 9 steps = 153 assessments** per full run instead of 9. That is the price of the pause,
+and it is the first thing to measure before this is shipped widely — see §9.
+
+**What "continue" means.** The runner restarts a **step**, not a volume, and `--volume` already
+exists. So resuming means: the step exits at volume *n*, the answer is obtained, and the step is
+re-run for volume *n* onward. The idempotent skip-checks are what make that cheap — a volume already
+accepted is not paid for twice. Pausing mid-chapter is not on the table: it leaves a half-built
+volume, which is the one state every check in this layer is written to avoid.
 
 ---
 
@@ -194,10 +226,15 @@ it is reported as done.
 | # | slice | what it has to prove |
 |---|---|---|
 | 1 | The level table as data, and the test that pins emitted severity against declared level. | The four blind kinds fail the test **before** any behaviour changes — the slice is proven by a red test it makes green. No routing changes yet. |
-| 2 | The triage routes on level instead of severity: `STOP` halts, `MAJOR` pauses at the volume boundary, `MINOR` batches, `NOTE` reports. | A planted `chapter-without-draft` fixture becomes a pause and an investigation, not a note. A planted `unexpected-file` does **not** stop a run. |
+| 2 | The triage routes on level instead of severity: `STOP` halts, `MAJOR` pauses, `MINOR` batches, `NOTE` reports. | A planted `chapter-without-draft` fixture becomes a pause and an investigation, not a note. A planted `unexpected-file` does **not** stop a run. |
 | 3 | The investigation bound: one per (kind, step, run), the answer filed on the ticket, a second occurrence reusing it. | A finding present in every volume of the fixture produces **one** model turn, and the offline loop's call count records the number. |
-| 4 | The pause is executable: the run stops at the volume boundary, the answer is obtained, and the run continues from that volume. | The offline loop shows a MAJOR finding halting at volume *n* and resuming at volume *n* — not at *n+1*, and not mid-chapter. |
-| 5 | The docs and the maps: `docs/delivery-layer.md`, `docs/environment.md` if any knob moves, and a gotcha for the four-blind-kinds finding. | The maps describe the routing that exists. |
+| 4 | **The per-volume gate in the shared volume loop** (§3.2) — the thing that makes a pause possible at all. | `walkVolumes` stops after the volume that tripped the gate and exits with its own code; the stages that do not use the shared loop are named out loud rather than silently ungated. Nothing is assessed mid-chapter. |
+| 5 | The pause is executable end to end: the run halts at volume *n*, the answer is obtained, the step resumes from volume *n*. | The offline loop shows a MAJOR finding halting at volume *n* and resuming at volume *n* — not *n+1* — and the resumed pass does not pay for the volumes already accepted. |
+| 6 | The docs and the maps: `docs/delivery-layer.md`, `docs/environment.md` if any knob moves, and a gotcha for the four-blind-kinds finding. | The maps describe the routing that exists. |
+
+**Slice 4 is the one this plan used to skip.** Slices 2 and 3 can be built without it — they change
+what the triage *says* — but nothing before slice 4 changes what a running step *does*, and a plan
+that reaches its final slice before noticing that has a hole in the middle of it, not at the end.
 
 ---
 
@@ -210,6 +247,7 @@ it is reported as done.
 | chapters of the book that were never translated, caught by the layer | **0** — the check exists and its output is discarded | every one, at MAJOR |
 | volumes published with no grader signing off, caught | **0** — same | every one, at MAJOR |
 | investigations per run | 1 kind (`quarantine-present`) | bounded by (kind × step), counted in the offline loop |
+| assessments a full 17-volume run makes | **9** (one per step, after it returns) | **153** (one per volume per step) — free of model calls, not free of time |
 | model calls added to the offline loops | 93 / 39 today | re-baselined and written into this plan |
 
 **Slice 1 has to produce the red test first.** If it goes green immediately, the measurement in §1 is
@@ -222,7 +260,7 @@ wrong and this plan is wrong, and that is the cheapest possible way to find out.
 1. **How many MAJOR findings does a real 17-volume run produce?** Unknown, and it cannot be known
    until the corpus is re-extracted, because the corpus currently holds no generated output. If the
    answer is "several per volume", a pause-at-every-MAJOR run spends more time investigating than
-   translating, and the bound in §5 has to tighten. **This is measured before slice 4 is trusted.**
+   translating, and the bound in §5 has to tighten. **This is measured before slice 5 is trusted.**
 2. **Does a MAJOR pause need a ceiling?** A STOP halts outright. A MAJOR pause that cannot get an
    answer becomes the thing this layer refuses everywhere else: a run that stops making progress. The
    per-step intervention budget is the obvious ceiling, and whether it is the right one is a decision
@@ -237,6 +275,12 @@ wrong and this plan is wrong, and that is the cheapest possible way to find out.
    about a *measurement being wrong*, not about a deliverable being wrong — which argues for NOTE.
    It is placed at MINOR here because it can hide a real artifact behind an old one. Measure it
    against the real corpus before it is pinned.
+5. **Is a per-volume assessment for every step the right price, or only for the steps that can
+   produce a MAJOR?** 153 assessments per run instead of 9 is the cost of the pause, and it is paid on
+   every volume of every step whether or not that step has anything at MAJOR or above. Assessing only
+   the steps whose artifact is inherited — the references and the records, not the wiki or the style
+   guide — would cut most of it. **Measure the 153 before deciding**, because the difference between
+   "cheap" and "not" here is a number nobody has yet taken.
 
 ---
 
