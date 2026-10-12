@@ -184,6 +184,10 @@ volume, which is the one state every check in this layer is written to avoid.
 
 Twenty-eight finding types exist today. Every one gets a level, declared in code.
 
+> **Corrected before slice 1 was scoped: it is 67, not 28.** See the measurement below. The list that
+> follows is kept as written, because the four kinds this plan exists for are in it and their reasoning
+> is unchanged — but nobody should build the table from this paragraph.
+
 **And a correction made on 2026-10-12 while slice 4 of the extraction plan was being built:** the
 twenty-eight names below are the delivery layer's own. **The extraction audit's kinds are not among them**
 — `source-not-archive`, `no-usable-chapter`, `chapter-extracted-empty`, `guide-split-in-text` (added the
@@ -193,6 +197,29 @@ six extraction kinds until the table includes them. That is not a defect in the 
 are declared in `utils/source/audit/rules.js` `EXTRACTION_AUDIT_KINDS` with the severity each one is emitted
 at, which is the shape this plan wants for every kind. It is a gap in this plan's list, and it is said here
 rather than discovered later by whoever builds slice 1.
+
+**And a second, much larger correction, measured on 2026-10-12 while slice 1 was being scoped.** The
+list below is not 28 kinds and the total is not 34. Scanning every `.js` in the repository for a call to
+the finding constructor (`finding(severity, kind, …)` in `utils/postmortem/rules.js:73`) finds **65
+distinct kinds**, and `missing-required` / `missing-expected` are built separately in
+`utils/postmortem/file.js:35` where the severity comes from the expectation's own level — so the
+inventory the level table has to cover is **67**, not 34. **Thirty-three of them are not named anywhere
+in this plan.** They fall into three families the list simply never looked at:
+
+| family | count | examples, with the severity they are emitted at |
+|---|---|---|
+| the reference store's own audit | 29 | `reference-character-lost-in-copy` (HIGH), `reference-volume-unsealed` (HIGH), `reference-copy-row-count-mismatch` (HIGH), `reference-voice-covers-fewer-characters` (HIGH), `reference-evidence-does-not-verify` (HIGH), `reference-claim-filed-without-a-roster-entry` (MEDIUM), `reference-voice-mention-not-covered` (MEDIUM), `reference-record-reattached-to-its-source` (MEDIUM) |
+| the manager and the loop | 3 | `loop-crashed` (HIGH), `manager-refused` (HIGH), `manager-corrected` (LOW) |
+| the extraction audit, already named above | 6 | `source-not-archive`, `no-usable-chapter`, `chapter-extracted-empty`, `guide-split-in-text` (all HIGH), `title-is-filename`, `ruby-harvest-missing` (both MEDIUM) |
+
+Two things follow, and they change what slice 1 has to do. First, **the table is 67 rows, not 34**, and
+the test that pins "every emitted kind has a declared level" is the only thing that will keep it honest
+as kinds are added — a hand-written list of 28 was already wrong twice. Second, the reference-store
+family is where the *cumulative* damage lives: `reference-character-lost-in-copy` and
+`reference-volume-unsealed` are exactly "wrong in a way every later volume inherits", which is the
+definition of MAJOR, and they are not in `DAMAGE_KINDS` at all. The four kinds this plan was written for
+are the visible symptom; the store's own audit is the larger half of the same disease, and it was
+invisible because nobody counted.
 
 **STOP** — halt now.
 `missing-required` · `missing-volume-folder` · `empty-or-stub` · `bad-json` · `audit-verdict-fail` ·
@@ -303,7 +330,7 @@ that reaches its final slice before noticing that has a hole in the middle of it
 | measure | today | after |
 |---|---|---|
 | kinds the triage calls damage that can actually reach its decision | **6 of 10** (`missing-required`, `missing-volume-folder`, `empty-or-stub`, `bad-json`, `audit-verdict-fail`, `step-undeclared`) | **10 of 10** |
-| finding kinds with a declared level and a route | 0 — routing is by severity alone | **all 34** (the 28 listed in §4 plus the 6 the extraction audit emits) |
+| finding kinds with a declared level and a route | 0 — routing is by severity alone | **all 67** (measured 2026-10-12: 65 kinds emitted through `finding(…)` plus `missing-required` / `missing-expected`, built in `utils/postmortem/file.js:35`) |
 | chapters of the book that were never translated, caught by the layer | **0** — the check exists and its output is discarded | every one, at MAJOR |
 | volumes published with no grader signing off, caught | **0** — same | every one, at MAJOR |
 | investigations per run | 1 kind (`quarantine-present`) | bounded by (kind × step), counted in the offline loop |
