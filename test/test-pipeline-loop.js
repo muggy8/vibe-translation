@@ -8,8 +8,13 @@
  * runs them, on a real two-volume series laid out in a temp folder, with
  * `fake-workflow.js` answering behind the stub the way a real model answers:
  *
- *   discover → glossary → character-voice → style-guide → jump-in-wiki
+ *   discover → extract → glossary → character-voice → style-guide → jump-in-wiki
  *           → consistency-audit → translate → translate-qa → polish → translation-report
+ *
+ * `extract` is in that list and makes NO model call: it is the deterministic extraction audit
+ * (extract.js), and the loop runs it so the step is exercised end to end rather than only by its own
+ * suite. The audit's `stage-made-calls` rule knows it is deterministic by design, so a step that
+ * correctly calls nothing is not reported as a stage that failed to call the model.
  *
  * Nothing is mocked below the task code: the real manifest intake, the real
  * source bundles, the real agent loop and file tools, the real approve gate, the
@@ -76,9 +81,16 @@ const REPORT_DIR = path.join(LOOP_DIR, "report");
 const HOOKS_DIR = path.join(LOOP_DIR, "empty-hooks");
 const CALIBRATION_FILE = path.join(LOOP_DIR, "token-calibration.json");
 
-/** The ten gulp tasks, in the order the default run uses. */
+/**
+ * The eleven gulp tasks, in the order the default run uses.
+ *
+ * `extract` makes no model call. It is here because the loop is the only place the whole pipeline runs
+ * in order, and a step that is never run in order is a step whose interaction with the others is
+ * unmeasured — its 0 calls included, which is what `DETERMINISTIC_STAGES` in `prompt-audit.js` is for.
+ */
 const STAGES = [
   "discover",
+  "extract",
   "glossary",
   "character-voice",
   "style-guide",
@@ -162,6 +174,9 @@ async function runStageChild(name) {
     switch (name) {
       case "discover":
         await require("../get-translation-target").discoverSeries();
+        break;
+      case "extract":
+        await require("../extract").extractVolumes();
         break;
       case "glossary":
         await require("../glossary").glossary();

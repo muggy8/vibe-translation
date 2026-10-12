@@ -216,10 +216,11 @@ async function scenarioCommandsAreDeclared() {
     assert.ok(exposed.includes(name), `${name} is declared as a delivery command but no npm script runs it`);
   }
 
-  // The corpus half is untouched: not one pipeline step declares a run scope, so the nine steps are
-  // assessed exactly as they were before this change.
+  // The corpus half is untouched: not one pipeline step declares a run scope, so the thirteen steps are
+  // assessed exactly as they were before this change. (`extract` is the step that most tempts an
+  // exception, because its whole output is a report — and it declares nothing, for this reason.)
   const pipeline = Object.keys(STEP_ARTIFACT_SPECS).filter((n) => !DELIVERY_COMMANDS.includes(n));
-  assert.strictEqual(pipeline.length, 12, "the twelve pipeline steps are still the corpus half");
+  assert.strictEqual(pipeline.length, 13, "the thirteen pipeline steps are still the corpus half");
   for (const name of pipeline) {
     assert.strictEqual(STEP_ARTIFACT_SPECS[name].run, undefined, `${name} must not declare a run scope`);
   }

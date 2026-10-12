@@ -51,8 +51,13 @@
  *                                     whole-installment processing; the fallback
  *                                     also triggers automatically when the whole
  *                                     text exceeds SOURCE_CHUNK_THRESHOLD_CHARS)
- *   (default task)                     # all nine in order:
- *                                     # discover -> glossary -> character-voice ->
+ *   npx gulp extract                # resolve every volume's source bundle, audit the
+ *                                     # extraction (five deterministic checks), and write the
+ *                                     # per-volume report + series summary into the run's
+ *                                     # records. No model call. Re-verifies a warm cache
+ *                                     # instead of re-extracting, and says which it did.
+ *   (default task)                     # all ten in order:
+ *                                     # discover -> extract -> glossary -> character-voice ->
  *                                     # style-guide -> jump-in-wiki ->
  *                                     # consistency-audit -> translate ->
  *                                     # translate-qa -> polish
@@ -70,6 +75,7 @@ require("./configs/env-defaults").bootstrapEnv();
 const fs = require("fs");
 const path = require("path");
 const { discoverSeries } = require("./get-translation-target");
+const { extractVolumes } = require("./extract");
 const { jumpInWiki } = require("./jump-in-wiki");
 const { glossary } = require("./glossary");
 const { characterVoice } = require("./character-voice");
@@ -209,11 +215,27 @@ async function discover() {
   });
 }
 
+/**
+ * The "extract" step (step 1): resolve every volume's source bundle, run the extraction audit over it,
+ * and record what was found. Deterministic - no model call, no prompt, no agent - and the only step
+ * that owns whether the text every later artifact is built on is the text the book actually prints.
+ *
+ * It sits after `discover` because it needs the plan of record to know which file is which volume, and
+ * before everything else because everything else is downstream of its output. On a warm cache it
+ * verifies each volume's bundle against the current archive and the current converter schema instead of
+ * re-extracting, and says which of the two it did, per volume. A HIGH finding fails the step
+ * structurally, so the stages after it do not run. See `utils/source/plan/01-extraction-step.md`.
+ */
+async function extractStep() {
+  await extractVolumes();
+}
+
 // Each step is wrapped three times: the run lock on the outside (so a collision is refused
 // before a hook switches a model container in), the hook runner next, and the structural
 // marker on the inside (closest to the error, so it records the failure the task module
 // actually threw).
 const discoverTask = withRunLock("discover", withHooks("discover", withStructuralMarker("discover", discover)));
+const extractTask = withRunLock("extract", withHooks("extract", withStructuralMarker("extract", extractStep)));
 const glossaryTask = withRunLock("glossary", withHooks("glossary", withStructuralMarker("glossary", glossary)));
 const characterVoiceTask = withRunLock(
   "character-voice",
@@ -267,6 +289,9 @@ const translationReportTask = withRunLock(
  */
 const PIPELINE_STEPS = [
   { name: "discover", run: discoverTask },
+  // Extraction is its own step so that the text every later artifact is built on is checked and
+  // reported before anything is built on it (utils/source/plan/01-extraction-step.md).
+  { name: "extract", run: extractTask },
   { name: "glossary", run: glossaryTask },
   { name: "character-voice", run: characterVoiceTask },
   { name: "style-guide", run: styleGuideTask },
@@ -332,6 +357,7 @@ async function runPipeline() {
 }
 
 exports.discover = discoverTask;
+exports.extract = extractTask;
 exports["jump-in-wiki"] = jumpInWikiTask;
 exports.glossary = glossaryTask;
 exports["character-voice"] = characterVoiceTask;
@@ -343,8 +369,8 @@ exports.retranslate = retranslateTask;
 exports["translate-qa"] = translateQaTask;
 exports.polish = polishTask;
 exports["translation-report"] = translationReportTask;
-// The whole default run also fires pre-pipeline / post-pipeline around all eight.
-// The lock is the outermost layer: the default run holds it across all nine in-process
+// The whole default run also fires pre-pipeline / post-pipeline around the whole run.
+// The lock is the outermost layer: the default run holds it across all ten in-process
 // steps, and the inner per-step wrappers join it rather than competing with it.
 exports.default = withRunLock(PIPELINE_TASK, withHooks(PIPELINE_TASK, runPipeline));
 

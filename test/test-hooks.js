@@ -50,6 +50,7 @@ assert.deepStrictEqual(
   TASKS,
   [
     "discover",
+    "extract",
     "glossary",
     "character-voice",
     "style-guide",

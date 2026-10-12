@@ -67,7 +67,7 @@ The run prints the exact folder it is writing to on its first line.
 |---|---|
 | [`docs/docker.md`](docs/docker.md) | Running it in a container, and pointing it at a model server on your own machine |
 | [`docs/environment.md`](docs/environment.md) | Every setting in `.env`, its default, and what it decides |
-| [`docs/pipelines.md`](docs/pipelines.md) | What each of the nine steps actually does |
+| [`docs/pipelines.md`](docs/pipelines.md) | What each of the pipeline's steps actually does |
 | [`docs/architecture.md`](docs/architecture.md) | How a task runs: the model calls, the file tools, the QA loops |
 | [`AGENTS.md`](AGENTS.md) | The index for working on this codebase |
 

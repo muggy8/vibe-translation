@@ -1,9 +1,49 @@
 # The pipelines, one at a time
 
-Sections 4 to 8.5: glossary, jump-in-wiki, character-voice, style-guide, the consistency audit and
-handoff, and the translation stage.
+Sections 3.5 to 8.5: the extraction step, then glossary, jump-in-wiki, character-voice, style
+guide, the consistency audit and handoff, and the translation stage.
 
 Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md).
+
+## 3.5. Pipeline 0: extract (`extract.js`) — check the books before anything is built on them
+
+Per volume, and nothing else: **no model call, no prompt, no agent.** `npx gulp extract`, or
+`npm run pipeline -- --stages=extract`, and it runs in the default run between `discover` and `glossary`.
+
+1. **Resolve the volume's source** through the same `resolveSourceBundle` the other eleven callers use —
+   the same door, the same cache, no second implementation of "is this extraction current".
+2. **Say what happened to that volume's bundle**, per volume, in the log and in the report: **VERIFIED**
+   (the bundle on disk matches the archive and schema 7 — nothing re-extracted), **RE-EXTRACTED** (a
+   bundle was there and is no longer current), **EXTRACTED** (none existed yet), **READ** (a plain-text
+   book has no cache to verify, and calling that "re-extracted" would report work that did not happen).
+   The second run over the same 17 books costs 154 ms against the first run's 1,840 ms and re-extracts
+   nothing.
+3. **Run the five deterministic checks** (`utils/source/audit.js` — `source-not-archive`,
+   `no-usable-chapter`, `chapter-extracted-empty`, `title-is-filename`, `ruby-guide-harvest`) and count
+   what the volume holds: chapters, packaging groups, characters, pronunciation guides set aside, images.
+4. **Write the record**: `extraction-<NN>.md` + `.json` per volume and `extraction-summary.md` + `.json`
+   for the series, all under the run's own records folder (`.run/postmortem/`). **Nothing is written into
+   a volume folder by this step** beyond the bundle files the extraction itself already writes, and every
+   one of those names is one `intake/config.js` already recognises — which is what keeps the next intake
+   run from mistaking a report for a book (gotcha 119).
+5. **Then decide whether the series failed.** A HIGH finding throws a **structural** error — every volume
+   audited and every report written first, because the audit costs nothing and one run should answer
+   "what is wrong with my books?" for all of them — so `ON_TASK_ERROR=continue` cannot walk past a broken
+   book and `glossary` is never started on text the audit already says is wrong. A MEDIUM is printed,
+   counted and recorded, and the run continues. A volume whose archive will not open is named as a volume
+   that could not be read, `**FAILED**` in its own report, and is fatal to the step.
+
+Measured over a **copy** of all 17 real archives: 133 chapters, 109 packaging groups, 2,450,415
+characters, 45,429 pronunciation guides, 457 images, **0 HIGH and 0 MEDIUM** — the five checks produce no
+false positives on legitimate material. Measured on the offline loop's plain-text fixture: 2 volumes,
+2 chapters, **0 HIGH and 2 MEDIUM** (`title-is-filename`, one per volume — a `.txt` book that declares no
+heading of its own is titled after its file), and the loop continues.
+
+What it does **not** do: it does not re-extract a warm cache, it does not repair anything it finds, it
+does not declare an artifact expectation anywhere (`test/test-delivery-audit.js` pins that no pipeline
+step declares a run scope — gotcha 127), and it is not the converter (`utils/source/extract.js` is).
+
+→ `extract.js`, `extract/`, `utils/source/plan/01-extraction-step.md`, `docs/map-core.md`.
 
 ## 4. Pipeline A: glossary (`glossary.js`)
 

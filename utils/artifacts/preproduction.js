@@ -1,5 +1,5 @@
 /**
- * utils/artifacts/preproduction.js — what the six pre-production steps owe each volume and the series root.
+ * utils/artifacts/preproduction.js — what the seven pre-production steps owe each volume and the series root.
  *
  * The cumulative tasks (glossary, character voice, style guide, wiki) owe a volume copy AND a
  * series-root copy, because the translation stage reads the root copies; the audit owes the
@@ -15,6 +15,26 @@ const { researchEnabled, QUARANTINED_CUMULATIVE } = require("./rules");
 /** @typedef {import("../artifacts").ArtifactContext} ArtifactContext */
 
 const PREPRODUCTION_SPECS = {
+  extract: {
+    step: "extract",
+    // The extraction step's deliverable is not a file in the corpus. It is the bundle inside each volume
+    // folder (names the intake already knows: `-bundle.meta.json`, `-whole.md`, `-chN.md`,
+    // `-ruby-guides.json`) and the record of what the extraction produced, which the step writes into
+    // the run's own folder (`postMortemDir()`) and proves it wrote with `assertWrote`
+    // (`extract/reports.js`).
+    //
+    // It declares NOTHING here, and that is a pinned invariant, not an oversight: `test/test-delivery-audit.js`
+    // pins that no pipeline step declares a run scope, so the corpus half is assessed exactly as it was
+    // before the delivery commands got their run-scope audit. Giving `extract` a run expectation would
+    // slip past that guard on the way to a report nobody is promised. If the account owner wants the
+    // delivery layer to check the extraction summary exists, that is a decision about the invariant, and
+    // it belongs in `utils/postmortem/plan/01-finding-levels.md`, not in a step's spec.
+    perVolume: false,
+    volume: [],
+    series: [],
+    quarantines: [],
+  },
+
   discover: {
     step: "discover",
     perVolume: false,

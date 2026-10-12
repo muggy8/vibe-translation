@@ -63,11 +63,14 @@ const harness = require("../harness");
 
 /**
  * The pipeline steps (gulp task names). "discover" is step 0 — the series
- * intake that writes the plan of record every other step reads.
+ * intake that writes the plan of record every other step reads. "extract" is
+ * step 1 — the deterministic extraction audit that owns the text every later
+ * step reads, and the only step in this list that makes no model call.
  * @type {string[]}
  */
 const TASKS = [
   "discover",
+  "extract",
   "glossary",
   "character-voice",
   "style-guide",

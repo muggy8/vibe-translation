@@ -26,8 +26,16 @@ const { acceptanceResponseFormat, ACCEPTANCE_BANDS } = require("../configs/share
  *  system prompt, `max_tokens: 1`, and the server's own usage count is the answer. */
 const CALIBRATION_KIND = "calibration-probe";
 
-/** Stages that are deterministic by design and therefore make no model call. */
-const DETERMINISTIC_STAGES = new Set(["translation-report"]);
+/**
+ * Stages that are deterministic by design and therefore make no model call.
+ *
+ * The rule this set serves ("every stage that talks to the model made at least one call") is a check
+ * on the stages that TALK. A step that is deterministic by design makes zero calls on every healthy
+ * run, so leaving it out of this set would report a working step as an idle one — and a rule that
+ * cries on correct behaviour is a rule somebody switches off. `extract` is the extraction audit: five
+ * checks over a checksum and a file listing, no prompt anywhere (extract.js).
+ */
+const DETERMINISTIC_STAGES = new Set(["extract", "translation-report"]);
 
 /** Kinds that must be tool-less calls (the one-shot contract). */
 const ONE_SHOT_KINDS = new Set([
@@ -62,6 +70,7 @@ const AGENT_KINDS = new Set([
 /** The order the default pipeline runs its tasks in. */
 const STAGE_ORDER = [
   "discover",
+  "extract",
   "glossary",
   "character-voice",
   "style-guide",
@@ -629,7 +638,13 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
       "A stage with no call is the stage to read the log of: a live-only phase a dry run never reaches is exactly the class of bug gotcha 49 is about.",
     ]);
   } else {
-    pass("stage-made-calls", `every stage that talks to the model made at least one call (${STAGE_ORDER.filter((n) => !DETERMINISTIC_STAGES.has(n)).length} stages; ${[...DETERMINISTIC_STAGES].join(", ")} is deterministic by design).`);
+    pass(
+      "stage-made-calls",
+      `every stage that talks to the model made at least one call ` +
+        `(${STAGE_ORDER.filter((n) => !DETERMINISTIC_STAGES.has(n)).length} stages; ` +
+        `${[...DETERMINISTIC_STAGES].join(", ")} are deterministic by design and made none, which is ` +
+        `what they are supposed to do)`
+    );
   }
 
   // ─── 16. Prompt sizes against the window the role is configured with ────────

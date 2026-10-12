@@ -1,12 +1,20 @@
 # The extraction step — plan of record
 
 **Status: partly built.** Written 2026-10-12, the same day the extraction defect was found and fixed.
-**Slice 1 — the audit as a pure function — is built** (`utils/source/audit.js` + `utils/source/audit/`,
-tested by `test/test-source-audit.js`, 26 checks, part of `npm test`). Slices 2–5 are not: there is no
-`extract` step in the pipeline yet, so the audit still runs nowhere inside a run and writes no reports —
-though it has been run once, by hand, over a copy of all 17 archives (§3), which is where the numbers
-below come from. It is deliberately its own plan rather than a section of
-`glossary/plan/01-glossary-route.md`, because extraction is upstream of *every* stage, not one of them.
+**Slices 1–2 are built.** Slice 1 is the audit as a pure function (`utils/source/audit.js` +
+`utils/source/audit/`, tested by `test/test-source-audit.js`, 26 checks, part of `npm test`). Slice 2 is
+the `extract` step itself (`extract.js` + `extract/`, tested by `test/test-extract-step.js`, 28 checks,
+part of `npm test`): it sits in `gulpfile.js` `PIPELINE_STEPS` between `discover` and `glossary`, runs the
+audit over every volume, writes the per-volume report and the series summary into the run's records, and
+fails the run structurally on a HIGH finding. **Slice 3 is half built**: the records exist and have been
+run over a copy of all 17 archives (133 chapters, 109 packaging groups, 2,450,415 characters, 45,429
+pronunciation guides, 457 images, 0 HIGH, 0 MEDIUM, 1,840 ms, 0 model calls; the same run again: 154 ms,
+all 17 VERIFIED), but the half that asks for a **step assessment in the ledger and the post-mortem** is
+not built — the step's own audit findings reach the run only as its report files, its console lines and a
+failed-step record when it throws, because `test/test-delivery-audit.js` pins that no pipeline step
+declares a run scope (gotcha 127). Slices 4–5 are not built. It is deliberately its own plan rather than a
+section of `glossary/plan/01-glossary-route.md`, because extraction is upstream of *every* stage, not one
+of them.
 
 ---
 
@@ -126,8 +134,9 @@ harvested, and 0 findings — 0 HIGH and 0 MEDIUM.** 133 chapters is the same fi
 the series, which is the cross-check that the measurement went through the real door. **The audit fires
 zero times on legitimate material**, and the contents-list fallback (the only path where the packaging
 exemption is load-bearing) fired **0 times out of 17**, so the exemption's narrowness costs nothing on
-this series today. That is a measurement of the audit, not of the step: no per-volume report, no series
-summary and no run records were written, and slice 3 still has to produce those.
+this series today. That was a measurement of the audit, not of the step; the step now produces the same
+numbers through itself — per-volume report, series summary and JSON sidecar included — over a copy of the
+same 17 archives, with the same totals and the same 0 findings (§6, slice 3).
 
 **Deferred, with the reason said plainly:**
 
@@ -215,14 +224,16 @@ One worker session per slice, each ending with `npm test` green and checked agai
 | # | slice | what it has to prove |
 |---|---|---|
 | 1 ✅ | The audit as a pure function over a bundle: the five computable checks in §3, against fixtures. | **Built.** Each HIGH check fires on a planted fixture and stays silent on a clean one; no stage runs, no model is called, nothing from `utils/reference-store/` is imported. What building it settled: the empty-chapter exemption has to be the **book's own declaration** (`PACKAGING_TITLE_RE` plus the bundle's packaging list), because under the contents-list fallbacks a cover plate becomes a segment and a check without the exemption re-invents gotcha 52's phantom holes; and a plain-text volume with no archive anywhere must stay silent, because `.md` books are a supported shape. |
-| 2 | The step itself: `extract` in the pipeline order, running the audit over every volume, writing the per-volume report and the series summary. | `--stages=extract` runs alone; a warm cache re-verifies rather than re-extracts and says so; a planted HIGH finding stops the run before `glossary` is reached. |
-| 3 | The numbers, through the step: run `extract` over all 17 volumes and write the per-volume report and the series summary. | The counts are already known (§3: 133 chapters, 109 packaging groups, 0 findings across 17 volumes, measured from a copy). What slice 3 adds is the **records** — a report per volume, a series table, and a step assessment in the ledger and the post-mortem — which is what the glossary plan is waiting for. |
+| 2 ✅ | The step itself: `extract` in the pipeline order, running the audit over every volume, writing the per-volume report and the series summary. | **Built.** `--stages=extract` runs alone and `npx gulp extract` runs it; a warm cache re-verifies rather than re-extracts and says which it did (VERIFIED / RE-EXTRACTED / EXTRACTED / READ, decided from `bundle.cacheHit` plus whether a `<base>-bundle.meta.json` was in the folder before the call); a planted HIGH finding stops the run with a **structural** error, so `ON_TASK_ERROR=continue` cannot walk past it and `glossary` is never started; a planted MEDIUM is printed, recorded and counted, and the run continues; 0 model calls measured at the wire against the stub endpoint. What building it settled: **the step declares nothing in `utils/artifacts.js`** — `test/test-delivery-audit.js` pins that no pipeline step declares a run scope, so the reports are guaranteed by `assertWrote` inside `extract/reports.js` instead of by a post-mortem check (gotcha 127) — and a plain-text volume gets its own state word, because `cacheHit: false` there means "no cache was consulted", not "the book was extracted again". |
+| 3 ◐ | The numbers, through the step: run `extract` over all 17 volumes and write the per-volume report and the series summary. | **Half built.** The records exist and have been produced through the step over a **copy** of all 17 archives: 133 chapters, 109 packaging groups, 2,450,415 characters, 45,429 pronunciation guides, 457 images, **0 HIGH and 0 MEDIUM**, 1,840 ms, 0 model calls; the second run is 154 ms and prints VERIFIED for all 17, and touching one archive makes that one print RE-EXTRACTED while the other sixteen stay VERIFIED. What is **not** built is the other half of this row — a step assessment the ledger and the post-mortem can see. The step's audit findings reach the run as its own report files and console lines, and as a failed-step record when it throws; nothing in `utils/postmortem/` knows the extraction summary exists, because of the run-scope invariant above. Closing that is a decision about the invariant (`utils/postmortem/plan/01-finding-levels.md`), not a step to write. |
 | 4 | The deferred tripwire, **only if** the harvest row shape is changed to record each annotation's own base-and-reading sequence (§3). | A fixture carrying a guide-split string produces HIGH **exactly** — no pattern matching, no false positives. If the shape change is refused, this slice is not built and the deferral stands. |
 | 5 | The docs and the maps: `docs/map-core.md`, the step list, and a gotcha if the build teaches one. | The maps describe the step that exists, not the one that was planned. (Slice 1 already added `utils/source/audit/` and `test/test-source-audit.js` to `docs/map-helpers.md` and `docs/map-tests.md`; the STEP list still belongs here.) |
 
 **Slice 1 is the cheapest thing in this plan and it is done, and it already answered the counting
 question.** Slice 2 is the one that makes the answer belong to the run rather than to a script somebody
-ran by hand: a report per volume, a series table, and an assessment the delivery layer can see.
+ran by hand, and it is built: a report per volume, a series table, and a step that fails the run on what
+it finds. What it did **not** buy is the last third of that sentence — an assessment the delivery layer can
+see — because of the run-scope invariant (gotcha 127), and that is now the open question it belongs to.
 
 ---
 

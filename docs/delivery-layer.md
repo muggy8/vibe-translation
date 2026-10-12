@@ -6,7 +6,7 @@ Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md
 
 ### 3.6 Step-by-step running and the post-mortem (`index.js`, `utils/postmortem.js`)
 
-`npx gulp` runs all nine steps **inside one Node process**. `npm run pipeline` runs
+`npx gulp` runs all ten steps **inside one Node process**. `npm run pipeline` runs
 them **one step per process**, and assesses each step before starting the next. Both
 halves matter, and they are separate features: the runner (`index.js`) and the
 assessment (`utils/postmortem.js` + `utils/artifacts.js`). Either can be used without
