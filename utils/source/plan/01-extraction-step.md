@@ -90,13 +90,22 @@ failure this repository has actually had, or to the fix it has just made.
 ### What the severities do
 
 **Decision (account owner, 2026-10-12): HIGH stops the run, MEDIUM warns.**
+**Revised the same day** — see `utils/postmortem/plan/01-finding-levels.md`. "Warn" turned out to
+mean "discarded": the resume triage reads only HIGH findings, so a MEDIUM finding is printed and
+nothing acts on it. The decision now reads:
 
-- A **HIGH** finding fails the step. The step runner records it, the post-mortem writes it, a
-  ticket opens, and the stages after it do not run — so a bad extraction costs one free step
-  instead of a glossary stage that spends real tokens building on it.
-- A **MEDIUM** finding is recorded, printed in the step's report, and the run continues.
+- A **HIGH** finding is a **STOP**. The step runner records it, the post-mortem writes it, a ticket
+  opens, and the stages after it do not run — so a bad extraction costs one free step instead of a
+  glossary stage that spends real tokens building on it.
+- A **MEDIUM** finding is **investigated**, at one of the two middle levels. The name-split check is
+  **MAJOR** — every later volume measures characters against a record built from that text — so the
+  run pauses at the volume boundary until it is answered. The filename-title and missing-harvest
+  checks are **MINOR**: investigated, batched, the run continues.
 - **info** is not a finding. It is the measurement, and it is what makes the difference between
   "this ran" and "this ran and here is what it saw".
+
+The original instinct stands — a converter quirk about a filename should not halt a run. What changed
+is that the alternative to halting is now *look into it*, not *throw the line away*.
 
 ---
 
