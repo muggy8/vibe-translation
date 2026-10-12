@@ -1,7 +1,7 @@
 # The extraction step — plan of record
 
-**Status: mostly built.** Written 2026-10-12, the same day the extraction defect was found and fixed.
-**Slices 1–2 and 4 are built.** Slice 1 is the audit as a pure function (`utils/source/audit.js` +
+**Status: built.** Written 2026-10-12, the same day the extraction defect was found and fixed.
+**All five slices are built.** Slice 1 is the audit as a pure function (`utils/source/audit.js` +
 `utils/source/audit/`, tested by `test/test-source-audit.js`, 33 checks, part of `npm test`). Slice 2 is
 the `extract` step itself (`extract.js` + `extract/`, tested by `test/test-extract-step.js`, 30 checks,
 part of `npm test`): it sits in `gulpfile.js` `PIPELINE_STEPS` between `discover` and `glossary`, runs the
@@ -9,12 +9,15 @@ audit over every volume, writes the per-volume report and the series summary int
 fails the run structurally on a HIGH finding. **Slice 4 is built** — the harvest records each annotation's
 own base-and-reading sequence (harvest schema **2**), the extraction marks each segment with what the book
 declared it to be, and the audit's sixth check (`guide-split-in-text`, HIGH) hunts the rebuilt broken
-string by exact substring; measured over a copy of all 17 archives it fires **0** times, and the floor that
-keeps it honest is measured too (§3). **Slice 3 is half built**: the records exist and have been
-run over a copy of all 17 archives (133 chapters, 109 packaging groups, 2,450,415 characters, 45,429
-pronunciation guides, 457 images, 0 HIGH, 0 MEDIUM, 2,234 ms, 0 model calls; the same run again: 342–350 ms,
-all 17 VERIFIED), but the half that asks for a **step assessment in the ledger and the post-mortem** is
-not built — the step's own audit findings reach the run only as its report files, its console lines and a
+string by exact substring; measured over all 17 real books it fires **0** times, and the floor that
+keeps it honest is measured too (§3). **Slice 3 is built on the real corpus**: `npx gulp extract` over
+`/mnt/windows/weeb/oresuki` reports **17 volumes, 133 chapters, 109 packaging groups, 2,450,415
+characters, 45,429 pronunciation guides, 457 images, 0 HIGH, 0 MEDIUM** with 0 model calls, and
+the run again prints VERIFIED for all 17 — **190 ms** on a warm cache (the step's own reported time) against
+**2.2 s** for a cold pass measured on a copy whose extracted files had been deleted, and the cold pass and
+the warm pass report the *same* 133 chapters and 45,429 guides, so the extraction is reproducible. The one
+thing the plan did **not** buy is a **step assessment the ledger and the post-mortem can see**: the step's
+own audit findings reach the run only as its report files, its console lines and a
 failed-step record when it throws, because `test/test-delivery-audit.js` pins that no pipeline step
 declares a run scope (gotcha 127). Slice 5 is not built as its own slice — the maps and the step list have
 been brought up to date alongside slices 1, 2 and 4. It is deliberately its own plan rather than a
@@ -260,15 +263,15 @@ One worker session per slice, each ending with `npm test` green and checked agai
 |---|---|---|
 | 1 ✅ | The audit as a pure function over a bundle: the five computable checks in §3, against fixtures. | **Built.** Each HIGH check fires on a planted fixture and stays silent on a clean one; no stage runs, no model is called, nothing from `utils/reference-store/` is imported. What building it settled: the empty-chapter exemption has to be the **book's own declaration** (`PACKAGING_TITLE_RE` plus the bundle's packaging list), because under the contents-list fallbacks a cover plate becomes a segment and a check without the exemption re-invents gotcha 52's phantom holes; and a plain-text volume with no archive anywhere must stay silent, because `.md` books are a supported shape. |
 | 2 ✅ | The step itself: `extract` in the pipeline order, running the audit over every volume, writing the per-volume report and the series summary. | **Built.** `--stages=extract` runs alone and `npx gulp extract` runs it; a warm cache re-verifies rather than re-extracts and says which it did (VERIFIED / RE-EXTRACTED / EXTRACTED / READ, decided from `bundle.cacheHit` plus whether a `<base>-bundle.meta.json` was in the folder before the call); a planted HIGH finding stops the run with a **structural** error, so `ON_TASK_ERROR=continue` cannot walk past it and `glossary` is never started; a planted MEDIUM is printed, recorded and counted, and the run continues; 0 model calls measured at the wire against the stub endpoint. What building it settled: **the step declares nothing in `utils/artifacts.js`** — `test/test-delivery-audit.js` pins that no pipeline step declares a run scope, so the reports are guaranteed by `assertWrote` inside `extract/reports.js` instead of by a post-mortem check (gotcha 127) — and a plain-text volume gets its own state word, because `cacheHit: false` there means "no cache was consulted", not "the book was extracted again". |
-| 3 ◐ | The numbers, through the step: run `extract` over all 17 volumes and write the per-volume report and the series summary. | **Half built.** The records exist and have been produced through the step over a **copy** of all 17 archives: 133 chapters, 109 packaging groups, 2,450,415 characters, 45,429 pronunciation guides, 457 images, **0 HIGH and 0 MEDIUM**, 2,234 ms, 0 model calls; the second run is 342–350 ms and prints VERIFIED for all 17, and touching one archive makes that one print RE-EXTRACTED while the other sixteen stay VERIFIED. What is **not** built is the other half of this row — a step assessment the ledger and the post-mortem can see. The step's audit findings reach the run as its own report files and console lines, and as a failed-step record when it throws; nothing in `utils/postmortem/` knows the extraction summary exists, because of the run-scope invariant above. Closing that is a decision about the invariant (`utils/postmortem/plan/01-finding-levels.md`), not a step to write. |
+| 3 ✅ | The numbers, through the step: run `extract` over all 17 volumes and write the per-volume report and the series summary. | **Built, on the real corpus.** `npx gulp extract` over `/mnt/windows/weeb/oresuki`: **17 volumes, 133 chapters, 109 packaging groups, 2,450,415 characters, 45,429 pronunciation guides set aside, 457 images, 0 HIGH and 0 MEDIUM**, with 0 model calls — every volume `EXTRACTED`, one report per volume plus the series table under `.run/postmortem/`. The run again prints **VERIFIED** for all 17 ("unchanged and its bundle is current (schema 8, sha256 …), nothing re-extracted") in **190 ms**. What this plan did **not** buy is the other half of the sentence: an assessment the ledger and the post-mortem can *see*. The findings reach the run as the step's own report files, its console lines, and a failed-step record when it throws; nothing in `utils/postmortem/` knows the extraction summary exists, because of the run-scope invariant (gotcha 127). Closing that belongs to `utils/postmortem/plan/01-finding-levels.md`, not to this plan. |
 | 4 ✅ | The deferred tripwire, **only if** the harvest row shape is changed to record each annotation's own base-and-reading sequence (§3). | **Built, and it fires exactly.** A fixture carrying 蒲かま田た produces HIGH **exactly** — the string is rebuilt from the volume's own annotation sequences and matched as a substring, no pattern matching anywhere — and the same check measures **0** across a copy of all 17 real books. The floor that makes that possible is measured, not assumed: at "every annotation" the rule reports **666 legitimate strings** (出だ, 言い, 回まわ, 聞き, 直す) and at "two or more pieces" it reports **0**, so `GUIDE_SPLIT_MIN_PIECES = 2` is pinned as a constant with no env knob. What building it settled: **the shape change is two changes, not one** — the harvest records the sequence (`RUBY_GUIDE_SCHEMA` 2) *and* the bundle carries the per-segment packaging mark, which is why `BUNDLE_SCHEMA_VERSION` moved 7 → 8 in the same edit; and **the sequence has to be produced by both converters**, because the intake measures books through its own converter call (§1) and `test/test-source-ruby.js` deep-compares the two harvests — so the pairing rule lives in one shared place (`pushRubyUnit` / `closeRubyUnits` in `utils/source/html.js`) rather than in each converter. |
 | 5 ✅ | The docs and the maps: `docs/map-core.md`, the step list, and a gotcha if the build teaches one. | **Done alongside slices 1, 2 and 4** rather than as its own slice: `docs/map-core.md` (the step row and the `extract/` table), `docs/map-helpers.md` (the `utils/source/` and `utils/source/audit/` tables), `docs/map-tests.md`, `docs/pipelines.md` §3.5, `docs/architecture.md` (the bundle layout and the chapter rule), the AGENTS.md step table and doc map, and gotchas 123, 126 and 128. |
 
-**Slice 1 is the cheapest thing in this plan and it is done, and it already answered the counting
-question.** Slice 2 is the one that makes the answer belong to the run rather than to a script somebody
-ran by hand, and it is built: a report per volume, a series table, and a step that fails the run on what
-it finds. What it did **not** buy is the last third of that sentence — an assessment the delivery layer can
-see — because of the run-scope invariant (gotcha 127), and that is now the open question it belongs to.
+**The plan is finished, and the number it existed to produce is on disk.** `npx gulp extract` now owns
+extraction, checks it, and writes the measurement into the run's records instead of leaving it to a script
+somebody ran by hand. What it did **not** buy is the last third of that promise — an assessment the delivery
+layer can *see* — because of the run-scope invariant (gotcha 127), and that is now an open question in
+`utils/postmortem/plan/01-finding-levels.md` rather than a slice here.
 
 ---
 

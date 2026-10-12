@@ -16,8 +16,9 @@ Per volume, and nothing else: **no model call, no prompt, no agent.** `npx gulp 
    (the bundle on disk matches the archive and schema 8 — nothing re-extracted), **RE-EXTRACTED** (a
    bundle was there and is no longer current), **EXTRACTED** (none existed yet), **READ** (a plain-text
    book has no cache to verify, and calling that "re-extracted" would report work that did not happen).
-   The second run over the same 17 books costs 342–350 ms against the first run's 2,234 ms and re-extracts
-   nothing.
+   The second run over the same 17 books reports **190 ms** and re-extracts nothing; a cold pass, measured
+   on a copy whose extracted files had been deleted, is 2.2 s — and both passes report the same 133 chapters
+   and 45,429 guides.
 3. **Run the six deterministic checks** (`utils/source/audit.js` — `source-not-archive`,
    `no-usable-chapter`, `chapter-extracted-empty`, `title-is-filename`, `ruby-harvest-missing`,
    `guide-split-in-text`) and count what the volume holds: chapters, packaging groups, characters,

@@ -31,7 +31,7 @@ steps in order with an assessment between them means a broken glossary is found
 before `character-voice` builds on it, and long before the translation stage has paid
 for it.
 
-**The post-mortem is the tier that can run for free.** 17 volumes × 9 steps is a lot
+**The post-mortem is the tier that can run for free.** 17 volumes × 10 steps is a lot
 of assessment, so it is split: **tier 1 is deterministic** (no model call, no
 network) and runs on every volume of every step; **tier 2 is a model call**, and does
 not exist yet. Tier 1 exists because of what the real failures in this project look
@@ -275,7 +275,7 @@ intervention** (`resume-here`, `re-run-step`, `re-translate-volume`, `open-ticke
 free), while
 wiping output that exists, `--force`-ing accepted output, and re-auditing are (`wipe-and-cascade`,
 `re-run-force`, `re-audit` count against `DELIVERY_MAX_INTERVENTIONS` — **per step**, the account
-owner's decision of 2026-10-06: a run with nine steps is nine problems, and a global cap spends
+owner's decision of 2026-10-06: a run with ten steps is ten problems (nine when the decision was made), and a global cap spends
 glossary's attempts on the wiki). `planResume` reads the ledger's `intervention` entries for the
 newest recorded run, groups them by step, and a step that has spent its budget becomes
 `open-ticket` — the honest reading of "I have run out of moves on this step" is that it needs

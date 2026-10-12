@@ -120,7 +120,7 @@ code. Seven stages get it by inheriting it; the stages that do not use the share
 exceptions rather than silently missing the gate.
 
 **What it costs.** The assessment is free of model calls but not free of time, and per-volume means
-**17 volumes × 9 steps = 153 assessments** per full run instead of 9. That is the price of the pause,
+**17 volumes × 10 steps = 170 assessments** per full run instead of 10 (the run gained its tenth step, `extract`, after this plan was written). That is the price of the pause,
 and it is the first thing to measure before this is shipped widely — see §9.
 
 **What "continue" means.** The runner restarts a **step**, not a volume, and `--volume` already
@@ -257,7 +257,7 @@ that reaches its final slice before noticing that has a hole in the middle of it
 | chapters of the book that were never translated, caught by the layer | **0** — the check exists and its output is discarded | every one, at MAJOR |
 | volumes published with no grader signing off, caught | **0** — same | every one, at MAJOR |
 | investigations per run | 1 kind (`quarantine-present`) | bounded by (kind × step), counted in the offline loop |
-| assessments a full 17-volume run makes | **9** (one per step, after it returns) | **153** (one per volume per step) — free of model calls, not free of time |
+| assessments a full 17-volume run makes | **10** (one per step, after it returns) | **170** (one per volume per step) — free of model calls, not free of time |
 | model calls added to the offline loops | 93 / 39 today | re-baselined and written into this plan |
 
 **Slice 1 has to produce the red test first.** If it goes green immediately, the measurement in §1 is
@@ -286,10 +286,10 @@ wrong and this plan is wrong, and that is the cheapest possible way to find out.
    It is placed at MINOR here because it can hide a real artifact behind an old one. Measure it
    against the real corpus before it is pinned.
 5. **Is a per-volume assessment for every step the right price, or only for the steps that can
-   produce a MAJOR?** 153 assessments per run instead of 9 is the cost of the pause, and it is paid on
+   produce a MAJOR?** 170 assessments per run instead of 10 is the cost of the pause, and it is paid on
    every volume of every step whether or not that step has anything at MAJOR or above. Assessing only
    the steps whose artifact is inherited — the references and the records, not the wiki or the style
-   guide — would cut most of it. **Measure the 153 before deciding**, because the difference between
+   guide — would cut most of it. **Measure the 170 before deciding**, because the difference between
    "cheap" and "not" here is a number nobody has yet taken.
 
 ---
