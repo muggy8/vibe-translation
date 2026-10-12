@@ -270,8 +270,11 @@ One worker session per slice, each ending with `npm test` green and checked agai
 **The plan is finished, and the number it existed to produce is on disk.** `npx gulp extract` now owns
 extraction, checks it, and writes the measurement into the run's records instead of leaving it to a script
 somebody ran by hand. What it did **not** buy is the last third of that promise — an assessment the delivery
-layer can *see* — because of the run-scope invariant (gotcha 127), and that is now an open question in
-`utils/postmortem/plan/01-finding-levels.md` rather than a slice here.
+layer can *see* — because of the run-scope invariant (gotcha 127). **The account owner has since decided
+that gap must close (2026-10-12): the extraction step's own output is to be checked after its own step,
+because everything downstream is built on it.** It is slice 7 of
+`utils/postmortem/plan/01-finding-levels.md` rather than a slice here, because closing it changes an
+invariant of the delivery layer, not this step.
 
 ---
 

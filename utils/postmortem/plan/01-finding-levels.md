@@ -119,9 +119,19 @@ that volume for that step, and if the result is STOP or MAJOR, stop the walk and
 code. Seven stages get it by inheriting it; the stages that do not use the shared loop get named as
 exceptions rather than silently missing the gate.
 
-**What it costs.** The assessment is free of model calls but not free of time, and per-volume means
-**17 volumes × 10 steps = 170 assessments** per full run instead of 10 (the run gained its tenth step, `extract`, after this plan was written). That is the price of the pause,
-and it is the first thing to measure before this is shipped widely — see §9.
+**What it costs — measured, and cheaper than this plan assumed when it was written.** The
+per-volume checks are **already happening**. `utils/postmortem/run.js` loops every volume of the step's
+spec (`if (spec.perVolume) { for (const volumeEntry of volumeEntries) … assessVolume … }`), so a full
+17-volume run already performs **170 volume assessments** (17 × 10 steps). What does not exist is *when*
+they run: all 170 happen after the step returns. Moving them inside `walkVolumes` therefore adds no
+checking work — it moves the same work earlier. Measured on the real corpus with the existing assessors:
+**0.29 ms per volume** for the glossary's 7 expectations, **0.12 ms per volume** for character-voice's 5,
+so 170 volume assessments cost **under 100 ms per full run**, with no model call. The framing this plan
+carried when it was written — "170 assessments instead of 10" — counted calls to `runPostMortem` rather
+than the per-volume work each call already performs, and it is corrected here.
+
+**The account owner's decision (2026-10-12): every volume of every step is assessed after that volume,
+not after the step.** No step is exempt, and no step is exempted because its output is not inherited.
 
 **What "continue" means.** The runner restarts a **step**, not a volume, and `--volume` already
 exists. So resuming means: the step exits at volume *n*, the answer is obtained, and the step is
@@ -241,6 +251,7 @@ it is reported as done.
 | 4 | **The per-volume gate in the shared volume loop** (§3.2) — the thing that makes a pause possible at all. | `walkVolumes` stops after the volume that tripped the gate and exits with its own code; the stages that do not use the shared loop are named out loud rather than silently ungated. Nothing is assessed mid-chapter. |
 | 5 | The pause is executable end to end: the run halts at volume *n*, the answer is obtained, the step resumes from volume *n*. | The offline loop shows a MAJOR finding halting at volume *n* and resuming at volume *n* — not *n+1* — and the resumed pass does not pay for the volumes already accepted. |
 | 6 | The docs and the maps: `docs/delivery-layer.md`, `docs/environment.md` if any knob moves, and a gotcha for the four-blind-kinds finding. | The maps describe the routing that exists. |
+| 7 | **The extraction step declares its own output** (§10), and the run-scope guard is amended to name that one exception instead of banning all of them. | `extract` goes from declaring nothing to declaring what it always writes; the post-mortem reports a missing extraction summary as a finding; the other twelve pipeline steps are still asserted to declare nothing. Independent of slices 2–6 — it can be dispatched any time after slice 1. |
 
 **Slice 4 is the one this plan used to skip.** Slices 2 and 3 can be built without it — they change
 what the triage *says* — but nothing before slice 4 changes what a running step *does*, and a plan
@@ -285,12 +296,14 @@ wrong and this plan is wrong, and that is the cheapest possible way to find out.
    about a *measurement being wrong*, not about a deliverable being wrong — which argues for NOTE.
    It is placed at MINOR here because it can hide a real artifact behind an old one. Measure it
    against the real corpus before it is pinned.
-5. **Is a per-volume assessment for every step the right price, or only for the steps that can
-   produce a MAJOR?** 170 assessments per run instead of 10 is the cost of the pause, and it is paid on
-   every volume of every step whether or not that step has anything at MAJOR or above. Assessing only
-   the steps whose artifact is inherited — the references and the records, not the wiki or the style
-   guide — would cut most of it. **Measure the 170 before deciding**, because the difference between
-   "cheap" and "not" here is a number nobody has yet taken.
+5. ~~Is a per-volume assessment for every step the right price, or only for the steps that can
+   produce a MAJOR?~~ **Decided by the account owner on 2026-10-12: every book, every step.** The cost
+   argument turned out to be empty — the 170 volume assessments are already performed today (§3.2), so
+   the choice was only ever about *when* they run, and the answer is "after each book". Measured: under
+   100 ms per full run, no model call. What is still open is the smaller half of this question: whether
+   a volume's assessment should also run the checks that only make sense once the whole step is finished
+   (the series-root publish, the cross-volume coverage rules), which cannot move earlier and stay where
+   they are.
 
 ---
 
@@ -314,3 +327,23 @@ defect it hunts sat in all 17 volumes unnoticed once already.
 The extraction plan's own decision stands — a converter change should not halt a run over a filename —
 but it now means *MINOR rather than ignored*, which is a different promise than the one written on
 2026-10-12.
+
+**And the account owner's second decision (2026-10-12): the extraction step's own output is
+checked, after its own step, because everything downstream is built on it.** Measured against
+`utils/artifacts.js`: `extract` declares **nothing today** — 0 volume expectations, 0 series
+expectations, 0 run expectations — which makes it the one step in the run whose work nothing verifies.
+Closing that means declaring its reports, and declaring them runs straight into the guard
+`test/test-delivery-audit.js:225`: *no pipeline step declares a run scope*. Read the guard's own reason
+(`test/test-delivery-audit.js:19`, `:219`) and the ban is narrower than it looks — it was written to prove
+that adding the delivery-record audit left the corpus half of the post-mortem untouched. It is a regression
+guard for one change, not a permanent law, so amending it is a legitimate decision **provided the
+amendment keeps what the guard actually protects**: `extract` becomes the single named exception, the
+remaining twelve pipeline steps are still asserted to declare nothing, and the reason an exception is
+allowed is written into the test rather than left to the commit message.
+
+What is still a design point is *what* gets declared. `assessRunScope` reads a flat list of file names
+out of `postMortemDir()`, which expresses `extraction-summary.md` and `.json` directly; the per-volume
+reports are 17 files, and the mechanism has no per-volume run-scope shape today. Declaring the summaries
+and leaving the per-volume reports to the step's own `assertWrote` is the small version of this slice;
+teaching the run-scope shape to expand per volume is the larger one, and it is the version that would
+later let a per-volume extraction finding be routed by level like any other.
