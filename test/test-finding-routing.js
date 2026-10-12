@@ -478,8 +478,13 @@ function testUndeclaredKindFailsClosed() {
 // ─── 6. Batching is per (kind, step), not per volume ──────────────────────────
 
 /**
- * Slice 3 bounds how many investigations a run may pay for. This measures what slice 2 produces with
- * no bound at all: one kind present in EVERY volume of a seventeen-volume series.
+ * Batching, measured before any ceiling is applied to it: one kind present in EVERY volume of a
+ * seventeen-volume series produces one investigation per (kind, step), not one per volume.
+ *
+ * (Slice 2 measured this with no bound in the code at all. Slice 3 added the ceiling, and this
+ * scenario still asks only the batching question — the bound and the reuse are `test-investigation-bound.js`'s
+ * job, and keeping the two suites asking different questions is what stops one of them quietly
+ * re-defining the other.)
  *
  * @returns {Promise<void>}
  */

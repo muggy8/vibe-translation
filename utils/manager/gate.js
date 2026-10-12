@@ -196,6 +196,33 @@ function validateManagerAction(action, { moves = [], tickets = [], patches = [],
             `Your moves here are: answer their question, choose an option, or escalate.`
         );
       }
+      // The same question, on a DIFFERENT ticket. `matchesTicketKey` keys on (step, volume, finding)
+      // because the anti-spin budget is deliberately per volume — and that is the wrong unit for a
+      // diagnostics turn, which is a model call about a finding kind on a step, not about one book. A
+      // kind that fired in all seventeen books produced seventeen keys, and a run could pay seventeen
+      // 702-second diagnoses for one answer. This is the half of the bound the manager could otherwise
+      // walk around by asking about the next volume.
+      const answered = (tickets || []).find(
+        (t) =>
+          t &&
+          t.id !== ticket.id &&
+          t.diagnosis &&
+          t.step === ticket.step &&
+          t.finding === ticket.finding &&
+          String(t.run) === String(ticket.run)
+      );
+      if (answered) {
+        const bound = plan && plan.investigationCeiling && plan.investigationCeiling.maxPerRun;
+        return refuse(
+          "already-answered-in-run",
+          `ticket ${ticket.id} asks ${ticket.step} / ${ticket.finding}, and this run already has that answer on ` +
+            `ticket ${answered.id} (answered${answered.diagnosis.attempts ? ` ${answered.diagnosis.attempts} time(s)` : ""}). ` +
+            `Reading ${answered.id} costs nothing; a second diagnosis of the same question on the same step costs a ` +
+            `model turn${bound ? ` — and this run pays for at most ${bound} of them` : ""}. Read it and choose one ` +
+            `of its options. If that answer is genuinely wrong, a re-ask is the account owner's call ` +
+            `(\`diagnose.js --reask --ticket=${answered.id}\`), not yours.`
+        );
+      }
       return { allowed: true, why: null, kind: null };
     }
 

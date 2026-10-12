@@ -18,7 +18,7 @@ const { ensureRunStateGitignore } = require("../configs/run-state");
 
 const { readArgs, resolveMode } = require("./cli");
 const { renderConsole, renderExecution } = require("./report");
-const { chooseOption, judgePatch, openTicketFromPlan } = require("./tickets");
+const { chooseOption, judgePatch, openTicketFromPlan, openInvestigationTickets } = require("./tickets");
 const { runActPlan, runIdFor } = require("./act");
 const { stopStalledRun } = require("./stop-run");
 
@@ -172,6 +172,50 @@ function openTicketVerb(args, plan, state) {
 }
 
 /**
+ * `--open-investigations`: write one question per investigation this run is allowed to pay for.
+ *
+ * Separate from `--open-ticket` on purpose, and the reason is a consequence nobody should meet by
+ * surprise. `--open-ticket` is the verb `autopilot/loop.js` runs by itself in act mode, and
+ * `endIsProvable` refuses `end` while any ticket is open — while no command closes a ticket today.
+ * Folding the investigation tickets into that verb would mean every act run that escalates also opens
+ * up to three questions nothing can close, and a run that cannot end is a run that spins to its
+ * iteration cap. So this one is a verb a person runs when they want the bounded questions on the
+ * record, and the loop is untouched until a closing door exists.
+ *
+ * Allowed in both modes, for the same reason `--open-ticket` is: a ticket is the manager's own words,
+ * not an action on the corpus.
+ *
+ * @param {Object} args - The parsed CLI arguments.
+ * @param {Object} plan - The resume plan, with its bounded investigations.
+ * @param {Object} state - The working state the plan was read from.
+ * @returns {number} The exit code.
+ */
+function openInvestigationsVerb(args, plan, state) {
+  if (!args.write) {
+    return refuse(
+      "--no-write with --open-investigations is a contradiction: an investigation is a written question " +
+        "for the diagnostics team. Use --no-write to read the plan without recording it."
+    );
+  }
+  const res = openInvestigationTickets({ plan, state, run: runIdFor(state) });
+  console.log(`[delivery] ${res.note}`);
+  for (const t of res.opened) {
+    console.log(`  ${t.id} — ${t.step} / ${t.finding}`);
+    console.log(`    question: ${t.question}`);
+    console.log(`    next: npm run diagnose -- --ticket=${t.id}`);
+  }
+  for (const s of res.skipped) {
+    console.log(`  not opened: ${s.step} / ${s.kind} (${s.status}) — ${s.because}${s.ticketId ? ` (ticket ${s.ticketId})` : ""}`);
+  }
+  for (const p of res.problems) console.log(`  ${p.kind}: ${p.message}`);
+  if (!res.opened.length && !res.skipped.length && !res.deferred.length && !res.problems.length) {
+    console.log(`  this plan proposes no investigation to open. Run \`npm run delivery\` and read the plan.`);
+  }
+  if (args.json) console.log(JSON.stringify(res, null, 2));
+  return res.problems.length ? 1 : 0;
+}
+
+/**
  * The "what was executed" section of the plan of record: one line per step, in the order the run did them.
  *
  * The line is written for the reader who was not there: what was wiped, where the step exited, how the
@@ -294,6 +338,11 @@ async function main() {
 
   if (args.openTicket) {
     process.exitCode = openTicketVerb(args, plan, state);
+    return;
+  }
+
+  if (args.openInvestigations) {
+    process.exitCode = openInvestigationsVerb(args, plan, state);
     return;
   }
 

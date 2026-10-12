@@ -26,6 +26,15 @@ function renderConsole(plan, mode) {
   const untouched = plan.steps.filter((s) => s.action === "none").map((s) => s.step);
   if (untouched.length) lines.push(`[delivery]   leave alone: ${untouched.join(", ")}`);
   for (const n of plan.notes) lines.push(`[delivery] note: ${n}`);
+  if (plan.investigations && plan.investigations.length) {
+    const c = plan.investigationCeiling || {};
+    lines.push(
+      `[delivery] investigations: ${c.total ?? plan.investigations.length} question(s) proposed — ` +
+        `${c.actionable ?? 0} may be paid for (this run pays for at most ${c.maxPerRun ?? "?"} diagnostics ` +
+        `turn(s)), ${c.answered ?? 0} already answered, ${c.pending ?? 0} already asked, ` +
+        `${c.deferred ?? 0} NOT paid for. The whole list is in the plan report.`
+    );
+  }
   if (mode === "act") {
     lines.push(
       `[delivery] mode act: this is what will be executed, one step at a time, through the step runner.`

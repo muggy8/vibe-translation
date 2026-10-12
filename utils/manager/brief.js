@@ -11,6 +11,7 @@
 require("../../types"); // JSDoc type definitions
 
 const { describeMoveTools } = require("./move-tools");
+const { customerMayRead } = require("../tickets");
 
 /**
  * One ticket, rendered for the role that cannot see the code.
@@ -167,6 +168,64 @@ function renderPatchForManager(patch) {
 
 
 /**
+ * The investigations, for the role that decides whether to spend a diagnostics turn on one.
+ *
+ * The bound is in the brief because the brief is where the spending decision is made: without it the
+ * manager sees a list of questions and has no way to know that three of them are all this run is
+ * allowed to pay for, or that one of them was already answered by a ticket it can simply read. The
+ * deferred ones are named with the file they are about — a question the run refused to pay for has to
+ * be visible in the record, or the next run inherits it as though nobody had noticed it.
+ *
+ * File names go through `customerMayRead` like everything else this role is shown: an investigation is
+ * about an artifact in a volume folder, and if a finding ever names something this role may not see,
+ * the brief says so instead of printing it.
+ *
+ * @param {import("./resume").ResumePlan} plan
+ * @returns {string[]} - Empty when the plan proposes nothing.
+ */
+function renderInvestigationsForManager(plan) {
+  const inv = plan.investigations || [];
+  if (!inv.length) return [];
+  const c = plan.investigationCeiling || {};
+  const lines = [
+    `## Questions you may have an investigation paid for`,
+    `This run pays for at most **${c.maxPerRun ?? "?"}** diagnostics turn(s) in total — ${c.why || ""} An ` +
+      `answer already written on a ticket costs nothing and does not take one of those places.`,
+    ``,
+  ];
+  const nameFiles = (files) => {
+    const seen = [];
+    const hidden = [];
+    for (const f of files || []) {
+      if (customerMayRead(f).allowed) seen.push(f);
+      else hidden.push(f);
+    }
+    return { seen, hidden };
+  };
+  const nameVolumes = (volumes) => {
+    const list = volumes || [];
+    if (list.length <= 6) return list.join(", ");
+    return `${list.slice(0, 6).join(", ")} … (${list.length} volumes)`;
+  };
+  for (const i of inv) {
+    const files = nameFiles(i.files);
+    lines.push(`- ${i.level} \`${i.kind}\` on \`${i.step}\` — ${i.occurrences} occurrence(s), volume(s) ${nameVolumes(i.volumes)}`);
+    if (files.seen.length) lines.push(`    file(s): ${files.seen.join(", ")}`);
+    if (files.hidden.length) lines.push(`    (${files.hidden.length} file(s) it is about are not yours to read — the diagnostics team's are)`);
+    if (i.status === "actionable") lines.push(`    may be paid for: one diagnostics turn.`);
+    else if (i.status === "answered") lines.push(`    already answered on ticket ${i.ticketId} (${i.ticketStatus}${i.inRun ? "" : `, asked in run ${i.ticketRun}`}) — read it, do not pay for a second diagnosis of the same question.`);
+    else if (i.status === "pending") lines.push(`    already asked on ticket ${i.ticketId} (${i.ticketStatus}${i.inRun ? "" : ` in run ${i.ticketRun}`}) and still unanswered — work that ticket rather than opening a second one.`);
+    else if (i.status === "deferred") lines.push(`    NOT PAID FOR this run: the ${c.maxPerRun ?? "?"} places are taken. Reported, not answered.`);
+  }
+  lines.push(
+    `Counted: ${c.actionable ?? 0} may be paid for · ${c.answered ?? 0} answered · ${c.pending ?? 0} waiting · ` +
+      `${c.deferred ?? 0} not paid for.`
+  );
+  return lines;
+}
+
+
+/**
  * The whole brief for one decision.
  *
  * Bounded by construction: every section here is a record this layer already wrote for a human
@@ -258,6 +317,9 @@ function renderManagerBrief({ plan, moves, tickets = [], patches = [], correctio
     out.push("");
   }
 
+  out.push(...renderInvestigationsForManager(plan));
+  if (plan.investigations && plan.investigations.length) out.push("");
+
   if (tickets.length) {
     out.push(`## Tickets open with the support teams`);
     for (const t of tickets) out.push(renderTicketForManager(t), "");
@@ -304,5 +366,6 @@ function renderManagerBrief({ plan, moves, tickets = [], patches = [], correctio
 module.exports = {
   renderTicketForManager,
   renderPatchForManager,
+  renderInvestigationsForManager,
   renderManagerBrief,
 };

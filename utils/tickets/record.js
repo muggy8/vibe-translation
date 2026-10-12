@@ -480,6 +480,97 @@ function ticketsFor(key, paths = ticketPaths()) {
   return readTickets(paths.json).tickets.filter((t) => matchesTicketKey(t, key));
 }
 
+// ─── The investigation door: the same question, without the volume ────────────
+
+/**
+ * @typedef {Object} InvestigationAnswer
+ * @property {boolean} asked - A ticket about this (step, finding) exists at all.
+ * @property {boolean} answered - The newest one carries a diagnosis, so the answer is already paid for.
+ * @property {boolean} pending - A ticket exists, nobody has answered it, and it is not closed.
+ * @property {Ticket|null} ticket - The ticket to name: the answered one, else the open one.
+ * @property {boolean} inRun - That ticket belongs to the run asked about (or no run was recorded).
+ * @property {Ticket[]} tickets - Every match, oldest first, so nothing is hidden by picking one.
+ */
+
+/**
+ * The volume-free twin of `matchesTicketKey`.
+ *
+ * `matchesTicketKey` keys on (step, volume, finding) because the anti-spin budget is deliberately per
+ * volume: a repair that failed on volume 15 says nothing about volume 16, and freezing volume 16's next
+ * attempt on volume 15's failure would be the ledger refusing work it never tried. That key is correct
+ * for what it is for and it is NOT changed here.
+ *
+ * An investigation is a different unit. It is one question about one finding kind on one step, and the
+ * batching that produced it already folded every volume into one entry — so a key that re-splits it by
+ * volume asks "has anybody asked this about volume 02?" when the only question is "has anybody asked
+ * this?". A kind that fired in all 17 books produced 17 keys, and a run could pay 17 diagnoses for one
+ * answer. This predicate is the one that question needs.
+ *
+ * @param {Ticket} ticket
+ * @param {{step: string, kind: string}} key
+ * @returns {boolean}
+ */
+function matchesInvestigationKey(ticket, { step, kind }) {
+  return Boolean(ticket) && ticket.step === step && ticket.finding === kind;
+}
+
+/**
+ * What the ticket channel already says about one (step, finding kind), read out of a list the caller
+ * was handed.
+ *
+ * One implementation, two readers: `investigationsAlreadyAsked` reads the file and calls this, and the
+ * resume triage calls it on the tickets already in its state snapshot — because `planResume` is a pure
+ * function of a state and a triage that opened `tickets.json` by itself would make a hand-built test
+ * state read the live series' correspondence (gotcha 71).
+ *
+ * The run is reported, not filtered. `matchesTicketKey` already ignores run, `ticketsFor` already
+ * returns tickets from every recorded run, and a question the series has already paid an answer for is
+ * an answer this run can read for free — re-paying for it is the waste this door exists to close. So
+ * `inRun` says whether the ticket belongs to the run you asked about, and the caller decides what to do
+ * with a match from an earlier one.
+ *
+ * @param {Ticket[]} tickets - The tickets to read.
+ * @param {{run?: string|null, step: string, kind: string}} key
+ * @returns {InvestigationAnswer}
+ */
+function investigationAnswerFrom(tickets, { run, step, kind }) {
+  const matches = (tickets || []).filter((t) => matchesInvestigationKey(t, { step, kind }));
+  const answeredOnes = matches.filter((t) => Boolean(t.diagnosis));
+  const openOnes = matches.filter((t) => !t.diagnosis && t.status !== "closed");
+  // Newest wins, because tickets are appended and the last one carries everything that has been tried
+  // since (the same rule `openChannels` uses for the escalation ladder).
+  const ticket = (answeredOnes.length ? answeredOnes[answeredOnes.length - 1] : null)
+    || (openOnes.length ? openOnes[openOnes.length - 1] : null);
+  return {
+    asked: matches.length > 0,
+    answered: answeredOnes.length > 0,
+    pending: answeredOnes.length === 0 && openOnes.length > 0,
+    ticket,
+    inRun: ticket ? (run === undefined || run === null ? true : String(ticket.run) === String(run)) : false,
+    tickets: matches,
+  };
+}
+
+/**
+ * Has this (step, finding kind) already been asked, and is it answered? — ignoring volume.
+ *
+ * The door the ceiling and the manager's brief read. It is a read: it opens no ticket, writes nothing,
+ * and reaches no model.
+ *
+ * @param {{run?: string|null, step: string, kind: string}} key
+ * @param {{json?: string, markdown?: string}} [paths]
+ * @returns {InvestigationAnswer}
+ */
+function investigationsAlreadyAsked(key, paths = ticketPaths()) {
+  const store = readTickets(paths.json);
+  const answer = investigationAnswerFrom(store.tickets, key);
+  // A ticket file that could not be read is not an empty channel. Saying "nobody has asked this" about
+  // a channel nobody could open is how a run asks the same question twice and reports it as progress
+  // (the honesty rule gotcha 33 states for the ledger and the manifest).
+  if (store.error) return { ...answer, error: store.error };
+  return { ...answer, error: null };
+}
+
 // ─── The human-facing half ────────────────────────────────────────────────────
 
 
@@ -497,4 +588,7 @@ module.exports = {
   openTickets,
   matchesTicketKey,
   ticketsFor,
+  matchesInvestigationKey,
+  investigationAnswerFrom,
+  investigationsAlreadyAsked,
 };

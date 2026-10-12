@@ -143,13 +143,15 @@ function claimsFromInvocation({ step, argv, exitCode }) {
     const ticketId = flagValue(argv, "--ticket");
     // `--stop-run` is a verb on the same footing as the others: it answers one question about the
     // machine and legitimately writes no plan of record. Leaving it out here would make the audit
-    // claim a plan the command never promised.
-    const verb = choose || accept || reject || hasFlag(argv, "--open-ticket") || hasFlag(argv, "--stop-run");
+    // claim a plan the command never promised. `--open-investigations` is the same shape — it writes
+    // tickets, not a plan.
+    const verb =
+      choose || accept || reject || hasFlag(argv, "--open-ticket") || hasFlag(argv, "--open-investigations") || hasFlag(argv, "--stop-run");
 
     // The normal path only: a verb answers one thing and legitimately writes no plan.
     claims.planRecordClaimed = succeeded && !verb && !hasFlag(argv, "--no-write");
 
-    if (succeeded && hasFlag(argv, "--open-ticket")) {
+    if (succeeded && (hasFlag(argv, "--open-ticket") || hasFlag(argv, "--open-investigations"))) {
       checks.push({
         kind: "ticket-opened",
         says: `it opened a ticket`,

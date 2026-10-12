@@ -102,18 +102,71 @@ no kind at all — as **damage**. The authority is the **table**, not the object
 `level` string for a kind `utils/postmortem/levels.js` does not name is undeclared whatever it claims,
 because the table is in a closed path and a finding is not.
 
-**Investigations are proposed, not run.** `plan.investigations` (built by `investigationsFor` in
-`utils/resume/plan.js`) names one entry per (kind, step) — a
-`MINOR` gap batch, plus one entry per trigger finding of a step that halted — each with its level, how
-many occurrences the batch folded together, the volumes it fired in, the size of fix the level implies
-(`LEVEL_FIX_SIZE`), and the question to ask. **Slice 2 makes no model call and opens no ticket**: the
-manager decides whether to spend a diagnostics turn, and how many it may spend is slice 3's bound.
+**Investigations are proposed, bounded, and never silently dropped.** `plan.investigations` is built in
+two steps: `investigationsFor` (`utils/resume/plan.js`) batches them — one entry per (kind, step), a
+`MINOR` gap batch plus one entry per trigger finding of a step that halted, each with its level, how many
+occurrences the batch folded together, the volumes it fired in, the size of fix the level implies
+(`LEVEL_FIX_SIZE`) and the question to ask — and `boundInvestigations` (`utils/resume/investigations.js`)
+gives every entry a **status** against the bound:
+
+| status | what it means | what it costs | takes a place in the ceiling? |
+|---|---|---|---|
+| `actionable` | nobody has asked it, and a place is left | one diagnostics turn | **yes** |
+| `answered` | a ticket already carries a diagnosis | nothing — read the ticket | no |
+| `pending` | somebody already asked and nobody answered | nothing — work that ticket, do not write a second one | no |
+| `deferred` | nobody has asked it and the places are gone | nothing | no — and it is named as **not paid for** |
+
 Measured on a 17-volume fixture with one `MINOR` kind in every book: **119 findings → 7 investigations**
 (one per kind-and-step across glossary, character-voice, style-guide, jump-in-wiki, translate,
 translate-qa, polish), and the verdict stays `nothing-to-do`. The batched line reaches the manager's
-brief through `plan.notes` (`MINOR unexpected-file in volume(s) 01–17 (17) — reported, and proposed for
-investigation, not acted on`); the structured entry — the question and the size of fix — reaches
-`plan.markdown`, and `utils/manager/brief.js` does not render `plan.investigations` itself yet.
+brief through `plan.notes`; the bounded entry reaches it directly, through
+`renderInvestigationsForManager` in `utils/manager/brief.js`, and the full version reaches
+`plan.markdown`. `delivery/report.js` prints the counted line on the console —
+`investigations: 4 question(s) proposed — 3 may be paid for (this run pays for at most 3 diagnostics
+turn(s)), 0 already answered, 0 already asked, 1 NOT paid for` — because the console is what a person
+actually reads and the plan report is what they have to go and open.
+
+**The bound is 3 per run, and it is a frozen constant with no environment knob.** The assessment is free
+by design (170 volume assessments per full run, under 100 ms, no model call). An investigation is the
+first part of this layer that is not: the one real diagnosis turn this repository measured ran **702
+seconds, 7.2M prompt tokens, 73 tool calls**, and the character-voice stage's whole chapter-by-chapter
+reading pass for one volume is ~1.14M prompt tokens. So **one diagnosis ≈ six volumes' worth of reading,
+three ≈ eighteen ≈ the entire 17-book series read once, and a fourth costs more than reading the series
+is worth** — which is the point where investigating stops being cheaper than the work it investigates.
+`INVESTIGATION_BOUND` is `Object.freeze`d in `utils/resume/` (a banned patch path), and a test that sets
+nine plausible environment names — including `DELIVERY_MAX_INTERVENTIONS` — shows none of them moves the
+count, and that `utils/resume/` still reads exactly the two variables it already read.
+
+`DELIVERY_MAX_INTERVENTIONS` is a different dial and is not replaced by this one: it bounds **re-runs of
+one step** (which cost the pipeline's own work), this bounds **diagnostics turns** (which cost a reading
+role's time). A step with four attempts left can still spend three diagnoses; a step with none left can
+still be explained by one.
+
+**The ticket is the record the answer lives on.** A second occurrence of the same question reuses the
+first answer only if the answer is somewhere a later run can read, and that place is the ticket. So
+`utils/tickets/record.js` gained `investigationsAlreadyAsked({run, step, kind})` — the **volume-free**
+twin of `matchesTicketKey`, which keys on (step, volume, finding) because the anti-spin budget is
+deliberately per volume and is **not** changed. A kind that fired in all 17 books produced 17 keys under
+the old door, and a run could pay 17 diagnoses for one answer; the investigation door asks the question
+an investigation actually is. It reports `inRun` rather than filtering by run, because `ticketsFor`
+already returns tickets from every recorded run and re-paying for an answer the series already has is the
+waste being closed. A ticket file that cannot be read is reported, never read as "nobody has asked this".
+
+**The door, and why it is not automatic.** `delivery.openInvestigationTickets({plan, state, run})` writes
+one ticket per `actionable` investigation (volume `null`: the question is about the step, not one book),
+is idempotent through the ticket channel rather than through a counter, and names everything it declined
+to open and why. Its command is `npm run delivery -- --open-investigations`. It is **not** folded into
+`--open-ticket` and nothing calls it by itself: `endIsProvable` refuses `end` while any ticket is open,
+and **no command closes a ticket today** (`closeTicketOnDeliverable` is reached only from act mode's
+intervention path and from tests), so a door that opened tickets on its own initiative would make a clean
+run permanently un-endable. Closing that gap is an open item, not a bug this slice fixed.
+
+**The gate refuses the same question twice in one run.** `validateManagerAction` already refused a second
+diagnosis of an *answered ticket* (`already-answered`). It now also refuses a `diagnose` whose ticket asks
+a (step, finding) this run already has an answer to **on another ticket** — kind
+`already-answered-in-run` — and names the ticket to read instead and `diagnose.js --reask` as the account
+owner's door. It is same-run only: a new run's own ticket is still diagnosable, so the escalation ladder
+is not narrowed. `matchesTicketKey` and the per-volume anti-spin budget are untouched, pinned by name.
 
 Two tests hold the table honest. `test/test-finding-levels.js` enumerates every finding kind the
 repository emits from the source text (67 today) and fails the suite if any of them has no declared
@@ -693,7 +746,12 @@ remember, decide, or start.
    exiting 0 with no diagnosis on the ticket, `fix --commit` leaving a patch `proposed`, `delivery
    --accept-patch` leaving it unjudged, `--choose` recording a different option: each is
    `claim-unsupported` HIGH. This is the delivery layer's version of "never let a stage persist empty
-   output" (gotcha 2) — the stage finished, and what it finished with is not there.
+   output" (gotcha 2) — the stage finished, and what it finished with is not there. The verbs that
+   legitimately write no plan of record are named in `claimsFromInvocation` — `--open-ticket`,
+   `--open-investigations`, `--stop-run`, `--choose`, `--accept-patch`, `--reject-patch` — and a new verb
+   has to be added to that list or the audit reports a completed command as missing the plan it never
+   promised. `--open-investigations` is checked the same way `--open-ticket` is: exit 0 with no open
+   ticket in the channel is a claim the disk does not support.
 
 **A live run lock is not a finding.** While a run is going on the lock is the gate, and the audit has
 nothing to say about it. Asked afterwards it is evidence. Reporting the lock working as a defect is

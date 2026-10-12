@@ -7,12 +7,30 @@
  * level and the size of fix that level implies. Both are named because a state a machine knows and a
  * human cannot read is how a run ends up reported as fine.
  *
+ * Slice 3 bounds that last list. The render is where the bound becomes readable: which questions this
+ * run may pay a diagnostics turn for, which ones the ticket channel already answers for free, which one
+ * somebody already asked and nobody answered, and — the part a report is most tempted to leave out —
+ * the questions the ceiling will not pay for, named with the file they are about.
+ *
  * Part of the resume.js layer (split out of the original single file).
  */
 
 const { PIPELINE_STEPS } = require("../../gulpfile");
 
 const { actionByName } = require("./menu");
+const { INVESTIGATION_BOUND } = require("./investigations");
+
+/**
+ * The four investigation statuses, in the words a person reads rather than the field names a test reads.
+ *
+ * @type {Record<string, string>}
+ */
+const STATUS_WORDS = Object.freeze({
+  actionable: "may be paid for this run",
+  answered: "already answered — read the ticket",
+  pending: "already asked, still waiting for an answer",
+  deferred: "NOT PAID FOR this run",
+});
 
 /**
  * Collapse installment numbers into readable ranges: `["01","02","03","07"]` → `"01–03, 07"`.
@@ -192,20 +210,51 @@ function renderResumePlanMarkdown(plan) {
     lines.push(``);
   }
 
-  if (plan.investigations && plan.investigations.length) {
-    lines.push(`## Investigations proposed (not run)`);
+  const inv = plan.investigations || [];
+  if (inv.length) {
+    const c = plan.investigationCeiling || {};
+    const max = typeof c.maxPerRun === "number" ? c.maxPerRun : INVESTIGATION_BOUND.maxPerRun;
+    lines.push(`## Investigations (bounded, and not run)`);
     lines.push(``);
     lines.push(
       `_One entry per (finding kind, step), whatever number of volumes it fired in. Nothing here was ` +
-        `investigated: the diagnostics role is summoned by the manager in act mode, and the level says ` +
-        `what size of fix the finding implies._`
+        `investigated: an investigation is a diagnostics turn, which is a model call, and this run pays ` +
+        `for at most **${max}** of them — ${c.why || INVESTIGATION_BOUND.why} An answer the ticket ` +
+        `channel already holds is read for free and does not take one of those places. A question the ` +
+        `bound will not pay for is named below as **not paid for** — reported, not dropped._`
     );
-    for (const i of plan.investigations) {
+    lines.push(``);
+    lines.push(
+      `_Counted: ${c.actionable ?? 0} to pay for · ${c.answered ?? 0} already answered · ` +
+        `${c.pending ?? 0} asked and waiting · ${c.deferred ?? 0} not paid for · ${c.total ?? inv.length} total._`
+    );
+    lines.push(``);
+    for (const i of inv) {
       lines.push(
         `- **${i.level}** \`${i.kind}\` on \`${i.step}\` — ${i.occurrences} occurrence(s) in volume(s) ` +
-          `${formatRanges(i.volumes) || "the series"} (${i.route}). Expected fix: ${i.sizeOfFix}.`
+          `${formatRanges(i.volumes) || "the series"} (${i.route}). Expected fix: ${i.sizeOfFix}. ` +
+          `**${STATUS_WORDS[i.status] || i.status}**`
       );
       lines.push(`  Question: ${i.question}`);
+      if (i.files && i.files.length) lines.push(`  File(s) it is about: ${i.files.join(", ")}`);
+      if (i.status === "answered") {
+        lines.push(
+          `  Already answered: ticket **${i.ticketId}** (${i.ticketStatus}${i.inRun ? "" : `, asked in run \`${i.ticketRun}\``}). ` +
+            `Read it (\`npm run diagnose -- --ticket=${i.ticketId}\`) and act on its options rather than paying ` +
+            `for a second diagnosis of the same question.`
+        );
+      } else if (i.status === "pending") {
+        lines.push(
+          `  Already asked: ticket **${i.ticketId}** is ${i.ticketStatus}${i.inRun ? "" : ` in run \`${i.ticketRun}\``} and has no ` +
+            `answer yet. Work that ticket — a second ticket for the same question splits the answer across two records.`
+        );
+      } else if (i.status === "deferred") {
+        lines.push(
+          `  Not paid for this run: the ${max} places this run may spend are taken by the entries above. ` +
+            `The question is reported, not answered.`
+        );
+      }
+      lines.push(`  Costs this run: ${i.costsTurn ? "one diagnostics turn" : "nothing"}.`);
     }
     lines.push(``);
   }

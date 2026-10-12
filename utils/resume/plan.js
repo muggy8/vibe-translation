@@ -12,6 +12,8 @@
  *   spendInterventions    — the per-step allowance, the one tell a landed patch cannot supersede
  *
  * Where the reading of the state lives: ./triage.js. Where the ticket/patch channel lives: ./escalate.js.
+ * Where the bound on investigations lives: ./investigations.js — `investigationsFor` batches, that file
+ * decides how many of the batched questions this run may pay a diagnostics turn for.
  *
  * Part of the resume.js layer (split out of the original single file).
  */
@@ -33,6 +35,7 @@ const {
   stepPlan,
 } = require("./triage");
 const { openChannels, escalatorFor } = require("./escalate");
+const { boundInvestigations } = require("./investigations");
 
 /**
  * The declared outputs one step leaves in one volume folder — the exact list to remove so
@@ -510,12 +513,13 @@ function headlineFor(plan, resumeStep, fromVolume) {
 
 
 /**
- * The investigations this run proposes, batched per (kind, step).
+ * The investigations this run proposes, batched per (kind, step), **before** the bound.
  *
- * **Proposed, not run.** Slice 2 adds no model call: the triage names the question, the level, the
- * number of occurrences it batched and the size of fix that level implies, and the manager decides
- * whether to spend a diagnostics turn on it (slice 3 bounds how many it may spend). Nothing here opens
- * a ticket, runs a step, or touches a file.
+ * **Proposed, not run.** Nothing here opens a ticket, runs a step, or touches a file, and no model is
+ * reached. The batching is slice 2's (one entry per (kind, step) whatever number of volumes it fired
+ * in); the ceiling, the reuse of an answer the ticket channel already holds, and the naming of what
+ * was not paid for are slice 3's, and they live in `./investigations.js` — this function is the raw
+ * list that function bounds.
  *
  * Two routes arrive here. A `MINOR` gap batch is one entry per (kind, step) however many volumes it
  * fired in — a stray file in seventeen books is one question about one kind on one step. A step that
@@ -572,10 +576,21 @@ function investigationsFor(state) {
 
 /**
  * Attach the render and return the plan.
+ *
+ * The investigations are bounded here rather than inside `investigationsFor`, so the batching door stays
+ * a plain read of the state and the ceiling stays one function with one table in front of it. The tickets
+ * come from the state snapshot for the reason gotcha 71 gives: `planResume` is a pure function of a state,
+ * and a bound that opened `tickets.json` itself would make a hand-built test state read the live series'
+ * correspondence.
+ *
  * @param {{state: Object, verdict: string, headline: string, steps: ResumeStepPlan[], notes: string[]}} input
  * @returns {ResumePlan}
  */
 function finishPlan({ state, verdict, headline, steps, notes }) {
+  const bounded = boundInvestigations(investigationsFor(state), {
+    run: state.run || null,
+    tickets: state.tickets || [],
+  });
   /** @type {ResumePlan} */
   const plan = {
     generatedAt: new Date().toISOString(),
@@ -590,10 +605,13 @@ function finishPlan({ state, verdict, headline, steps, notes }) {
     interventionsByStep: state.interventionsByStep || {},
     interventionBudget: state.interventionBudget || maxInterventionsPerStep(),
     deliverable: state.deliverable,
-    // The investigations this run PROPOSES (batched per kind and step). Nothing in this slice runs one:
-    // the diagnostics role is summoned by the manager, in act mode, and how many it may summon is
-    // slice 3's bound.
-    investigations: investigationsFor(state),
+    // The investigations this run proposes, each with its status against the bound: `actionable` (may be
+    // paid for, and it is what a diagnostics turn is spent on), `answered` (the ticket channel already
+    // holds the answer, so it is read for free), `pending` (already asked and unanswered — work that
+    // ticket, do not ask a second time), `deferred` (fresh, but the ceiling is gone: reported as
+    // unanswered, never dropped).
+    investigations: bounded.investigations,
+    investigationCeiling: bounded.ceiling,
     markdown: "",
   };
   plan.markdown = renderResumePlanMarkdown(plan);

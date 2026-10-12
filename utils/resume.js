@@ -12,6 +12,7 @@ const __state = require("./resume/state");
 const __triage = require("./resume/triage");
 const __escalate = require("./resume/escalate");
 const __plan = require("./resume/plan");
+const __investigations = require("./resume/investigations");
 const __report = require("./resume/report");
 
 module.exports = {
@@ -20,5 +21,6 @@ module.exports = {
   ...__triage,
   ...__escalate,
   ...__plan,
+  ...__investigations,
   ...__report,
 };

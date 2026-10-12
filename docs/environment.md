@@ -334,6 +334,18 @@ no knob for the banned-option filter (gotcha 70): a menu the manager can widen i
 same applies to `utils/manager.js`: no knob for the decision vocabulary, the accept-safety test, or
 the reply parser's fail-closed rules.
 
+**And no knob for the bound on investigations either** — there is no `MAX_INVESTIGATIONS_PER_RUN`, no
+`INVESTIGATION_CEILING`, no `DELIVERY_MAX_INVESTIGATIONS`, and there will not be one.
+`INVESTIGATION_BOUND` in `utils/resume/investigations.js` is a frozen constant in a banned patch path:
+**3 diagnostics turns per run**, with the arithmetic beside the number (the one real diagnosis turn this
+repository measured is 7.2M prompt tokens / 702 s / 73 tool calls; one volume's whole chapter-by-chapter
+reading pass is ~1.14M; so three answers cost about as much as reading the entire 17-book series once,
+and a fourth costs more than reading the series is worth). A ceiling the role that spends the money can
+raise is not a ceiling. `test/test-investigation-bound.js` sets nine plausible names — including
+`DELIVERY_MAX_INTERVENTIONS`, which is a **different dial** and bounds re-runs of one step, not
+diagnostics turns — and pins that none of them moves a count, and that `utils/resume/` reads exactly the
+two variables it already read (`DELIVERY_MAX_INTERVENTIONS`, `SERIES_LOCATION`).
+
 ### The autopilot (`autopilot.js` — `AUTOPILOT_*`)
 
 | Var | Default | Meaning |
