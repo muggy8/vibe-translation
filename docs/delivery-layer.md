@@ -585,9 +585,11 @@ glossary's attempts on the wiki). `planResume` reads the ledger's `intervention`
 newest recorded run, groups them by step, and a step that has spent its budget becomes
 `open-ticket` — the honest reading of "I have run out of moves on this step" is that it needs
 somebody who can see the code. Tier C is not a limit the
-manager can reach — editing code or prompts, deleting anything, `--allow-fail` /
-`--allow-no-glossary` (deleted 2026-10-13; the name is still on the menu precisely so it can be
-refused by name), renaming a volume folder, touching `old (do not touch)/` or a staged book, or
+manager can reach — editing code or prompts, deleting anything, `--allow-fail` (the menu still names
+that refusal so it can be refused by name; the flag that used to sit beside it was **deleted** on
+2026-10-13 and is no longer named in the menu's own text, because a refusal has to name a thing that
+exists — the banned-option filter in `utils/tickets/banned-options.js` is where the dead name is still
+refused, by name), renaming a volume folder, touching `old (do not touch)/` or a staged book, or
 running intake — and each Tier C entry carries the `why` so a refusal can name what it refused.
 `delivery.js` re-checks every action the plan names against the menu and exits 2 on one it does not
 find, so the menu cannot be widened by a bug in the triage.

@@ -57,7 +57,10 @@ ticket:
 
 - Turning off a carry-forward guard (`GLOSSARY_CARRY_FORWARD_GUARD`,
   `VOICE_CARRY_FORWARD_GUARD`, `STYLE_CARRY_FORWARD_GUARD`).
-- `--allow-fail` or `--allow-no-glossary`.
+- `--allow-fail`, which overrides only the consistency-audit verdict gate and is the account
+  owner's alone to type. There is no flag for the prerequisite gate in `utils/prereqs.js`: it has
+  no override, and the flag that used to skip it was deleted on 2026-10-13 because the case it
+  waved past is what that gate now refuses. Do not offer a replacement for it.
 - Lowering `PASSING_SCORE` or any acceptance threshold.
 - Deleting `.rejected` evidence, validation reports, or any report at all.
 - Editing anything under `hooks/`.

@@ -224,7 +224,9 @@ team for an option that needs a code change; accept or reject a patch; stop and 
 belongs to the account owner.
 
 What you may never do: edit or apply a code change (accept or reject only); delete anything; turn off
-a guard, a threshold, a run policy or the ledger; use --allow-fail or --allow-no-glossary; lower
+a guard, a threshold, a run policy or the ledger; use --allow-fail, which overrides only the
+consistency-audit verdict and is the account owner's alone to type (no flag reaches the prerequisite
+gate that asks whether the foundation was built at all); lower
 PASSING_SCORE; remove a report or a .rejected file; touch hooks/ or .env; rename a volume folder;
 touch the staged books or the "old (do not touch)" folder; run the intake agent. If one of those is
 genuinely the right answer, the diagnostics team says so in prose to the account owner (ownerNote),

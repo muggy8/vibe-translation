@@ -29,7 +29,10 @@
  *      `npm run pipeline -- --stages=`, `npm run delivery -- --mode=act`, and the autopilot's act
  *      command line;
  *  13. a refusal writes nothing into the series and makes no model call;
- *  14. the table is inside `BANNED_PATCH_PATHS` and this file is inside `constraint-tests`.
+ *  14. the table is inside `BANNED_PATCH_PATHS` and this file is inside `constraint-tests`;
+ *  15. no live instruction names the deleted flag — the closed action menu, the manager's standing
+ *      contract and every system prompt are scanned for `--allow-no-glossary`, while the ban entry that
+ *      still refuses the dead name and the test that plants it are the two places allowed to name it.
  *
  * Fixtures only, under `/tmp/opencode/series-fixtures`. Nothing here reads the real 17 volumes, and
  * nothing here reaches a model: `AI_API_KEY` is blank and `AI_BASE_URL` points at a closed port, so
@@ -731,6 +734,73 @@ async function scenarioClosedPath() {
   console.log("  utils/prereqs.js is in constraint-tables and test/test-prerequisite-gate.js is in constraint-tests");
 }
 
+// ─── 15. no live instruction names the deleted flag ───────────────────────────
+
+/**
+ * The gate's own wording, checked against the flag that no longer exists.
+ *
+ * `--allow-no-glossary` was deleted on 2026-10-13. A **live instruction** — a line a role is handed and
+ * acts on — that still names it states a fact about the pipeline that is false, and for the diagnostics
+ * role (whose whole job is telling the account owner what the pipeline will and will not do) a false fact
+ * is the defect. So the dead name is refused in every live instruction: the closed action menu's Tier C
+ * `why`, the manager's standing contract, and every system prompt.
+ *
+ * Two files are ALLOWED to name it, and the allowance is pinned rather than assumed: the ban entry in
+ * `utils/tickets/banned-options.js` (refusing a flag that no longer exists is still refusing it, and the
+ * name has to be present to be refused by name) and the test that plants it.
+ *
+ * The other half is that a reword must not become a softening. Each live instruction must still name
+ * `--allow-fail` as something the role may NOT use, and must still say the prerequisite gate has no
+ * override — the sentence that survived the cleanup is the sentence the cleanup could have quietly
+ * shortened.
+ */
+async function scenarioNoLiveInstructionNamesTheDeletedFlag() {
+  const DEAD = "allow-no-glossary";
+  const LIVE_DIRS = ["system-prompts", "utils/manager", "utils/resume"];
+  const liveFiles = [];
+  for (const dir of LIVE_DIRS) {
+    for (const name of await fs.promises.readdir(path.join(ROOT, dir))) {
+      if (/\.(js|md)$/.test(name)) liveFiles.push(`${dir}/${name}`);
+    }
+  }
+  liveFiles.sort();
+  ok(liveFiles.length >= 3, `the live instructions were found: ${liveFiles.length} file(s)`);
+
+  const hits = [];
+  for (const file of liveFiles) {
+    const text = await fs.promises.readFile(path.join(ROOT, file), "utf8");
+    if (text.includes(DEAD)) hits.push(file);
+  }
+  same(hits, [], `no live instruction names --${DEAD}; these do: ${hits.join(", ")}`);
+
+  // The three lines this scenario exists for, each still a prohibition with the gate named in it.
+  for (const file of ["utils/resume/menu.js", "utils/manager/rules.js", "system-prompts/diagnostics.md"]) {
+    const text = await fs.promises.readFile(path.join(ROOT, file), "utf8");
+    ok(text.includes("--allow-fail"), `${file} still names --allow-fail, so the prohibition survived the reword`);
+    ok(/prerequisite\s+gate/i.test(text), `${file} names the prerequisite gate`);
+    ok(/no override|no flag (at all )?reaches/i.test(text), `${file} says that gate has no override`);
+  }
+
+  // The menu item is still Tier C, still never available, and the refusal the manager is shown is clean.
+  const entry = resume.DELIVERY_ACTIONS.find((a) => a.name === "allow-fail");
+  ok(Boolean(entry), "the menu still names the refusal, so it can be refused by name");
+  same(entry.tier, "C", "and it is still Tier C");
+  same(entry.countsAsIntervention, false, "and it is still not an intervention the manager may spend");
+  const verdict = resume.actionIsAvailable("allow-fail");
+  ok(verdict.allowed === false, "the menu still refuses it");
+  ok(!verdict.why.includes(DEAD), "and the refusal text names no dead flag");
+
+  // The two places allowed to name it, pinned so the allowance cannot be widened by accident.
+  const ban = require("../utils/tickets/banned-options").BANNED_OPTIONS.find((o) => o.id === "allow-fail-or-no-glossary");
+  ok(Boolean(ban), "the banned-option entry for the deleted flag is still there");
+  ok(ban.because.includes(DEAD), "and it names the flag it refuses");
+  ok(ban.pattern.test(`--${DEAD}`), "and its pattern still refuses the dead name");
+  ok(ban.pattern.test("--allow-fail"), "and still refuses the one that exists");
+  const planted = await fs.promises.readFile(path.join(ROOT, "test/test-tickets.js"), "utf8");
+  ok(planted.includes(DEAD), "and the test that proves the refusal still plants it");
+  console.log(`  live instructions: ${liveFiles.length} file(s) scanned, 0 name --${DEAD}; the ban entry and its planted cases still do`);
+}
+
 // ─── runner ───────────────────────────────────────────────────────────────────
 
 const scenarios = [
@@ -748,6 +818,7 @@ const scenarios = [
   ["every door", scenarioEveryDoor],
   ["writes nothing", scenarioWritesNothing],
   ["closed path", scenarioClosedPath],
+  ["no live instruction names the deleted flag", scenarioNoLiveInstructionNamesTheDeletedFlag],
 ];
 
 (async () => {

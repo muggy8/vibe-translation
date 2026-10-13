@@ -204,7 +204,7 @@ const DELIVERY_ACTIONS = [
     what: "—",
     primitive: "—",
     countsAsIntervention: false,
-    why: "--allow-fail / --allow-no-glossary skip the entry gate that stops a token being spent on a foundation that was never built.",
+    why: "--allow-fail overrides the consistency-audit verdict gate and nothing else; the prerequisite gate in utils/prereqs.js has no override, and the flag that used to skip it was deleted on 2026-10-13 because the case it waved past is what that gate now refuses. Neither answer is the manager's to grant.",
   },
   {
     name: "lower-threshold",
