@@ -40,6 +40,7 @@ const DETERMINISTIC_STAGES = new Set(["extract", "translation-report"]);
 /** Kinds that must be tool-less calls (the one-shot contract). */
 const ONE_SHOT_KINDS = new Set([
   "glossary-extract",
+  "glossary-research",
   "voice-extract",
   "style-extract",
   "acceptance",
@@ -63,6 +64,44 @@ const AGENT_KINDS = new Set([
   "wiki-feedback",
   "audit-agent",
 ]);
+
+/**
+ * The tool-less calls whose reply the pipeline **parses as data**, and the shape each one asks for.
+ *
+ * The pair is a rule and its evidence in one place: `DATA_SHAPE_KINDS` is what the audit demands a
+ * shape for, and `DATA_RESPONSE_FORMATS` is the shape the stage's own parser declares, imported from the
+ * module that declares it rather than copied here. A copy in the audit would let a schema and its parser
+ * drift apart and still pass.
+ *
+ * **Only one of them can be shaped, and that is a measurement.** A `response_format` JSON Schema has to
+ * carry an OBJECT at its root. Measured 2026-10-13 against the endpoint this pipeline is configured
+ * against: a schema whose root was `type: "array"` was refused **before the model was asked** — HTTP 400
+ * in 161 ms, 0 tokens, `code: structured_output_failed`, "response_format schema must accept only JSON
+ * objects at its root (type object, or anyOf/oneOf of object schemas)". OpenAI's structured outputs
+ * require the same root. So the three calls that answer with a JSON array — the term list, the voice/POV
+ * extraction, the style-observation extraction — cannot have their answer declared as itself, and
+ * `ai/one-shot.js` refuses an array-rooted schema before it is ever sent. They are named in
+ * `ARRAY_ANSWER_KINDS` so the audit says which data-shaped calls are unshaped and why, instead of leaving
+ * that silent. Wrapping each list in an object would make them shapeable; that changes what three prompts
+ * tell the model to write, and it is written up as a decision in `/tmp/opencode/json-schema-questions.md`.
+ *
+ * Deliberately absent as well, with the reason: `verify`, `polish-audit` and `volume-consistency` answer
+ * with a structured **document** whose findings are the deliverable the retranslate pass reads verbatim —
+ * an envelope would replace the artifact, and an unreadable reply is already counted as a failed check.
+ * `translate`, `retranslate` and `polish` answer in prose by contract, and every agent kind answers with
+ * tool calls, which this endpoint cannot combine with `response_format` at all.
+ */
+const DATA_RESPONSE_FORMATS = {
+  "glossary-research": require("../glossary/research").researchResponseFormat(),
+};
+const DATA_SHAPE_KINDS = new Set(Object.keys(DATA_RESPONSE_FORMATS));
+
+/**
+ * Data-shaped calls whose reply is a JSON array, and which therefore ask for no shape on this endpoint.
+ * The audit fails if one of them starts sending a shape, because the shape it would send is the one the
+ * server refuses — the failure that motivated this whole rule.
+ */
+const ARRAY_ANSWER_KINDS = new Set(["glossary-extract", "voice-extract", "style-extract"]);
 
 /** The order the default pipeline runs its tasks in. */
 const STAGE_ORDER = [
@@ -430,9 +469,10 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
   //   - the directive REPLACES the rubric. A schema says what shape the answer has; only the
   //     prompt says what the score MEANS. A grader given the shape and not the rubric produces
   //     a confident number with nothing behind it.
-  //   - it leaks. `response_format` and `tools` are mutually exclusive on this endpoint, so an
-  //     agent turn carrying it fails at the HTTP layer; and the translation role's deliverable
-  //     is prose, so a shape forced onto it is a contract change wearing a knob.
+  //   - it leaks onto a role that must answer in prose or with tools. `response_format` and
+  //     `tools` are mutually exclusive on this endpoint, so an agent turn carrying it fails at
+  //     the HTTP layer; and a translation, a draft, a polished chapter or an audit DOCUMENT
+  //     answers in prose, so a shape forced onto one of them is a contract change wearing a knob.
   const declaredShape = acceptanceResponseFormat();
   const answerShapeGaps = [];
   let shapedGrades = 0;
@@ -465,17 +505,89 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
       }
       continue;
     }
-    if (asked) {
+    if (asked && !DATA_SHAPE_KINDS.has(kind)) {
       answerShapeGaps.push(
-        `#${entry.index} ${kind}: a ${kind} call sends response_format — it is not a grading call. ` +
-        `An agent turn cannot carry it on this endpoint (asking for it beside tools is an HTTP 400), ` +
-        `and the writing roles answer in prose.`
+        `#${entry.index} ${kind}: a ${kind} call sends response_format — it is neither a grading call nor a ` +
+        `call whose reply the pipeline parses as data. An agent turn cannot carry it on this endpoint ` +
+        `(asking for it beside tools is an HTTP 400), and the writing roles and the audit-document roles ` +
+        `answer in prose.`
       );
     }
   }
   if (answerShapeGaps.length) fail("grade-answer-shape", "the answer shape asked for on the wire does not match the roles that are allowed to ask for it.", answerShapeGaps);
-  else if (!declaredShape) pass("grade-answer-shape", "ACCEPTANCE_STRUCTURED_OUTPUT=off: no call asks for a shape, and no call that must not ask for one does.");
+  else if (!declaredShape) pass("grade-answer-shape", "ACCEPTANCE_STRUCTURED_OUTPUT=off: no grading call asks for a shape, and no call that must not ask for one does.");
   else pass("grade-answer-shape", `${shapedGrades} grading call(s) ask for the rubric's own answer shape and still carry the rubric; no writing or agent call sends response_format.`);
+
+  // ─── 6c. Every call whose reply is PARSED AS DATA: shaped, or named as unshapeable ──
+  // The other half of 6b. The question is the one 6b asks about a grader, asked about a read pass
+  // instead: did the call that produces data ASK for the shape its own parser reads — and if it did not,
+  // is that a stage that stopped asking, or the one shape this endpoint cannot be given at all?
+  //
+  // A `kind` in DATA_SHAPE_KINDS that sends no shape is a stage that stopped asking — the exact state that
+  // lets a chapter's extraction come back as prose and be logged as "the chapter files nothing". A `kind`
+  // whose shape is not the module's own is a second copy of a schema that has drifted from its parser.
+  //
+  // A `kind` in ARRAY_ANSWER_KINDS that sends a shape is the failure this rule exists to catch. Its reply
+  // is a JSON array, and this endpoint refuses a JSON Schema whose root is an array before it generates
+  // anything (measured 2026-10-13: HTTP 400, 161 ms, 0 tokens). Shipping one does not make the answer
+  // stricter, it makes every call fail.
+  //
+  // What is deliberately NOT in either set, and why it is worth saying out loud: `verify`, `polish-audit`
+  // and `volume-consistency`. Their reply is a structured DOCUMENT whose findings ARE the deliverable —
+  // the retranslate pass reads them verbatim — so a `{score, findings}` envelope would replace the
+  // artifact, and an unreadable one is already counted as a failed check. `translate`, `retranslate`,
+  // `polish` and every agent kind answer in prose or with tool calls. See `configs/shared/acceptance.js`
+  // and the comment above each parser (`glossary/extract.js`, `character-voice/stages.js`,
+  // `style-guide/amend.js`, `glossary/research.js`).
+  const dataShapeGaps = [];
+  const dataShapeSeen = [];
+  const dataShapeUnshaped = [];
+  for (const { entry, kind } of identified) {
+    const asked = entry.sampling ? entry.sampling.responseFormat : null;
+    if (DATA_SHAPE_KINDS.has(kind)) {
+      const declared = DATA_RESPONSE_FORMATS[kind];
+      if (!declared) {
+        dataShapeGaps.push(`#${entry.index} ${kind}: the audit has no declared shape for a data-shaped call — add it beside the parser`);
+        continue;
+      }
+      if (!asked) {
+        dataShapeGaps.push(
+          `#${entry.index} ${kind}: this call's reply is parsed as data and it asked for no answer shape. ` +
+          `A reply that is not that shape is a stage that cannot tell "found nothing" from "never answered".`
+        );
+        continue;
+      }
+      if (JSON.stringify(asked) !== JSON.stringify(declared)) {
+        dataShapeGaps.push(
+          `#${entry.index} ${kind}: asked for ${JSON.stringify(asked)}, not the shape its own parser declares ` +
+            `(${JSON.stringify(declared)})`
+        );
+        continue;
+      }
+      dataShapeSeen.push(`#${entry.index} ${kind}: ${asked.type} "${asked.json_schema && asked.json_schema.name}"`);
+      continue;
+    }
+    if (ARRAY_ANSWER_KINDS.has(kind) && asked) {
+      const root = asked.json_schema && asked.json_schema.schema && asked.json_schema.schema.type;
+      dataShapeGaps.push(
+        `#${entry.index} ${kind}: this call answers with a JSON ARRAY and it sent a response_format ` +
+          `(root "${root === undefined ? "none" : root}"). This endpoint refuses a schema whose root is not ` +
+          `an object — it answers HTTP 400 before generating, so a shape here is not a stricter answer, it ` +
+          `is every call failing. Either drop it or wrap the list in an object AND change the prompt and ` +
+          `the parser to match.`
+      );
+    } else if (ARRAY_ANSWER_KINDS.has(kind)) {
+      dataShapeUnshaped.push(`#${entry.index} ${kind}`);
+    }
+  }
+  if (dataShapeGaps.length) fail("data-answer-shape", "a call whose reply the pipeline parses as data either stopped asking for its shape, or asked for one this endpoint refuses.", dataShapeGaps);
+  else pass(
+    "data-answer-shape",
+    `${dataShapeSeen.length} data-shaped call(s) asked for the shape declared beside its own parser; ` +
+      `${dataShapeUnshaped.length} array-answering call(s) asked for none, which is what this endpoint requires ` +
+      `of an answer that is a JSON array (a schema whose root is not an object is refused before generation).`,
+    dataShapeSeen
+  );
 
   // ─── 7. No placeholder reached the model as literal text ────────────────────
   const leaks = [];

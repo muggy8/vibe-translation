@@ -60,6 +60,11 @@ const {
   glossaryNewestSections,
   rosterReconciliationLog,
 } = require("../utils/reference-store");
+// The finding constructor, used only to NAME a term-list read that never answered (see
+// auditGlossaryArtifact). Reaching for the post-mortem's own constructor rather than inventing a local
+// finding shape is what keeps the kind, its severity and its declared level in one vocabulary.
+const { finding } = require("../utils/postmortem");
+const { extractionReadReport } = require("./extract");
 
 /** The artifact this stage publishes, for the audit report's headings. */
 const GLOSSARY_ARTIFACT_NAME = "glossary.md";
@@ -295,10 +300,27 @@ async function renderGlossaryArtifact(ctx, { moveAside = true } = {}) {
 /**
  * Run the deterministic audit and write the report the validator agent used to write.
  *
- * @param {{ values: Object, refStore: Object|null, glossaryOutputFile: string, storeTermRows: Object|null }} ctx
+ * The report is the audit's own markdown **plus the block about how this volume's term lists were read**
+ * (`glossary/extract.js`'s `extractionReadReport`). It is appended here rather than in `glossary/qa.js`,
+ * because this is the function that owns the report's content, and it is the mirror of
+ * `character-voice/store.js`'s `auditVoiceArtifact`, which appends its own `readingReport` the same way.
+ * The reason both stages do it: a glossary built from ten reads of which one never answered is a different
+ * artifact from one built from ten that answered, and the grader's message list already contains this file
+ * — so this is the one place the hole reaches the gate without inventing a second gate.
+ *
+ * Each read that never produced a list also becomes a finding (`chapter-extraction-never-answered`, HIGH,
+ * declared MAJOR in the level table). **What that finding does and does not reach, stated plainly:** it is
+ * in the report the grader reads, it is on the console, and it is on `ctx.extractionFindings` for the
+ * stage's caller. It is NOT in the delivery layer's triage or the volume-halt gate, because the post-mortem
+ * assesses a finished step from the disk (`utils/postmortem/run.js` → `volume.js` / `file.js`) and nothing
+ * on a stage's own finding list is on the disk. Closing that needs a new declared sidecar in
+ * `utils/artifacts/preproduction.js` or a finding channel in `utils/postmortem/volume.js` — both outside
+ * this slice's allowed edits, and both an owner's call. See `/tmp/opencode/json-schema-questions.md`.
+ *
+ * @param {{ values: Object, refStore: Object|null, glossaryOutputFile: string, storeTermRows: Object|null, extractionReads?: Array<Object> }} ctx
  * @param {{ refused?: Array<Object> }} [opts] - The filings this volume refused, so the report names them
  *   instead of leaving a term the read pass found unexplained.
- * @returns {Promise<Object|null>} The audit, or null when no record is open.
+ * @returns {Promise<Object|null>} The audit, its markdown carrying the read block, or null when no record is open.
  */
 async function auditGlossaryArtifact(ctx, { refused } = {}) {
   if (!ctx.refStore) return null;
@@ -309,12 +331,34 @@ async function auditGlossaryArtifact(ctx, { refused } = {}) {
     markdown,
     refused: refused !== undefined ? refused : (ctx.storeTermRows && ctx.storeTermRows.refused) || [],
   });
-  ctx.storeAudit = audit;
+
+  // The reading half of the report, and the findings it produces.
+  const reads = Array.isArray(ctx.extractionReads) ? ctx.extractionReads : [];
+  const volume = ctx.values.INSTALLMENT_NUMBER;
+  const readReport = extractionReadReport(reads, { volume });
+  const neverAnswered = reads.filter((read) => read.failed);
+  ctx.extractionFindings = neverAnswered.map((read) =>
+    finding(
+      "HIGH",
+      "chapter-extraction-never-answered",
+      "glossary",
+      volume,
+      GLOSSARY_ARTIFACT_NAME,
+      `${read.id}: this volume's glossary was built from a term-list read that never produced a list ` +
+        `(${(read.attempts || []).map((a) => `${a.thinkingLevel}: ${a.failure ? a.failure.kind : "no answer"}`).join("; ")}). ` +
+        `Every term that read was supposed to find is missing from this glossary and from every later ` +
+        `volume's, because the glossary is copied forward.`
+    )
+  );
+  for (const found of ctx.extractionFindings) console.error(`Volume ${volume}: HIGH ${found.kind}: ${found.message}`);
+
+  ctx.storeAudit = readReport ? { ...audit, markdown: `${audit.markdown}\n${readReport}` } : audit;
   console.log(
     `Volume ${ctx.values.INSTALLMENT_NUMBER}: deterministic audit — ${audit.findings.length} finding(s), ` +
-      `${audit.highFindings.length} at HIGH; ${audit.checked} citation(s) re-checked against the source text.`
+      `${audit.highFindings.length} at HIGH; ${audit.checked} citation(s) re-checked against the source text.` +
+      `${ctx.extractionFindings.length ? ` Plus ${ctx.extractionFindings.length} read(s) that never answered (see the report).` : ""}`
   );
-  return audit;
+  return ctx.storeAudit;
 }
 
 /**

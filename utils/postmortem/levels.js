@@ -177,6 +177,11 @@ const FINDING_LEVEL_ROWS = [
     why: "a chapter of the book was never translated while the volume published as complete, and the later volumes read that volume as finished.",
   },
   {
+    kind: "chapter-extraction-never-answered",
+    level: "MAJOR",
+    why: "a read this volume's glossary was built from produced no term list at all, so the terms it was owed are missing from this volume and from every later volume's copy-forward.",
+  },
+  {
     kind: "accepted-without-acceptance",
     level: "MAJOR",
     why: "the volume published on a window no grader signed off, and the next volume copies that record forward.",

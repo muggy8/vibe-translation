@@ -170,7 +170,7 @@ owner's door. It is same-run only: a new run's own ticket is still diagnosable, 
 is not narrowed. `matchesTicketKey` and the per-volume anti-spin budget are untouched, pinned by name.
 
 Two tests hold the table honest. `test/test-finding-levels.js` enumerates every finding kind the
-repository emits from the source text (67 today) and fails the suite if any of them has no declared
+repository emits from the source text (68 today) and fails the suite if any of them has no declared
 level, if a `STOP` kind is not emitted at HIGH, or if **any** damage kind fails to reach the triage's
 damage decision — that number is now pinned at **0**, where it was pinned at 4 while the triage routed
 on severity. The four kinds §1 was written about stay pinned separately as still emitted below HIGH,

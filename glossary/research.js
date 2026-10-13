@@ -118,6 +118,53 @@ function buildResearchReadingPrompt(row, results) {
 }
 
 /**
+ * The `response_format` payload for the research reading call.
+ *
+ * Declared beside {@link parseResearchAnswer}. The prompt already spells the object out key by key
+ * (`buildResearchReadingPrompt`'s "Answer with ONE JSON object" block: `found`, `page`, `lang`, `url`,
+ * `note`), so the schema is that block, and nothing wider: all five required, all strings except the
+ * boolean, no extra keys. `note` is required as a **string that may be empty** rather than a non-empty
+ * one, because the parser is what enforces the non-empty rule (`parseResearchAnswer` throws on a blank
+ * note) and the filing door refuses the row — a schema that forced a non-empty note would push the model
+ * to write a plausible one for a term nothing matched, which is the exact defect the prompt warns about.
+ *
+ * This is the **only** read pass in the pipeline that can carry a shape at all, and the reason is the root:
+ * this answer is already a JSON object, and this endpoint refuses a `response_format` JSON Schema whose root
+ * is anything but an object (measured 2026-10-13 — HTTP 400 in 161 ms, 0 tokens, "response_format schema
+ * must accept only JSON objects at its root"; `ai/one-shot.js` refuses such a schema before it is sent). The
+ * term list, the voice extraction and the style extraction all answer as JSON **arrays**, so they cannot be
+ * declared as themselves. Whether they should be re-expressed as an object holding the list is an open
+ * decision: `/tmp/opencode/json-schema-questions.md`.
+ *
+ * Not measured against the real endpoint. It is the same class of schema the four acceptance graders have
+ * been sending to it successfully (`{score, band, note}`, `strict: true`, `additionalProperties: false`),
+ * which is why it was kept; the acceptance shape is proven on this machine, this one is inferred from it.
+ *
+ * @returns {Object} The `response_format` request field.
+ */
+function researchResponseFormat() {
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "glossary_research_answer",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          found: { type: "boolean" },
+          page: { type: "string" },
+          lang: { type: "string" },
+          url: { type: "string" },
+          note: { type: "string" },
+        },
+        required: ["found", "page", "lang", "url", "note"],
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
+/**
  * Read the research call's answer.
  *
  * Tolerant of a code fence and of a model that wraps the object in a sentence, and strict about the one
@@ -354,6 +401,10 @@ async function researchVolumeTerms(ctx, { lookup = defaultWikiLookup, only = nul
     const output = await harness.runOneShot({
       systemPrompt: RESEARCH_SYSTEM_PROMPT,
       messages: [{ text: prompt }],
+      // The answer shape, declared beside the parser that reads it. This call has no tools and no agent
+      // turn behind it, and its reply is filed as a row of the record — so a reply that is not that
+      // object is a research turn paid for and thrown away, which is what the shape makes loud instead.
+      responseFormat: researchResponseFormat(),
       label: `glossary-research-${volume}-${row.term.slice(0, 20)}`,
     });
     turnsLeft -= 1;
@@ -423,6 +474,7 @@ async function researchVolumeTerms(ctx, { lookup = defaultWikiLookup, only = nul
 module.exports = {
   RESEARCH_SYSTEM_PROMPT,
   buildResearchReadingPrompt,
+  researchResponseFormat,
   parseResearchAnswer,
   lookupLogLines,
   renderResearchLog,

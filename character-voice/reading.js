@@ -54,6 +54,9 @@ require("../types"); // JSDoc type definitions
 
 const { runExtract, parseVoiceQuirks } = require("./stages");
 const { buildAlreadyExtractedNote } = require("./prompts");
+// The endpoint's own tags on the two ways a call can fail without answering (AGENTS.md gotcha 55: never
+// string-match a server's error text — these are the classes `configs/shared/failures.js` puts on them).
+const { isStructuredOutputError, isTooBigForOnePassError } = require("../configs/shared");
 
 /** One chapter's answer, kept beside the volume so an interrupted pass does not pay for it twice. */
 const PARTIAL_PREFIX = "character-voice-extract-";
@@ -325,6 +328,19 @@ function parseExtractionAnswer(output) {
 /**
  * One chapter's paid read: ask for it, parse what comes back, and say whether the answer closed.
  *
+ * A call that throws is not all one failure. A chapter can come back with **no answer because the endpoint
+ * refused the shape it was asked for** (`shape-refused`), and that is the failure a re-ask can plausibly
+ * fix, which makes it an incomplete answer rather than a reason to abandon the pass. It is rarer than it
+ * sounds on this machine today: `character-voice/stages.js` sends no `response_format`, because its answer
+ * is a JSON array and this endpoint refuses a schema whose root is an array before it generates (measured
+ * 2026-10-13; see `ai/one-shot.js`'s `assertShapeIsExpressible`). The class is kept because the reading
+ * pass must classify whatever it is given, and because a shape this stage can actually express — the list
+ * under an object root — is an open decision, not a settled one.
+ *
+ * A size failure (`finish_reason=length`) is not re-askable: the same request at the same cap is cut off
+ * the same way, so it keeps this file's existing behaviour and stops the pass. Anything else (an endpoint
+ * that is down, an idle deadline) also stops it, because a second ask is not a fix for a dead server.
+ *
  * @param {Object} params
  * @param {Object} params.ctx - The ctx `character-voice/stages.js`'s extraction pass reads.
  * @param {{id: string, file: string}} params.segment
@@ -332,7 +348,7 @@ function parseExtractionAnswer(output) {
  * @param {string} params.extraNote - What this chapter is told about what has already been extracted.
  * @param {string|null} [params.thinkingLevel] - The reasoning level for this attempt, or null for the run's own.
  * @param {(line: string) => void} params.log
- * @returns {Promise<{ok: boolean, entries: Array<Object>, lost: Array<Object>, cutOff: boolean, recovered: boolean, error: string|null, raw: string, thinkingLevel: string|null}>}
+ * @returns {Promise<{ok: boolean, entries: Array<Object>, lost: Array<Object>, cutOff: boolean, recovered: boolean, error: string|null, failure: {kind: string, because: string}|null, raw: string, thinkingLevel: string|null}>}
  */
 async function readOneChapter({ ctx, segment, si, extraNote, thinkingLevel = null, log }) {
   let output = "";
@@ -343,8 +359,23 @@ async function readOneChapter({ ctx, segment, si, extraNote, thinkingLevel = nul
       thinkingLevel,
     });
   } catch (err) {
-    log(`  chapter ${segment.id}: extraction FAILED${thinkingLevel ? ` at ${thinkingLevel}` : ""}: ${err.message}`);
-    return { ok: false, entries: [], lost: [], cutOff: false, recovered: false, error: err.message, raw: "", thinkingLevel };
+    const kind = isStructuredOutputError(err)
+      ? "shape-refused"
+      : isTooBigForOnePassError(err)
+        ? "ran-out-mid-shape"
+        : "call-failed";
+    log(`  chapter ${segment.id}: extraction FAILED${thinkingLevel ? ` at ${thinkingLevel}` : ""} (${kind}): ${err.message}`);
+    return {
+      ok: false,
+      entries: [],
+      lost: [],
+      cutOff: false,
+      recovered: false,
+      error: err.message,
+      failure: { kind, because: err.message },
+      raw: "",
+      thinkingLevel,
+    };
   }
   const parsed = parseExtractionAnswer(output);
   return {
@@ -354,8 +385,30 @@ async function readOneChapter({ ctx, segment, si, extraNote, thinkingLevel = nul
     cutOff: parsed.cutOff,
     recovered: parsed.recovered,
     error: parsed.error,
+    failure: null,
     raw: output,
     thinkingLevel,
+  };
+}
+
+/**
+ * The line one paid read contributes to the chapter's attempt log.
+ *
+ * Written as a function because the same record is taken from a read that answered and from one that
+ * threw, and the two used to be built by two different expressions that had to be kept in step by hand.
+ *
+ * @param {{thinkingLevel: string|null, entries?: Array<Object>, cutOff?: boolean, lost?: Array<Object>, recovered?: boolean, error?: string|null, failure?: {kind: string}|null}} read
+ * @returns {{at: string, thinkingLevel: string|null, claims: number, cutOff: boolean, lostClaims: number, parseError: string|null, failure: string|null}}
+ */
+function attemptLog(read) {
+  return {
+    at: new Date().toISOString(),
+    thinkingLevel: read.thinkingLevel,
+    claims: read.entries ? read.entries.length : 0,
+    cutOff: Boolean(read.cutOff || read.failure),
+    lostClaims: read.lost ? read.lost.length : 0,
+    parseError: read.recovered ? read.error : null,
+    failure: read.failure ? read.failure.kind : null,
   };
 }
 
@@ -457,23 +510,28 @@ async function readVolumeChapters({ ctx, segments, volumeDir, installmentNumber,
     /** @type {Array<Object>} */
     const attempts = [];
     const first = await readOneChapter({ ctx, segment, si, extraNote: buildNote(chapters), log });
-    if (!first.ok) {
+    attempts.push(attemptLog(first));
+    // A read that failed for a reason a re-ask cannot fix — the answer hit the output cap, or the call
+    // itself failed — stops the pass, exactly as it did before this file learned about answer shapes.
+    // A refused shape does not: that one is given the chapter's second paid read below.
+    if (!first.ok && first.failure.kind !== "shape-refused") {
       return {
         ok: false,
         chapters,
         refusal: {
           rule: "chapter-extraction-failed",
-          because: `chapter ${segment.id}: ${first.error}`,
+          because: `chapter ${segment.id} (${first.failure.kind}): ${first.error}`,
           fix: "run this command again — the chapters already read are kept and are not paid for twice.",
         },
       };
     }
-    attempts.push({ at: new Date().toISOString(), thinkingLevel: first.thinkingLevel, claims: first.entries.length, cutOff: first.cutOff, lostClaims: first.lost.length, parseError: first.recovered ? first.error : null });
-    log(`  chapter ${segment.id}: ${first.entries.length} claim(s) read${first.thinkingLevel ? ` at ${first.thinkingLevel}` : ""}${first.cutOff ? " — CUT OFF: the answer never reached its closing bracket" : ""}`);
-    if (first.recovered) {
-      log(`    the answer was not valid JSON as a whole (${first.error}).`);
-      log(`    recovered ${first.entries.length} claim(s) individually; ${first.lost.length} could not be read.`);
-      for (const item of first.lost.slice(0, 10)) log(`    lost: ${item.because} — ${item.raw.replace(/\s+/g, " ").slice(0, 160)}`);
+    if (first.ok) {
+      log(`  chapter ${segment.id}: ${first.entries.length} claim(s) read${first.thinkingLevel ? ` at ${first.thinkingLevel}` : ""}${first.cutOff ? " — CUT OFF: the answer never reached its closing bracket" : ""}`);
+      if (first.recovered) {
+        log(`    the answer was not valid JSON as a whole (${first.error}).`);
+        log(`    recovered ${first.entries.length} claim(s) individually; ${first.lost.length} could not be read.`);
+        for (const item of first.lost.slice(0, 10)) log(`    lost: ${item.because} — ${item.raw.replace(/\s+/g, " ").slice(0, 160)}`);
+      }
     }
 
     let best = first;
@@ -493,29 +551,33 @@ async function readVolumeChapters({ ctx, segments, volumeDir, installmentNumber,
      * The budget is unchanged: `MAX_ATTEMPTS_PER_CHAPTER` is two paid reads per chapter per pass, and the
      * better answer still wins, so a re-read that comes back worse does not replace the first one.
      */
-    const answerIncomplete = first.cutOff || first.entries.length === 0 || first.lost.length > 0;
+    const answerIncomplete = !first.ok || first.cutOff || first.entries.length === 0 || first.lost.length > 0;
     if (answerIncomplete) {
-      if (first.entries.length === 0) log(`  chapter ${segment.id}: the answer yielded no claims at all — re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
+      if (!first.ok) log(`  chapter ${segment.id}: the endpoint refused the answer shape (${first.failure.because}). Re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
+      else if (first.entries.length === 0) log(`  chapter ${segment.id}: the answer yielded no claims at all — re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
       else if (first.cutOff) log(`  chapter ${segment.id}: a cut-off answer is half an answer. Re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
       else log(`  chapter ${segment.id}: ${first.lost.length} claim(s) could not be read out of a closed array. Re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
       const second = await readOneChapter({ ctx, segment, si, extraNote: buildNote(chapters), thinkingLevel: EXTRACTION_RETRY_THINKING_LEVEL, log });
       retried = true;
+      attempts.push(attemptLog(second));
       if (second.ok) {
-        attempts.push({ at: new Date().toISOString(), thinkingLevel: second.thinkingLevel, claims: second.entries.length, cutOff: second.cutOff, lostClaims: second.lost.length, parseError: second.recovered ? second.error : null });
         log(`  chapter ${segment.id}: re-read at ${EXTRACTION_RETRY_THINKING_LEVEL} → ${second.entries.length} claim(s), ${second.cutOff ? "still cut off" : "the array closed"}${second.lost.length ? `, ${second.lost.length} unreadable` : ""}.`);
         if (second.entries.length > best.entries.length || (!second.cutOff && best.cutOff)) best = second;
       } else {
-        attempts.push({ at: new Date().toISOString(), thinkingLevel: second.thinkingLevel, claims: 0, cutOff: true, lostClaims: 0, parseError: second.error });
+        log(`  chapter ${segment.id}: the re-read ${second.failure.kind === "shape-refused" ? "was refused by the endpoint too" : `failed (${second.failure.kind})`}.`);
       }
     }
 
     if (best.entries.length === 0) {
+      const kinds = attempts.map((a) => `${a.thinkingLevel || "run default"}: ${a.failure || (a.cutOff ? "cut off" : "no claims")}`).join("; ");
       return {
         ok: false,
         chapters,
         refusal: {
           rule: "chapter-extraction-unparseable",
-          because: `chapter ${segment.id}: ${best.error}${best.cutOff ? " — and the answer never reached its closing bracket, so it was cut off, not merely malformed" : ""}`,
+          because:
+            `chapter ${segment.id}: ${best.error}${best.cutOff ? " — and the answer never reached its closing bracket, so it was cut off, not merely malformed" : ""} ` +
+            `(paid reads: ${kinds})`,
           fix: "run this command again; the chapters already read are kept and are not paid for twice.",
         },
       };

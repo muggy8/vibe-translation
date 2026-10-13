@@ -51,7 +51,7 @@ const {
   publishedGlossaryRowsInRecord,
 } = require("../utils/reference-store");
 const glossaryStore = require("../glossary/store");
-const { researchVolumeTerms } = require("../glossary/research");
+const { researchVolumeTerms, researchResponseFormat } = require("../glossary/research");
 const { classifyResearchable, RESEARCH_MAX_TERMS_PER_VOLUME, selectResearchTargets } = require("../glossary/researchable");
 const { readModuleLayer } = require("./module-layer");
 const { assertInsideFixture } = require("./fixture-reference-store");
@@ -344,11 +344,15 @@ function fakeWiki(known = null) {
  */
 function fakeResearchModel(sink) {
   /**
-   * @param {{systemPrompt: string, messages: Array<Object>, label: string}} request
+   * @param {{systemPrompt: string, messages: Array<Object>, label: string, responseFormat?: Object|null}} request
    * @returns {Promise<string>}
    */
   return async function runOneShot(request) {
+    if (!Array.isArray(sink.shapes)) sink.shapes = [];
     sink.calls.push(request.label);
+    // What the pass asked the endpoint to answer as. Recorded so a scenario can prove the shape is
+    // asked for on the wire and not only claimed in a comment.
+    sink.shapes.push(request.responseFormat ?? null);
     const term = String(request.messages[request.messages.length - 1].text.match(/^Term: (.+)$/m)?.[1] || "");
     return JSON.stringify({
       found: true,
@@ -493,6 +497,13 @@ async function scenarioTheBoundBitesAndSaysSo() {
 
   ok(result.asked === RESEARCH_MAX_TERMS_PER_VOLUME, `the pass asked ${result.asked} terms; the bound is ${RESEARCH_MAX_TERMS_PER_VOLUME}`);
   same(sink.calls.length, RESEARCH_MAX_TERMS_PER_VOLUME, `the model was called ${sink.calls.length} times, not the bound`);
+  // Every one of those calls asked for the answer shape `parseResearchAnswer` reads. A research turn is
+  // the one thing this pass pays for, and a reply that is not that object is a turn thrown away.
+  same(
+    sink.shapes.map((shape) => JSON.stringify(shape)),
+    Array.from({ length: RESEARCH_MAX_TERMS_PER_VOLUME }, () => JSON.stringify(researchResponseFormat())),
+    "every research call asked for the shape its parser declares"
+  );
   ok(result.skipped.length === 3, `expected 3 rows over the bound, got ${result.skipped.length}`);
   ok(result.capped === true, "the pass did not report that the volume hit the bound");
   ok(warnings.some((line) => line.includes("research bound") && line.includes("named in glossary-research.md")), "the volume that hit the bound did not say so on the console");

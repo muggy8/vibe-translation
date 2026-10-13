@@ -701,6 +701,29 @@ function runAuditSelfTest() {
   log.push(entry(i++, { stage: "style-guide", system: authorSystem, user: authorUser(vol01), tools: fsTools, toolCalls: [{ name: "writeFile", arguments: { filePath: "style-guide.md", text: "…" } }] }));
   // 2. A tool the model reached for that was never advertised.
   log.push(entry(i++, { stage: "style-guide", system: authorSystem, user: authorUser(vol01), tools: fsTools, toolCalls: [{ name: "writeStyleGuide", arguments: { filePath: "style-guide.md" } }] }));
+  // 2b. A data-shaped read that asks for a shape this endpoint refuses: a glossary extraction handed an
+  //     ARRAY-rooted JSON Schema. It looks correct in the code — the call sends a `response_format`, the
+  //     parser reads an array, the offline fake backend accepts anything — and the real server answers
+  //     HTTP 400 before it generates. Measured 2026-10-13; this is the defect the rule exists for.
+  log.push(
+    entry(i++, {
+      stage: "glossary",
+      system: sys("glossary-terms.md"),
+      user: `Volume being processed: 01\n\n${workflow.sourceTextOf(vol01)}`,
+      temperature: 0.7,
+      reasoningEffort: "medium",
+      responseFormat: {
+        type: "json_schema",
+        json_schema: {
+          name: "glossary_new_terms",
+          strict: true,
+          schema: { type: "array", items: { type: "object", properties: { term: { type: "string" } }, required: ["term"], additionalProperties: false } },
+        },
+      },
+      answer: { text: "[]" },
+    })
+  );
+
   // 3. A tool-less grader handed tool schemas.
   log.push(entry(i++, { stage: "glossary", system: sys("glossary-acceptance.md"), user: `Volume being processed: 01\n\n${workflow.glossaryMarkdown(vol01)}\n\n**Recommendation:** Pass`, tools: fsTools, responseFormat: gradeShape, answer: { text: '{"score":80,"band":"Pass","note":"ok"}' } }));
   // 4. The translator given a system prompt and the wrong sampling.
@@ -857,6 +880,7 @@ function runAuditSelfTest() {
     "translator-context",
     "judging-dialect",
     "grade-answer-shape",
+    "data-answer-shape",
     "placeholder-leak",
     "stage-ordering",
     "answer-shape",

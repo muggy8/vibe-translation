@@ -620,6 +620,7 @@ function selfCheck() {
 const SIGNATURES = [
   ["# Series Intake Agent", "intake"],
   ["**Terminology Extraction Specialist**", "glossary-extract"],
+  ["You are a reference researcher supporting", "glossary-research"],
   ["**Quality Gatekeeper** for a translation glossary", "acceptance"],
   ["**Voice and Perspective Analyst**", "voice-extract"],
   ["**Quality Gatekeeper** for a character voice", "acceptance"],

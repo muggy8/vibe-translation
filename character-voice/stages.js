@@ -82,6 +82,26 @@ async function runExtract(ctx, seg, si, opts = {}) {
 }
 
 
+// ─── Why this read pass asks for no answer shape ─────────────────────────────
+//
+// It used to declare one beside `parseVoiceQuirks`, and it was measured against the endpoint this
+// pipeline is configured against on 2026-10-13: the request was refused before the model was asked —
+// HTTP 400 in 161 ms, 0 tokens, "response_format schema must accept only JSON objects at its root
+// (type object, or anyOf/oneOf of object schemas)". The schema that produced it was
+// `{ type: "array", items: { type: "object", … } }`, which is the shape this call answers in, so a
+// chapter's extraction cannot be shaped as itself. `ai/one-shot.js` now refuses an array-rooted schema
+// before it is sent, because shipping one means every chapter of every volume fails at the HTTP layer.
+//
+// What the shape was for is still here, and it is the part the measurement says matters:
+// `character-voice/reading.js` re-asks a chapter whose answer never reached its closing bracket, and a
+// chapter that never answers is named in `character-voice-reading.md` and in the report the grader reads.
+//
+// The envelope that WOULD be expressible — the same item list under an object root — is written up as a
+// decision rather than taken: `/tmp/opencode/json-schema-questions.md`. Adopting it means changing what
+// `system-prompts/character-voice-extract.md` tells the model to write, and the key inventory this file
+// could not measure (no real voice extraction answer is on disk anywhere in the series folder).
+
+
 /**
  * Truncate a character voice reference if it exceeds the threshold.
  *

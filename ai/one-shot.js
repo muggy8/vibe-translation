@@ -32,6 +32,63 @@ const { consumeEvents, logResultLine } = require("./turn");
 const { tagSizeOverflowError, tagStructuredOutputError } = require("./endpoint");
 
 /**
+ * Refuse a `response_format` the endpoint cannot be given at all, before it is sent.
+ *
+ * **Why this exists (measured 2026-10-13, one request to this machine's endpoint: HTTP 400 in 161 ms,
+ * 0 tokens — the server rejected the request before the model was asked):**
+ *
+ *   `response_format schema must accept only JSON objects at its root (type object, or anyOf/oneOf of
+ *   object schemas)` — `code: structured_output_failed`
+ *
+ * The schema that produced it was `{ type: "array", items: { type: "object", … } }` — the shape a term
+ * list, a voice extraction and a style-guide extraction actually answer in. So "ask for the array the
+ * parser reads" is not expressible on this endpoint, and it fails at the HTTP layer on **every** call:
+ * the harness would retry it (`AI_RETRY`), the reading pass would retry it again on top of that, and the
+ * run would end with an empty artifact after six doomed requests. OpenAI's structured outputs require the
+ * same object root, so this is not a quirk of one server.
+ *
+ * The check is deterministic and has no environment knob (AGENTS.md rule 3). It is not a style rule: an
+ * array-rooted schema looks exactly like a working shape in the code and in `npm test` — the offline fake
+ * backend does not enforce the server's rule — and fails only against the real endpoint, which is the
+ * worst place to learn it.
+ *
+ * @param {Object} responseFormat - The `response_format` request field.
+ * @param {string} label - The call's log label.
+ * @returns {void}
+ * @throws {Error} When a `json_schema` is declared whose root is not an object (or a union of objects).
+ */
+function assertShapeIsExpressible(responseFormat, label) {
+  if (responseFormat.type !== "json_schema") return;
+  const schema = responseFormat.json_schema && responseFormat.json_schema.schema;
+  if (!schema || typeof schema !== "object") return;
+
+  /**
+   * Is this schema node an object shape? A union counts when every branch is one.
+   * @param {Object} node - One schema node.
+   * @returns {boolean}
+   */
+  function isObjectShape(node) {
+    if (!node || typeof node !== "object") return false;
+    const branches = node.anyOf || node.oneOf;
+    if (Array.isArray(branches)) return branches.every(isObjectShape);
+    return node.type === "object";
+  }
+
+  if (isObjectShape(schema)) return;
+
+  const rootType = schema.type === undefined ? "none" : String(schema.type);
+  throw new Error(
+    `${label}: response_format asks for a JSON Schema whose root is "${rootType}", and this endpoint ` +
+      `refuses that before it generates. Its own words: "response_format schema must accept only JSON ` +
+      `objects at its root (type object, or anyOf/oneOf of object schemas)". ` +
+      `${JSON.stringify((responseFormat.json_schema && responseFormat.json_schema.name) || "?")} is ` +
+      `therefore not a shape this pipeline can ask for. An answer that is a JSON ARRAY cannot be declared ` +
+      `as one: wrap the array in an object ({"items": [...]}), and change the prompt and the parser to ` +
+      `match — which is a change to what the stage asks the model to write, not a knob.`
+  );
+}
+
+/**
  * A single tool-less model call — the drop-in replacement for the old
  * callAi(). Used by acceptance checks, classic-mode pipeline stages, and
  * the CLI below.
@@ -133,6 +190,7 @@ async function runOneShot({
           `Got ${Array.isArray(responseFormat) ? "an array" : typeof responseFormat}.`
       );
     }
+    assertShapeIsExpressible(responseFormat, label);
     extraBody = { ...(extraBody || {}), response_format: responseFormat };
   }
   const structured = responseFormat !== null && responseFormat !== undefined;
@@ -405,4 +463,5 @@ async function runOneShot({
 
 module.exports = {
   runOneShot,
+  assertShapeIsExpressible,
 };

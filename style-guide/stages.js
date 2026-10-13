@@ -57,7 +57,11 @@ async function runExtract(ctx, seg = null, si = null) {
       );
     }
     messages.push({ text: ctx.extractPrompt }, { text: chapterSegmentNote(ctx.bundle, seg, si) });
-    return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `style-guide-extract-${values.INSTALLMENT_NUMBER}${labelSuffix}` });
+    return harness.runOneShot({
+      systemPrompt: ctx.extractSystemPrompt,
+      messages,
+      label: `style-guide-extract-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+    });
   }
   const { sourceFile } = ctx;
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running style-convention extraction...`);
@@ -70,7 +74,11 @@ async function runExtract(ctx, seg = null, si = null) {
       })
     );
   }
-  return harness.runOneShot({ systemPrompt: ctx.extractSystemPrompt, messages, label: `style-guide-extract-${values.INSTALLMENT_NUMBER}` });
+  return harness.runOneShot({
+    systemPrompt: ctx.extractSystemPrompt,
+    messages,
+    label: `style-guide-extract-${values.INSTALLMENT_NUMBER}`,
+  });
 }
 
 

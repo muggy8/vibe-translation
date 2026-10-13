@@ -16,6 +16,8 @@
 require("dotenv").config();
 require("../types"); // JSDoc type definitions
 
+const { isStructuredOutputError, isTooBigForOnePassError } = require("../configs/shared");
+
 const { GLOSSARY_TRUNCATION_MAX_ENTRIES, GLOSSARY_TRUNCATION_THRESHOLD } = require("./config");
 // The same reading of a glossary row the cumulative gate uses: `glossaryTermSpans` is how this layer
 // spells "the spellings one row names", and a second definition of it is how the extractor and the
@@ -70,6 +72,233 @@ function parseTerms(output) {
       type: typeof entry.type === "string" && entry.type.trim() !== "" ? entry.type.trim() : "concept",
       query: typeof entry.query === "string" && entry.query.trim() !== "" ? entry.query.trim() : entry.term.trim(),
     }));
+}
+
+// ─── Why this read pass asks for no answer shape ─────────────────────────────
+//
+// It used to declare one, beside `parseTerms`, for the reason every shape in this repository is
+// declared: the schema is what the endpoint is asked for and the parser is what the stage accepts, and
+// two copies in two places drift. Measured 2026-10-13 against the endpoint this pipeline is configured
+// against, replaying the exact request that lost volume 01 chapter 5 (`glossary-terms-01-ch5`, run log
+// `2026-10-13T12-45-22-158Z`):
+//
+//   HTTP 400 in 161 ms, 0 tokens — the server refused the REQUEST before the model was asked:
+//   "response_format schema must accept only JSON objects at its root (type object, or anyOf/oneOf of
+//   object schemas)" — code `structured_output_failed`.
+//
+// The schema that produced it was `{ type: "array", items: { type: "object", … } }`, which is the shape
+// this call answers in. So the term list cannot be shaped as itself, and `ai/one-shot.js` now refuses an
+// array-rooted schema before it is ever sent. Left in place it would fail every extraction call in a real
+// run: the harness re-asks a refused shape `AI_RETRY` times and `readTermList` re-asks once more on top
+// of that, so one chapter would spend six doomed requests and then file nothing.
+//
+// The same item schema wrapped in an object root IS accepted, and on that same chapter it produced a
+// closed, parseable answer — `{"terms":[…]}`, `finish_reason=stop`, 27,886 prompt + 8,652 completion
+// tokens, against the original call's 27,588 + 45,742. Adopting that envelope means changing what
+// `system-prompts/glossary-terms.md` tells the model to write (from "Respond with **only** a JSON array")
+// and what {@link parseTerms} accepts, which is a change to the contract of a stage that publishes an
+// artifact. It is written down as a decision rather than taken here: `/tmp/opencode/json-schema-questions.md`.
+//
+// What this read pass DOES have, and what actually fixed the defect the shape was meant to fix:
+// `readTermList` re-asks a failed read once, and a read that never produced a list comes back as
+// `failed: true` and named, instead of arriving as `[]`.
+
+/**
+ * How many paid reads one term list gets in one pass.
+ *
+ * Two, mirroring `character-voice/reading.js`'s `MAX_ATTEMPTS_PER_CHAPTER`: the run's own reasoning
+ * level, then the retry level. After that the failure is reported rather than paid for again. The
+ * number is a constant with no environment knob (AGENTS.md rule 3): a budget an operator can raise
+ * is a budget that quietly stops being a bound.
+ *
+ * @type {number}
+ */
+const EXTRACTION_MAX_ATTEMPTS = 2;
+
+/**
+ * The reasoning level the SECOND read runs at.
+ *
+ * `character-voice/reading.js` chose "medium" by measurement (volume 02: two chapters cut off at
+ * `xhigh` came back whole at `medium`). Measured 2026-10-13 from the offline loop's own wire log: the
+ * glossary, character-voice and style-guide **extraction** calls all run at `reasoning_effort: xhigh`
+ * there (2 + 2 + 2 of them, against `medium` for every grading call) — they are not judging calls, so they
+ * inherit `AI_THINKING_LEVEL` and never see `STAGE_THINKING_LEVEL`. On this machine's `.env`
+ * `AI_THINKING_LEVEL=medium`, and the extraction calls pass no per-call level, so the real volume 01 run
+ * that lost chapter 5 asked at `medium` too — which makes this retry a **same-level re-sample** for that
+ * run, and that is exactly what gotcha 122 measured fixed the voice stage's cut-off chapters ("what fixed
+ * them was a second roll rather than the lower level"). The real run's own summary log does not print
+ * `reasoning_effort`, so that last half is the code path plus `.env`, not a line read off the log.
+ *
+ * @type {string}
+ */
+const EXTRACTION_RETRY_THINKING_LEVEL = "medium";
+
+/**
+ * Which of the three ways a term-list read can fail actually happened.
+ *
+ * The endpoint's two refusals are different problems with different fixes, and the log line has to
+ * say which one it saw (AGENTS.md gotcha 55: a task must not string-match a server's error text —
+ * these are the tags `configs/shared/failures.js` puts on them):
+ *
+ *   - `shape-refused` — the endpoint could not produce an answer in the shape it was asked for
+ *     (`structured_output_failed`). The request was well-formed; the model answered in prose, or in
+ *     an object where an array was asked for.
+ *   - `ran-out-mid-shape` — the answer hit the output cap before it closed (`finish_reason=length`).
+ *     That is a size problem: the fix is a smaller request or a bigger cap, not a re-ask.
+ *   - `unparseable-answer` — an answer arrived and {@link parseTerms} could not read it. On a server
+ *     that honours `response_format` this should be rare; it is the shape a server that ignores the
+ *     field still produces.
+ *
+ * @param {Error} err - What the call or the parse threw.
+ * @returns {"shape-refused"|"ran-out-mid-shape"|"unparseable-answer"}
+ */
+function classifyExtractionFailure(err) {
+  if (isStructuredOutputError(err)) return "shape-refused";
+  if (isTooBigForOnePassError(err)) return "ran-out-mid-shape";
+  return "unparseable-answer";
+}
+
+/**
+ * Ask for one term list, retry it once when the answer fails its shape, and report what happened.
+ *
+ * The rule, in the order it bites — the same shape `character-voice/reading.js` uses, so the two
+ * reading passes do not drift into two different sets of rules:
+ *
+ *   1. the first read runs at the run's own reasoning level (no `thinkingLevel` is passed);
+ *   2. a read that throws, or whose answer {@link parseTerms} cannot parse, is re-asked once at
+ *      {@link EXTRACTION_RETRY_THINKING_LEVEL};
+ *   3. **a size failure is not re-asked** — `finish_reason=length` is deterministic, the same request
+ *      at the same cap is cut off the same way, and the harness already throws on it (its own message
+ *      says raise `AI_MAX_TOKENS` or shrink the input). Re-asking would pay for a doomed call and turn
+ *      a loud failure into a quiet one, so it is re-thrown unchanged;
+ *   4. every paid read is recorded in `attempts` — its level, its term count, and what it failed with;
+ *   5. a list that never arrived is returned as `failed: true` with a named `failure`, and the caller
+ *      reports it. It is never returned as `[]`, because `[]` is also the honest answer for a volume
+ *      with nothing new, and the two must not look alike.
+ *
+ * There is no "keep the better of two half answers" rule here, and that is a real difference from
+ * `character-voice/reading.js`: that file reads a chapter's array object by object and can rescue the
+ * claims a malformed one lost, so two partial answers can be compared. {@link parseTerms} is
+ * all-or-nothing — it either returns the list or throws — so a failed read has no partial to keep, and
+ * the first read that parses IS the answer. Adding the tolerant reader here would be a second filing
+ * rule, and the glossary's evidence rule is what a rescued term would have to pass.
+ *
+ * @param {Object} params
+ * @param {(attempt: {attempt: number, thinkingLevel: string|null}) => Promise<string>} params.ask - Runs the one-shot for one paid read.
+ * @param {string} params.label - What the log lines call this read.
+ * @param {(line: string) => void} [params.warn] - Where the retry is announced.
+ * @returns {Promise<{terms: Array<Object>, attempts: Array<Object>, failed: boolean, failure: {kind: string, because: string}|null}>}
+ * @throws {Error} Re-throws a size failure (`ran-out-mid-shape`) unchanged, which is what the stage did before this file existed.
+ */
+async function readTermList({ ask, label, warn = console.warn }) {
+  /** @type {Array<Object>} */
+  const attempts = [];
+  /** @type {{terms: Array<Object>, failure: {kind: string, because: string}}|null} */
+  let lastFailure = null;
+
+  for (let attempt = 1; attempt <= EXTRACTION_MAX_ATTEMPTS; attempt++) {
+    const thinkingLevel = attempt === 1 ? null : EXTRACTION_RETRY_THINKING_LEVEL;
+    /** @type {Array<Object>} */
+    let terms = [];
+    /** @type {{kind: string, because: string}|null} */
+    let failure = null;
+    try {
+      terms = parseTerms(await ask({ attempt, thinkingLevel }));
+    } catch (err) {
+      const kind = classifyExtractionFailure(err);
+      if (kind === "ran-out-mid-shape") {
+        warn(`${label}: the answer hit the output cap before it closed. Not re-asked — the same request at the same cap is cut off the same way.`);
+        throw err;
+      }
+      failure = { kind, because: err.message };
+    }
+    attempts.push({
+      attempt,
+      thinkingLevel: thinkingLevel || "run default",
+      terms: terms.length,
+      failure,
+    });
+    if (!failure) return { terms, attempts, failed: false, failure: null };
+    lastFailure = failure;
+    if (attempt < EXTRACTION_MAX_ATTEMPTS) {
+      warn(
+        `${label}: the term list ${failure.kind === "shape-refused" ? "was refused by the endpoint (it could not answer in the shape it was asked for)" : "arrived in a shape this stage cannot parse"} — re-asking once at ${EXTRACTION_RETRY_THINKING_LEVEL}.`
+      );
+    }
+  }
+
+  warn(
+    `${label}: NO term list after ${EXTRACTION_MAX_ATTEMPTS} paid read(s) (${attempts.map((a) => `${a.thinkingLevel}: ${a.failure.kind}`).join("; ")}). ` +
+      `Whatever this read was supposed to find is missing, and that is not the same as finding nothing.`
+  );
+  return { terms: [], attempts, failed: true, failure: lastFailure };
+}
+
+/**
+ * The block the volume's validation report carries about **how its term lists were read**.
+ *
+ * The mirror of `character-voice/reading.js`'s `readingReport`, for the same reason: a glossary built
+ * from ten reads of which one never answered is a different artifact from one built from ten that
+ * answered, and the difference has to be visible to whoever reads the report — including the
+ * acceptance grader, whose message list already contains this file (`prompt-audit.js`'s
+ * `acceptance-context` rule is what proves it does).
+ *
+ * @param {Array<{id: string, title?: string, terms?: number, attempts?: Array<Object>, failed?: boolean}>} reads - One entry per paid read pass, in reading order.
+ * @param {{volume: string|number}} opts
+ * @returns {string} A markdown block, or "" when every read answered.
+ */
+function extractionReadReport(reads, { volume }) {
+  const rows = (reads || []).map((read) => {
+    const attempts = read.attempts && read.attempts.length ? read.attempts : [];
+    const levels = attempts
+      .map((a) => `${a.thinkingLevel}: ${a.terms}${a.failure ? ` (${a.failure.kind})` : ""}`)
+      .join(", ");
+    return {
+      id: read.id,
+      title: read.title || "",
+      terms: read.terms === undefined ? attempts.reduce((n, a) => Math.max(n, a.terms), 0) : read.terms,
+      reads: attempts.length,
+      failed: Boolean(read.failed),
+      because: read.failed && attempts.length ? (attempts[attempts.length - 1].failure || {}).because || "" : "",
+      levels: levels || "—",
+    };
+  });
+  const failed = rows.filter((r) => r.failed);
+  const retried = rows.filter((r) => r.reads > 1);
+  if (!failed.length && !retried.length) return "";
+
+  const out = [
+    "## How this volume's terms were read",
+    "",
+    `_Every term list this volume was built from is paid for at most twice, and a list that failed was ` +
+      "re-asked once. **None of them is asked for in a declared answer shape**: a term list answers as a " +
+      "JSON array, and this endpoint refuses a `response_format` schema whose root is an array before it " +
+      "generates (measured 2026-10-13 — HTTP 400, 0 tokens; gotcha 138). " +
+      `${failed.length ? `${failed.length} read(s) never produced a list at all.` : "Every read produced a list."}`,
+    "",
+    "| read | terms filed | paid reads | how it was read |",
+    "| --- | --- | --- | --- |",
+  ];
+  for (const row of rows) {
+    out.push(
+      `| ${row.id}${row.title ? ` (${row.title})` : ""} | ${row.terms} | ${row.reads} | ${row.levels}${row.failed ? " — **NOTHING READ**" : ""} |`
+    );
+  }
+  out.push("");
+  if (failed.length) {
+    out.push(
+      `**${failed.length} of ${rows.length} read(s) produced no term list.** ${failed.map((r) => r.id).join(", ")}. ` +
+        "Every term those reads were supposed to find is missing from this glossary, and from every later " +
+        "volume's, because the glossary is copied forward. Nothing here can say which terms they were."
+    );
+    for (const row of failed) {
+      if (row.because) out.push(`- ${row.id}: ${String(row.because).slice(0, 400)}`);
+    }
+  } else {
+    out.push(`All ${rows.length} read(s) answered.`);
+  }
+  out.push("");
+  return out.join("\n");
 }
 
 // ─── Context truncation helpers ──────────────────────────────────────────────
@@ -368,5 +597,10 @@ function truncationNote({ total, kept, relevantTotal, relevantShown, dropped, dr
 
 module.exports = {
   parseTerms,
+  EXTRACTION_MAX_ATTEMPTS,
+  EXTRACTION_RETRY_THINKING_LEVEL,
+  classifyExtractionFailure,
+  readTermList,
+  extractionReadReport,
   truncateGlossary,
 };

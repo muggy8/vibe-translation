@@ -101,6 +101,25 @@ async function styleAuthorMaxSteps(ctx, seg = null) {
 }
 
 
+// ─── Why this extraction call asks for no answer shape ───────────────────────
+//
+// It used to declare one here, beside `parseStyleObservations`: the prompt's own Output section written
+// as data, since `system-prompts/style-guide-extract.md` names exactly six keys (`category`, `pattern`,
+// `description`, `examples`, `frequency`, `notes`) and says "Each element is an object with exactly these
+// keys". It was the fully-closed shape of the four this slice drew.
+//
+// Measured 2026-10-13 against the endpoint this pipeline is configured against, it is not expressible:
+// the request was refused before the model was asked — HTTP 400 in 161 ms, 0 tokens, "response_format
+// schema must accept only JSON objects at its root (type object, or anyOf/oneOf of object schemas)". The
+// schema that produced it was `{ type: "array", items: { type: "object", … } }`, which is the shape this
+// call answers in. `ai/one-shot.js` now refuses an array-rooted schema before it is sent, because shipping
+// one means every volume's extraction fails at the HTTP layer.
+//
+// The envelope that WOULD be expressible — the same six-key list under an object root — is written up as
+// a decision rather than taken: `/tmp/opencode/json-schema-questions.md`. It changes what
+// `system-prompts/style-guide-extract.md` tells the model to write.
+
+
 /**
  * Parse the AI's extraction output into an array of style-construct entries.
  * @param {string} output - The raw AI output.

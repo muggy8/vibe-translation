@@ -35,7 +35,7 @@ const { RESEARCH_MAX_TERMS_PER_VOLUME } = require("./researchable");
 const { assertGlossaryCarryForward } = require("./carry-forward");
 const { openGlossaryRecord, fileGlossaryExtraction, fileGlossaryTermRows, renderGlossaryArtifact, quarantineGlossaryArtifact, sealGlossaryRecord } = require("./store");
 const { writeGlossaryCoverageReport } = require("./coverage");
-const { parseTerms, truncateGlossary } = require("./extract");
+const { truncateGlossary, readTermList } = require("./extract");
 const { runChunkedVolumeAgent } = require("./chunked");
 const { runQaLoop } = require("./qa");
 
@@ -269,6 +269,11 @@ async function buildVolumeContext({ folderName, index, folders, volumeByFolder, 
     // which is what a (re)generated volume is owed.
     researchTurnsLeft: RESEARCH_MAX_TERMS_PER_VOLUME,
     researchLog: null,
+    // One entry per term-list read this volume paid for, in reading order, each carrying every paid
+    // attempt. The whole-installment route writes one entry; the chapter-by-chapter route appends one per
+    // chapter. `glossary/store.js` turns it into the block the grader reads, so "this volume's glossary is
+    // missing a chapter's worth of terms" is a fact on disk rather than a line in a log nobody opens.
+    extractionReads: [],
   };
 
   // Report → input: the previous volume's coverage audit (which glossary entries were never used)
@@ -487,8 +492,16 @@ async function runVolumeAgent(ctx) {
  * is bounded here: the whole 17-volume glossary sitting in the extraction turn is how the extraction
  * starts inventing rows.
  *
+ * The read is paid for at most twice (`readTermList`), and a read that never produced a list comes back
+ * as `failed: true` rather than as an empty list. What that replaces is the `catch` below: this used to
+ * parse what came back, and on a parse failure log "Continuing without research" and hand the volume an
+ * empty list — the same value
+ * a volume with genuinely nothing new produces. The whole-installment read is the ONLY reading pass
+ * this route has, so a volume whose one read failed published a glossary of carried rows only, and
+ * every later volume copied that forward.
+ *
  * @param {GlossaryVolumeCtx} ctx
- * @returns {Promise<Array<{term: string, type: string, query: string}>>} The extracted terms ([] when the reply is unparseable).
+ * @returns {Promise<Array<{term: string, type: string, query: string}>>} The extracted terms. Empty when the volume has nothing new — and also empty when the read never answered, which `ctx.extractionReads` is what tells apart.
  */
 async function extractNewTerms(ctx) {
   const { values, sourceFile, previousGlossaryFile, termsPrompt, termsSystemPrompt } = ctx;
@@ -502,21 +515,30 @@ async function extractNewTerms(ctx) {
       })
     );
   }
-  const termsOutput = await harness.runOneShot({
-    systemPrompt: termsSystemPrompt,
-    messages: [...baseMessages, { text: termsPrompt }],
-    label: `glossary-terms-${values.INSTALLMENT_NUMBER}`,
+  const read = await readTermList({
+    label: `Volume ${values.INSTALLMENT_NUMBER}: the term list`,
+    ask: ({ attempt, thinkingLevel }) =>
+      harness.runOneShot({
+        systemPrompt: termsSystemPrompt,
+        messages: [...baseMessages, { text: termsPrompt }],
+        label: `glossary-terms-${values.INSTALLMENT_NUMBER}${attempt > 1 ? "-retry" : ""}`,
+        ...(thinkingLevel ? { thinkingLevel } : {}),
+      }),
   });
-  let terms = [];
-  try {
-    terms = parseTerms(termsOutput);
-  } catch (err) {
-    console.warn(
-      `Volume ${values.INSTALLMENT_NUMBER}: could not parse the term list ` +
-        `(${err.message}). Continuing without research.`
-    );
-  }
-  console.log(`Volume ${values.INSTALLMENT_NUMBER}: extracted ${terms.length} new term(s).`);
+  const terms = read.terms;
+  ctx.extractionReads = [
+    {
+      id: `volume ${values.INSTALLMENT_NUMBER}`,
+      title: "whole installment (one read for the whole book)",
+      terms: terms.length,
+      attempts: read.attempts,
+      failed: read.failed,
+    },
+  ];
+  console.log(
+    `Volume ${values.INSTALLMENT_NUMBER}: extracted ${terms.length} new term(s)` +
+      `${read.failed ? " — NOTHING: the read never produced a list, and this route has no other reading pass" : ""}.`
+  );
   // Persist the volume's new-term extraction so the translation handoff (utils/handoff.js) can
   // render a "what's new in this volume" section without re-calling the AI.
   try {

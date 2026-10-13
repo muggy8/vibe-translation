@@ -26,7 +26,11 @@
  *      says the level was undeclared;
  *   7. batching is per (kind, step), so one kind spread over seventeen volumes is one investigation
  *      per step, not seventeen;
- *   8. no environment variable gates any of it.
+ *   8. `chapter-extraction-never-answered` — a term-list read that never answered — is MAJOR damage,
+ *      the stage really emits it, and the post-mortem does **not** see it yet: the channel from a
+ *      stage's own finding into the disk assessment does not exist, and that is pinned rather than
+ *      assumed;
+ *   9. no environment variable gates any of it.
  *
  * Fixtures only. Nothing here reads the real 17 volumes, the reference store, or the endpoint.
  * (AGENTS.md rule 8, gotcha 69.)
@@ -557,7 +561,65 @@ async function testSeventeenVolumesOneKind() {
   );
 }
 
-// ─── 7. No environment knob, and the routing is data ──────────────────────────
+// ─── 7. A chapter nobody read is damage, and it says how far it travels ────────
+
+/**
+ * `chapter-extraction-never-answered` — the kind `glossary/store.js` builds when a term-list read came
+ * back with no list at all (a refused answer shape, or an answer the parser could not read, after both
+ * paid reads).
+ *
+ * Two things are pinned here, and the second is the uncomfortable one.
+ *
+ *   1. **The level.** MAJOR, and it reaches the triage's damage decision: the glossary is copied
+ *      forward, so a chapter nobody read is missing from every later volume's glossary too. That is the
+ *      same shape as `chapter-without-draft`, which is why it sits next to it in the table.
+ *   2. **The channel it does not have yet.** The post-mortem assesses a finished step **from the disk**
+ *      (`utils/postmortem/run.js` → `volume.js` / `file.js`). A finding a stage builds in its own
+ *      process and puts in its own report is not on that disk, so this kind reaches the grader and the
+ *      volume's report and NOT the halt gate or the triage. That is asserted here rather than left in a
+ *      comment, because a finding kind whose routing a test proves, with nothing saying where it
+ *      actually arrives, is exactly the kind of finding that looks like a guard and is not one. Closing
+ *      the gap needs a declared sidecar in `utils/artifacts/preproduction.js` or a finding channel in
+ *      `utils/postmortem/volume.js`; both are outside the slice that added the kind.
+ *
+ * @returns {Promise<void>}
+ */
+async function testAChapterNobodyReadIsDamage() {
+  const kind = "chapter-extraction-never-answered";
+  same(FINDING_LEVELS[kind].level, "MAJOR", `${kind} is declared MAJOR: the glossary is copied forward, so the hole travels`);
+
+  const planted = finding("HIGH", kind, "glossary", "02", "glossary.md", "chapter ch5: the term-list read never produced a list");
+  same(planted.level, "MAJOR", "and finding() records it");
+  const routed = resume.classifyFindings([planted]);
+  same(routed.damage.map((f) => f.kind), [kind], "it lands in the damage decision, not in the batched gaps");
+  same(routed.gaps, [], "and it is not swept into the MINOR batch");
+
+  // The stage really builds it: the kind is emitted from the glossary layer, not only declared here.
+  const storeLayer = readModuleLayer(ROOT, "glossary/store.js", "glossary");
+  ok(
+    storeLayer.includes(`"${kind}"`),
+    `glossary/store.js must emit "${kind}" — a level row for a kind nothing emits is decoration`
+  );
+
+  // And the honest half: a fixture whose glossary step finished cleanly produces no such finding from
+  // the post-mortem, because the post-mortem reads the disk and the stage's finding is not on it.
+  const f = await fx.completeSeries("read-hole", FIXTURE_ROOT);
+  const { runPostMortem } = require("../utils/postmortem");
+  const report = await runPostMortem({ step: "glossary", seriesDir: f.dir });
+  same(
+    report.findings.filter((x) => x.kind === kind).map((x) => x.volume),
+    [],
+    `the disk assessment does not emit ${kind} today — the stage's own finding has no route into the post-mortem, and this assertion is what stops anyone claiming it does`
+  );
+  ok(
+    report.findings.length === 0,
+    `the fixture's glossary step is clean, so the assessment finds nothing (got: ${report.findings.map((x) => x.kind).join(", ") || "none"})`
+  );
+
+  console.log(`  ${kind}: MAJOR, damage, emitted by the stage — and not yet routed through the post-mortem, pinned`);
+}
+
+// ─── 8. No environment knob, and the routing is data ──────────────────────────
 
 /**
  * The routing table is code in a closed path, and nothing in the resume layer can be switched off by
@@ -652,6 +714,7 @@ function testNoEnvironmentKnob() {
   await testAPausedStepIsNotABrokenBook();
   testUndeclaredKindFailsClosed();
   await testSeventeenVolumesOneKind();
+  await testAChapterNobodyReadIsDamage();
   testNoEnvironmentKnob();
   console.log(`OK: ${checks} checks on what a finding level means to the resume triage.`);
 })().catch((err) => {

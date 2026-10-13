@@ -35,7 +35,7 @@ const { chapterSegmentNote } = require("../utils/source");
 
 const { researchVolumeTerms } = require("./research");
 const { fileGlossaryExtraction, fileGlossaryTermRows, renderGlossaryArtifact } = require("./store");
-const { parseTerms, truncateGlossary } = require("./extract");
+const { truncateGlossary, readTermList } = require("./extract");
 const { guardCarryForwardAgainst } = require("./carry-forward");
 
 /**
@@ -106,8 +106,12 @@ async function runChunkedVolumeAgent(ctx) {
  * and this volume's own rendered file afterwards — so each chapter is read against what the chapters before
  * it already published, not against a snapshot from before this volume started.
  *
- * A reply that cannot be parsed is not a failure of the volume: the chapter files nothing, which the
- * coverage audit counts.
+ * A read that never produced a list is **not** a chapter that found nothing. It used to be reported as one:
+ * the `catch` here logged "The chapter files nothing" and returned `[]`, which is the same value an honest
+ * empty chapter produces, and the coverage audit counts rows rather than reads. The chapter is now recorded
+ * in `ctx.extractionReads` with every paid read it took, and `glossary/store.js` prints that in the report
+ * the grader reads. The chapter still files nothing and the volume still finishes — naming the hole is what
+ * changed, not what the volume does with it.
  *
  * @param {GlossaryVolumeCtx} ctx
  * @param {import("../types").SourceSegment} segment - The chapter being read.
@@ -132,23 +136,29 @@ async function extractChapterTerms(ctx, segment, si) {
       })
     );
   }
-  messages.push({ text: termsPrompt }, { text: chapterSegmentNote(bundle, segment, si) });
-  const termsOutput = await harness.runOneShot({
-    systemPrompt: termsSystemPrompt,
-    messages,
-    label: `glossary-terms-${values.INSTALLMENT_NUMBER}-${segment.id}`,
+  const chapterMessages = [...messages, { text: termsPrompt }, { text: chapterSegmentNote(bundle, segment, si) }];
+  const read = await readTermList({
+    label: `Volume ${values.INSTALLMENT_NUMBER} chapter ${segment.id}: the term list`,
+    ask: ({ attempt, thinkingLevel }) =>
+      harness.runOneShot({
+        systemPrompt: termsSystemPrompt,
+        messages: chapterMessages,
+        label: `glossary-terms-${values.INSTALLMENT_NUMBER}-${segment.id}${attempt > 1 ? "-retry" : ""}`,
+        ...(thinkingLevel ? { thinkingLevel } : {}),
+      }),
   });
-  let terms = [];
-  try {
-    terms = parseTerms(termsOutput);
-  } catch (err) {
-    console.warn(
-      `Volume ${values.INSTALLMENT_NUMBER}: could not parse the term list for ` +
-        `chapter ${segment.id} (${err.message}). The chapter files nothing.`
-    );
-  }
+  const terms = read.terms;
+  ctx.extractionReads = ctx.extractionReads || [];
+  ctx.extractionReads.push({
+    id: `chapter ${segment.id}`,
+    title: segment.title,
+    terms: terms.length,
+    attempts: read.attempts,
+    failed: read.failed,
+  });
   console.log(
-    `Volume ${values.INSTALLMENT_NUMBER}: extracted ${terms.length} new term(s) from chapter ${segment.id}.`
+    `Volume ${values.INSTALLMENT_NUMBER}: extracted ${terms.length} new term(s) from chapter ${segment.id}` +
+      `${read.failed ? " — NOTHING: this chapter's read never produced a list" : ""}.`
   );
   return terms;
 }
