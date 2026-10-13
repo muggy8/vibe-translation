@@ -70,6 +70,7 @@ const path = require("path");
 
 const { chosenSeriesLocation, loadEnv } = require("./configs/env-defaults");
 const { resolveRunSettings } = require("./configs/shared");
+const { assertDoorAllowed } = require("./utils/prereqs/freeze");
 const rs = require("./utils/reference-store");
 require("./types"); // JSDoc type definitions
 
@@ -334,6 +335,27 @@ async function main(args) {
     return 1;
   }
   if (args.list) return 0;
+
+  // The freeze gate, and the one thing that decides it here: `--apply`. A rehearsal writes
+  // into a copy under `--out` and touches nothing in the series folder, so it is not a
+  // rewrite and stays allowed — that door exists so a renderer change can be seen before it is
+  // published, and freezing it would remove the only cheap way to do that. `--apply` publishes into
+  // the volume folder and seals the record the next volume copies forward, so a volume whose
+  // translation is already published is refused. No flag gets past it; the way through is a
+  // recorded release typed before this command runs.
+  if (args.apply) {
+    try {
+      await assertDoorAllowed({
+        door: "rebuild-voice",
+        seriesDir,
+        cancelledBy: "apply",
+        volumes: [{ folder: folderName, installmentNumber: rs.installmentKey(args.volume) }],
+      });
+    } catch (err) {
+      console.error(String((err && err.message) || err));
+      return 1;
+    }
+  }
 
   if (args.renderOnly) {
     // A render-only rehearsal renders from the record the volume already has, so the copy has to

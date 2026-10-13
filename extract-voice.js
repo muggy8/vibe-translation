@@ -88,6 +88,7 @@ const { chosenSeriesLocation, loadEnv } = require("./configs/env-defaults");
 const { validateRequiredEnv } = require("./configs/shared");
 const { transformUserPrompt, writePromptDump } = require("./utils/prompt");
 const { openSeriesRun, locatePreviousVolume } = require("./utils/series-run");
+const { assertDoorAllowed } = require("./utils/prereqs/freeze");
 const { resolveSourceBundle, chapterSegmentNote } = require("./utils/source");
 const rs = require("./utils/reference-store");
 const { buildAlreadyExtractedNote } = require("./character-voice/prompts");
@@ -160,6 +161,31 @@ async function runExtractPass({ seriesDir, volumeArg, dryRun = false, force = fa
 
   if (!fs.existsSync(volumeDir)) {
     return { ok: false, refusal: { rule: "volume-folder-missing", because: `${volumeDir} is not there.`, fix: "check --series and the plan of record." }, volume: String(installmentNumber), folder: folderName, chapters: [], entries: 0, refusedClaims: [], incompleteChapters: [], record: null, extractionFile: null, dryRun };
+  }
+
+  // The freeze gate. This command re-reads the volume chapter by chapter and re-files its reference
+  // record, and the published reference is what a published translation was rendered from. A volume
+  // whose translation is already on disk is not this command's to re-read; the way past is a recorded
+  // release (node release-translation.js), not a flag. There is no flag here.
+  try {
+    await assertDoorAllowed({
+      door: "extract-voice",
+      seriesDir,
+      cancelledBy: "act",
+      volumes: [volumeEntry],
+      dryRun,
+      log,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      refusal: {
+        rule: "volume-frozen",
+        because: String((err && err.message) || err),
+        fix: `record the act first: node release-translation.js --volume=${installmentNumber} --door=extract-voice --reason="…"`,
+      },
+      volume: String(installmentNumber), folder: folderName, chapters: [], entries: 0, refusedClaims: [], incompleteChapters: [], record: null, extractionFile: null, dryRun,
+    };
   }
 
   // The same source resolution the stage uses: the extracted chapter files the evidence rule cites.

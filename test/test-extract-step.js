@@ -553,6 +553,90 @@ async function scenarioWarmCache() {
   await dispose(fx);
 }
 
+// ─── 4b. a frozen volume re-extracted by a changed archive is NAMED, not refused ─
+
+/**
+ * The freeze gate refuses `extract --force` on a volume whose translation is published. This is the
+ * OTHER way that volume's text gets rewritten — the archive changed, so the cache is no longer current
+ * — and there the step **warns** instead of refusing, because the book on disk has already changed and
+ * the translation beside it was made from the old text. Refusing would protect nothing; the sentence is
+ * the whole value of the act, so it is pinned here rather than asserted in a comment.
+ *
+ * @returns {Promise<void>}
+ */
+async function scenarioFrozenReExtractionIsNamed() {
+  const fx = await fixtureSeries("frozen-reextract", [
+    {
+      installment: "01",
+      folder: "Frozen Series(01)",
+      sourceName: "frozen(1).epub",
+      write: () =>
+        buildBookEpub({
+          title: "Frozen Series 1",
+          pages: [
+            { file: "p-001.xhtml", pageTitle: "表紙", navTitle: "表紙", bodyClass: "p-cover", body: `<p>表紙</p>` },
+            CHAPTER("p-002.xhtml", "第一章"),
+            CHAPTER("p-003.xhtml", "第二章"),
+          ],
+        }),
+    },
+  ]);
+  const volumeDir = path.join(fx.seriesDir, "Frozen Series(01)");
+
+  const first = await capture(() => runStep());
+  assert.strictEqual(first.error, null, `the cold pass must succeed: ${first.error && first.error.message}\n${first.logs.join("\n")}`);
+  ok("the fixture's book extracts");
+
+  // Publish a translation on top of it: the two names `specForStep("translate")` declares `required`.
+  // That is what makes this volume frozen, and nothing else in this scenario changes that fact.
+  await fs.promises.writeFile(path.join(volumeDir, "translation.md"), "# translated\n", "utf8");
+  await fs.promises.writeFile(
+    path.join(volumeDir, "translation-state.json"),
+    JSON.stringify({ sourceFingerprint: "whatever-the-translation-was-made-from" }, null, 2) + "\n",
+    "utf8"
+  );
+  ok("a volume holding the translate step's two required artifacts is a frozen volume");
+
+  // The archive changes underneath it. No `--force` anywhere in this scenario.
+  const archive = path.join(volumeDir, "frozen(1).epub");
+  const bytes = fs.readFileSync(archive);
+  fs.writeFileSync(archive, bytes);
+  fs.utimesSync(archive, new Date(), new Date(Date.now() + 5000));
+
+  const second = await capture(() => runStep());
+  const lines = second.logs.join("\n");
+  assert.strictEqual(second.error, null, `a stale cache is not a refusal, so the step still finishes:\n${lines}`);
+  assert.ok(/Volume 01 · RE-EXTRACTED/.test(lines), `the archive change is re-extracted:\n${lines}`);
+  ok("the step re-extracts a stale cache without being told to");
+
+  assert.ok(
+    /FROZEN VOLUME RE-EXTRACTED/.test(lines),
+    `and it says out loud that the volume was frozen:\n${lines}`
+  );
+  assert.ok(
+    /translation\.md/.test(lines.split("\n").find((l) => /FROZEN VOLUME RE-EXTRACTED/.test(l)) || ""),
+    "the warning names the translation standing in the folder"
+  );
+  assert.ok(
+    /release-translation\.js --volume=01 --door=extract/.test(lines),
+    `and it names the door past the gate rather than inventing a flag:\n${lines}`
+  );
+  ok("a frozen volume whose text this run replaced is named, with the recorded act it would need");
+
+  // And the warning is not a refusal wearing a different colour: the volume's own report still records
+  // the re-extraction, and the translation files are untouched.
+  const report = fs.readFileSync(path.join(postMortemDir(), "extraction-01.md"), "utf8");
+  assert.ok(/RE-EXTRACTED/.test(report), `the report records what happened:\n${report}`);
+  assert.strictEqual(
+    fs.readFileSync(path.join(volumeDir, "translation.md"), "utf8"),
+    "# translated\n",
+    "the warning touched no translation"
+  );
+  ok("the sentence is a warning: the report still says RE-EXTRACTED and the translation is byte-identical");
+
+  await dispose(fx);
+}
+
 // ─── 5. the reports land in the run's records, not in the corpus ──────────────
 
 /**
@@ -723,6 +807,7 @@ async function scenarioUnreadableBook() {
   await scenarioMediumContinues();
   await scenarioGuideSplitFailsTheStep();
   await scenarioWarmCache();
+  await scenarioFrozenReExtractionIsNamed();
   await scenarioReportLocation();
   await scenarioNoModelCalls();
   await scenarioUnreadableBook();

@@ -612,6 +612,20 @@ changes. The gate is not on the closed menu, has no flag, and is a banned patch 
 point: a role that can move the rule about which steps may start is not being stopped by it.
 → gotcha 140, docs/map-helpers.md.
 
+**The same door also refuses to rewrite what a finished translation already consumed.** Since
+2026-10-13 the freeze gate (`utils/prereqs/freeze.js`, wrapped around the same gulp tasks by
+`withFreezeGate`) refuses a pre-production act that would **overwrite** the reference artifact a
+volume whose translation is published was built from — the same structural shape, no flag, no
+setting, no ledger entry, 0 model calls. It is a different question from "may this step start?":
+the idempotent skip answers that one by reporting finished work as finished, and never asks
+whether the glossary that work was built from still exists. The only way past is a recorded act
+the account owner types — `npm run release-translation -- --volume=NN --door=<step>
+--reason="…"` — which is standing, touches no translation file, and is itself a banned patch path.
+**What is not yet gated, and is the account owner's decision:** `wipe-and-cascade` removes a frozen
+volume's declared outputs before it re-runs the step, and the removal is not itself a rewrite, so
+the re-run that follows is excused as filling a hole. The freeze constrains what a step may
+overwrite, not what the manager may delete. → gotcha 142.
+
 **Report mode is the default; act mode is what it earns.** `DELIVERY_MODE=report` writes a proposal and
 executes nothing, and that ordering is the point: the manager earns the right to act by writing a report
 that is demonstrably right about a real run. `--mode=act` now exists, and what it does is narrow:

@@ -92,6 +92,7 @@ const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
 const { isStructuralError } = require("./configs/shared");
 const { readRunArgs } = require("./utils/series-run");
 const { evaluatePrerequisites, prerequisiteRefusal } = require("./utils/prereqs");
+const { freezeDoorRow, evaluateFreeze, freezeRefusal } = require("./utils/prereqs/freeze");
 const { postMortemDir } = require("./utils/postmortem");
 const { acquireRunLock, releaseRunLock, runLockPath } = require("./utils/runlock");
 const { installShutdownWatch } = require("./utils/shutdown");
@@ -196,6 +197,70 @@ function withPrerequisiteGate(name, taskFn) {
 }
 
 
+// ─── The freeze gate ──────────────────────────────────────────────────────────
+
+/**
+ * Refuse to rewrite what a finished translation already consumed.
+ *
+ * The other half of the rule `withPrerequisiteGate` enforces. That gate asks whether a step may
+ * START; this one asks whether a step may REBUILD something a published translation was built from.
+ * The account owner's rule is one sentence — once the run is translating, the pre-production
+ * artifacts are frozen, and a resumed run is no exception — and the start-gate cannot enforce the
+ * second half of it: a resumed run happily prints "already accepted, skipping" for eight
+ * translations built from a glossary that was rewritten underneath them.
+ *
+ * **This is the pre-flight half, and it is deliberately only the flag-shaped half.** It refuses what
+ * is knowable before the step touches anything: `--force`, which cancels every volume's skip and so
+ * rewrites every frozen volume in scope. Refusing here rather than inside the volume loop is what
+ * stops a run from rebuilding volumes 01–04 and only then noticing that 05 was frozen. The
+ * state-shaped cancellations — the cumulative cascade, a changed source fingerprint, a failed
+ * acceptance grade — are only knowable once the volume's own acceptance window has been read, so
+ * they are refused by the same gate inside `utils/series-run/skip.js`, which reuses the skip
+ * decision itself rather than re-deriving it.
+ *
+ * **A frozen volume whose skip stands is not a refusal.** `extract` on a warm cache verifies each
+ * volume's bundle and writes nothing; `discover` reuses the plan of record. Both must keep running
+ * on a frozen series, because the prerequisite gate runs them before every step — a freeze that
+ * blocked them outright would make a resumed run unable to run anything at all. The offline
+ * pipeline loop's zero-call second pass is the test that pins this (gotcha 130).
+ *
+ * Same wrapping position as the prerequisite gate: inside `withRunLock`, outside `withHooks`, inside
+ * `withStructuralMarker` so the refusal reaches the parent process. `--dry-run` reports and does not
+ * refuse, which is the prerequisite gate's rule and the two gates keep it identical. There is no
+ * flag and no environment variable that turns this off; the way past is
+ * `release-translation.js`, a recorded act with a typed reason.
+ *
+ * @param {string} name - The gulp task name, which is the key in `utils/prereqs/freeze.js`.
+ * @param {Function} taskFn - The wrapped task.
+ * @returns {Function} A drop-in async gulp task.
+ */
+function withFreezeGate(name, taskFn) {
+  return async function gated(...args) {
+    const { dryRun, force, volumeArg } = readRunArgs();
+    if (!freezeDoorRow(name)) return taskFn(...args);
+    // Pre-flight knows one thing for certain: --force cancels every skip. Everything else the skip
+    // check would cancel is a fact about a volume's own acceptance window, and the loop asks it there.
+    if (!force) return taskFn(...args);
+    const verdict = await evaluateFreeze({
+      door: name,
+      seriesDir: process.env.SERIES_LOCATION,
+      cancelledBy: name === "discover" ? "plan-stale" : "force",
+      volumeArg,
+    });
+    if (verdict.ok) return taskFn(...args);
+    if (dryRun) {
+      console.error(
+        `[freeze] ${name} — DRY RUN, so the freeze gate reports and does NOT refuse: ` +
+          `${verdict.frozen.length} volume(s) would be rewritten.`
+      );
+      for (const bullet of verdict.bullets) console.error(`[freeze]   - ${bullet}`);
+      return taskFn(...args);
+    }
+    throw freezeRefusal(verdict.message);
+  };
+}
+
+
 // ─── The run lock ─────────────────────────────────────────────────────────────
 
 /**
@@ -291,30 +356,30 @@ async function extractStep() {
 // hook runner innermost around the task itself.
 const discoverTask = withRunLock(
   "discover",
-  withStructuralMarker("discover", withPrerequisiteGate("discover", withHooks("discover", discover)))
+  withStructuralMarker("discover", withPrerequisiteGate("discover", withFreezeGate("discover", withHooks("discover", discover))))
 );
 const extractTask = withRunLock(
   "extract",
-  withStructuralMarker("extract", withPrerequisiteGate("extract", withHooks("extract", extractStep)))
+  withStructuralMarker("extract", withPrerequisiteGate("extract", withFreezeGate("extract", withHooks("extract", extractStep))))
 );
 const glossaryTask = withRunLock(
   "glossary",
-  withStructuralMarker("glossary", withPrerequisiteGate("glossary", withHooks("glossary", glossary)))
+  withStructuralMarker("glossary", withPrerequisiteGate("glossary", withFreezeGate("glossary", withHooks("glossary", glossary))))
 );
 const characterVoiceTask = withRunLock(
   "character-voice",
   withStructuralMarker(
     "character-voice",
-    withPrerequisiteGate("character-voice", withHooks("character-voice", characterVoice))
+    withPrerequisiteGate("character-voice", withFreezeGate("character-voice", withHooks("character-voice", characterVoice)))
   )
 );
 const styleGuideTask = withRunLock(
   "style-guide",
-  withStructuralMarker("style-guide", withPrerequisiteGate("style-guide", withHooks("style-guide", styleGuide)))
+  withStructuralMarker("style-guide", withPrerequisiteGate("style-guide", withFreezeGate("style-guide", withHooks("style-guide", styleGuide))))
 );
 const jumpInWikiTask = withRunLock(
   "jump-in-wiki",
-  withStructuralMarker("jump-in-wiki", withPrerequisiteGate("jump-in-wiki", withHooks("jump-in-wiki", jumpInWiki)))
+  withStructuralMarker("jump-in-wiki", withPrerequisiteGate("jump-in-wiki", withFreezeGate("jump-in-wiki", withHooks("jump-in-wiki", jumpInWiki))))
 );
 const consistencyAuditTask = withRunLock(
   "consistency-audit",

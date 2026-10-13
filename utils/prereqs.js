@@ -44,6 +44,11 @@
  * @module utils/prereqs
  */
 
+// The other half of this gate lives beside it, in the same closed folder: `utils/prereqs/freeze.js`
+// answers "may this step REWRITE what a finished translation already consumed?", which is the
+// question a start-gate cannot ask. `readVolumesInScope` is exported for it so the `--volume`
+// narrowing is one rule and not two.
+
 const fs = require("fs");
 const path = require("path");
 
@@ -734,6 +739,7 @@ module.exports = {
   consumersOf,
   prerequisiteChain,
   gateContext,
+  readVolumesInScope,
   quarantineBlocksCompletion,
   stepGaps,
   evaluatePrerequisites,

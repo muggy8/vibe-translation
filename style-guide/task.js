@@ -74,7 +74,7 @@ async function styleGuide() {
   const prompts = await loadPromptFiles();
   const { runSettings, folders, volumes, volumeByFolder } = await openSeriesRun({ seriesDir, dryRun, volumeArg });
 
-  const cascade = { regeneratedAny: false };
+  const cascade = { regeneratedAny: false, regeneratedFrom: null };
   const run = { folders, volumeByFolder, runSettings, prompts, dryRun, force, chunked, cascade };
   await runVolumeSeries("style-guide", {
     volumes,
@@ -145,12 +145,17 @@ async function processStyleVolume({ folderName, index }, run) {
     bundle,
     force,
     regeneratedAny: cascade.regeneratedAny,
+    cascadeFrom: cascade.regeneratedFrom,
     artifactLabel: "style guide",
+    step: "style-guide",
+    seriesDir,
+    folder: folderName,
   })) {
     return;
   }
 
   cascade.regeneratedAny = true;
+  cascade.regeneratedFrom = values.INSTALLMENT_NUMBER;
 
   await runVolumeWithModeFallback({
     label: `Volume ${volume.installmentNumber}`,

@@ -62,6 +62,7 @@ const path = require("path");
 const { chosenSeriesLocation, loadEnv } = require("./configs/env-defaults");
 const { dryRunDir } = require("./configs/run-state");
 const { openSeriesRun } = require("./utils/series-run");
+const { assertDoorAllowed } = require("./utils/prereqs/freeze");
 const { writePromptDump } = require("./utils/prompt");
 const detective = require("./character-voice/detective");
 const rs = require("./utils/reference-store");
@@ -369,6 +370,25 @@ async function main({ args, seriesDir, log = console.log }) {
       if (!findings.length) log("    none");
       for (const f of findings) log(`    ${f.severity} ${f.kind}`);
       return high.length ? 1 : 0;
+    }
+
+    // The freeze gate, asked only of the half that can change the record. `--check` and `--answers` return
+    // above: they read the record and write nothing, so they are not rewrites and are not gated.
+    // Reaching this line means the reading half is about to run — it files answers into the record and
+    // marks claims this volume already PUBLISHED as `disputed`, which changes what the reference a
+    // translation was built on says about who speaks those words.
+    try {
+      await assertDoorAllowed({
+        door: "attribute-voice",
+        seriesDir,
+        cancelledBy: "act",
+        volumes: [{ folder: folderName, installmentNumber: volume }],
+        dryRun: args.dryRun,
+        log,
+      });
+    } catch (err) {
+      log(String((err && err.message) || err));
+      return 1;
     }
 
     if (args.dryRun) {

@@ -55,6 +55,7 @@ const path = require("path");
 
 const { chosenSeriesLocation, loadEnv } = require("./configs/env-defaults");
 const { openSeriesRun } = require("./utils/series-run");
+const { assertDoorAllowed } = require("./utils/prereqs/freeze");
 const rs = require("./utils/reference-store");
 require("./types"); // JSDoc type definitions
 
@@ -143,6 +144,22 @@ async function main({ args, seriesDir, log = console.log }) {
       if (row.copies_affected.length) log(`    copies it marked: ${row.copies_affected.map((v) => `volume ${v}`).join(", ")}`);
     }
     return 0;
+  }
+
+  // The freeze gate. Retiring a published record is the first half of rebuilding the reference a
+  // published translation was rendered from, so it is exactly the act the freeze exists to make
+  // deliberate. `--list` and `--history` above read and write nothing, so they never reach here.
+  // The way past is a recorded release typed before this command runs, not a flag on this one.
+  try {
+    await assertDoorAllowed({
+      door: "reopen-volume",
+      seriesDir,
+      cancelledBy: "act",
+      volumes: [{ folder: folderName, installmentNumber: volume }],
+    });
+  } catch (err) {
+    log(String((err && err.message) || err));
+    return 1;
   }
 
   log(`\nreopen-volume — volume ${volume} (${folderName})`);

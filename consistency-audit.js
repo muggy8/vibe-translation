@@ -50,6 +50,7 @@ const { fileExists, assertWrote } = require("./utils/fs");
 const { emittedToolCallAsText, assertRealToolCalls } = require("./utils/agents");
 const { getTranslationTarget } = require("./get-translation-target");
 const { readRunArgs } = require("./utils/series-run");
+const { assertDoorAllowed } = require("./utils/prereqs/freeze");
 const { sha256OfFile } = require("./utils/source");
 
 const clientDir = __dirname;
@@ -390,6 +391,20 @@ async function consistencyAudit() {
 
   // Idempotency: skip while the report still fingerprints the four artifacts exactly.
   if (!force && (await fileExists(reportFile)) && (await auditIsFresh(reportFile, seriesDir))) return;
+
+  // The freeze gate. Reaching this line means the audit is about to SIGN THE SERIES AGAIN: --force
+  // was given, or the report is gone, or its fingerprints no longer match the four artifacts. When
+  // any volume in scope already has a published translation, that sign-off is the one those
+  // translations were built on, and re-signing it after the fact makes it describe a state that no
+  // longer matches what was translated. A plain run that skipped above never reaches this line, so a
+  // legal resumed `translate` is never blocked — the prerequisite gate asks whether the audit is
+  // COMPLETE, not whether it may run.
+  await assertDoorAllowed({
+    door: "consistency-audit",
+    seriesDir,
+    cancelledBy: force ? "force" : "audit-stale",
+    dryRun,
+  });
 
   const fsGate = await harness.createGatedFsTools({ cwd: seriesDir, allowedDirs: [seriesDir] });
 

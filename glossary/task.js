@@ -86,7 +86,7 @@ async function glossary() {
   const { manifest, runSettings, folders, volumes, volumeByFolder } = await openSeriesRun({ seriesDir, dryRun, volumeArg });
   console.log(`Found ${folders.length} volume folder(s). Processing in order...`);
 
-  const cascade = { regeneratedAny: false };
+  const cascade = { regeneratedAny: false, regeneratedFrom: null };
   const run = { folders, volumeByFolder, runSettings, prompts, dryRun, force, chunked, cascade };
   await runVolumeSeries("glossary", {
     volumes,
@@ -164,7 +164,11 @@ async function processGlossaryVolume({ folderName, index }, run) {
     bundle,
     force,
     regeneratedAny: cascade.regeneratedAny,
+    cascadeFrom: cascade.regeneratedFrom,
     artifactLabel: "glossary",
+    step: "glossary",
+    seriesDir,
+    folder: folderName,
   })) {
     // The coverage report is deterministic (no AI) — refresh it even on a skip so a source change
     // is visible without a full regeneration.
@@ -174,6 +178,7 @@ async function processGlossaryVolume({ folderName, index }, run) {
 
   // A volume is being (re)generated; later volumes depend on it.
   cascade.regeneratedAny = true;
+  cascade.regeneratedFrom = values.INSTALLMENT_NUMBER;
 
   // Open this volume's reference record, carrying the previous volume's published record in first.
   // The integrity gate inside that copy is the hard stop — a volume whose character-voice reference

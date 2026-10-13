@@ -78,7 +78,7 @@ async function jumpInWiki() {
   const prompts = await loadPromptFiles();
   const { runSettings, folders, volumes, volumeByFolder } = await openSeriesRun({ seriesDir, dryRun, volumeArg });
 
-  const cascade = { regeneratedAny: false };
+  const cascade = { regeneratedAny: false, regeneratedFrom: null };
   const tally = { limitReached: 0 };
   const run = { folders, volumeByFolder, runSettings, prompts, dryRun, force, chunked, cascade, tally };
 
@@ -177,7 +177,11 @@ async function processWikiVolume({ folderName, index }, run) {
     bundle,
     force,
     regeneratedAny: cascade.regeneratedAny,
+    cascadeFrom: cascade.regeneratedFrom,
     artifactLabel: "wiki",
+    step: "jump-in-wiki",
+    seriesDir,
+    folder: folderName,
   })) {
     console.log("The current volume has already been processed by a previous run.");
     await writeHandoff(ctx, runSettings, volume);
@@ -202,6 +206,7 @@ async function processWikiVolume({ folderName, index }, run) {
   // This volume's wiki was (re)written, so every later volume's wiki — which was built on it — is
   // now stale and must be rebuilt too.
   cascade.regeneratedAny = true;
+  cascade.regeneratedFrom = values.INSTALLMENT_NUMBER;
 
   // Deterministic per-volume handoff for the translation stage: chapters.json +
   // translation-brief.md (no AI call; best-effort — a failure here must not fail an already-accepted

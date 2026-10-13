@@ -45,6 +45,7 @@ require("../types"); // JSDoc type definitions
 
 const { structuralError } = require("../configs/shared");
 const { readRunArgs, openSeriesRun } = require("../utils/series-run");
+const { evaluateFreeze } = require("../utils/prereqs/freeze");
 const { resolveSourceBundle, auditExtractedVolume } = require("../utils/source");
 const { BUNDLE_SCHEMA_VERSION } = require("../utils/source/config");
 const { postMortemDir } = require("../utils/postmortem");
@@ -195,6 +196,29 @@ async function extractOneVolume({ seriesDir, volume, force, outDir }) {
     const audit = auditExtractedVolume({ volume, bundle, volumeFiles: await fs.readdir(volumeDir) });
     record = recordOf({ volume, bundle, audit, action, images: await imageCountOf(bundle) });
     console.log(action.line);
+    if (action.state === "re-extracted") {
+      // The freeze gate refuses `extract --force` on a frozen volume. This is the OTHER way a frozen
+      // volume's text gets rewritten: the archive changed, a bundle file went missing, or the cache
+      // predates the current converter schema. Refusing would protect nothing — the book on disk has
+      // already changed, and the translation standing beside it was made from the old text. What the
+      // run owes the operator is the sentence, so `extract` names the drift instead of printing
+      // RE-EXTRACTED and moving on.
+      const frozen = await evaluateFreeze({
+        door: "extract",
+        seriesDir,
+        cancelledBy: "source-changed",
+        volumes: [volume],
+      });
+      if (!frozen.ok && frozen.frozen.length) {
+        console.warn(
+          `[extract] Volume ${record.installment} · FROZEN VOLUME RE-EXTRACTED — ${frozen.frozen[0].artifacts.join(", ")} ` +
+            `is in this folder, so the translation published here was made from the text this run just ` +
+            `replaced. Nothing here stops that; it says so. If the new text is the one the translation ` +
+            `should be rebuilt from, record the act: node release-translation.js ` +
+            `--volume=${record.installment} --door=extract --reason="…"`
+        );
+      }
+    }
   } catch (err) {
     const message = String((err && err.message) || err);
     console.error(

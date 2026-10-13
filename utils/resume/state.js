@@ -16,6 +16,11 @@ const { readPatches } = require("../patches");
 const { runInProgress } = require("../runlock");
 const { validateManifest } = require("../../get-translation-target");
 const { readTranslationReport, summarizeReportRows } = require("../translation-report");
+// The freeze gate's recorded acts (utils/prereqs/freeze.js). A release is STANDING — it does not
+// expire and it is not consumed by one run — so it belongs in the snapshot the triage reads: a
+// volume whose translation a release invalidated is a fact whoever resumes this series has to see,
+// not something the person who typed the release has to remember.
+const { readTranslationReleases, DOOR_OWNER } = require("../prereqs/freeze");
 
 const { EVIDENCE_KINDS, actionByName } = require("./menu");
 
@@ -261,6 +266,11 @@ function inventoryVolume(seriesDir, volume) {
     quarantines: [],
     quarantinedForStep: [],
     missingForStep: [],
+    // Filled by `readWorkingState` from the freeze gate's release record: the doors a recorded release
+    // currently lets rewrite this volume. Empty means frozen, and empty is also the honest answer for a
+    // volume nothing has ever been released for — which is why it is declared here rather than left
+    // undefined.
+    releasedDoors: [],
   };
 
   let names = [];
@@ -289,6 +299,52 @@ function inventoryVolume(seriesDir, volume) {
     }
   }
   return out;
+}
+
+
+/**
+ * Which doors a recorded translation release currently leaves open, per volume.
+ *
+ * A release is STANDING: it does not expire and one run does not consume it, because the translation
+ * artifacts it invalidated stay on disk. So the resume triage has to carry it — otherwise a volume
+ * somebody deliberately unlocked reads, on the next run, exactly like a volume that is frozen.
+ *
+ * @param {Array<{volumes?: string[], doors?: string[]}>} releases - Rows from `readTranslationReleases`.
+ * @returns {Map<string, string[]>} installment → the doors released for it, sorted, newest release first.
+ */
+function indexTranslationReleases(releases) {
+  /** @type {Map<string, Set<string>>} */
+  const open = new Map();
+  const rows = [...(releases || [])].sort((a, b) => String(a && a.at || "").localeCompare(String(b && b.at || "")));
+  for (const r of rows) {
+    if (!r || !Array.isArray(r.volumes)) continue;
+    for (const installment of r.volumes) {
+      const key = String(installment);
+      if (!open.has(key)) open.set(key, new Set());
+      for (const door of r.doors || []) open.get(key).add(String(door));
+    }
+  }
+  /** @type {Map<string, string[]>} */
+  const out = new Map();
+  for (const [key, doors] of open) out.set(key, [...doors].sort());
+  return out;
+}
+
+
+/**
+ * The doors one volume's releases unlock for one step.
+ *
+ * A manual door (`rebuild-voice`, `extract-voice`, `reopen-volume`, `attribute-voice`) is unlocked by a
+ * release naming its OWNING stage, because the artifact it threatens is that stage's artifact — the same
+ * rule `utils/prereqs/freeze.js`'s `releaseCovering` applies, kept in one place by asking that module's
+ * own `DOOR_OWNER` table rather than restating it here.
+ *
+ * @param {string[]|undefined} releasedDoors - The doors released for this volume.
+ * @param {string} step
+ * @returns {string[]} The released door names that cover this step, empty when none do.
+ */
+function releasedDoorsForStep(releasedDoors, step) {
+  return (releasedDoors || []).filter((door) => door === step || DOOR_OWNER[door] === step);
 }
 
 
@@ -440,13 +496,22 @@ function unhelpfulInterventions(entries, run) {
  *   run: string|null, interventionsByStep: Object<string, number>, interventionBudget: number,
  *   unhelpfulInterventionsByStep: Object<string, Array>, ledgerError: string|null,
  *   tickets: Array, ticketsError: string|null,
- *   patches: Array, patchesError: string|null, deliverable: Object|null}>}
+ *   patches: Array, patchesError: string|null, releases: Array, releasesFile: string,
+ *   releasesError: string|null, deliverable: Object|null}>}
  */
 async function readWorkingState({ seriesDir, manifest } = {}) {
   const dir = path.resolve(seriesDir || process.env.SERIES_LOCATION || process.cwd());
   const plan = manifest === undefined ? readPlanOfRecord(dir) : { manifest, problem: null };
 
   const volumes = ((plan.manifest && plan.manifest.volumes) || []).map((v) => inventoryVolume(dir, v));
+
+  // The freeze gate's recorded acts, read once and attached per volume. A standing release is the only
+  // thing that distinguishes "this volume's reference is frozen because a translation was published on
+  // top of it" from "somebody released it on purpose, and the run may rebuild it" — and without it in
+  // the snapshot the next run cannot tell those two volumes apart.
+  const releases = readTranslationReleases();
+  const releasedByVolume = indexTranslationReleases(releases.releases);
+  for (const volume of volumes) volume.releasedDoors = releasedByVolume.get(volume.installment) || [];
 
   /** @type {ResumeStepState[]} */
   const stepStates = [];
@@ -578,6 +643,9 @@ async function readWorkingState({ seriesDir, manifest } = {}) {
     patches: patches.patches,
     patchesError: patches.error || null,
     runLock,
+    releases: releases.releases,
+    releasesFile: releases.file,
+    releasesError: releases.error || null,
     deliverable: await readDeliverable(dir),
   };
 }
@@ -590,6 +658,8 @@ module.exports = {
   resolveDeclaredName,
   quarantineBelongsToStep,
   inventoryVolume,
+  indexTranslationReleases,
+  releasedDoorsForStep,
   readDeliverable,
   maxInterventionsPerStep,
   interventionsUsed,

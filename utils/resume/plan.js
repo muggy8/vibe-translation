@@ -609,6 +609,12 @@ function finishPlan({ state, verdict, headline, steps, notes }) {
     interventionsByStep: state.interventionsByStep || {},
     interventionBudget: state.interventionBudget || maxInterventionsPerStep(),
     deliverable: state.deliverable,
+    // The freeze gate's recorded acts (utils/prereqs/freeze.js). They are STANDING, so they are carried
+    // into every plan: a volume somebody released on purpose must not read, in the next report, like a
+    // volume that is frozen.
+    releases: state.releases || [],
+    releasesFile: state.releasesFile || null,
+    releasesError: state.releasesError || null,
     // The investigations this run proposes, each with its status against the bound: `actionable` (may be
     // paid for, and it is what a diagnostics turn is spent on), `answered` (the ticket channel already
     // holds the answer, so it is read for free), `pending` (already asked and unanswered — work that

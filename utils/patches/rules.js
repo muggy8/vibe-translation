@@ -114,7 +114,7 @@ const BANNED_PATCH_PATHS = [
   {
     id: "constraint-tests",
     pattern:
-      /^test\/(?:test-(?:tickets|resume|delivery-verify|ledger|delivery-act|diagnostics|patches|finding-levels|prerequisite-gate|reference-store(?:-(?:copy|artifacts|ownership))?)|fixture-reference-store)\.js$/,
+      /^test\/(?:test-(?:tickets|resume|delivery-verify|ledger|delivery-act|diagnostics|patches|finding-levels|prerequisite-gate|freeze-gate|reference-store(?:-(?:copy|artifacts|ownership))?)|fixture-reference-store)\.js$/,
     because:
       "these are the tests that pin the constraints above. Editing the test that proves a guard works " +
       "is how a guard becomes decoration while the suite stays green (gotcha 67: a check that can " +
@@ -122,10 +122,32 @@ const BANNED_PATCH_PATHS = [
       "thing that keeps the level table complete — every emitted kind declared, and the count of " +
       "kinds the triage cannot see pinned at a number that may only fall. `test-prerequisite-gate.js` " +
       "is on the list because it is the only thing that keeps the prerequisite table a DAG, keeps it " +
-      "covering every pipeline step, and pins that no flag and no run policy can wave it past. The " +
+      "covering every pipeline step, and pins that no flag and no run policy can wave it past. " +
+      "`test-freeze-gate.js` is on the list because it is the only thing that pins the other half of " +
+      "the same rule — that a step may not REWRITE what a published translation was built from, that " +
+      "the freeze has no switch, and that the recorded release which lifts it touches no translation. " +
+      "The " +
       "reference-store fixture is on the list for the same reason in the other direction: it is what " +
       "keeps those suites pointed at a two-volume toy series instead of the books (gotcha 69).",
     escalateTo: "the account owner, who is the only role that may relax one of these guarantees.",
+  },
+  {
+    id: "freeze-gate-doors",
+    // The door PAST the freeze gate. `utils/prereqs/freeze.js` is already inside `constraint-tables`
+    // (that pattern covers the folder as well as `utils/prereqs.js`), but the way through a gate is
+    // exactly as protected as the gate: a role that can edit the command which records a release can
+    // unlock any volume it is being refused on, without ever touching the table.
+    pattern: /^release-translation\.js$/,
+    because:
+      "this is the only door past the freeze gate, which is what stops a step rewriting the " +
+      "glossary, voice reference, style guide, wiki and extracted text a published translation was " +
+      "built from. The gate has no flag and no environment variable on it by design; a release is a " +
+      "typed reason recorded in the run's own records. A role that can rewrite the command that " +
+      "records it can open the gate without editing the gate, which is the same hole the table ban " +
+      "exists to close.",
+    escalateTo:
+      "the account owner. Releasing a volume's translation is the account owner's decision, and this " +
+      "command is the only place they make it.",
   },
   {
     id: "edit-hooks",

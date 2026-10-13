@@ -114,7 +114,7 @@ async function characterVoice() {
   const prompts = await loadPromptFiles();
   const { runSettings, folders, volumes, volumeByFolder } = await openSeriesRun({ seriesDir, dryRun, volumeArg });
 
-  const cascade = { regeneratedAny: false };
+  const cascade = { regeneratedAny: false, regeneratedFrom: null };
   const run = { folders, volumeByFolder, runSettings, prompts, dryRun, force, cascade };
   await runVolumeSeries("character-voice", {
     volumes,
@@ -185,12 +185,17 @@ async function processVoiceVolume({ folderName, index }, run) {
     bundle,
     force,
     regeneratedAny: cascade.regeneratedAny,
+    cascadeFrom: cascade.regeneratedFrom,
     artifactLabel: "voice reference and POV map",
+    step: "character-voice",
+    seriesDir,
+    folder: folderName,
   })) {
     return;
   }
 
   cascade.regeneratedAny = true;
+  cascade.regeneratedFrom = values.INSTALLMENT_NUMBER;
 
   // Slice 6: the volume's reference record. Opened before anything is written, because the previous
   // volume's published record has to be carried in first — and carrying it in is where the hard stop

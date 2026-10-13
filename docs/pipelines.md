@@ -41,8 +41,50 @@ nothing. `--dry-run` prints what is missing and continues, because a dry run exi
 `--volume NN` narrows the check to the volumes the run is about to touch, so a series with a broken
 volume 14 can still be worked on one book at a time.
 
-→ `utils/prereqs.js`, `gulpfile.js`'s `withPrerequisiteGate`, `test/test-prerequisite-gate.js`,
-docs/map-helpers.md, gotcha 140.
+### The other half: a finished translation freezes what it was built from
+
+"May this step START?" is one question. "May this step REWRITE something a published translation was
+already built from?" is the other, and the start-gate cannot ask it. Since 2026-10-13 the answer is
+declared data in `utils/prereqs/freeze.js`, in the same closed folder and with the same rule: no flag,
+no environment variable, no ledger entry and no run policy is an input to it, the refusal is
+**structural**, it costs no model call and writes nothing into the series.
+
+A volume is **frozen** when the `translate` step's own `required` per-volume artifacts are in its
+folder — read from `utils/artifacts.js`, never from a second list. Eleven doors are covered: the five
+pre-production steps, `discover` and `extract`, and the four manual doors (`rebuild-voice`,
+`extract-voice`, `reopen-volume`, `attribute-voice`), which are root commands rather than gulp tasks
+and so no wrapper can reach them.
+
+**The freeze is on rewriting, not on looking.** The prerequisite gate runs `discover` and `extract`
+before *every* step, so a freeze that blocked them outright would make a resumed run sitting in the
+translation stage unable to run anything at all. A warm-cache `extract` verifies each volume's bundle
+and rewrites nothing; `discover` reuses the plan of record; `consistency-audit` skips while its
+provenance sidecar still fingerprints the four artifacts. All three keep running on a frozen series,
+and the offline pipeline loop's zero-call second pass is the test that proves it.
+
+So the question is never "is this step allowed to run?" but **"would this act actually rewrite it?"** —
+answered by the same conditions `utils/series-run/skip.js` already uses to cancel its own skip
+(`--force`, the cumulative cascade, a changed source fingerprint, a failing or missing acceptance
+window). `missing-output` is the one cancellation that is **not** a rewrite: filling a hole in a
+half-built volume is not overwriting something a translation consumed, and refusing it would make an
+inconsistent series unrepairable. An unrecognised cancellation is treated as a rewrite, never waved
+through.
+
+`--volume NN` narrows this gate exactly as it narrows the start-gate: a frozen volume 01 does not block
+a legal volume-02 run. `--dry-run` reports and does not refuse, which is the same rule the start-gate
+keeps.
+
+**There is a way past, and it is not a switch.** `npm run release-translation -- --volume=01,02
+--door=glossary --reason="…"` records, in the run's own records, that those volumes' translations no
+longer vouch for what the references now say. The reason is refused under 20 characters — the same
+floor `reopen-volume.js` holds. It is per door (releasing `glossary` does not release
+`character-voice`), it is standing rather than consumed, and **it does not delete, edit, mark or
+schedule a single file in a translation folder**: the translations stay byte for byte, and what changed
+is only what the pipeline is allowed to rewrite next.
+
+→ `utils/prereqs.js`, `utils/prereqs/freeze.js`, `release-translation.js`, `gulpfile.js`'s
+`withPrerequisiteGate` and `withFreezeGate`, `test/test-prerequisite-gate.js`,
+`test/test-freeze-gate.js`, docs/map-helpers.md, gotcha 140, gotcha 142.
 
 ## 3.5. Pipeline 0: extract (`extract.js`) — check the books before anything is built on them
 

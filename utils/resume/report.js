@@ -119,6 +119,30 @@ function progressByStep(volumes) {
 
 
 /**
+ * Which volumes the freeze gate is currently holding.
+ *
+ * Derived from the same declaration the gate itself reads — the `translate` step's `required` per-volume
+ * outputs — rather than from a second list of file names (gotcha 141: two lists of one artifact become
+ * two opinions about whether a volume is finished). A volume whose folder is there and whose `translate`
+ * output is NOT missing is a volume a translation was published on top of.
+ *
+ * @param {VolumeInventory[]} volumes
+ * @returns {Array<{installment: string, folder: string, releasedDoors: string[]}>} Frozen volumes, in
+ *   plan order, each with the doors a recorded release currently unlocks for it.
+ */
+function frozenVolumes(volumes) {
+  const out = [];
+  for (const v of volumes || []) {
+    if (!v.exists) continue;
+    const translated = !(v.missingForStep || []).some((m) => m.step === "translate");
+    if (!translated) continue;
+    out.push({ installment: v.installment, folder: v.folder, releasedDoors: v.releasedDoors || [] });
+  }
+  return out;
+}
+
+
+/**
  * The plan as Markdown — the file a human reads, and the file the manager writes in `report`
  * mode.
  * @param {ResumePlan} plan
@@ -162,6 +186,60 @@ function renderResumePlanMarkdown(plan) {
           evidence.map((v) => `volume ${v.installment} ${v.quarantines.map((n) => `\`${n}\``).join(", ")}`).join("; ")
       );
     }
+    lines.push(``);
+  }
+
+  const frozen = frozenVolumes(plan.volumes);
+  if (frozen.length) {
+    const open = frozen.filter((v) => v.releasedDoors.length);
+    const shut = frozen.filter((v) => !v.releasedDoors.length);
+    lines.push(`## Frozen references`);
+    lines.push(``);
+    lines.push(
+      `_Volume(s) with a published translation: ${frozen.map((v) => v.installment).join(", ")}. The ` +
+        `pre-production artifacts those translations were built from are frozen — a step may not rewrite ` +
+        `them, and a resumed run is no exception. The gate has no flag and no environment variable on it; ` +
+        `the way past is a recorded act:_`
+    );
+    lines.push(``);
+    lines.push(`    npm run release-translation -- --volume=NN --door=<step> --reason="…"`);
+    lines.push(``);
+    if (shut.length) {
+      lines.push(`- Frozen, nothing released: ${shut.map((v) => `volume ${v.installment}`).join(", ")}.`);
+    }
+    if (open.length) {
+      for (const v of open) {
+        lines.push(
+          `- Volume ${v.installment}: released for ${v.releasedDoors.map((d) => `\`${d}\``).join(", ")} — ` +
+            `a run may rewrite those artifacts, and the translations beside it no longer vouch for them.`
+        );
+      }
+    }
+    lines.push(``);
+  }
+
+  const releases = plan.releases || [];
+  if (releases.length) {
+    lines.push(`## Recorded translation releases (standing)`);
+    lines.push(``);
+    lines.push(
+      `_Each one is the account owner saying, in writing, that these volumes' translations no longer vouch ` +
+        `for what the references now say. None of them touched a translation file. They do not expire._`
+    );
+    lines.push(``);
+    for (const r of releases) {
+      lines.push(
+        `- **${r.id}** (${r.at}) — volumes ${r.volumes.join(", ")}; doors ${r.doors.join(", ")}; ` +
+          `invalidates ${r.invalidated.join(", ") || "no declared translation output"}.`
+      );
+      lines.push(`  Reason: ${r.reason}`);
+    }
+    if (plan.releasesError) lines.push(`- **The release record could not be read:** ${plan.releasesError}`);
+    lines.push(``);
+  } else if (plan.releasesError) {
+    lines.push(`## Recorded translation releases`);
+    lines.push(``);
+    lines.push(`- **The release record could not be read:** ${plan.releasesError}`);
     lines.push(``);
   }
 
@@ -276,5 +354,6 @@ module.exports = {
   formatRanges,
   progressForStep,
   progressByStep,
+  frozenVolumes,
   renderResumePlanMarkdown,
 };
