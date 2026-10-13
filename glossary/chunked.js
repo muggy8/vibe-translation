@@ -35,7 +35,7 @@ const { chapterSegmentNote } = require("../utils/source");
 
 const { researchVolumeTerms } = require("./research");
 const { fileGlossaryExtraction, fileGlossaryTermRows, renderGlossaryArtifact } = require("./store");
-const { truncateGlossary, readTermList } = require("./extract");
+const { truncateGlossary, readTermList, termsResponseFormat } = require("./extract");
 const { guardCarryForwardAgainst } = require("./carry-forward");
 
 /**
@@ -144,6 +144,7 @@ async function extractChapterTerms(ctx, segment, si) {
         systemPrompt: termsSystemPrompt,
         messages: chapterMessages,
         label: `glossary-terms-${values.INSTALLMENT_NUMBER}-${segment.id}${attempt > 1 ? "-retry" : ""}`,
+        responseFormat: termsResponseFormat(),
         ...(thinkingLevel ? { thinkingLevel } : {}),
       }),
   });

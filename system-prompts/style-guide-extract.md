@@ -31,7 +31,7 @@ Categories (use exactly one `category` per entry):
 
 ## Output
 
-Respond with **only** a JSON array — no prose, no markdown fences, no commentary. Each element is an object with exactly these keys:
+Respond with **only** a JSON object holding one key, `constructs` — no prose, no markdown fences, no commentary. `constructs` is an array, and each element of it is an object with exactly these keys:
 
 - `category` — one of the category names above (string)
 - `pattern` — the source-language form (string)
@@ -40,12 +40,14 @@ Respond with **only** a JSON array — no prose, no markdown fences, no commenta
 - `frequency` — one of `high`, `medium`, `low` (string)
 - `notes` — any additional context (string)
 
-If there are **no new constructs to extract**, respond with an empty JSON array: `[]`
+If there are **no new constructs to extract**, respond with an object holding an empty array: `{"constructs": []}`
 
 Example shape (do not copy these values):
 ```
-[
-  { "category": "honorific", "pattern": "〜ちゃん", "description": "familiar/affectionate address suffix", "examples": ["「例ちゃん、ちょっと来なさい」"], "frequency": "high", "notes": "used for children and close friends" },
-  { "category": "povMarker", "pattern": "※", "description": "POV shift marker", "examples": ["※"], "frequency": "medium", "notes": "appears at every perspective change" }
-]
+{
+  "constructs": [
+    { "category": "honorific", "pattern": "〜ちゃん", "description": "familiar/affectionate address suffix", "examples": ["「例ちゃん、ちょっと来なさい」"], "frequency": "high", "notes": "used for children and close friends" },
+    { "category": "povMarker", "pattern": "※", "description": "POV shift marker", "examples": ["※"], "frequency": "medium", "notes": "appears at every perspective change" }
+  ]
+}
 ```

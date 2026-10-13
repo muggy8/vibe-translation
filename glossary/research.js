@@ -132,13 +132,18 @@ function buildResearchReadingPrompt(row, results) {
  * this answer is already a JSON object, and this endpoint refuses a `response_format` JSON Schema whose root
  * is anything but an object (measured 2026-10-13 — HTTP 400 in 161 ms, 0 tokens, "response_format schema
  * must accept only JSON objects at its root"; `ai/one-shot.js` refuses such a schema before it is sent). The
- * term list, the voice extraction and the style extraction all answer as JSON **arrays**, so they cannot be
- * declared as themselves. Whether they should be re-expressed as an object holding the list is an open
- * decision: `/tmp/opencode/json-schema-questions.md`.
+ * term list, the voice extraction and the style extraction answer as JSON **arrays**, so they could not be
+ * declared as themselves; they now declare the list **inside an object** — `{"terms": […]}`,
+ * `{"entries": […]}`, `{"constructs": […]}` — beside their own parsers (`AGENTS.md` gotcha 138). This one
+ * needed no such change, because its answer was already an object.
  *
- * Not measured against the real endpoint. It is the same class of schema the four acceptance graders have
- * been sending to it successfully (`{score, band, note}`, `strict: true`, `additionalProperties: false`),
- * which is why it was kept; the acceptance shape is proven on this machine, this one is inferred from it.
+ * Not measured against the real endpoint on its own. It is the same class of schema the four acceptance
+ * graders have been sending to it successfully (`{score, band, note}`, `strict: true`,
+ * `additionalProperties: false`), which is why it was kept; the acceptance shape is proven on this machine,
+ * this one is inferred from it. What HAS been proven on this machine since is the class itself, on three
+ * sibling shapes: the term list, the voice extraction and the style extraction each sent a closed or open
+ * object-rooted schema to this endpoint and each answered as one object holding its list (5,356 / 8,210 /
+ * 5,944 tokens, all `finish_reason=stop`, all parsed).
  *
  * @returns {Object} The `response_format` request field.
  */

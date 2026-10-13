@@ -73,17 +73,18 @@ const AGENT_KINDS = new Set([
  * module that declares it rather than copied here. A copy in the audit would let a schema and its parser
  * drift apart and still pass.
  *
- * **Only one of them can be shaped, and that is a measurement.** A `response_format` JSON Schema has to
- * carry an OBJECT at its root. Measured 2026-10-13 against the endpoint this pipeline is configured
- * against: a schema whose root was `type: "array"` was refused **before the model was asked** — HTTP 400
- * in 161 ms, 0 tokens, `code: structured_output_failed`, "response_format schema must accept only JSON
- * objects at its root (type object, or anyOf/oneOf of object schemas)". OpenAI's structured outputs
- * require the same root. So the three calls that answer with a JSON array — the term list, the voice/POV
- * extraction, the style-observation extraction — cannot have their answer declared as itself, and
- * `ai/one-shot.js` refuses an array-rooted schema before it is ever sent. They are named in
- * `ARRAY_ANSWER_KINDS` so the audit says which data-shaped calls are unshaped and why, instead of leaving
- * that silent. Wrapping each list in an object would make them shapeable; that changes what three prompts
- * tell the model to write, and it is written up as a decision in `/tmp/opencode/json-schema-questions.md`.
+ * **Every one of them carries an OBJECT at its root, and that is a measurement.** Measured 2026-10-13
+ * against the endpoint this pipeline is configured against: a schema whose root was `type: "array"` was
+ * refused **before the model was asked** — HTTP 400 in 161 ms, 0 tokens, `code: structured_output_failed`,
+ * "response_format schema must accept only JSON objects at its root (type object, or anyOf/oneOf of object
+ * schemas)". OpenAI's structured outputs require the same root. So the three calls that answer with a list —
+ * the term list, the voice/POV extraction, the style-construct extraction — cannot have their answer declared
+ * as itself, and `ai/one-shot.js` refuses an array-rooted schema before it is ever sent (AGENTS.md gotcha
+ * 138). They now declare the list **inside an object** (`{"terms": […]}`, `{"entries": […]}`,
+ * `{"constructs": […]}`), their prompts ask the model for that envelope, and their parsers read the envelope
+ * and the bare array both. `ARRAY_ANSWER_KINDS` — the set that used to name them as unshapeable — is gone,
+ * and `declaredShapesAreExpressible` below is what replaced it: the audit now checks every shape this
+ * repository declares, not just the ones that reached the wire.
  *
  * Deliberately absent as well, with the reason: `verify`, `polish-audit` and `volume-consistency` answer
  * with a structured **document** whose findings are the deliverable the retranslate pass reads verbatim —
@@ -92,16 +93,56 @@ const AGENT_KINDS = new Set([
  * tool calls, which this endpoint cannot combine with `response_format` at all.
  */
 const DATA_RESPONSE_FORMATS = {
+  "glossary-extract": require("../glossary/extract").termsResponseFormat(),
   "glossary-research": require("../glossary/research").researchResponseFormat(),
+  "voice-extract": require("../character-voice/stages").voiceResponseFormat(),
+  "style-extract": require("../style-guide/amend").styleResponseFormat(),
 };
 const DATA_SHAPE_KINDS = new Set(Object.keys(DATA_RESPONSE_FORMATS));
 
 /**
- * Data-shaped calls whose reply is a JSON array, and which therefore ask for no shape on this endpoint.
- * The audit fails if one of them starts sending a shape, because the shape it would send is the one the
- * server refuses — the failure that motivated this whole rule.
+ * Every declared shape must be one this endpoint can be given at all: an object (or a union of objects) at
+ * its root.
+ *
+ * This is the guard `ARRAY_ANSWER_KINDS` used to be. That set named the three list-answering calls as
+ * unshapeable and failed if one of them started sending a shape; the envelope decision made that set empty,
+ * and an empty set is a check that never runs. What the check has to ask instead is a question about the
+ * declared shapes themselves, so it fires on a schema nobody has run yet: an array-rooted shape in
+ * `DATA_RESPONSE_FORMATS` is the exact request that cost HTTP 400 and 0 tokens per call on 2026-10-13, and it
+ * looks correct in the code and passes every offline test — the scripted backend does not enforce the
+ * server's rule (gotcha 138). `ai/one-shot.js`'s `assertShapeIsExpressible` is the runtime half; this is the
+ * half that catches it before a stage is ever pointed at the endpoint.
+ *
+ * @param {Object} formats - The declared `response_format` payloads, keyed by call kind.
+ * @returns {string[]} One line per declared shape whose root is not an object.
  */
-const ARRAY_ANSWER_KINDS = new Set(["glossary-extract", "voice-extract", "style-extract"]);
+function declaredShapesAreExpressible(formats) {
+  /**
+   * Is this schema node an object shape? A union counts when every branch is one.
+   * @param {Object} node - One schema node.
+   * @returns {boolean}
+   */
+  function isObjectShape(node) {
+    if (!node || typeof node !== "object") return false;
+    const branches = node.anyOf || node.oneOf;
+    if (Array.isArray(branches)) return branches.length > 0 && branches.every(isObjectShape);
+    return node.type === "object";
+  }
+  const gaps = [];
+  for (const [kind, format] of Object.entries(formats)) {
+    const schema = format && format.json_schema && format.json_schema.schema;
+    if (!schema || !isObjectShape(schema)) {
+      gaps.push(
+        `${kind}: its declared shape has root "${schema && schema.type ? schema.type : "none"}" — this ` +
+          `endpoint refuses a response_format whose root is not an object before it generates (HTTP 400, ` +
+          `0 tokens, measured 2026-10-13), so the list has to be wrapped in an object AND the prompt and ` +
+          `the parser changed to match`
+      );
+    }
+  }
+  return gaps;
+}
+
 
 /** The order the default pipeline runs its tasks in. */
 const STAGE_ORDER = [
@@ -518,74 +559,60 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
   else if (!declaredShape) pass("grade-answer-shape", "ACCEPTANCE_STRUCTURED_OUTPUT=off: no grading call asks for a shape, and no call that must not ask for one does.");
   else pass("grade-answer-shape", `${shapedGrades} grading call(s) ask for the rubric's own answer shape and still carry the rubric; no writing or agent call sends response_format.`);
 
-  // ─── 6c. Every call whose reply is PARSED AS DATA: shaped, or named as unshapeable ──
+  // ─── 6c. Every call whose reply is PARSED AS DATA asked for its own shape ──
   // The other half of 6b. The question is the one 6b asks about a grader, asked about a read pass
-  // instead: did the call that produces data ASK for the shape its own parser reads — and if it did not,
-  // is that a stage that stopped asking, or the one shape this endpoint cannot be given at all?
+  // instead: did the call that produces data ASK for the shape its own parser reads?
   //
   // A `kind` in DATA_SHAPE_KINDS that sends no shape is a stage that stopped asking — the exact state that
   // lets a chapter's extraction come back as prose and be logged as "the chapter files nothing". A `kind`
-  // whose shape is not the module's own is a second copy of a schema that has drifted from its parser.
+  // whose shape is not the module's own is a second copy of a schema that has drifted from its parser, and
+  // an array-rooted one is the request this endpoint refuses before it generates (measured 2026-10-13:
+  // HTTP 400, 161 ms, 0 tokens) — a shape like that does not make the answer stricter, it makes every call
+  // fail. All three are checked here, and the third is checked against the DECLARED shapes as well as the
+  // wire, so a schema nobody has run yet is still caught.
   //
-  // A `kind` in ARRAY_ANSWER_KINDS that sends a shape is the failure this rule exists to catch. Its reply
-  // is a JSON array, and this endpoint refuses a JSON Schema whose root is an array before it generates
-  // anything (measured 2026-10-13: HTTP 400, 161 ms, 0 tokens). Shipping one does not make the answer
-  // stricter, it makes every call fail.
-  //
-  // What is deliberately NOT in either set, and why it is worth saying out loud: `verify`, `polish-audit`
-  // and `volume-consistency`. Their reply is a structured DOCUMENT whose findings ARE the deliverable —
-  // the retranslate pass reads them verbatim — so a `{score, findings}` envelope would replace the
-  // artifact, and an unreadable one is already counted as a failed check. `translate`, `retranslate`,
+  // What is deliberately NOT in DATA_SHAPE_KINDS, and why it is worth saying out loud: `verify`,
+  // `polish-audit` and `volume-consistency`. Their reply is a structured DOCUMENT whose findings ARE the
+  // deliverable — the retranslate pass reads them verbatim — so a `{score, findings}` envelope would replace
+  // the artifact, and an unreadable one is already counted as a failed check. `translate`, `retranslate`,
   // `polish` and every agent kind answer in prose or with tool calls. See `configs/shared/acceptance.js`
   // and the comment above each parser (`glossary/extract.js`, `character-voice/stages.js`,
   // `style-guide/amend.js`, `glossary/research.js`).
-  const dataShapeGaps = [];
+  const dataShapeGaps = declaredShapesAreExpressible(DATA_RESPONSE_FORMATS);
   const dataShapeSeen = [];
-  const dataShapeUnshaped = [];
   for (const { entry, kind } of identified) {
     const asked = entry.sampling ? entry.sampling.responseFormat : null;
-    if (DATA_SHAPE_KINDS.has(kind)) {
-      const declared = DATA_RESPONSE_FORMATS[kind];
-      if (!declared) {
-        dataShapeGaps.push(`#${entry.index} ${kind}: the audit has no declared shape for a data-shaped call — add it beside the parser`);
-        continue;
-      }
-      if (!asked) {
-        dataShapeGaps.push(
-          `#${entry.index} ${kind}: this call's reply is parsed as data and it asked for no answer shape. ` +
-          `A reply that is not that shape is a stage that cannot tell "found nothing" from "never answered".`
-        );
-        continue;
-      }
-      if (JSON.stringify(asked) !== JSON.stringify(declared)) {
-        dataShapeGaps.push(
-          `#${entry.index} ${kind}: asked for ${JSON.stringify(asked)}, not the shape its own parser declares ` +
-            `(${JSON.stringify(declared)})`
-        );
-        continue;
-      }
-      dataShapeSeen.push(`#${entry.index} ${kind}: ${asked.type} "${asked.json_schema && asked.json_schema.name}"`);
+    if (!DATA_SHAPE_KINDS.has(kind)) continue;
+    const declared = DATA_RESPONSE_FORMATS[kind];
+    if (!declared) {
+      dataShapeGaps.push(`#${entry.index} ${kind}: the audit has no declared shape for a data-shaped call — add it beside the parser`);
       continue;
     }
-    if (ARRAY_ANSWER_KINDS.has(kind) && asked) {
-      const root = asked.json_schema && asked.json_schema.schema && asked.json_schema.schema.type;
+    if (!asked) {
       dataShapeGaps.push(
-        `#${entry.index} ${kind}: this call answers with a JSON ARRAY and it sent a response_format ` +
-          `(root "${root === undefined ? "none" : root}"). This endpoint refuses a schema whose root is not ` +
-          `an object — it answers HTTP 400 before generating, so a shape here is not a stricter answer, it ` +
-          `is every call failing. Either drop it or wrap the list in an object AND change the prompt and ` +
-          `the parser to match.`
+        `#${entry.index} ${kind}: this call's reply is parsed as data and it asked for no answer shape. ` +
+        `A reply that is not that shape is a stage that cannot tell "found nothing" from "never answered".`
       );
-    } else if (ARRAY_ANSWER_KINDS.has(kind)) {
-      dataShapeUnshaped.push(`#${entry.index} ${kind}`);
+      continue;
     }
+    if (JSON.stringify(asked) !== JSON.stringify(declared)) {
+      const askedRoot = asked.json_schema && asked.json_schema.schema && asked.json_schema.schema.type;
+      dataShapeGaps.push(
+        `#${entry.index} ${kind}: asked for ${JSON.stringify(asked)}, not the shape its own parser declares ` +
+          `(${JSON.stringify(declared)}).${askedRoot && askedRoot !== "object" ? ` Its root is "${askedRoot}", ` +
+          `and this endpoint refuses a schema whose root is not an object before it generates.` : ""}`
+      );
+      continue;
+    }
+    dataShapeSeen.push(`#${entry.index} ${kind}: ${asked.type} "${asked.json_schema && asked.json_schema.name}"`);
   }
   if (dataShapeGaps.length) fail("data-answer-shape", "a call whose reply the pipeline parses as data either stopped asking for its shape, or asked for one this endpoint refuses.", dataShapeGaps);
   else pass(
     "data-answer-shape",
-    `${dataShapeSeen.length} data-shaped call(s) asked for the shape declared beside its own parser; ` +
-      `${dataShapeUnshaped.length} array-answering call(s) asked for none, which is what this endpoint requires ` +
-      `of an answer that is a JSON array (a schema whose root is not an object is refused before generation).`,
+    `${dataShapeSeen.length} data-shaped call(s) asked for the shape declared beside its own parser, and all ` +
+      `${Object.keys(DATA_RESPONSE_FORMATS).length} declared shapes have an object at their root — the root ` +
+      `this endpoint requires (it refuses a schema rooted on an array before it generates, measured 2026-10-13). ` +
+      `Every list-answering read pass now declares its list inside an object.`,
     dataShapeSeen
   );
 
@@ -889,4 +916,13 @@ function renderAuditReport(audit) {
   return lines.join("\n");
 }
 
-module.exports = { auditPromptLog, renderAuditReport, STAGE_ORDER, ONE_SHOT_KINDS, AGENT_KINDS };
+module.exports = {
+  auditPromptLog,
+  renderAuditReport,
+  STAGE_ORDER,
+  ONE_SHOT_KINDS,
+  AGENT_KINDS,
+  DATA_SHAPE_KINDS,
+  DATA_RESPONSE_FORMATS,
+  declaredShapesAreExpressible,
+};

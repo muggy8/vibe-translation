@@ -67,8 +67,8 @@ Per volume, in order — each volume's glossary builds on the previous volume's 
    then refuse every citation it was asked to check. A record that cannot be opened **stops the
    volume**: the alternative is publishing a glossary with nothing behind it.
 2. **Read the volume** — one tool-less one-shot per chapter-group: source + the previous volume's
-   `glossary.md` → JSON array of `{ term, rendering, note, type, query }`; parsed by `parseTerms`
-   (tolerates markdown fences and surrounding prose). **`rendering` and `note` are on the list because
+   `glossary.md` → `{"terms": […]}`, each entry `{ term, rendering, note, type, query }`; parsed by
+   `parseTerms` (tolerates markdown fences, surrounding prose, and the bare array it used to ask for). **`rendering` and `note` are on the list because
    the read pass is the only place on this route where a rendering is chosen** — the render cannot
    invent one, and the filing door refuses a row that arrives without it. When the previous glossary is over `GLOSSARY_TRUNCATION_THRESHOLD` the inlined copy goes through `truncateGlossary`: `GLOSSARY_TRUNCATION_MAX_ENTRIES` (200) full rows, chosen by whether the row's term occurs in the text being processed — matched under **any spelling the row names**, verbatim or by its Han-character skeleton, which is the only form in which two furiganed spellings of one term compare equal — and then the **complete term → rendering list of the whole file** (`buildGlossaryIndex`) appended underneath, so the window hides a row's Notes and never the existence of an entry. The extractor has no file tools, so that list is the only way its "do not re-propose what already exists" instruction can be obeyed (gotcha 82). The same prompt also carries the two notes the stage feeds back — the previous volume's zero-occurrence coverage audit (`buildUnusedEntriesNote`) and the open glossary disputes the translation stage raised (`buildDisputesNote`) — because the read pass is now the one place a contested rendering can be settled.
    **One read of that list is paid for at most twice** (`readTermList`, `EXTRACTION_MAX_ATTEMPTS = 2`, no
@@ -79,11 +79,14 @@ Per volume, in order — each volume's glossary builds on the previous volume's 
    list that never arrived comes back `failed: true` with a named failure kind — never as `[]`, because `[]`
    is also the honest answer for a volume with nothing new, and the two used to look identical in the log, in
    `glossary-new-terms.json`, in the published file and in the coverage audit, which counts rows rather than
-   reads. **The call asks for no `response_format`, and that is a measurement, not an omission**: the term
-   list answers as a JSON array, and this endpoint refuses a JSON Schema whose root is an array before it
+   reads. **The call asks for its own answer shape** (`termsResponseFormat`, declared beside `parseTerms`):
+   an object root holding the list — `{"terms": […]}` — with every key the prompt names, the five closed
+   `type` values, and `additionalProperties: false`. It is wrapped in an object rather than declared as a
+   list because this endpoint refuses a `response_format` JSON Schema whose root is an array before it
    generates (HTTP 400 in 161 ms, 0 tokens, measured 2026-10-13 against the replayed request that lost volume
-   01 chapter 5), so a shape there would not make the answer stricter — it would make every chapter fail.
-   `ai/one-shot.js` now refuses such a schema before it is ever sent.
+   01 chapter 5), and `ai/one-shot.js` refuses such a schema before it is ever sent. The envelope was then
+   probed against the real endpoint on a short synthetic volume: **3,066 prompt + 2,290 completion = 5,356
+   tokens, `finish_reason=stop`, 5 terms, all five parsed by `parseTerms`** (AGENTS.md gotcha 138).
 3. **File what was found** — two filings from the same list, on purpose (`glossary/store.js`):
    - `fileGlossaryExtraction` files the read pass's terms as `extract`-stage **candidates**. They are never rendered; they are what makes "the glossary holds no row for a term this volume's read pass found" a query with a number in it.
    - `fileGlossaryTermRows` files the **published rows** — term, canonical rendering, note, section — each with its quote re-found in this volume's chapter files, and **refused when the rendering is missing** (`missingRendering`): an empty rendering column is a word on a list, not a decision a translator can use. This is the only thing in the stage that puts a rendering into the record.
@@ -140,9 +143,13 @@ Per volume, in order — each volume's reference builds on the previous one's:
    exception and no downgrade. It is not behind a setting — the artifacts are rendered out of this record,
    so a switch in front of it would not turn a check off, it would turn the volume off.
 2. **Read the volume chapter by chapter** (`character-voice/reading.js` — the same pass
-   `extract-voice.js` runs). One extraction one-shot per chapter: source text → JSON array of
-   `{ type, character, quirkType, description, examples, ... }` entries for both voice quirks and POV
-   analysis, parsed by `parseVoiceQuirks` (tolerates markdown fences and prose). Each chapter's answer is
+   `extract-voice.js` runs). One extraction one-shot per chapter: source text → `{"entries": […]}`, each
+   entry a `{ type, character, quirkType, description, examples, … }` record covering both voice quirks and
+   POV analysis, parsed by `parseVoiceQuirks` (tolerates markdown fences, prose, the bare array it used to
+   ask for, and the `{"voice": […], "pov": […]}` split a model reaches for when a prompt opens by telling it
+   to "produce two outputs"). The shape it asks for (`voiceResponseFormat`) is **open on purpose** — it names
+   a key inventory and requires only `type`, and it is the one envelope of the three that is not closed; the
+   reason is in `character-voice/stages.js` above the declaration (AGENTS.md gotcha 138). Each chapter's answer is
    kept in its own partial tagged with a fingerprint of the text it was read from, so a chapter already
    read for the same text is not paid for twice. An answer whose array never reached its closing bracket is
    half an answer: it is named and re-read once at `EXTRACTION_RETRY_THINKING_LEVEL`, and a chapter still
@@ -301,7 +308,13 @@ The 4th pipeline step — the "how do I write it" policy layer. The glossary say
 
 Per volume, in order — each volume's guide builds on the previous one's:
 
-1. **Extract** — one-shot call: source text + previous `style-guide.md` → JSON array of `{ category, pattern, description, examples, frequency, notes }` entries (categories: `honorific`, `pronoun`, `particle`, `internalMonologue`, `onomatopoeia`, `interjection`, `povMarker`, `sceneBreak`, `tense`, `punctuation`, `wordplay`, `note`, `other`). Parsed by `parseStyleObservations` (tolerates markdown fences and prose).
+1. **Extract** — one-shot call: source text + previous `style-guide.md` → `{"constructs": […]}`, each entry
+   `{ category, pattern, description, examples, frequency, notes }` (categories: `honorific`, `pronoun`,
+   `particle`, `internalMonologue`, `onomatopoeia`, `interjection`, `povMarker`, `sceneBreak`, `tense`,
+   `punctuation`, `wordplay`, `note`, `other`). Parsed by `parseStyleObservations` (tolerates markdown fences,
+   prose, and the bare array it used to ask for). The shape it asks for (`styleResponseFormat`) is declared
+   beside that parser and closes the entry: every key the prompt names, the thirteen `category` values and the
+   three `frequency` values as enums, `additionalProperties: false`.
 2. **Compile** — the workflow first **copies the previous volume's `style-guide.md` into this volume's folder** (`seedStyleGuideFromPrevious`) and inlines its section map (`buildStyleIndex` → `styleIndexBlock`), then an author agent (per-volume session, step cap `styleAuthorMaxSteps` → `authorMaxStepsFor(guideBytes, sourceBytes)`) reads the source, the guide it is amending (at `../<previous folder>/style-guide.md` — same convention as the other tasks), and the extraction results, plus optional cross-references (the same volume's `glossary.md` / `character-voice.md` snapshots, read if present), and writes the cumulative `style-guide.md` — **amended in place with `editFile`** (`styleWriteInstruction`; the whole-file `writeFile` is only for the first volume). The guide is written in the **target language** (it is instructions for writing the translation), quoting source-language patterns inline.
    **After the compile pass and after every feedback pass**, `assertStyleCarryForward` → `compareStyleCarryForward` checks that this volume's guide still holds every `## ` category section the previous volume's held — a guide missing "Address & Honorifics" has lost everything inside it. A drop in the bullet-rule count is **reported, not failed**: the guide's content is free prose, and a guard that compares prose starts calling an improvement a loss (gotcha 65). A missing section fails the volume and moves the guide to `style-guide.md.rejected`; the chunked flow runs it between chapters (`guardStyleCarryForwardAgainst`). Knob: `STYLE_CARRY_FORWARD_GUARD=false`.
 

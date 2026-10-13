@@ -1,5 +1,6 @@
 /**
- * The extraction one-shot (source → the style-observation JSON array) and the compile turn that folds it into the cumulative guide.
+ * The extraction one-shot (source → the style-construct envelope `{"constructs": […]}`, read back by
+ * `parseStyleObservations`) and the compile turn that folds it into the cumulative guide.
  *
  * Part of the style-guide.js layer (split out of the original single file).
  */
@@ -21,7 +22,7 @@ const {
 } = require("../utils/source");
 
 const { truncateStyleGuide } = require("./config");
-const { parseStyleObservations, styleAuthorMaxSteps, styleRecoveryPrompt } = require("./amend");
+const { parseStyleObservations, styleResponseFormat, styleAuthorMaxSteps, styleRecoveryPrompt } = require("./amend");
 const { buildStyleIndex } = require("./reference-index");
 const { buildAuthorSystemPrompt, buildAuthorTurnPrompt } = require("./prompts");
 
@@ -61,6 +62,7 @@ async function runExtract(ctx, seg = null, si = null) {
       systemPrompt: ctx.extractSystemPrompt,
       messages,
       label: `style-guide-extract-${values.INSTALLMENT_NUMBER}${labelSuffix}`,
+      responseFormat: styleResponseFormat(),
     });
   }
   const { sourceFile } = ctx;
@@ -78,6 +80,7 @@ async function runExtract(ctx, seg = null, si = null) {
     systemPrompt: ctx.extractSystemPrompt,
     messages,
     label: `style-guide-extract-${values.INSTALLMENT_NUMBER}`,
+    responseFormat: styleResponseFormat(),
   });
 }
 

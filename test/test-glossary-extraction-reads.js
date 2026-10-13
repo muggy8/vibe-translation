@@ -25,11 +25,12 @@
  *      grader's report is not padded with a table about nothing.
  *   5. **The hole reaches the report the grader reads, and it is a finding.** Through the stage's own
  *      store door: the validation markdown carries the block, and the finding is HIGH / declared MAJOR.
- *   6. **The chapter-by-chapter pass sends no answer shape at all**, and a chapter whose read never
- *      answered is recorded with `failed: true` rather than quietly filing nothing. The first half is the
- *      measurement: the term list answers as a JSON array, and this endpoint refuses a `response_format`
- *      schema whose root is an array — HTTP 400 before it generates, measured 2026-10-13 against the
- *      replayed request that lost volume 01 chapter 5.
+ *   6. **The chapter-by-chapter pass asks for the `{"terms": […]}` envelope its own parser declares**, and
+ *      a chapter whose read never answered is recorded with `failed: true` rather than quietly filing
+ *      nothing. The first half is the measurement: the array-rooted shape this pass used to be barred from
+ *      sending was refused by this endpoint before it generated — HTTP 400, measured 2026-10-13 against the
+ *      replayed request that lost volume 01 chapter 5 — and the list under an object root is the same
+ *      contract in the form the endpoint accepts.
  *   7. **The harness refuses an array-rooted schema before it is sent**, and every shape this repository
  *      does send passes the same check.
  *
@@ -52,6 +53,7 @@ const glossaryStore = require("../glossary/store");
 const { assertShapeIsExpressible } = harness;
 const {
   parseTerms,
+  termsResponseFormat,
   readTermList,
   extractionReadReport,
   EXTRACTION_MAX_ATTEMPTS,
@@ -389,19 +391,20 @@ async function scenarioTheHoleReachesTheReportTheGraderReads() {
 // ─── Scenario 6 ───────────────────────────────────────────────────────────────
 
 /**
- * The chapter-by-chapter pass: it sends **no** answer shape, and a chapter whose read never answered is
- * recorded as a failed read rather than quietly filing nothing.
+ * The chapter-by-chapter pass: it asks for the `{"terms": […]}` envelope, and a chapter whose read never
+ * answered is recorded as a failed read rather than quietly filing nothing.
  *
- * The first half is the measurement, not an omission. The term list answers as a JSON array, and this
- * endpoint refuses a `response_format` JSON Schema whose root is an array — HTTP 400 before it generates
- * (measured 2026-10-13, replaying the exact request that lost volume 01 chapter 5). A shape here would
- * not make the answer stricter; it would make every chapter fail. What the pass has instead is
- * `readTermList`: a failed read is re-asked once, and a read that never produced a list is recorded as
- * one.
+ * The first half is the measurement, not a preference. The array-rooted shape this pass used to be barred
+ * from sending was replayed against this endpoint and refused before the model was asked — HTTP 400 before
+ * it generates (measured 2026-10-13, replaying the exact request that lost volume 01 chapter 5). The list
+ * under an object root is the same contract in a form the endpoint accepts, so the pass now asks for it and
+ * the audit compares the wire against `termsResponseFormat()`. What the pass ALSO has, and what fixed the
+ * defect before the envelope existed, is `readTermList`: a failed read is re-asked once, and a read that
+ * never produced a list is recorded as one.
  *
  * @returns {Promise<void>}
  */
-async function scenarioTheChapterPassSendsNoShapeAndNamesAFailedRead() {
+async function scenarioTheChapterPassAsksForTheEnvelopeAndNamesAFailedRead() {
   const fx = fixtureStoreSeries("glossary-extraction-reads-chunked");
   const volume = fx.volumes[0];
   const meta = JSON.parse(fs.readFileSync(path.join(volume.dir, `${volume.base}-bundle.meta.json`), "utf8"));
@@ -434,9 +437,11 @@ async function scenarioTheChapterPassSendsNoShapeAndNamesAFailedRead() {
   }, () => extractChapterTerms(ctx, segment, 0));
 
   same(requests.length, EXTRACTION_MAX_ATTEMPTS, `the chapter paid ${requests.length} read(s)`);
+  const envelope = termsResponseFormat();
   for (const request of requests) {
-    same(request.responseFormat ?? null, null,
-      "the chapter's read sent a response_format: an array-rooted schema is refused by this endpoint before it generates");
+    same(JSON.stringify(request.responseFormat ?? null), JSON.stringify(envelope),
+      "the chapter's read did not ask for the envelope its own parser declares (an array-rooted schema is " +
+        "refused by this endpoint before it generates, so the list has to sit inside an object)");
   }
   same(requests[1].thinkingLevel, EXTRACTION_RETRY_THINKING_LEVEL, "the re-ask did not run at the retry level");
   ok(requests[1].label.endsWith("-retry"), `the re-ask is not distinguishable in the log: ${requests[1].label}`);
@@ -460,7 +465,7 @@ async function scenarioTheChapterPassSendsNoShapeAndNamesAFailedRead() {
   const block = extractionReadReport(ctx.extractionReads, { volume: volume.installmentNumber });
   ok(block.includes(`chapter ${segment.id}`) && block.includes("NOTHING READ"), `the report does not name the chapter:\n${block}`);
 
-  console.log("6/7: the chapter pass sends no shape (an array-rooted schema is refused before generation), and a chapter that never answered is recorded as one");
+  console.log("6/7: the chapter pass asks for the envelope its own parser declares, and a chapter that never answered is recorded as one");
 }
 
 // ─── Scenario 7 ───────────────────────────────────────────────────────────────
@@ -495,12 +500,15 @@ function scenarioTheHarnessRefusesAnArrayRootedShape() {
   ok(/must accept only JSON objects at its root/.test(thrown.message), `the error does not quote the endpoint's own rule: ${thrown.message}`);
   ok(/wrap the array in an object/.test(thrown.message), `the error does not say what to do instead: ${thrown.message}`);
 
-  // The shapes this repository does send must pass the same check, or the guard is decoration.
+  // The shapes this repository does send must pass the same check, or the guard is decoration. These are the
+  // real declared shapes, imported from the modules that declare them — the same three the prompt audit
+  // compares the wire against, so a shape that drifts from its parser is caught twice.
   const expressible = [
     acceptanceResponseFormat(),
     require("../glossary/research").researchResponseFormat(),
-    // An object root holding an array is the shape the endpoint accepts, and the one the open decision is about.
-    { type: "json_schema", json_schema: { name: "envelope", schema: { type: "object", properties: { terms: { type: "array", items: { type: "object" } } }, required: ["terms"], additionalProperties: false } } },
+    termsResponseFormat(),
+    require("../character-voice/stages").voiceResponseFormat(),
+    require("../style-guide/amend").styleResponseFormat(),
     // A union of objects is expressible too, and so is the shapeless `{ type: "json_object" }`.
     { type: "json_schema", json_schema: { name: "union", schema: { anyOf: [{ type: "object", properties: { a: { type: "string" } } }, { type: "object", properties: { b: { type: "string" } } }] } } },
     { type: "json_object" },
@@ -527,7 +535,7 @@ function scenarioTheHarnessRefusesAnArrayRootedShape() {
   await scenarioSizeFailureIsNotReAsked();
   scenarioACleanVolumePrintsNothingExtra();
   await scenarioTheHoleReachesTheReportTheGraderReads();
-  await scenarioTheChapterPassSendsNoShapeAndNamesAFailedRead();
+  await scenarioTheChapterPassAsksForTheEnvelopeAndNamesAFailedRead();
   scenarioTheHarnessRefusesAnArrayRootedShape();
   console.log(`OK: ${checks} checks on the glossary stage's term-list reads.`);
 })().catch((err) => {

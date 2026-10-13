@@ -31,9 +31,139 @@ const {
   buildGlossaryIndex,
 } = require("./carry-forward/table");
 
+// ─── The answer shape this read pass asks for ────────────────────────────────
+//
+// Declared beside {@link parseTerms}, in the module that owns the parser, so the request the endpoint is
+// given and the answer the stage accepts cannot drift apart (`test/prompt-audit.js`'s `data-answer-shape`
+// rule compares the wire against this function, imported, not copied).
+//
+// The root is an OBJECT holding the list, not the list itself. That is a measurement, not a style choice:
+// the array-rooted version of this same schema was replayed against the endpoint this pipeline is
+// configured against on 2026-10-13 (`glossary-terms-01-ch5`, run log `2026-10-13T12-45-22-158Z`) and the
+// request was refused before the model was asked — HTTP 400 in 161 ms, 0 tokens, `code:
+// structured_output_failed`, "response_format schema must accept only JSON objects at its root (type
+// object, or anyOf/oneOf of object schemas)". `ai/one-shot.js`'s `assertShapeIsExpressible` refuses such a
+// schema before it is ever sent. OpenAI's structured outputs require the same root, so this is not a quirk
+// of one server (AGENTS.md gotcha 138).
+//
+// The envelope is what makes the answer CLOSE. Measured on the very chapter that lost its terms: the same
+// item list under an object root came back `finish_reason=stop` with the whole reply parseable, 36,538
+// tokens in 42.9 s, against the unshaped call's 73,330 tokens in 170.8 s of prose. It is not a promise of
+// a *richer* answer — that probe found 2 terms where the rambling answer had listed 5, and extraction
+// yield is model variance (gotcha 122).
+//
+// `strict: true` + `additionalProperties: false` is the combination the four acceptance graders already
+// send to this endpoint successfully, and this prompt names exactly five keys and its own example produces
+// exactly those five, so the closed shape is describing the contract rather than guessing at one. The voice
+// stage's shape is deliberately NOT closed, for the reason recorded in `character-voice/stages.js`.
+//
+// What this read pass ALSO has, and what actually fixed the defect before the envelope existed:
+// {@link readTermList} re-asks a failed read once, and a read that never produced a list comes back as
+// `failed: true` and named, instead of arriving as `[]`.
+
+/**
+ * The `response_format` the term-list call asks this endpoint for.
+ *
+ * An object root holding the term array, because this endpoint refuses a JSON Schema whose root is an
+ * array before it generates. The five properties are the five keys
+ * `system-prompts/glossary-terms.md` names, and the prompt's own example produces exactly those five —
+ * which is what makes `additionalProperties: false` a description of the contract rather than a guess at
+ * one. `rendering` is required because the read pass is the only place on this route that can supply one,
+ * and the filing door refuses a row without it.
+ *
+ * @returns {{type: "json_schema", json_schema: {name: string, strict: boolean, schema: Object}}}
+ */
+function termsResponseFormat() {
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "glossary_new_terms",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          terms: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                term: { type: "string" },
+                rendering: { type: "string" },
+                note: { type: "string" },
+                type: { type: "string", enum: ["character", "place", "item", "faction", "concept"] },
+                query: { type: "string" },
+              },
+              required: ["term", "rendering", "note", "type", "query"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["terms"],
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
+/**
+ * Pull the term array out of the answer, in whichever of the two forms it arrived.
+ *
+ * The envelope (`{"terms": […]}`) is what the request asks for and what the prompt now asks the model to
+ * write. The bare array is still read, because a server that ignores `response_format` answers in the form
+ * its prompt used to ask for, and a stage that can read both is a stage that does not break when the
+ * endpoint changes. Tolerance is the reader's job; the request always asks for the envelope.
+ *
+ * @param {string} text - The answer, already fence-stripped.
+ * @returns {Array<Object>|null} The entries, or null when this answer holds no term array at all.
+ */
+function termArrayFromAnswer(text) {
+  /**
+   * Parse one candidate span, or return undefined when it is not JSON.
+   * @param {string} span
+   * @returns {Object|undefined}
+   */
+  const tryJson = (span) => {
+    try {
+      return JSON.parse(span);
+    } catch {
+      return undefined;
+    }
+  };
+  /**
+   * Is this value an answer — a bare array, or an object holding a `terms` array?
+   * @param {Object} value
+   * @returns {Array<Object>|null}
+   */
+  const asList = (value) => {
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === "object" && Array.isArray(value.terms)) return value.terms;
+    return null;
+  };
+
+  const whole = tryJson(text);
+  if (whole !== undefined) {
+    const list = asList(whole);
+    if (list) return list;
+  }
+  const objStart = text.indexOf("{");
+  const objEnd = text.lastIndexOf("}");
+  if (objStart !== -1 && objEnd > objStart) {
+    const list = asList(tryJson(text.slice(objStart, objEnd + 1)));
+    if (list) return list;
+  }
+  const arrStart = text.indexOf("[");
+  const arrEnd = text.lastIndexOf("]");
+  if (arrStart !== -1 && arrEnd > arrStart) {
+    const list = asList(tryJson(text.slice(arrStart, arrEnd + 1)));
+    if (list) return list;
+  }
+  return null;
+}
+
 /**
  * Parse the AI's term-list output into the rows the record files.
- * Tolerates markdown fences and surrounding prose.
+ * Tolerates markdown fences, surrounding prose, the `{"terms": […]}` envelope the request asks for, and
+ * the bare JSON array a server that ignores `response_format` still answers in.
  *
  * The answer carries the target‑language rendering and the one‑line note, because on this route the
  * read pass is the ONLY place a rendering is chosen — the file is rendered from the record afterwards
@@ -43,6 +173,7 @@ const {
  *
  * @param {string} output - The raw AI output.
  * @returns {Array<{term: string, rendering: string, note: string, section: string, type: string, query: string}>}
+ * @throws {Error} When the answer holds no array of terms in either form.
  */
 function parseTerms(output) {
   if (!output || typeof output !== "string") {
@@ -53,14 +184,12 @@ function parseTerms(output) {
   if (fenceMatch) {
     text = fenceMatch[1].trim();
   }
-  const firstBracket = text.indexOf("[");
-  const lastBracket = text.lastIndexOf("]");
-  if (firstBracket === -1 || lastBracket === -1 || lastBracket < firstBracket) {
-    throw new Error("No JSON array found in the term-list output.");
-  }
-  const parsed = JSON.parse(text.slice(firstBracket, lastBracket + 1));
-  if (!Array.isArray(parsed)) {
-    throw new Error("The term-list output was not a JSON array.");
+  const parsed = termArrayFromAnswer(text);
+  if (parsed === null) {
+    throw new Error(
+      "No JSON array found in the term-list output: the answer is neither a JSON array nor an object " +
+        'holding a "terms" array.'
+    );
   }
   return parsed
     .filter((entry) => entry && typeof entry.term === "string" && entry.term.trim() !== "")
@@ -74,34 +203,6 @@ function parseTerms(output) {
     }));
 }
 
-// ─── Why this read pass asks for no answer shape ─────────────────────────────
-//
-// It used to declare one, beside `parseTerms`, for the reason every shape in this repository is
-// declared: the schema is what the endpoint is asked for and the parser is what the stage accepts, and
-// two copies in two places drift. Measured 2026-10-13 against the endpoint this pipeline is configured
-// against, replaying the exact request that lost volume 01 chapter 5 (`glossary-terms-01-ch5`, run log
-// `2026-10-13T12-45-22-158Z`):
-//
-//   HTTP 400 in 161 ms, 0 tokens — the server refused the REQUEST before the model was asked:
-//   "response_format schema must accept only JSON objects at its root (type object, or anyOf/oneOf of
-//   object schemas)" — code `structured_output_failed`.
-//
-// The schema that produced it was `{ type: "array", items: { type: "object", … } }`, which is the shape
-// this call answers in. So the term list cannot be shaped as itself, and `ai/one-shot.js` now refuses an
-// array-rooted schema before it is ever sent. Left in place it would fail every extraction call in a real
-// run: the harness re-asks a refused shape `AI_RETRY` times and `readTermList` re-asks once more on top
-// of that, so one chapter would spend six doomed requests and then file nothing.
-//
-// The same item schema wrapped in an object root IS accepted, and on that same chapter it produced a
-// closed, parseable answer — `{"terms":[…]}`, `finish_reason=stop`, 27,886 prompt + 8,652 completion
-// tokens, against the original call's 27,588 + 45,742. Adopting that envelope means changing what
-// `system-prompts/glossary-terms.md` tells the model to write (from "Respond with **only** a JSON array")
-// and what {@link parseTerms} accepts, which is a change to the contract of a stage that publishes an
-// artifact. It is written down as a decision rather than taken here: `/tmp/opencode/json-schema-questions.md`.
-//
-// What this read pass DOES have, and what actually fixed the defect the shape was meant to fix:
-// `readTermList` re-asks a failed read once, and a read that never produced a list comes back as
-// `failed: true` and named, instead of arriving as `[]`.
 
 /**
  * How many paid reads one term list gets in one pass.
@@ -141,13 +242,13 @@ const EXTRACTION_RETRY_THINKING_LEVEL = "medium";
  * these are the tags `configs/shared/failures.js` puts on them):
  *
  *   - `shape-refused` — the endpoint could not produce an answer in the shape it was asked for
- *     (`structured_output_failed`). The request was well-formed; the model answered in prose, or in
- *     an object where an array was asked for.
+ *     (`structured_output_failed`). The request was well-formed; the model answered in prose, or in a
+ *     bare array where the envelope was asked for on a server that constrains its output loosely.
  *   - `ran-out-mid-shape` — the answer hit the output cap before it closed (`finish_reason=length`).
  *     That is a size problem: the fix is a smaller request or a bigger cap, not a re-ask.
- *   - `unparseable-answer` — an answer arrived and {@link parseTerms} could not read it. On a server
- *     that honours `response_format` this should be rare; it is the shape a server that ignores the
- *     field still produces.
+ *   - `unparseable-answer` — an answer arrived and {@link parseTerms} could not read it. On a server that
+ *     honours `response_format` this should be rare; it is the shape a server that ignores the field
+ *     still produces, and {@link parseTerms} reads both the envelope and the bare array.
  *
  * @param {Error} err - What the call or the parse threw.
  * @returns {"shape-refused"|"ran-out-mid-shape"|"unparseable-answer"}
@@ -271,9 +372,10 @@ function extractionReadReport(reads, { volume }) {
     "## How this volume's terms were read",
     "",
     `_Every term list this volume was built from is paid for at most twice, and a list that failed was ` +
-      "re-asked once. **None of them is asked for in a declared answer shape**: a term list answers as a " +
-      "JSON array, and this endpoint refuses a `response_format` schema whose root is an array before it " +
-      "generates (measured 2026-10-13 — HTTP 400, 0 tokens; gotcha 138). " +
+      "re-asked once. **Every one of them is asked for in a declared answer shape** — the term list wrapped " +
+      "in an object (`{\"terms\": […]}`), because this endpoint refuses a `response_format` schema whose root " +
+      "is an array before it generates (measured 2026-10-13 — HTTP 400, 0 tokens; gotcha 138). The shape is " +
+      "what makes the answer close and parse; it is not what makes it thorough. " +
       `${failed.length ? `${failed.length} read(s) never produced a list at all.` : "Every read produced a list."}`,
     "",
     "| read | terms filed | paid reads | how it was read |",
@@ -597,6 +699,7 @@ function truncationNote({ total, kept, relevantTotal, relevantShown, dropped, dr
 
 module.exports = {
   parseTerms,
+  termsResponseFormat,
   EXTRACTION_MAX_ATTEMPTS,
   EXTRACTION_RETRY_THINKING_LEVEL,
   classifyExtractionFailure,

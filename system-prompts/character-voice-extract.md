@@ -56,7 +56,7 @@ This is the hardest to detect — look for third-person narration that uses a ch
 
 ## Output
 
-Respond with **only** a JSON array — no prose, no markdown fences, no commentary. Each element is an object with exactly these keys:
+Respond with **only** a JSON object holding one key, `entries` — no prose, no markdown fences, no commentary. `entries` is an array, and each element of it is an object of one of the two kinds below.
 
 For **voice quirks**:
 ```json
@@ -77,6 +77,7 @@ For **POV analysis**:
   "type": "pov",
   "povCategory": "marker|narrationType|povAssignment|freeIndirect|summary",
   "marker": "the POV marker symbol (e.g. '※'), if applicable",
+  "description": "brief description of what this POV observation says",
   "assignedCharacter": "character name whose POV follows, if applicable",
   "narrationType": "first-person-internal|first-person-speech|free-indirect|third-person-omniscient|dialogue-only",
   "sectionDescription": "brief description of the section",
@@ -85,24 +86,27 @@ For **POV analysis**:
 }
 ```
 
-If there is **nothing new to extract**, respond with an empty JSON array: `[]`
+If there is **nothing new to extract**, respond with an object holding an empty array: `{"entries": []}`
 
 Example shape (do not copy these values):
 ```json
-[
-  {
-    "type": "voice",
-    "character": "ソラ",
-    "quirkType": "sentenceEnding",
-    "description": "Uses formal, machine-like sentence endings",
-    "examples": ["〜である", "〜と推測する", "〜を確認した"],
-    "formalityLevel": "plain",
-    "notes": "Consistently uses である-form; never uses だ-form"
-  },
-  {
-    "type": "pov",
-    "povCategory": "marker",
-    "marker": "※",
-    "description": "Most frequent POV marker, appears at every perspective shift"
-  }
-]
+{
+  "entries": [
+    {
+      "type": "voice",
+      "character": "ソラ",
+      "quirkType": "sentenceEnding",
+      "description": "Uses formal, machine-like sentence endings",
+      "examples": ["〜である", "〜と推測する", "〜を確認した"],
+      "formalityLevel": "plain",
+      "notes": "Consistently uses である-form; never uses だ-form"
+    },
+    {
+      "type": "pov",
+      "povCategory": "marker",
+      "marker": "※",
+      "description": "Most frequent POV marker, appears at every perspective shift"
+    }
+  ]
+}
+```

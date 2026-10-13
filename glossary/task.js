@@ -35,7 +35,7 @@ const { RESEARCH_MAX_TERMS_PER_VOLUME } = require("./researchable");
 const { assertGlossaryCarryForward } = require("./carry-forward");
 const { openGlossaryRecord, fileGlossaryExtraction, fileGlossaryTermRows, renderGlossaryArtifact, quarantineGlossaryArtifact, sealGlossaryRecord } = require("./store");
 const { writeGlossaryCoverageReport } = require("./coverage");
-const { truncateGlossary, readTermList } = require("./extract");
+const { truncateGlossary, readTermList, termsResponseFormat } = require("./extract");
 const { runChunkedVolumeAgent } = require("./chunked");
 const { runQaLoop } = require("./qa");
 
@@ -522,6 +522,7 @@ async function extractNewTerms(ctx) {
         systemPrompt: termsSystemPrompt,
         messages: [...baseMessages, { text: termsPrompt }],
         label: `glossary-terms-${values.INSTALLMENT_NUMBER}${attempt > 1 ? "-retry" : ""}`,
+        responseFormat: termsResponseFormat(),
         ...(thinkingLevel ? { thinkingLevel } : {}),
       }),
   });

@@ -235,7 +235,7 @@ function consolidateExtraction(chapters) {
 }
 
 /**
- * Scan a JSON array for its top-level objects, string-aware.
+ * Scan an answer for its top-level claim objects, string-aware.
  *
  * Why this exists and not just a second `JSON.parse`: the extraction model's answers are arrays of
  * objects, and a claim with a syntax error — a missing comma between two properties, measured on the
@@ -243,12 +243,23 @@ function consolidateExtraction(chapters) {
  * perfectly parseable. Dropping the whole chapter because one claim was malformed loses twenty claims
  * to fix one. This finds the objects; it does not repair any of them.
  *
- * It is also how a cut-off answer is detected: `closed` is false when the array never reached its
+ * It is also how a cut-off answer is detected: `closed` is false when the claim array never reached its
  * `]`, and that is a different failure from a malformed claim — the answer is missing whatever the
  * model had not written yet.
  *
+ * **It reads the envelope the same way it reads a bare array, and that is not an accident.** Since
+ * 2026-10-13 the request asks for `{"entries": […]}`, so a half answer is now a **half envelope**:
+ * `{"entries": [{…},{…}` with no closing bracket anywhere. The scan starts at the first `[`, which in an
+ * envelope is the claim array's own bracket — the envelope's opening `{` sits before it and is never
+ * counted as a claim — and every `{…}` that balances at depth 0 after that point is one claim. So the
+ * rescue does what it was built to do on the new shape: the claims that did arrive are kept, and the
+ * chapter is re-read for the ones that did not. `closed` means **the claim array closed**, not the
+ * envelope closed, and that is the right question: `{"entries": […]` with the outer brace missing has
+ * lost no claim, and calling it cut off would spend a paid read and print an INCOMPLETE row for a
+ * chapter that is whole. A truncated envelope is pinned by `test/test-answer-envelopes.js`.
+ *
  * @param {string} text
- * @returns {{objects: string[], closed: boolean}} The balanced top-level objects, and whether the array closed.
+ * @returns {{objects: string[], closed: boolean}} The balanced top-level objects, and whether the claim array closed.
  */
 function scanTopLevelObjects(text) {
   const body = String(text || "");
@@ -331,11 +342,12 @@ function parseExtractionAnswer(output) {
  * A call that throws is not all one failure. A chapter can come back with **no answer because the endpoint
  * refused the shape it was asked for** (`shape-refused`), and that is the failure a re-ask can plausibly
  * fix, which makes it an incomplete answer rather than a reason to abandon the pass. It is rarer than it
- * sounds on this machine today: `character-voice/stages.js` sends no `response_format`, because its answer
- * is a JSON array and this endpoint refuses a schema whose root is an array before it generates (measured
- * 2026-10-13; see `ai/one-shot.js`'s `assertShapeIsExpressible`). The class is kept because the reading
- * pass must classify whatever it is given, and because a shape this stage can actually express — the list
- * under an object root — is an open decision, not a settled one.
+ * sounds on this machine today: `character-voice/stages.js` asks for the `{"entries": […]}` envelope — the
+ * object root this endpoint accepts — because the array-rooted schema it used to declare was refused before
+ * the model was asked (HTTP 400 in 161 ms, 0 tokens, measured 2026-10-13; see `ai/one-shot.js`'s
+ * `assertShapeIsExpressible` and AGENTS.md gotcha 138). The class is kept because the reading pass must
+ * classify whatever it is given, and because a shape refusal is still a different failure from a dead
+ * endpoint: one is worth a second paid read and the other is not.
  *
  * A size failure (`finish_reason=length`) is not re-askable: the same request at the same cap is cut off
  * the same way, so it keeps this file's existing behaviour and stops the pass. Anything else (an endpoint

@@ -433,30 +433,41 @@ account owner makes, not a side effect of a refactor.
     declares its answer shape beside its parser. What is still not built is the other half — the
     offline loops run research off, so no loop ever sends that prompt and the audit's coverage of it is
     by signature, not by a request it watched.
-12. **Should the three array-answering read passes be re-asked inside an object envelope?** Measured
-    2026-10-13 against the endpoint this pipeline runs against, a `response_format` JSON Schema whose
-    root is an **array** is refused **before the model is asked** — HTTP 400 in 161 ms, 0 tokens,
-    "response_format schema must accept only JSON objects at its root" — so the term list, the
-    voice/POV extraction and the style extraction cannot have their answer declared as itself
-    (`AGENTS.md` gotcha 138). The same item list under an object root (`{"terms": […]}`) **works**, and
-    it was measured on the exact request that lost volume 01 chapter 5: `finish_reason=stop`, the whole
-    reply parses, **27,886 prompt + 8,652 completion = 36,538 tokens in 42.9 s**, against the original
-    call's 27,588 + 45,742 = **73,330 tokens in 170.8 s**. Two things stop it from being a free win, and
-    both are the owner's call rather than a slice's:
-    - **It changes what a prompt file tells the model to write.** All three prompts currently say
-      "Respond with **only** a JSON array … if there is nothing new, respond with `[]`". An envelope
-      rewrites that contract, and `parseTerms` / `parseVoiceQuirks` / `parseStyleObservations` have to
-      accept the new form — including the voice pass's tolerant partial reader, which rescues claims
-      from a half-answer and would be rescuing from a different shape.
-    - **The probe found fewer terms, not more.** The envelope's answer held **2** terms; the rambling
-      answer that failed held **5**. That is the model variance gotcha 122 records (the same chapter at
-      the same reasoning level produced 111 / 9 / 51 claims), so the envelope is proven to make the
-      answer **close and parse**, not to make it **richer**. What it definitively buys is that a closed,
-      parseable answer is *filed* rather than thrown away: chapter 5's 5 terms became **0**, and 4 of
-      them are printed in that chapter and appear nowhere in the volume's published glossary.
-    **Not decided, and not built.** What is built is the half that does not need the decision: two paid
-    reads per term list, a named failure class, a block in the report the grader reads, and a MAJOR
-    finding. The voice stage carries an extra unknown the glossary does not — its own prompt's example
-    answer breaks the key list its prompt declares, and no real voice extraction answer exists on disk
-    anywhere in the series folder to measure a key inventory against, so a closed key list there would
-    lose a chapter's worth of claims to a key nobody thought about.
+12. **Should the three array-answering read passes be re-asked inside an object envelope?** **Decided and
+    built 2026-10-13.** Measured against the endpoint this pipeline runs against, a `response_format` JSON
+    Schema whose root is an **array** is refused **before the model is asked** — HTTP 400 in 161 ms, 0 tokens,
+    "response_format schema must accept only JSON objects at its root" — so the term list, the voice/POV
+    extraction and the style extraction cannot have their answer declared as itself (`AGENTS.md` gotcha 138).
+    Each now declares its list inside a one-key object the prompt asks for and the parser reads back:
+    `{"terms": […]}` (`glossary/extract.js` `termsResponseFormat`), `{"entries": […]}`
+    (`character-voice/stages.js` `voiceResponseFormat`), `{"constructs": […]}` (`style-guide/amend.js`
+    `styleResponseFormat`). All three parsers still accept the bare array, and the voice parser also accepts
+    the `{"voice": […], "pov": […]}` split, so a server that ignores `response_format` does not break a stage.
+    Measured on the exact request that lost volume 01 chapter 5, before the adoption: `finish_reason=stop`, the
+    whole reply parses, **27,886 prompt + 8,652 completion = 36,538 tokens in 42.9 s**, against the original
+    call's 27,588 + 45,742 = **73,330 tokens in 170.8 s**. Measured after it, three probes against the real
+    endpoint with each stage's own system prompt and its own declared schema over a short synthetic volume:
+    **5,356 / 8,210 / 5,944 tokens, 10.7 s / 20.0 s / 14.5 s, 5 terms / 12 entries / 9 constructs, every one
+    `finish_reason=stop` and every one parsed by the stage's own parser — 3 calls, 19,510 tokens.**
+    - **What it costs.** Only the `## Output` section of each prompt file changed. `parseTerms` /
+      `parseVoiceQuirks` / `parseStyleObservations` each grew a small reader for the envelope, and
+      `character-voice/reading.js`'s half-answer rescue had to be re-proved on a **cut-off envelope** — a
+      `{"entries": […` whose outer brace never arrived is read as the array inside it, because the claims it
+      holds are real and discarding them is the defect that rescue exists to prevent (pinned by
+      `test/test-answer-envelopes.js`).
+    - **What it does not buy.** The envelope's answer on chapter 5 held **2** terms where the rambling answer
+      listed **5**. That is the model variance gotcha 122 records (the same chapter at the same reasoning level
+      produced 111 / 9 / 51 claims), so the envelope is proven to make the answer **close and parse**, not to
+      make it **richer**. What it definitively buys is that a closed, parseable answer is *filed* rather than
+      thrown away: chapter 5's 5 terms became **0**, and 4 of them are printed in that chapter and appear
+      nowhere in the volume's published glossary.
+    - **The one shape left open, on purpose.** The voice entry schema requires `type` and names a key
+      inventory, and is **not** closed with `additionalProperties: false` / `strict: true`, while the glossary
+      and style entry schemas are closed. The reason is measured rather than assumed: the voice prompt names
+      two key sets and then shows a POV example carrying a key its own key block does not name, no real voice
+      extraction answer exists anywhere on disk to inventory against, and a closed schema on that pass is the
+      one shape in this slice that can lose a chapter's worth of claims — a refusal at the wire is a chapter
+      that files nothing. The probe did **not** settle it: the model used only keys inside the declared
+      inventory, which is equally consistent with a closed schema being safe and with a model that happened to
+      behave. Settling it means sending a schema the model is known to violate, which is a deliberate doomed
+      call and was not spent.

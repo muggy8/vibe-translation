@@ -77,29 +77,10 @@ async function runExtract(ctx, seg, si, opts = {}) {
     systemPrompt: ctx.extractSystemPrompt,
     messages,
     label: `character-voice-extract-${values.INSTALLMENT_NUMBER}-${seg.id}`,
+    responseFormat: voiceResponseFormat(),
     ...thinking,
   });
 }
-
-
-// ─── Why this read pass asks for no answer shape ─────────────────────────────
-//
-// It used to declare one beside `parseVoiceQuirks`, and it was measured against the endpoint this
-// pipeline is configured against on 2026-10-13: the request was refused before the model was asked —
-// HTTP 400 in 161 ms, 0 tokens, "response_format schema must accept only JSON objects at its root
-// (type object, or anyOf/oneOf of object schemas)". The schema that produced it was
-// `{ type: "array", items: { type: "object", … } }`, which is the shape this call answers in, so a
-// chapter's extraction cannot be shaped as itself. `ai/one-shot.js` now refuses an array-rooted schema
-// before it is sent, because shipping one means every chapter of every volume fails at the HTTP layer.
-//
-// What the shape was for is still here, and it is the part the measurement says matters:
-// `character-voice/reading.js` re-asks a chapter whose answer never reached its closing bracket, and a
-// chapter that never answers is named in `character-voice-reading.md` and in the report the grader reads.
-//
-// The envelope that WOULD be expressible — the same item list under an object root — is written up as a
-// decision rather than taken: `/tmp/opencode/json-schema-questions.md`. Adopting it means changing what
-// `system-prompts/character-voice-extract.md` tells the model to write, and the key inventory this file
-// could not measure (no real voice extraction answer is on disk anywhere in the series folder).
 
 
 /**
@@ -129,6 +110,169 @@ function truncateVoiceRef(content, sourceText) {
 }
 
 
+// ─── The answer shape this read pass asks for ────────────────────────────────
+//
+// Declared beside {@link parseVoiceQuirks}, in the module that owns the parser, so the request the endpoint
+// is given and the answer the stage accepts cannot drift apart (`test/prompt-audit.js`'s `data-answer-shape`
+// rule compares the wire against this function, imported, not copied).
+//
+// The root is an OBJECT holding the list, because the array-rooted version of this schema was measured
+// against this endpoint on 2026-10-13 and the request was refused before the model was asked — HTTP 400 in
+// 161 ms, 0 tokens, "response_format schema must accept only JSON objects at its root (type object, or
+// anyOf/oneOf of object schemas)". `ai/one-shot.js`'s `assertShapeIsExpressible` refuses such a schema
+// before it is sent (AGENTS.md gotcha 138).
+//
+// ## Why this shape is NOT closed, when the glossary's and the style guide's are
+//
+// `additionalProperties` is deliberately left unset here, and `strict` is deliberately absent. The other
+// two prompts name their element's keys and their own examples produce exactly those keys, so their closed
+// schemas describe a contract that has been read off the prompt. This one has not:
+//
+//   - **No real voice extraction answer exists on disk anywhere in the series folder**, so the key
+//     inventory cannot be measured from a real artifact — it can only be read off the prompt.
+//   - **The prompt contradicted itself.** Its `pov` element block named eight keys and its own final example
+//     produced a `pov` object carrying `description`, which that block does not name (and omitting `examples`
+//     and `notes`). That contradiction is fixed in the prompt — `description` is now declared — but it is the
+//     evidence for the rule: a prompt this repository has been shipping has been showing its model a key its
+//     own key list did not name.
+//   - **A closed schema is the one shape that can cost a chapter.** `additionalProperties: false` says: an
+//     element carrying a key this inventory does not hold is not an answer. On a grammar-constrained endpoint
+//     that key is then never written; on one that checks after generating, the whole reply is refused and
+//     `character-voice/reading.js` loses every claim in it. The envelope exists to stop a chapter's worth of
+//     claims being thrown away; a schema that trades that risk back is the wrong envelope for this stage.
+//
+// So this shape guarantees the one thing the measurement says matters — the answer is an object holding an
+// array of objects that each name a `type`, and it closes — and leaves every other key to the parser and to
+// the reference store's own filing doors, which is where those rules already live and are already reported.
+// `test/test-answer-envelopes.js` pins that the closed glossary/style shapes and this open one are different
+// on purpose, so neither drifts into the other.
+
+/**
+ * The keys `system-prompts/character-voice-extract.md` names for its two element kinds, plus the ones its
+ * own example answer produces. Read off the prompt, because no real extraction answer is on disk to read
+ * them off of.
+ *
+ * Declared voice keys: `type`, `character`, `quirkType`, `description`, `examples`, `formalityLevel`,
+ * `notes`. Declared POV keys: `type`, `povCategory`, `marker`, `description`, `assignedCharacter`,
+ * `narrationType`, `sectionDescription`, `examples`, `notes`. The example voice object produces exactly the
+ * seven declared voice keys; the example POV object produces `type`, `povCategory`, `marker`, `description`
+ * — and `description` is the one that was missing from the declared POV list until this slice.
+ *
+ * @type {string[]}
+ */
+const VOICE_ENTRY_KEYS = [
+  "type",
+  "character",
+  "quirkType",
+  "description",
+  "examples",
+  "formalityLevel",
+  "notes",
+  "povCategory",
+  "marker",
+  "assignedCharacter",
+  "narrationType",
+  "sectionDescription",
+];
+
+/**
+ * The `response_format` the voice/POV extraction asks this endpoint for.
+ *
+ * An object root holding one array, `entries`, whose elements each carry a `type`. Open on purpose — see
+ * the block comment above this function for the three reasons, of which the load-bearing one is that a
+ * closed schema here is the one shape that can lose a chapter's worth of claims.
+ *
+ * @returns {{type: "json_schema", json_schema: {name: string, schema: Object}}}
+ */
+function voiceResponseFormat() {
+  const properties = {};
+  for (const key of VOICE_ENTRY_KEYS) {
+    properties[key] = key === "examples" ? { type: "array", items: { type: "string" } } : { type: "string" };
+  }
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "voice_pov_extraction",
+      schema: {
+        type: "object",
+        properties: {
+          entries: {
+            type: "array",
+            items: {
+              type: "object",
+              properties,
+              required: ["type"],
+            },
+          },
+        },
+        required: ["entries"],
+      },
+    },
+  };
+}
+
+/**
+ * Pull the claim array out of the answer, in whichever of the forms it arrived.
+ *
+ * The envelope the request asks for is `{"entries": […]}`. Also read, because a server that ignores
+ * `response_format` answers in whatever form its prompt used to ask for:
+ *   - the bare JSON array the prompt asked for until this slice;
+ *   - `{"voice": […], "pov": […]}`, which is the shape a model reaches for when a prompt opens by telling
+ *     it to "produce two outputs" — concatenated in that order, because the reading pass and the record do
+ *     not care which array a claim came out of, only which `type` it carries.
+ *
+ * @param {string} text - The answer, already fence-stripped.
+ * @returns {Array<Object>|null} The entries, or null when this answer holds no claim array at all.
+ */
+function claimArrayFromAnswer(text) {
+  /**
+   * Parse one candidate span, or return undefined when it is not JSON.
+   * @param {string} span
+   * @returns {Object|undefined}
+   */
+  const tryJson = (span) => {
+    try {
+      return JSON.parse(span);
+    } catch {
+      return undefined;
+    }
+  };
+  /**
+   * Is this value an answer — a bare array, an object holding an `entries` array, or an object holding the
+   * two arrays a model writes when it reads the prompt's "two outputs" literally?
+   * @param {Object} value
+   * @returns {Array<Object>|null}
+   */
+  const asList = (value) => {
+    if (Array.isArray(value)) return value;
+    if (!value || typeof value !== "object") return null;
+    if (Array.isArray(value.entries)) return value.entries;
+    if (Array.isArray(value.voice) || Array.isArray(value.pov)) {
+      return [...(Array.isArray(value.voice) ? value.voice : []), ...(Array.isArray(value.pov) ? value.pov : [])];
+    }
+    return null;
+  };
+
+  const whole = tryJson(text);
+  if (whole !== undefined) {
+    const list = asList(whole);
+    if (list) return list;
+  }
+  const objStart = text.indexOf("{");
+  const objEnd = text.lastIndexOf("}");
+  if (objStart !== -1 && objEnd > objStart) {
+    const list = asList(tryJson(text.slice(objStart, objEnd + 1)));
+    if (list) return list;
+  }
+  const arrStart = text.indexOf("[");
+  const arrEnd = text.lastIndexOf("]");
+  if (arrStart !== -1 && arrEnd > arrStart) {
+    const list = asList(tryJson(text.slice(arrStart, arrEnd + 1)));
+    if (list) return list;
+  }
+  return null;
+}
+
 /**
  * Parse the AI's extraction output into an array of voice quirk / POV entries.
  *
@@ -136,29 +280,34 @@ function truncateVoiceRef(content, sourceText) {
  * answer arrived whole, and a parser that invented an empty array out of a half-written one would hide
  * the cut-off. The tolerant, object-by-object reader lives there, on top of this one.
  *
+ * Reads the `{"entries": […]}` envelope the request asks for, the bare array the prompt asked for until
+ * this slice, and `{"voice": […], "pov": […]}`.
+ *
  * @param {string} output - The raw AI output.
  * @returns {Array<Object>}
+ * @throws {Error} When the answer holds no array of entries in any of those forms.
  */
 function parseVoiceQuirks(output) {
   if (!output || typeof output !== "string") return [];
   let text = output.trim();
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenceMatch) text = fenceMatch[1].trim();
-  const firstBracket = text.indexOf("[");
-  const lastBracket = text.lastIndexOf("]");
-  if (firstBracket === -1 || lastBracket === -1 || lastBracket < firstBracket) {
-    throw new Error("No JSON array found in the character-voice extraction output.");
-  }
-  const parsed = JSON.parse(text.slice(firstBracket, lastBracket + 1));
-  if (!Array.isArray(parsed)) {
-    throw new Error("The character-voice extraction output was not a JSON array.");
+  const parsed = claimArrayFromAnswer(text);
+  if (parsed === null) {
+    throw new Error(
+      "No JSON array found in the character-voice extraction output: the answer is neither a JSON array " +
+        'nor an object holding an "entries" array.'
+    );
   }
   return parsed.filter((entry) => entry && typeof entry.type === "string");
 }
+
 
 
 module.exports = {
   runExtract,
   truncateVoiceRef,
   parseVoiceQuirks,
+  voiceResponseFormat,
+  VOICE_ENTRY_KEYS,
 };

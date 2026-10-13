@@ -287,6 +287,9 @@ function installStubs(manifest, { failInstallments = [], acceptanceScore = 88 } 
     // The assembled route's reading pass. The claim quotes a line this fixture's book really
     // prints, so the evidence rule adopts it and the render has something to render — which is what
     // lets these scenarios exercise the failure policy on the route a run actually takes.
+    // Deliberately answered in the BARE-ARRAY form the prompt used to ask for: the request now asks for
+    // the `{"entries": […]}` envelope, and this is a whole-task run proving the parser still reads the
+    // old shape — a server that ignores `response_format` answers in it.
     if (label.startsWith("character-voice-extract-")) {
       return JSON.stringify([
         {

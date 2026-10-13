@@ -8,7 +8,8 @@
  * turn the conversation already is — and answers with the shape that stage's real
  * model produces:
  *
- *   extraction call      → the JSON array that stage's parser accepts
+ *   extraction call      → the `{"terms":[…]}` / `{"entries":[…]}` / `{"constructs":[…]}` envelope that
+ *                          stage's parser accepts (and each parser still reads a bare array too)
  *   author agent turn    → real `writeFile` tool calls that land real artifacts
  *   validator agent turn → a real validation report on disk
  *   acceptance grader    → the `{"score","band","note"}` contract
@@ -720,13 +721,15 @@ function answer(req, ctx) {
       const terms = newTermsForVolume(vol.installment);
       return {
         text: JSON.stringify(
-          terms.map((t) => ({
-            term: t.term,
-            rendering: t.rendering,
-            note: t.note,
-            type: t.type,
-            query: `${SERIES.alt} ${t.rendering}`,
-          })),
+          {
+            terms: terms.map((t) => ({
+              term: t.term,
+              rendering: t.rendering,
+              note: t.note,
+              type: t.type,
+              query: `${SERIES.alt} ${t.rendering}`,
+            })),
+          },
           null,
           2
         ),
@@ -735,36 +738,38 @@ function answer(req, ctx) {
     case "voice-extract":
       return {
         text: JSON.stringify(
-          [
-            {
-              type: "voice",
-              character: "灯里",
-              quirkType: "pronoun",
-              description: "Avoids the request form; speaks as a confirmation rather than an order.",
-              examples: ["もう一度確認したい"],
-              formalityLevel: "neutral",
-              notes: "Consistent across the volume.",
-            },
-            {
-              type: "voice",
-              character: "悠真",
-              quirkType: "vocabulary",
-              description: "Defines a term before using it; rejects metaphor.",
-              examples: ["技術は反復で、魔法は依頼だ"],
-              formalityLevel: "formal",
-              notes: "",
-            },
-            {
-              type: "pov",
-              povCategory: "narration",
-              marker: "none",
-              assignedCharacter: "主人公",
-              narrationType: "first-person-internal",
-              sectionDescription: "The whole volume stays inside the protagonist; the roof scenes drift into free indirect discourse.",
-              examples: ["私はその輪郭を数えるのが好きだった"],
-              notes: "",
-            },
-          ],
+          {
+            entries: [
+              {
+                type: "voice",
+                character: "灯里",
+                quirkType: "pronoun",
+                description: "Avoids the request form; speaks as a confirmation rather than an order.",
+                examples: ["もう一度確認したい"],
+                formalityLevel: "neutral",
+                notes: "Consistent across the volume.",
+              },
+              {
+                type: "voice",
+                character: "悠真",
+                quirkType: "vocabulary",
+                description: "Defines a term before using it; rejects metaphor.",
+                examples: ["技術は反復で、魔法は依頼だ"],
+                formalityLevel: "formal",
+                notes: "",
+              },
+              {
+                type: "pov",
+                povCategory: "narration",
+                marker: "none",
+                assignedCharacter: "主人公",
+                narrationType: "first-person-internal",
+                sectionDescription: "The whole volume stays inside the protagonist; the roof scenes drift into free indirect discourse.",
+                examples: ["私はその輪郭を数えるのが好きだった"],
+                notes: "",
+              },
+            ],
+          },
           null,
           2
         ),
@@ -772,32 +777,34 @@ function answer(req, ctx) {
     case "style-extract":
       return {
         text: JSON.stringify(
-          [
-            {
-              category: "honorific",
-              pattern: "さん after a classmate's name",
-              description: "Classmates use -san in narration and address.",
-              examples: ["灯里さん"],
-              frequency: "high",
-              notes: "The register is carried by word choice in English.",
-            },
-            {
-              category: "internalMonologue",
-              pattern: "だ / である endings inside thought",
-              description: "Thought lines are plain declaratives with no quotation marks.",
-              examples: ["誰もその書類に署名しない"],
-              frequency: "high",
-              notes: "",
-            },
-            {
-              category: "tense",
-              pattern: "past narration with present-tense thought",
-              description: "Narration is past; the thought inside it is present.",
-              examples: ["数えるのが好きだった"],
-              frequency: "medium",
-              notes: "",
-            },
-          ],
+          {
+            constructs: [
+              {
+                category: "honorific",
+                pattern: "さん after a classmate's name",
+                description: "Classmates use -san in narration and address.",
+                examples: ["灯里さん"],
+                frequency: "high",
+                notes: "The register is carried by word choice in English.",
+              },
+              {
+                category: "internalMonologue",
+                pattern: "だ / である endings inside thought",
+                description: "Thought lines are plain declaratives with no quotation marks.",
+                examples: ["誰もその書類に署名しない"],
+                frequency: "high",
+                notes: "",
+              },
+              {
+                category: "tense",
+                pattern: "past narration with present-tense thought",
+                description: "Narration is past; the thought inside it is present.",
+                examples: ["数えるのが好きだった"],
+                frequency: "medium",
+                notes: "",
+              },
+            ],
+          },
           null,
           2
         ),

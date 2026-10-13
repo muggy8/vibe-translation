@@ -101,43 +101,148 @@ async function styleAuthorMaxSteps(ctx, seg = null) {
 }
 
 
-// ─── Why this extraction call asks for no answer shape ───────────────────────
+// ─── The answer shape this extraction call asks for ──────────────────────────
 //
-// It used to declare one here, beside `parseStyleObservations`: the prompt's own Output section written
-// as data, since `system-prompts/style-guide-extract.md` names exactly six keys (`category`, `pattern`,
-// `description`, `examples`, `frequency`, `notes`) and says "Each element is an object with exactly these
-// keys". It was the fully-closed shape of the four this slice drew.
+// Declared beside {@link parseStyleObservations}, in the module that owns the parser, so the request the
+// endpoint is given and the answer the stage accepts cannot drift apart (`test/prompt-audit.js`'s
+// `data-answer-shape` rule compares the wire against this function, imported, not copied).
 //
-// Measured 2026-10-13 against the endpoint this pipeline is configured against, it is not expressible:
-// the request was refused before the model was asked — HTTP 400 in 161 ms, 0 tokens, "response_format
-// schema must accept only JSON objects at its root (type object, or anyOf/oneOf of object schemas)". The
-// schema that produced it was `{ type: "array", items: { type: "object", … } }`, which is the shape this
-// call answers in. `ai/one-shot.js` now refuses an array-rooted schema before it is sent, because shipping
-// one means every volume's extraction fails at the HTTP layer.
+// The root is an OBJECT holding the list. The array-rooted version of this same schema was measured against
+// this endpoint on 2026-10-13 and the request was refused before the model was asked — HTTP 400 in 161 ms,
+// 0 tokens, "response_format schema must accept only JSON objects at its root (type object, or anyOf/oneOf
+// of object schemas)" — and `ai/one-shot.js`'s `assertShapeIsExpressible` refuses such a schema before it is
+// sent (AGENTS.md gotcha 138).
 //
-// The envelope that WOULD be expressible — the same six-key list under an object root — is written up as
-// a decision rather than taken: `/tmp/opencode/json-schema-questions.md`. It changes what
-// `system-prompts/style-guide-extract.md` tells the model to write.
+// `strict: true` + `additionalProperties: false` is the combination the four acceptance graders already send
+// to this endpoint successfully, and it is safe here for a reason specific to this prompt:
+// `system-prompts/style-guide-extract.md` names exactly six keys for an element and its own example produces
+// exactly those six, so the closed shape describes the contract the prompt already states rather than
+// guessing at one. (The voice stage's shape is deliberately NOT closed, for the reasons in
+// `character-voice/stages.js`; the two are separate contracts and neither borrows the other's looseness.)
 
+/**
+ * The `response_format` the style-construct extraction asks this endpoint for.
+ *
+ * An object root holding the construct array. The six properties are the six keys
+ * `system-prompts/style-guide-extract.md` names, with `category` and `frequency` enumerated to the values
+ * that prompt lists — which is what makes the closed shape a description rather than a constraint the
+ * prompt never asked for.
+ *
+ * @returns {{type: "json_schema", json_schema: {name: string, strict: boolean, schema: Object}}}
+ */
+function styleResponseFormat() {
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "style_constructs",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          constructs: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                category: {
+                  type: "string",
+                  enum: [
+                    "honorific", "pronoun", "particle", "internalMonologue", "onomatopoeia", "interjection",
+                    "povMarker", "sceneBreak", "tense", "punctuation", "wordplay", "note", "other",
+                  ],
+                },
+                pattern: { type: "string" },
+                description: { type: "string" },
+                examples: { type: "array", items: { type: "string" } },
+                frequency: { type: "string", enum: ["high", "medium", "low"] },
+                notes: { type: "string" },
+              },
+              required: ["category", "pattern", "description", "examples", "frequency", "notes"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["constructs"],
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
+/**
+ * Pull the construct array out of the answer, in whichever of the two forms it arrived.
+ *
+ * The envelope (`{"constructs": […]}`) is what the request asks for. The bare array is still read, because
+ * a server that ignores `response_format` answers in the form its prompt used to ask for.
+ *
+ * @param {string} text - The answer, already fence-stripped.
+ * @returns {Array<Object>|null} The entries, or null when this answer holds no construct array at all.
+ */
+function constructArrayFromAnswer(text) {
+  /**
+   * Parse one candidate span, or return undefined when it is not JSON.
+   * @param {string} span
+   * @returns {Object|undefined}
+   */
+  const tryJson = (span) => {
+    try {
+      return JSON.parse(span);
+    } catch {
+      return undefined;
+    }
+  };
+  /**
+   * Is this value an answer — a bare array, or an object holding a `constructs` array?
+   * @param {Object} value
+   * @returns {Array<Object>|null}
+   */
+  const asList = (value) => {
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === "object" && Array.isArray(value.constructs)) return value.constructs;
+    return null;
+  };
+
+  const whole = tryJson(text);
+  if (whole !== undefined) {
+    const list = asList(whole);
+    if (list) return list;
+  }
+  const objStart = text.indexOf("{");
+  const objEnd = text.lastIndexOf("}");
+  if (objStart !== -1 && objEnd > objStart) {
+    const list = asList(tryJson(text.slice(objStart, objEnd + 1)));
+    if (list) return list;
+  }
+  const arrStart = text.indexOf("[");
+  const arrEnd = text.lastIndexOf("]");
+  if (arrStart !== -1 && arrEnd > arrStart) {
+    const list = asList(tryJson(text.slice(arrStart, arrEnd + 1)));
+    if (list) return list;
+  }
+  return null;
+}
 
 /**
  * Parse the AI's extraction output into an array of style-construct entries.
+ *
+ * Reads the `{"constructs": […]}` envelope the request asks for and the bare JSON array the prompt asked
+ * for until this slice, and tolerates markdown fences and surrounding prose either way.
+ *
  * @param {string} output - The raw AI output.
  * @returns {Array<Object>}
+ * @throws {Error} When the answer holds no array of constructs in either form.
  */
 function parseStyleObservations(output) {
   if (!output || typeof output !== "string") return [];
   let text = output.trim();
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenceMatch) text = fenceMatch[1].trim();
-  const firstBracket = text.indexOf("[");
-  const lastBracket = text.lastIndexOf("]");
-  if (firstBracket === -1 || lastBracket === -1 || lastBracket < firstBracket) {
-    throw new Error("No JSON array found in the style-guide extraction output.");
-  }
-  const parsed = JSON.parse(text.slice(firstBracket, lastBracket + 1));
-  if (!Array.isArray(parsed)) {
-    throw new Error("The style-guide extraction output was not a JSON array.");
+  const parsed = constructArrayFromAnswer(text);
+  if (parsed === null) {
+    throw new Error(
+      "No JSON array found in the style-guide extraction output: the answer is neither a JSON array nor " +
+        'an object holding a "constructs" array.'
+    );
   }
   return parsed.filter((entry) => entry && typeof entry.category === "string");
 }
@@ -148,4 +253,5 @@ module.exports = {
   styleRecoveryPrompt,
   styleAuthorMaxSteps,
   parseStyleObservations,
+  styleResponseFormat,
 };

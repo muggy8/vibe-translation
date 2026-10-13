@@ -39,7 +39,7 @@ Then **compare against the previous glossary** and keep only the terms that are 
 
 ## Output
 
-Respond with **only** a JSON array — no prose, no markdown fences, no commentary. Each element is an object with exactly these keys:
+Respond with **only** a JSON object holding one key, `terms` — no prose, no markdown fences, no commentary. `terms` is an array, and each element of it is an object with exactly these keys:
 
 - `term` — the source-language term, exactly as the book prints it (string)
 - `rendering` — the canonical target-language rendering (string, required)
@@ -47,12 +47,14 @@ Respond with **only** a JSON array — no prose, no markdown fences, no commenta
 - `type` — one of `character`, `place`, `item`, `faction`, `concept` (string)
 - `query` — the suggested search query (string)
 
-If there are **no new terms**, respond with an empty JSON array: `[]`
+If there are **no new terms**, respond with an object holding an empty array: `{"terms": []}`
 
 Example shape (do not copy these values):
 ```
-[
-  { "term": "例 名前", "rendering": "Example Name", "note": "A student introduced in this volume.", "type": "character", "query": "例 名前" },
-  { "term": "例の町", "rendering": "Example Town", "note": "Named location; the club trip goes here.", "type": "place", "query": "例の町" }
-]
+{
+  "terms": [
+    { "term": "例 名前", "rendering": "Example Name", "note": "A student introduced in this volume.", "type": "character", "query": "例 名前" },
+    { "term": "例の町", "rendering": "Example Town", "note": "Named location; the club trip goes here.", "type": "place", "query": "例の町" }
+  ]
+}
 ```
