@@ -33,7 +33,7 @@ const { buildDisputesNote, buildUnusedEntriesNote } = require("./notes");
 const { researchVolumeTerms, RESEARCH_SYSTEM_PROMPT, buildResearchReadingPrompt } = require("./research");
 const { RESEARCH_MAX_TERMS_PER_VOLUME } = require("./researchable");
 const { assertGlossaryCarryForward } = require("./carry-forward");
-const { openGlossaryRecord, fileGlossaryExtraction, fileGlossaryTermRows, renderGlossaryArtifact, quarantineGlossaryArtifact, sealGlossaryRecord } = require("./store");
+const { openGlossaryRecord, fileGlossaryExtraction, fileGlossaryTermRows, fileGlossaryRevisions, renderGlossaryArtifact, quarantineGlossaryArtifact, sealGlossaryRecord } = require("./store");
 const { writeGlossaryCoverageReport } = require("./coverage");
 const { truncateGlossary, readTermList, termsResponseFormat } = require("./extract");
 const { runChunkedVolumeAgent } = require("./chunked");
@@ -449,6 +449,11 @@ async function runVolumeAgent(ctx) {
     // checked against the book. This is the only thing in the stage that puts a rendering into the record,
     // and it is what `renderGlossary` prints.
     fileGlossaryTermRows(ctx, terms);
+    // And this is the third filing, through the third door: what this volume's read pass says about a term
+    // an EARLIER volume already published. It files a replacement row beside the row it replaces and never
+    // edits that row, and it refuses anything whose quote this volume's own text does not print. Asked
+    // after the new rows so a revision can only land on a term the record actually holds.
+    fileGlossaryRevisions(ctx, ctx.extractionRevisions || []);
 
     // Research runs AFTER the filing, on purpose: the bound is a query over what the record now holds,
     // so a term the evidence rule refused never costs a lookup, a term an earlier volume already
@@ -527,6 +532,11 @@ async function extractNewTerms(ctx) {
       }),
   });
   const terms = read.terms;
+  // The other half of the same answer: what this volume says about a term an EARLIER volume published.
+  // It is kept apart from `terms` all the way to the record, because the two are filed through different
+  // doors with different guards, and a door that mixed them would let a new term slip past the revision
+  // evidence rule or a revision slip past the "only new terms" rule.
+  ctx.extractionRevisions = read.revisions;
   ctx.extractionReads = [
     {
       id: `volume ${values.INSTALLMENT_NUMBER}`,

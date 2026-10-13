@@ -53,7 +53,7 @@ const path = require("path");
 
 const harness = require("../harness");
 const { assertShapeIsExpressible } = harness;
-const { parseTerms, termsResponseFormat } = require("../glossary/extract");
+const { parseTerms, parseTermAnswer, termsResponseFormat } = require("../glossary/extract");
 const { parseVoiceQuirks, voiceResponseFormat, VOICE_ENTRY_KEYS } = require("../character-voice/stages");
 const { parseStyleObservations, styleResponseFormat } = require("../style-guide/amend");
 const { parseExtractionAnswer, scanTopLevelObjects } = require("../character-voice/reading");
@@ -152,6 +152,7 @@ function scenarioEveryParserReadsBothForms() {
 
   const parsers = [
     { label: "parseTerms", parse: parseTerms, item: term, key: "terms" },
+    { label: "parseTermAnswer", parse: (text) => parseTermAnswer(text).terms, item: term, key: "terms" },
     { label: "parseVoiceQuirks", parse: parseVoiceQuirks, item: claim, key: "entries" },
     { label: "parseStyleObservations", parse: parseStyleObservations, item: construct, key: "constructs" },
   ];
@@ -518,12 +519,35 @@ function scenarioThePromptsAskForTheEnvelope() {
     const text = fs.readFileSync(path.join(ROOT, "system-prompts", file), "utf8");
     ok(!/Respond with \*\*only\*\* a JSON array/.test(text), `${file} still asks for a bare JSON array`);
     ok(!/respond with an empty JSON array/.test(text), `${file} still tells the model to answer an empty array`);
-    ok(new RegExp(`Respond with \\*\\*only\\*\\* a JSON object holding one key, \`${key}\``).test(text),
+    ok(new RegExp(`Respond with \\*\\*only\\*\\* a JSON object holding [a-z]+ key(?:s)?, \`${key}\``).test(text),
       `${file} does not ask for the \`${key}\` envelope its schema declares`);
-    ok(new RegExp(`\\{"${key}": \\[]\\}`).test(text), `${file} does not say what the "nothing new" answer looks like`);
+    ok(new RegExp(`\\{"${key}": \\[\\]`).test(text), `${file} does not say what the "nothing new" answer looks like`);
     const fences = (text.match(/```/g) || []).length;
     same(fences % 2, 0, `${file} has an unclosed markdown fence (${fences} fence markers) — the model is shown an unterminated example`);
   }
+
+  // The glossary prompt's second list, and the keys its own example produces for it. The schema declares
+  // `revisions` beside `terms`; a prompt that asked for one and declared the other is a contract that
+  // fails at the endpoint and looks correct in the diff.
+  const glossary = fs.readFileSync(path.join(ROOT, "system-prompts", "glossary-terms.md"), "utf8");
+  ok(/Respond with \*\*only\*\* a JSON object holding two keys, `terms` and `revisions`/.test(glossary),
+    "the glossary prompt does not ask for both lists its schema declares");
+  ok(/\{"terms": \[\], "revisions": \[\]\}/.test(glossary),
+    "the glossary prompt does not say what the nothing-new answer looks like when both lists are empty");
+  const revisionKeys = glossary.slice(glossary.indexOf("`revisions` is an array"), glossary.indexOf("Three rules about `revisions`"));
+  for (const key of ["term", "rendering", "note", "quote", "reason"]) {
+    ok(revisionKeys.includes(`\`${key}\``), `the glossary prompt does not name the revision key \`${key}\` its schema requires`);
+  }
+  const glossaryExample = glossary.slice(glossary.indexOf("Example shape (do not copy these values):"));
+  for (const key of ["term", "rendering", "note", "quote", "reason"]) {
+    ok(glossaryExample.includes(`"${key}"`), `the glossary prompt's example no longer produces the revision key "${key}"`);
+  }
+  const revisionItem = termsResponseFormat().json_schema.schema.properties.revisions.items;
+  same(revisionItem.required, ["term", "rendering", "note", "quote", "reason"],
+    "the declared revision shape and the prompt's own key list no longer name the same five keys");
+  same(revisionItem.additionalProperties, false, "the revision entry shape is no longer closed");
+  same(termsResponseFormat().json_schema.schema.required, ["terms", "revisions"],
+    "the declared answer no longer requires both lists — a property outside `required` is a schema a strict server may refuse");
 
   // The voice prompt's own contradiction: its POV element block used to omit the key its own example produced.
   const voice = fs.readFileSync(path.join(ROOT, "system-prompts", "character-voice-extract.md"), "utf8");
@@ -539,7 +563,7 @@ function scenarioThePromptsAskForTheEnvelope() {
     ok(VOICE_ENTRY_KEYS.includes(key), `the voice prompt's example produces "${key}", which the declared inventory does not hold`);
   }
 
-  console.log("9/10: all three prompts ask for their envelope, close their fences, and the voice prompt names the key its own example produces");
+  console.log("9/10: all three prompts ask for their envelope, the glossary prompt asks for both lists it declares, and the voice prompt names the key its own example produces");
 }
 
 // ─── Scenario 10 ──────────────────────────────────────────────────────────────

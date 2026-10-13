@@ -34,7 +34,7 @@ const { fileExists, inlineReferenceMessage } = require("../utils/fs");
 const { chapterSegmentNote } = require("../utils/source");
 
 const { researchVolumeTerms } = require("./research");
-const { fileGlossaryExtraction, fileGlossaryTermRows, renderGlossaryArtifact } = require("./store");
+const { fileGlossaryExtraction, fileGlossaryTermRows, fileGlossaryRevisions, renderGlossaryArtifact } = require("./store");
 const { truncateGlossary, readTermList, termsResponseFormat } = require("./extract");
 const { guardCarryForwardAgainst } = require("./carry-forward");
 
@@ -78,6 +78,11 @@ async function runChunkedVolumeAgent(ctx) {
     // published file is printed from, and they are what the research pass is allowed to ask about.
     fileGlossaryExtraction(ctx, terms);
     fileGlossaryTermRows(ctx, terms);
+    // The revision door, per chapter, for the same reason the other two run per chapter: this chapter's
+    // answer is what this chapter's text can support. A revision a later chapter is justified by arrives
+    // with that chapter, and the door is idempotent per volume, so the same term settled twice in one
+    // volume files one revision rather than two.
+    fileGlossaryRevisions(ctx, ctx.extractionRevisions || []);
     await researchChapterTerms(ctx, segment, si, terms);
     await renderChapterGlossary(ctx, segment, si);
   }
@@ -149,6 +154,8 @@ async function extractChapterTerms(ctx, segment, si) {
       }),
   });
   const terms = read.terms;
+  // The revisions half of the same chapter's answer, filed by the step below through the revision door.
+  ctx.extractionRevisions = read.revisions;
   ctx.extractionReads = ctx.extractionReads || [];
   ctx.extractionReads.push({
     id: `chapter ${segment.id}`,

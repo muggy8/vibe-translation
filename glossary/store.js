@@ -10,8 +10,9 @@
  * The stage's whole route, in the order this file supports it:
  *
  *   `openGlossaryRecord` → `fileGlossaryExtraction` (what the read pass noticed) →
- *   `fileGlossaryTermRows` (what the glossary will publish) → `renderGlossaryArtifact` (the published
- *   file) → `auditGlossaryArtifact` + `glossaryGradeSample` (the gate) → `sealGlossaryRecord`.
+ *   `fileGlossaryTermRows` (what the glossary will publish) → `fileGlossaryRevisions` (what this volume
+ *   says an earlier volume published wrongly) → `renderGlossaryArtifact` (the published file) →
+ *   `auditGlossaryArtifact` + `glossaryGradeSample` (the gate) → `sealGlossaryRecord`.
  *
  * **No agent reaches any of this.** No tool, no prompt, no agent-facing query. That is slice 7.
  *
@@ -52,6 +53,7 @@ const {
   openVolumeRecord,
   importVolumeExtraction,
   importGlossaryExtraction,
+  importGlossaryRevisions,
   renderGlossary,
   moveArtifactAside,
   auditVolumeRecord,
@@ -185,6 +187,174 @@ function fileGlossaryTermRows(ctx, terms) {
 }
 
 /**
+ * The block the validation report carries about **what this volume revised**.
+ *
+ * The mirror of `extractionReadReport`, for the same reason and with the same destination: a glossary
+ * where volume 7 changed a rendering volume 1 published is a different artifact from one where nothing
+ * was changed, and the acceptance grader's message list already contains this file. The gate cannot
+ * re-derive the change from the published file — the file prints the new rendering and one history line
+ * — so the report is where the replaced rendering, the line the revision came from, and the reason are
+ * all named together.
+ *
+ * Refused revisions are named with the rule that refused them. That is the half that matters most: a
+ * read pass that proposed a revision justified by the previous glossary's own row rather than by this
+ * volume's book has to be visible, or the next volume gets the same silent rewrite the last series run
+ * produced twice and never reported.
+ *
+ * @param {{filed: Array<Object>, replaced: Array<Object>, alreadyFiled: Array<string>, refused: Array<Object>}|null} revisions - What `fileGlossaryRevisions` returned.
+ * @param {{volume: string|number}} opts
+ * @returns {string} A markdown block, or "" when this volume revised nothing and refused nothing.
+ */
+function revisionReport(revisions, { volume }) {
+  if (!revisions) return "";
+  const filed = Array.isArray(revisions.filed) ? revisions.filed : [];
+  const replaced = Array.isArray(revisions.replaced) ? revisions.replaced : [];
+  const refused = Array.isArray(revisions.refused) ? revisions.refused : [];
+  const already = Array.isArray(revisions.alreadyFiled) ? revisions.alreadyFiled : [];
+  if (!filed.length && !refused.length && !already.length) return "";
+
+  const out = [
+    "## Revisions this volume filed",
+    "",
+    "_A revision replaces a rendering an **earlier volume** published. The earlier row is not edited and " +
+      "not removed: it stays in the record marked `superseded`, and the published file prints the new " +
+      "rendering with a line naming the old one and the volume it was in force from. A revision is filed " +
+      `only when the line it quotes is in volume ${volume}'s own text. ` +
+      (refused.length
+        ? `${refused.length} proposed revision(s) were refused.`
+        : filed.length
+          ? " Every proposed revision was filed."
+          : ""),
+    "",
+  ];
+
+  if (filed.length) {
+    /**
+     * One stored column read as the array it holds.
+     *
+     * `getFact` hands back the row as the database holds it, and `examples` / `evidence` are JSON columns.
+     * A report that printed them raw would print `["禁忌の書","the Forbidden Book"]` where it means to
+     * print the two cells it is comparing.
+     *
+     * @param {Object|string|null} value
+     * @returns {Array<Object>}
+     */
+    const column = (value) => {
+      if (Array.isArray(value)) return value;
+      try {
+        const parsed = JSON.parse(String(value || "[]"));
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    };
+    out.push("| term | replaced rendering | new rendering | in force from | the line it comes from | why |");
+    out.push("| --- | --- | --- | --- | --- | --- |");
+    for (let i = 0; i < filed.length; i += 1) {
+      const fact = filed[i] || {};
+      const before = replaced[i] || {};
+      const examples = column(fact.examples);
+      const evidence = column(fact.evidence);
+      const quote = evidence.length ? String(evidence[0].quote || "") : "";
+      const cell = (value) => String(value || "").replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ").trim();
+      out.push(
+        `| ${cell(before.term || examples[0])} | ${cell(before.rendering)} | ${cell(examples[1])} | ` +
+          `volume ${volume} (replacing volume ${before.appliesFromVolume ?? "?"}) | ` +
+          `${cell(quote ? `"${quote}"` : "—")} | ${cell(fact.body || "—")} |`
+      );
+    }
+    out.push("");
+  }
+
+  if (already.length) {
+    const distinct = [...new Set(already)];
+    out.push(
+      `${distinct.length} term(s) were already settled by this volume's own revision and were not filed twice` +
+        `${distinct.length < already.length ? ` (${already.length} proposals in total, one per chapter that read them)` : ""}: ` +
+        `${distinct.join(", ")}.`
+    );
+    out.push("");
+  }
+
+  if (refused.length) {
+    // One line per distinct refusal, with how many times it was proposed. The chapter-by-chapter route
+    // asks every chapter the same question, and a report that printed the same refusal twelve times
+    // would bury the one fact the grader needs: which term kept the rendering it already had.
+    /** @type {Map<string, {item: Object, times: number}>} */
+    const byRule = new Map();
+    for (const item of refused) {
+      const key = `${item.rule}|${item.term}|${item.rendering}|${item.quote}`;
+      const seen = byRule.get(key);
+      if (seen) seen.times += 1;
+      else byRule.set(key, { item, times: 1 });
+    }
+    out.push(
+      `**${refused.length} revision proposal(s) were refused${byRule.size === refused.length ? "" : ` (${byRule.size} distinct)`}, and the term keeps the rendering it already had.**`
+    );
+    out.push("");
+    for (const { item, times } of byRule.values()) {
+      out.push(
+        `- \`${item.rule}\` — "${item.term}" → "${item.rendering}"${times > 1 ? ` (proposed ${times} times)` : ""}: ${item.because}` +
+          `${item.reason ? `\n  the answer's stated reason: ${item.reason}` : ""}`
+      );
+    }
+    out.push("");
+  }
+
+  return out.join("\n");
+}
+
+/**
+ * File this volume's revisions in its record — the renderings of **earlier volumes' rows** that this
+ * volume's own text shows to be wrong.
+ *
+ * The third filing door, and the only one that touches a term the record already holds.
+ * `fileGlossaryExtraction` files what the read pass noticed (never rendered); `fileGlossaryTermRows`
+ * files the new published rows; this one files a **replacement row** beside the row it replaces, which
+ * is the only legal way to change a term an earlier volume already published, because a sealed row is
+ * never edited.
+ *
+ * It refuses rather than warns. A revision whose quote is not in this volume's text is not filed with a
+ * note attached to it — it is not filed at all, and the term keeps the rendering it had. That is the
+ * guard against the failure this feature would otherwise create: a later volume silently rewriting what
+ * every earlier volume was translated against.
+ *
+ * @param {{ values: Object, folderName: string, seriesDir: string, refStore: Object|null }} ctx
+ * @param {Array<Object>} revisions - The read pass's `revisions` array.
+ * @returns {Object|null} The filing report, or null when no record is open.
+ */
+function fileGlossaryRevisions(ctx, revisions) {
+  if (!ctx.refStore) return null;
+  const filed = importGlossaryRevisions(ctx.refStore, revisions);
+  // The chapter-by-chapter route files per chapter and audits once, so the report has to describe the
+  // whole volume. Accumulating is what makes the revision that landed in chapter 1 still be named in the
+  // report the grader reads after chapter twelve.
+  const prior = ctx.storeRevisions;
+  ctx.storeRevisions = prior
+    ? {
+        ok: prior.ok && filed.ok,
+        filed: [...prior.filed, ...filed.filed],
+        replaced: [...prior.replaced, ...filed.replaced],
+        alreadyFiled: [...prior.alreadyFiled, ...filed.alreadyFiled],
+        refused: [...prior.refused, ...filed.refused],
+      }
+    : filed;
+  const volume = ctx.values.INSTALLMENT_NUMBER;
+  if (filed.filed.length || filed.refused.length || filed.alreadyFiled.length) {
+    console.log(
+      `Volume ${volume}: reference record filed ${filed.filed.length} revision(s) of terms earlier volumes ` +
+        `published (${filed.alreadyFiled.length} already filed, ${filed.refused.length} refused).`
+    );
+  }
+  for (const item of filed.refused) {
+    console.error(
+      `Volume ${volume}: revision of "${item.term}" → "${item.rendering}" REFUSED — ${item.rule}: ${item.because}`
+    );
+  }
+  return filed;
+}
+
+/**
  * The opening lines a rendered glossary gets when its record holds no document prose of its own.
  *
  * The authored file had these lines because an agent wrote the file; the render has no agent, so the two
@@ -301,12 +471,14 @@ async function renderGlossaryArtifact(ctx, { moveAside = true } = {}) {
  * Run the deterministic audit and write the report the validator agent used to write.
  *
  * The report is the audit's own markdown **plus the block about how this volume's term lists were read**
- * (`glossary/extract.js`'s `extractionReadReport`). It is appended here rather than in `glossary/qa.js`,
- * because this is the function that owns the report's content, and it is the mirror of
- * `character-voice/store.js`'s `auditVoiceArtifact`, which appends its own `readingReport` the same way.
- * The reason both stages do it: a glossary built from ten reads of which one never answered is a different
- * artifact from one built from ten that answered, and the grader's message list already contains this file
- * — so this is the one place the hole reaches the gate without inventing a second gate.
+ * (`glossary/extract.js`'s `extractionReadReport`) **plus the block about what this volume revised**
+ * (`revisionReport`). It is appended here rather than in `glossary/qa.js`, because this is the function
+ * that owns the report's content, and it is the mirror of `character-voice/store.js`'s
+ * `auditVoiceArtifact`, which appends its own `readingReport` the same way. The reason both stages do it:
+ * a glossary built from ten reads of which one never answered is a different artifact from one built from
+ * ten that answered, and a glossary that quietly changed what volume 1 said is a different artifact from
+ * one that did not — and the grader's message list already contains this file, so this is the one place
+ * those facts reach the gate without inventing a second gate.
  *
  * Each read that never produced a list also becomes a finding (`chapter-extraction-never-answered`, HIGH,
  * declared MAJOR in the level table). **What that finding does and does not reach, stated plainly:** it is
@@ -316,11 +488,15 @@ async function renderGlossaryArtifact(ctx, { moveAside = true } = {}) {
  * on a stage's own finding list is on the disk. Closing that needs a new declared sidecar in
  * `utils/artifacts/preproduction.js` or a finding channel in `utils/postmortem/volume.js` — both outside
  * this slice's allowed edits, and both an owner's call. See `/tmp/opencode/json-schema-questions.md`.
+ * A refused revision is reported the same way and for the same reason: named in the report, on the console,
+ * and NOT turned into a finding kind, because a kind the delivery layer cannot reach is a promise rather
+ * than a guard (gotcha 138).
  *
- * @param {{ values: Object, refStore: Object|null, glossaryOutputFile: string, storeTermRows: Object|null, extractionReads?: Array<Object> }} ctx
+ * @param {{ values: Object, refStore: Object|null, glossaryOutputFile: string, storeTermRows: Object|null, storeRevisions?: Object|null, extractionReads?: Array<Object> }} ctx
  * @param {{ refused?: Array<Object> }} [opts] - The filings this volume refused, so the report names them
  *   instead of leaving a term the read pass found unexplained.
- * @returns {Promise<Object|null>} The audit, its markdown carrying the read block, or null when no record is open.
+ * @returns {Promise<Object|null>} The audit, its markdown carrying the read and revision blocks, or null
+ *   when no record is open.
  */
 async function auditGlossaryArtifact(ctx, { refused } = {}) {
   if (!ctx.refStore) return null;
@@ -352,11 +528,15 @@ async function auditGlossaryArtifact(ctx, { refused } = {}) {
   );
   for (const found of ctx.extractionFindings) console.error(`Volume ${volume}: HIGH ${found.kind}: ${found.message}`);
 
-  ctx.storeAudit = readReport ? { ...audit, markdown: `${audit.markdown}\n${readReport}` } : audit;
+  ctx.storeAudit = null;
+  const revisionBlock = revisionReport(ctx.storeRevisions, { volume });
+  const extraBlocks = [readReport, revisionBlock].filter(Boolean).join("\n");
+  ctx.storeAudit = extraBlocks ? { ...audit, markdown: `${audit.markdown}\n${extraBlocks}` } : audit;
   console.log(
     `Volume ${ctx.values.INSTALLMENT_NUMBER}: deterministic audit — ${audit.findings.length} finding(s), ` +
       `${audit.highFindings.length} at HIGH; ${audit.checked} citation(s) re-checked against the source text.` +
-      `${ctx.extractionFindings.length ? ` Plus ${ctx.extractionFindings.length} read(s) that never answered (see the report).` : ""}`
+      `${ctx.extractionFindings.length ? ` Plus ${ctx.extractionFindings.length} read(s) that never answered (see the report).` : ""}` +
+      `${revisionBlock ? " Plus this volume's revisions, filed and refused (see the report)." : ""}`
   );
   return ctx.storeAudit;
 }
@@ -458,6 +638,8 @@ module.exports = {
   openGlossaryRecord,
   fileGlossaryExtraction,
   fileGlossaryTermRows,
+  fileGlossaryRevisions,
+  revisionReport,
   glossaryTitleBlock,
   renderGlossaryArtifact,
   auditGlossaryArtifact,

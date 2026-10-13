@@ -59,6 +59,7 @@
  */
 
 require("./test-home"); // the run's records get a throwaway home (gotcha 69)
+const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
@@ -899,6 +900,148 @@ function runAuditSelfTest() {
   return missed === 0;
 }
 
+/**
+ * The revision half of the loop, checked against the files the loop actually wrote.
+ *
+ * The feature this proves is the one the last live series run needed and did not have: a later volume
+ * correcting a rendering an earlier volume published. Two of those corrections happened in that run
+ * (百花祭 and 夫人界のアガシ) and nothing in the record, the file, or the report said so. So the loop
+ * has to show the whole chain, in the order the pipeline really runs it:
+ *
+ *   - the scripted revision's quote is in the fixture volume's own text, and the revision lands in that
+ *     volume's `glossary.md` as the term's rendering;
+ *   - the file also prints the rendering it replaced and the volume that rendering was in force from;
+ *   - the EARLIER volume's published file is untouched — a later volume's correction does not rewrite
+ *     what volume 1 published, which is the difference between superseding and editing;
+ *   - the superseded row is still in the volume's record, marked `superseded`, and the replacement row
+ *     names it in `supersedes` — the record keeps both decisions;
+ *   - the planted defect, whose quote is a line no volume prints, is refused and named in the report the
+ *     grader reads, and its term keeps the rendering it already had;
+ *   - and the translation stage's own reader of the published file yields exactly one pair per term,
+ *     with the in-force rendering, never the history line.
+ *
+ * The record is read through a **copy**, because opening a volume's `series.db` with a client folds its
+ * write-ahead log into the file and deletes the sidecars in the folder it was read from (gotcha 124).
+ *
+ * @param {string[]} stagesRun - The stages this loop executed; the check needs the glossary stage.
+ * @returns {{terms: number, filed: number, refused: number}} What was found, for the log line.
+ */
+function assertRevisionLanded(stagesRun) {
+  if (!stagesRun.includes("glossary")) return { terms: 0, filed: 0, refused: 0 };
+  const { parseGlossaryTerms, GLOSSARY_HISTORY_PREFIX } = require("../utils/translate");
+  const { openDatabase } = require("../utils/reference-store");
+
+  const [vol01, vol02] = workflow.VOLUMES;
+  const dir01 = path.join(SERIES_DIR, vol01.folder);
+  const dir02 = path.join(SERIES_DIR, vol02.folder);
+  const glossary01 = fs.readFileSync(path.join(dir01, "glossary.md"), "utf8");
+  const glossary02 = fs.readFileSync(path.join(dir02, "glossary.md"), "utf8");
+
+  const accepted = workflow.REVISIONS.find((r) => !r.expectRefused);
+  const defect = workflow.REVISIONS.find((r) => r.expectRefused);
+  assert.ok(accepted && defect, "the fixture carries no scripted revision, or no planted defect");
+  const superseded = workflow.termsForVolume(vol01.installment).find((t) => t.term === accepted.term);
+  assert.ok(superseded, `the fixture's revision targets "${accepted.term}", which volume ${vol01.installment} does not publish`);
+
+  // 1 — the new rendering is the one the file prints, and the old one survives as history.
+  const rows02 = parseGlossaryTerms(glossary02);
+  const row02 = rows02.find((row) => row.term === accepted.term);
+  assert.ok(row02, `volume ${vol02.installment}'s glossary has no row for "${accepted.term}"`);
+  assert.strictEqual(
+    row02.rendering,
+    accepted.rendering,
+    `volume ${vol02.installment}'s glossary renders "${accepted.term}" as "${row02.rendering}", not the revision it filed`
+  );
+  const history = `Earlier rendering: "${superseded.rendering}" (in force from volume 1)`;
+  assert.ok(
+    glossary02.includes(history),
+    `volume ${vol02.installment}'s glossary does not name the rendering it replaced: expected ${history}`
+  );
+  assert.ok(
+    glossary02.includes(accepted.note),
+    `volume ${vol02.installment}'s glossary lost the revision's own note for "${accepted.term}"`
+  );
+
+  // 2 — one pair per term, and the history line is never one of them.
+  const termCells = rows02.map((row) => row.term);
+  assert.strictEqual(
+    new Set(termCells).size,
+    termCells.length,
+    `volume ${vol02.installment}'s glossary yields ${termCells.length} pairs for ${new Set(termCells).size} terms — the translator's law names one term twice`
+  );
+  assert.ok(
+    !rows02.some((row) => row.rendering.startsWith(GLOSSARY_HISTORY_PREFIX)),
+    "a superseded rendering reached the terminology law as a rendering"
+  );
+  assert.ok(
+    !rows02.some((row) => row.notes && row.notes.startsWith(GLOSSARY_HISTORY_PREFIX) && !row.rendering),
+    "a history line with no rendering produced a pair"
+  );
+
+  // 3 — the earlier volume's published file is not rewritten by a later volume's correction.
+  const rows01 = parseGlossaryTerms(glossary01);
+  const row01 = rows01.find((row) => row.term === accepted.term);
+  assert.ok(row01, `volume ${vol01.installment}'s glossary lost "${accepted.term}"`);
+  assert.strictEqual(
+    row01.rendering,
+    superseded.rendering,
+    `volume ${vol01.installment}'s published glossary was rewritten to "${row01.rendering}" by a later volume's revision`
+  );
+  assert.ok(!glossary01.includes(GLOSSARY_HISTORY_PREFIX), "volume 1's glossary carries a history line it never revised");
+
+  // 4 — the refused revision kept its term's rendering, and the report names the refusal.
+  const defectRow = rows02.find((row) => row.term === defect.term);
+  const defectOriginal = workflow.termsForVolume(vol02.installment).find((t) => t.term === defect.term);
+  assert.ok(defectRow, `volume ${vol02.installment}'s glossary lost "${defect.term}" — the refused revision removed a row`);
+  assert.strictEqual(
+    defectRow.rendering,
+    defectOriginal.rendering,
+    `the refused revision of "${defect.term}" changed the rendering anyway: "${defectRow.rendering}"`
+  );
+  const validation = fs.readFileSync(path.join(dir02, "glossary-validation.md"), "utf8");
+  assert.ok(
+    validation.includes(defect.expectRefused),
+    `the validation report does not name the refused revision (${defect.expectRefused})`
+  );
+  assert.ok(validation.includes(defect.term), "the validation report does not name the term whose revision was refused");
+  assert.ok(validation.includes("## Revisions this volume filed"), "the validation report has no revision block");
+  assert.ok(validation.includes(accepted.rendering), "the validation report does not name the rendering the revision filed");
+
+  // 5 — the record holds BOTH rows: the replaced one marked superseded, the replacement naming it.
+  const sourceDb = path.join(dir02, "series.db");
+  assert.ok(fs.existsSync(sourceDb), `volume ${vol02.installment} has no reference record at ${sourceDb}`);
+  const copyFile = path.join(REPORT_DIR, "revision-record-copy.db");
+  for (const suffix of ["", "-wal", "-shm"]) {
+    if (fs.existsSync(sourceDb + suffix)) fs.copyFileSync(sourceDb + suffix, copyFile + suffix);
+  }
+  const db = openDatabase(copyFile);
+  try {
+    const termRows = db
+      .prepare("SELECT id, status, supersedes, applies_from_volume, owner_volume, examples FROM facts WHERE aspect = 'term_usage' AND source_stage != 'extract' ORDER BY ord, id")
+      .all();
+    const matches = termRows.filter((row) => String(row.examples || "").includes(accepted.term));
+    assert.ok(matches.length >= 2, `the record holds ${matches.length} row(s) for "${accepted.term}" — a supersession must keep both rows`);
+    const old = matches.find((row) => String(row.examples || "").includes(superseded.rendering));
+    const fresh = matches.find((row) => String(row.examples || "").includes(accepted.rendering));
+    assert.ok(old, "the superseded row is gone from the record — a replaced rendering was deleted, not superseded");
+    assert.ok(fresh, "the replacement row is not in the record");
+    assert.strictEqual(old.status, "superseded", `the replaced row's status is "${old.status}", not "superseded"`);
+    assert.strictEqual(fresh.supersedes, old.id, "the replacement row does not name the row it replaces");
+    assert.strictEqual(fresh.applies_from_volume, 2, "the replacement row is not in force from the volume that filed it");
+    assert.strictEqual(old.applies_from_volume, 1, "the replaced row lost the volume its rendering was in force from");
+    const defectRows = termRows.filter((row) => String(row.examples || "").includes(defect.term));
+    assert.strictEqual(
+      defectRows.filter((row) => String(row.examples || "").includes(defect.rendering)).length,
+      0,
+      "the refused revision filed a row anyway"
+    );
+    return { terms: matches.length, filed: 1, refused: 1 };
+  } finally {
+    db.close();
+    for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(copyFile + suffix, { force: true });
+  }
+}
+
 async function main() {
   const stageArg = process.argv.find((arg) => arg.startsWith("--stage="));
   if (stageArg) return runStageChild(stageArg.slice("--stage=".length));
@@ -1008,6 +1151,25 @@ async function main() {
 
   writeSeriesTree();
 
+  // The revision chain, checked against the files the run actually wrote. Asked only when the glossary
+  // stage ran, because a loop that never built a glossary has no revision to inspect.
+  let revisionFailure = null;
+  let revisionCheck = null;
+  if (!first.stages.some((stage) => !stage.ok)) {
+    try {
+      revisionCheck = assertRevisionLanded(selectedStages());
+    } catch (err) {
+      revisionFailure = err.message;
+    }
+  }
+  if (revisionCheck) {
+    console.log(
+      `\nrevisions: ${revisionCheck.filed} filed and ${revisionCheck.refused} refused end to end; ` +
+        `volume ${workflow.VOLUMES[1].installment}'s record holds ${revisionCheck.terms} row(s) for the revised term, ` +
+        `its published glossary prints the new rendering and names the one it replaced.`
+    );
+  }
+
   console.log("");
   console.log(`report: ${path.join(REPORT_DIR, "wire-log.md")}`);
   console.log(`        ${path.join(REPORT_DIR, "prompt-audit.md")}`);
@@ -1023,6 +1185,9 @@ async function main() {
     process.exitCode = 1;
   } else if (second && (secondPassMadeCalls > 0 || second.stages.some((stage) => !stage.ok))) {
     console.log(`\nFAILED: the second pass was not a no-op (${secondPassMadeCalls} call(s)).`);
+    process.exitCode = 1;
+  } else if (revisionFailure) {
+    console.log(`\nFAILED: the glossary revision did not hold up end to end — ${revisionFailure}`);
     process.exitCode = 1;
   } else {
     console.log("\nOK: the whole pipeline ran against the stub, the audit is clean, and the second pass made no calls.");

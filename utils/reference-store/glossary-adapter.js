@@ -47,6 +47,8 @@ const { readChapterLines } = require("./source-chapters");
 const { DOCUMENT_GLOSSARY, storeDocumentProse, readDocumentProse, markDocumentMirrored } = require("./document-prose");
 const { isBareFirstPersonPronoun } = require("./name-resolution");
 const { researchNotesInRecord, mergeResearchNotes } = require("./research-notes");
+const { markSuperseded } = require("./facts");
+const { refusal } = require("./refusals");
 require("../../types"); // JSDoc type definitions
 
 /** The heading the renderer writes when a store holds no title of its own. */
@@ -542,6 +544,15 @@ function importGlossary(store, markdown, { volume } = {}) {
  * Matched on the term the way the glossary's own carry-forward gate matches it — the term is the
  * row's identity, and a term that moved sections is still the same term.
  *
+ * **What the skip is, and what it is not.** A term the record already holds is not amended by the read
+ * pass: `importGlossary` and `importGlossaryExtraction` count it as carried and move on. That is still
+ * true, and it is still the rule for the `terms` list. What it does NOT mean is that a term already in
+ * the record can never be touched again — it means the only door that touches it is
+ * {@link fileGlossaryRevision}, which files a **replacement row** rather than editing the one it
+ * replaces, and refuses unless the replacement is justified by a line this volume's own text prints.
+ * A blanket skip on one side and a guarded replacement door on the other is the same rule read twice:
+ * a published row is never edited.
+ *
  * @param {ReferenceStore} store
  * @param {string} term
  * @returns {boolean}
@@ -564,7 +575,7 @@ function documentTermAlreadyStored(store, term) {
 }
 
 /**
- * The glossary rows this record holds, in the order the render prints them.
+ * The glossary rows this record holds **in force at one volume**, in the order the render prints them.
  *
  * One query, one order, shared by everything that has to ask "what does this volume's glossary contain":
  * `renderGlossary` prints these rows, `glossary/researchable.js` classifies them to decide what to look
@@ -572,21 +583,58 @@ function documentTermAlreadyStored(store, term) {
  * and getting the order slightly wrong is how a renderer and a bound disagree about what the glossary is.
  *
  * `source_stage != 'extract'` is the line that makes this the **published** rows rather than the
- * extraction's candidates (schema.js's `EXTRACTION_SOURCE_STAGE`). The selection is exactly the one
- * `renderGlossary` has always used — same predicate, same `ORDER BY ord, id` — so factoring it out
- * cannot change a single byte of the published file.
+ * extraction's candidates (schema.js's `EXTRACTION_SOURCE_STAGE`).
  *
- * @param {{db: Object}} store - The volume's open record.
- * @returns {Array<{id: string, term: string, rendering: string, notes: string, section: string|null, establishedVolume: number, ord: number}>}
+ * ## One row per term, and the row that is in force
+ *
+ * A term can now have more than one published row: a later volume files a replacement rather than
+ * editing the row an earlier volume published (a sealed row is never edited), and the replacement
+ * `supersedes` the row it replaces. Printing both would print the argument instead of its outcome, and
+ * it would hand the translation stage two renderings for one term. So a chain of rows linked by
+ * `supersedes` collapses to **one row** — the one in force — with the replaced rows carried beside it as
+ * `superseded`, which is what the render turns into the Notes cell's history line.
+ *
+ * ## "In force at volume V" is bounded by V, and that is not the same as "the newest row"
+ *
+ * The in-force row is the one with the greatest `applies_from_volume` that is **still ≤ V**, not simply
+ * the greatest. The difference is what makes a re-run reproduce the past: a record that has reached
+ * volume 8 and is asked to render volume 3's glossary must print what volume 3 printed, not volume 8's
+ * correction of it. Taking the newest row would silently rewrite volume 3's published decision with a
+ * decision volume 3 never made, and the file would no longer be the answer to "what guidance did this
+ * volume actually get?" — which is the question a per-volume record exists to answer (doc 03 §2.2).
+ *
+ * Rows whose replacement has not happened yet at V are simply not shown at V; they are still in the
+ * record, and they become the in-force row at the volume that filed them. **The same bound applies to a
+ * term's first row**: a term volume 5 introduced is not a term volume 3's glossary contained, so it is not
+ * printed at 3 either. Measured before this was pinned — the first version bounded only the chains, and
+ * rendering volume 1 from a record that had reached volume 2 printed volume 2's brand-new term, which is
+ * the same silent rewrite of the past this bound exists to prevent, arriving through the door written to
+ * stop it.
+ *
+ * A chain is only collapsed when its rows are actually linked by `supersedes`. Two rows that happen to
+ * name the same term and are linked to nothing are two rows, exactly as they were before this rule
+ * existed — the render route refuses to file a second row for a term it already holds, so an unlinked
+ * pair is a record somebody built by hand, and collapsing it would be this query inventing a
+ * supersession nobody filed.
+ *
+ * @param {{db: Object, volume: number}} store - The volume's open record.
+ * @param {{volume?: number}} [opts] - The volume the answer is about. Defaults to the record's own.
+ * @returns {Array<{id: string, term: string, rendering: string, notes: string, section: string|null, establishedVolume: number, appliesFromVolume: number, ownerVolume: number, ord: number, superseded: Array<Object>}>}
+ *   One entry per term. `ord` is where the term sits in the document — the position of its FIRST row,
+ *   so a revised term stays exactly where it was first published. `superseded` is the term's earlier
+ *   rows, oldest first, each carrying the volume its rendering was in force from.
  */
-function publishedGlossaryRowsInRecord(store) {
+function publishedGlossaryRowsInRecord(store, { volume } = {}) {
+  const vol = Number(volume === undefined ? store.volume : volume);
   const rows = store.db
     .prepare(
-      "SELECT id, section, examples, body, established_volume, ord FROM facts " +
+      "SELECT id, section, examples, body, label, established_volume, applies_from_volume, supersedes, ord, owner_volume FROM facts " +
         "WHERE aspect = 'term_usage' AND source_stage != ? ORDER BY ord, id"
     )
     .all(EXTRACTION_SOURCE_STAGE);
-  const out = [];
+
+  /** @type {Map<string, Object>} */
+  const byId = new Map();
   for (const row of rows) {
     let term = "";
     let rendering = "";
@@ -597,17 +645,348 @@ function publishedGlossaryRowsInRecord(store) {
     } catch {
       /* an unparsable examples column renders as an empty term cell, which the diff will show */
     }
-    out.push({
+    byId.set(row.id, {
       id: row.id,
       term,
       rendering,
       notes: row.body,
+      label: row.label === null || row.label === undefined ? null : String(row.label),
       section: row.section === null || row.section === "" ? null : row.section,
       establishedVolume: Number(row.established_volume),
+      appliesFromVolume: Number(row.applies_from_volume),
+      ownerVolume: Number(row.owner_volume),
+      supersedes: row.supersedes === null || row.supersedes === "" ? null : String(row.supersedes),
+      ownOrd: Number(row.ord),
       ord: Number(row.ord),
+      superseded: [],
     });
   }
-  return out;
+
+  // Chains, keyed on the row at the bottom of each `supersedes` link — the row that replaces nothing.
+  /** @type {Map<string, Object[]>} */
+  const chains = new Map();
+  for (const entry of byId.values()) {
+    const visited = new Set([entry.id]);
+    let root = entry;
+    while (root.supersedes && byId.has(root.supersedes) && !visited.has(root.supersedes)) {
+      visited.add(root.supersedes);
+      root = byId.get(root.supersedes);
+    }
+    if (!chains.has(root.id)) chains.set(root.id, []);
+    chains.get(root.id).push(entry);
+  }
+
+  const out = [];
+  for (const chain of chains.values()) {
+    const firstOrd = Math.min(...chain.map((entry) => entry.ownOrd));
+    // The bound is asked of EVERY row, a term's first row included: a chain of one row that this volume
+    // has not reached yet is a term that does not exist at V, and printing it would rewrite V's glossary
+    // with a term V never saw.
+    const inRange = chain.filter((entry) => entry.appliesFromVolume <= vol);
+    if (inRange.length === 0) continue; // every row of this term's chain postdates this volume
+    const ordered = [...inRange].sort(
+      (a, b) => a.appliesFromVolume - b.appliesFromVolume || a.ownOrd - b.ownOrd || a.id.localeCompare(b.id)
+    );
+    const inForce = ordered[ordered.length - 1];
+    out.push({
+      ...inForce,
+      ord: firstOrd,
+      superseded: ordered.slice(0, -1).map((entry) => ({
+        id: entry.id,
+        term: entry.term,
+        rendering: entry.rendering,
+        appliesFromVolume: entry.appliesFromVolume,
+        establishedVolume: entry.establishedVolume,
+        ownerVolume: entry.ownerVolume,
+      })),
+    });
+  }
+  return out.sort((a, b) => a.ord - b.ord || a.id.localeCompare(b.id));
+}
+
+/**
+ * The row this record holds for one term, at one volume — the same identity every other door uses.
+ *
+ * Matched the way `documentTermAlreadyStored` matches it: the first spelling in the row's `examples`,
+ * whitespace-normalised. Two doors that spell "the row for this term" differently is how a revision
+ * lands on the wrong row.
+ *
+ * @param {{db: Object, volume: number}} store - The volume's open record.
+ * @param {string} term - The term, spelled the way the glossary spells it.
+ * @param {number} volume - The volume the answer is about.
+ * @returns {Object|null} The in-force row, or null when the record holds no row for this term.
+ */
+function glossaryRowInForceForTerm(store, term, volume) {
+  const needle = normalizeQuote(term);
+  if (!needle) return null;
+  const rows = publishedGlossaryRowsInRecord(store, { volume });
+  for (const row of rows) {
+    if (normalizeQuote(row.term) === needle) return row;
+  }
+  return null;
+}
+
+/**
+ * Find a quoted line in this volume's own chapter files, and cite where it is.
+ *
+ * The revision door's half of the evidence rule. `findRowEvidence` asks "does this row's term, its
+ * rendering, or a passage its notes quote appear in this volume's text?" — a question about a NEW row.
+ * A revision is asked a narrower and stricter one: **the line the answer quoted is really in this
+ * volume**. A revision justified by the previous glossary's own row is a rendering changed because a
+ * model said so, which is the one thing this store does not accept.
+ *
+ * @param {string} volumeDir
+ * @param {Array<{id: string, file: string}>} chapters
+ * @param {number} volume
+ * @param {string} quote - The line the answer quoted.
+ * @returns {{evidence: Array<Object>|null, matched: string|null, span: string}}
+ */
+function findQuoteEvidence(volumeDir, chapters, volume, quote) {
+  const span = String(quote || "").trim();
+  if (!normalizeQuote(span)) return { evidence: null, matched: null, span };
+  const hit = searchSpans(volumeDir, chapters, volume, [span], "quote");
+  if (!hit) return { evidence: null, matched: null, span };
+  return { evidence: hit.evidence, matched: hit.matched, span };
+}
+
+/**
+ * File one revision: this volume's replacement of a rendering an earlier volume published.
+ *
+ * The order is the door, and every step refuses rather than reports-and-accepts:
+ *
+ *   1. **The term must already be a published row of this record.** A revision is not a way to add a
+ *      term: the `terms` list is that, with its own evidence rule. A revision naming a term the record
+ *      has no row for is refused (`revision-of-unknown-term`).
+ *   2. **The quote must be a line this volume's own text prints.** `findQuoteEvidence` searches this
+ *      volume's chapter files with the store's one matching rule. This is the load-bearing guard: it is
+ *      the only thing standing between "a later volume found evidence in its own book" and "a later
+ *      volume changed a decision because it felt like it". A revision whose quote is not there is
+ *      refused (`revision-quote-not-in-source`), not filed with a warning.
+ *   3. **The replacement is a new row, and the replaced row is never edited or deleted.** The new row
+ *      carries `established_volume = this volume`, `applies_from_volume = this volume` and
+ *      `supersedes = the replaced row`. The replaced row's `status` becomes `superseded` through
+ *      `markSuperseded`, which changes **status only** and refuses unless the replacement row it is
+ *      attributed to already exists. Body, evidence, examples, key and owner of the published row are
+ *      untouched, so the earlier decision survives being replaced — which is what the render's history
+ *      line and the carry-forward guard both need.
+ *   4. **Idempotent per volume, and per rendering this volume already filed.** Re-running the same volume
+ *      over the same text — which the chapter-by-chapter route does once per chapter — files one revision,
+ *      not one per chapter. The test is asked of the whole chain, not only of the row in force: a rendering
+ *      this volume filed and a later chapter of the same volume replaced is still a decision this volume
+ *      made, and re-filing it would flip the term back to a superseded rendering and grow the record by one
+ *      row on every re-run. Measured before this was pinned: the first version compared only the in-force
+ *      row, and re-running one volume over the same five proposals grew the chain from 2 rows to 3 and
+ *      rewrote the term's rendering back to the one the second chapter had replaced.
+ *   5. **The note is the row's own notes cell, and the row seals with its volume.** Nothing here writes
+ *      into the row it replaces.
+ *
+ * Both writes happen in one transaction: a replacement row whose predecessor is still `active` would be
+ * a term with two live renderings, and a `superseded` mark with no replacement row behind it is an
+ * unattributed edit to a published row. Either half alone is a broken record.
+ *
+ * @param {ReferenceStore} store - Opened with a document-scoped handle, which is what a rendered row needs.
+ * @param {Object} entry - One `revisions` element: `{term, rendering, note, quote, reason}`.
+ * @param {{volume?: number}} [opts]
+ * @returns {{ok: boolean, filed: Object|null, replaced: Object|null, alreadyFiled: boolean, evidence: Array<Object>|null, refusal: ReferenceRefusal|null}}
+ */
+function fileGlossaryRevision(store, entry, { volume } = {}) {
+  const vol = Number(volume === undefined ? store.volume : volume);
+  const text = (value) => (typeof value === "string" ? value.trim() : "");
+  const term = text(entry && entry.term);
+  const rendering = text(entry && entry.rendering);
+  const note = text(entry && entry.note);
+  const quote = text(entry && entry.quote);
+  const reason = text(entry && entry.reason);
+
+  const refuse = (rule, because, fix) => ({
+    ok: false,
+    filed: null,
+    replaced: null,
+    alreadyFiled: false,
+    evidence: null,
+    refusal: refusal({ verb: "file_glossary_revision", rule, because, fix }),
+  });
+
+  if (!term) return refuse("revision-has-no-term", "a revision arrived with no term, so there is no row it replaces.", "name the term exactly as the previous glossary spells it.");
+  if (!rendering) {
+    return refuse(
+      "revision-has-no-rendering",
+      `"${term}": a revision with no rendering is a complaint, not a replacement. The published file's middle column is the decision a translator uses, and this read pass is the only place on this route that can supply one.`,
+      "the `revisions` element owes a `rendering`."
+    );
+  }
+
+  // 1 — the term must already be published content of this record.
+  const current = glossaryRowInForceForTerm(store, term, vol);
+  if (!current) {
+    return refuse(
+      "revision-of-unknown-term",
+      `"${term}" is not a term this record's glossary holds, so there is nothing for this revision to replace. A term this volume found belongs in \`terms\`.` +
+        (normalizeQuote(term) === normalizeQuote(rendering) ? " (the term and its rendering are the same string, which is usually the sign of a term the answer invented.)" : ""),
+      "file it as a new term, or spell it the way the previous glossary spells it."
+    );
+  }
+
+  // 4 — asked before the quote search, so a volume that already settled this term does not pay for the
+  // search again per chapter. The whole chain is asked, not only the row in force: a rendering this volume
+  // filed and a later chapter of the same volume replaced is still a decision this volume made, and
+  // re-filing it would flip the term back and grow the chain on every re-run.
+  const settled = [current, ...(Array.isArray(current.superseded) ? current.superseded : [])].find(
+    (row) => Number(row.ownerVolume) === vol && normalizeQuote(row.rendering) === normalizeQuote(rendering)
+  );
+  if (settled) {
+    return { ok: true, filed: settled, replaced: null, alreadyFiled: true, evidence: null, refusal: null };
+  }
+
+  // 2 — the quote has to be in THIS volume's book.
+  const listed = store.listChapters();
+  const found = findQuoteEvidence(store.volumeDir, listed.chapters, vol, quote);
+  if (!found.evidence) {
+    return refuse(
+      "revision-quote-not-in-source",
+      `"${term}": the revision quotes ${quote ? `"${quote}"` : "nothing"}, and no line of volume ${vol}'s source text contains it. ` +
+        "A later volume may replace an earlier volume's rendering when its own book shows the earlier one is wrong; it may not replace one on the " +
+        "strength of the previous glossary's own row.",
+      "quote the line you actually read in this volume, character for character."
+    );
+  }
+
+  // 3 — file the replacement, then mark the replaced row superseded. One transaction, because either
+  // half alone is a record with a term in two states at once.
+  let inserted = null;
+  store.db.exec("BEGIN");
+  try {
+    inserted = store.insertFact({
+      key: null,
+      aspect: "term_usage",
+      label: current.label,
+      section: current.section,
+      body: note || reason || rendering,
+      examples: [current.term, rendering],
+      evidence: found.evidence,
+      establishedVolume: vol,
+      appliesFromVolume: vol,
+      supersedes: current.id,
+    });
+    if (!inserted.ok) {
+      store.db.exec("ROLLBACK");
+      return refuse(
+        inserted.refusal ? inserted.refusal.rule : "insert refused",
+        inserted.refusal ? inserted.refusal.because : `the replacement row for "${term}" could not be filed.`,
+        "the record's own insert contract is the fix."
+      );
+    }
+    const marked = markSuperseded(store, current.id, { byVolume: vol, byStage: store.scope.stage });
+    if (!marked.ok) {
+      store.db.exec("ROLLBACK");
+      return refuse(
+        marked.refusal.rule,
+        marked.refusal.because,
+        marked.refusal.fix
+      );
+    }
+    store.db.exec("COMMIT");
+  } catch (err) {
+    store.db.exec("ROLLBACK");
+    throw err;
+  }
+
+  return {
+    ok: true,
+    filed: inserted.fact,
+    replaced: { id: current.id, term: current.term, rendering: current.rendering, appliesFromVolume: current.appliesFromVolume },
+    alreadyFiled: false,
+    evidence: found.evidence,
+    refusal: null,
+  };
+}
+
+/**
+ * File this volume's revisions into its record, and report every one — filed and refused.
+ *
+ * The batch half of {@link fileGlossaryRevision}, and the door the glossary stage calls. It never
+ * throws on a refusal: a read pass that proposed three revisions and got one refused has still made
+ * two correct decisions, and a door that threw would throw all three away and leave the volume with
+ * none. What it does instead is hand back the refusals with the rule that produced each one, because
+ * `glossary/store.js` prints them in the report the acceptance grader reads.
+ *
+ * @param {ReferenceStore} store - Opened with a document-scoped handle.
+ * @param {Array<Object>} entries - The answer's `revisions` array.
+ * @param {{volume?: number}} [opts]
+ * @returns {{ok: boolean, filed: Array<Object>, replaced: Array<Object>, alreadyFiled: Array<string>, refused: Array<{term: string, rendering: string, quote: string, reason: string, rule: string, because: string}>}}
+ */
+function importGlossaryRevisions(store, entries, { volume } = {}) {
+  const vol = Number(volume === undefined ? store.volume : volume);
+  const filed = [];
+  const replaced = [];
+  const alreadyFiled = [];
+  const refused = [];
+
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const result = fileGlossaryRevision(store, entry, { volume: vol });
+    if (result.ok) {
+      if (result.alreadyFiled) {
+        alreadyFiled.push(String((entry && entry.term) || "").trim());
+        continue;
+      }
+      filed.push(result.filed);
+      replaced.push(result.replaced);
+      continue;
+    }
+    refused.push({
+      term: String((entry && entry.term) || "").trim(),
+      rendering: String((entry && entry.rendering) || "").trim(),
+      quote: String((entry && entry.quote) || "").trim(),
+      reason: String((entry && entry.reason) || "").trim(),
+      rule: result.refusal.rule,
+      because: result.refusal.because,
+    });
+  }
+
+  return { ok: refused.length === 0, filed, replaced, alreadyFiled, refused };
+}
+
+/**
+ * The text one superseded rendering becomes inside its term's Notes cell.
+ *
+ * No pipes, and the volume the old rendering was in force from is part of the sentence rather than a
+ * footnote: "the glossary used to say X" without "…from volume 3 to volume 10" is the kind of history a
+ * reader cannot act on, and a translator who is re-reading volume 4 needs to know the older rendering was
+ * the law *for their volume*.
+ *
+ * @param {{rendering: string, appliesFromVolume: number}} superseded - One replaced row.
+ * @returns {string} e.g. `Earlier rendering: "Agassi of the madam world" (in force from volume 3)`
+ */
+function revisionHistoryFragment(superseded) {
+  return `Earlier rendering: "${String(superseded.rendering || "").trim()}" (in force from volume ${superseded.appliesFromVolume})`;
+}
+
+/**
+ * Merge a term's superseded renderings into its row's Notes cell.
+ *
+ * Render-time only, and idempotent — the same rule `mergeResearchNotes` runs, for the same reason: a
+ * published file can be read back into a record (`ensureVolumeGlossaryInRecord`), and a renderer that
+ * appended blindly would stack a second copy of the same history on the next render.
+ *
+ * A superseded row whose rendering is the SAME string the term is rendered with now is skipped. That
+ * happens when a revision changed the note and not the rendering, and printing "Earlier rendering: the
+ * same words" would be the file claiming a change it did not make.
+ *
+ * @param {string} body - The row's own notes cell, as the record holds it.
+ * @param {Array<Object>} superseded - The term's replaced rows, oldest first.
+ * @param {{rendering?: string}} [opts] - The rendering the term is printed with, for the same-string test.
+ * @returns {string} The cell to print.
+ */
+function mergeRevisionHistory(body, superseded, { rendering } = {}) {
+  const live = normalizeQuote(rendering);
+  let cell = String(body || "").trim();
+  for (const row of Array.isArray(superseded) ? superseded : []) {
+    if (live && normalizeQuote(row.rendering) === live) continue;
+    const fragment = revisionHistoryFragment(row);
+    if (cell.includes(fragment)) continue;
+    cell = cell ? `${cell}; ${fragment}` : fragment;
+  }
+  return cell;
 }
 
 /**
@@ -616,7 +995,15 @@ function publishedGlossaryRowsInRecord(store) {
  * Deterministic by construction: the document's own prose first, exactly as it was stored;
  * then sections in the order their first row was inserted, rows in insertion order, cells
  * escaped the same way every time. Two runs over the same rows are byte-identical (slice 4's
- * second criterion).
+ * second criterion) — including the history line, because it is built from stored columns
+ * (`applies_from_volume`, `rendering`) in stored order, not from anything remembered at render time.
+ *
+ * One row per term, and the row that is **in force at this volume** (see
+ * {@link publishedGlossaryRowsInRecord}). What a superseded rendering does is move into the term's Notes
+ * cell as `Earlier rendering: "…" (in force from volume N)` — the file keeps the decision this volume
+ * made and says out loud what it replaced and from which volume, and the term's own row in the table
+ * stays one row, which is what keeps the cumulative gate matching it as carried and keeps the
+ * translation stage's terminology law free of two answers to one term.
  *
  * @param {ReferenceStore} store
  * @param {{volume?: number, title?: string}} [opts] - `title` is only used when the store holds
@@ -625,7 +1012,7 @@ function publishedGlossaryRowsInRecord(store) {
  */
 function renderGlossary(store, { volume, title = GLOSSARY_TITLE } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
-  const rows = publishedGlossaryRowsInRecord(store);
+  const rows = publishedGlossaryRowsInRecord(store, { volume: vol });
   // What research returned for a term, looked up once per term rather than once per row. The merge is a
   // render-time join only: the row's own `body` in the record is never rewritten, because a published row
   // is not edited (AGENTS.md rule 5) and because a note folded into the body would come back through the
@@ -654,7 +1041,11 @@ function renderGlossary(store, { volume, title = GLOSSARY_TITLE } = {}) {
     if (!sections.has(section)) sections.set(section, { ord: row.ord, items: [] });
     const term = row.term;
     const rendering = row.rendering;
-    const notes = mergeResearchNotes(row.notes, notesByTerm.get(normalizeQuote(term)) || []);
+    // The row's own notes, then the renderings this term used to carry, then what research returned.
+    // Both extra halves are render-time joins for the same reason: a published row is never edited, so
+    // the history of a term and the notes filed against its term live in their own rows and meet here.
+    const withHistory = mergeRevisionHistory(row.notes, row.superseded, { rendering });
+    const notes = mergeResearchNotes(withHistory, notesByTerm.get(normalizeQuote(term)) || []);
     sections.get(section).items.push({ term, rendering, notes });
   }
 
@@ -688,7 +1079,6 @@ function renderGlossary(store, { volume, title = GLOSSARY_TITLE } = {}) {
     }
     out.push("");
   }
-  void vol;
   return out.join("\n").replace(/\n+$/, "") + "\n";
 }
 
@@ -883,12 +1273,18 @@ module.exports = {
   parseGlossaryMarkdown,
   noteQuotedSpans,
   findRowEvidence,
+  findQuoteEvidence,
   barePronounTokensIn,
   firstPersonAliasDeclarations,
   importGlossary,
   glossaryRowFromExtraction,
   importGlossaryExtraction,
+  glossaryRowInForceForTerm,
   publishedGlossaryRowsInRecord,
+  fileGlossaryRevision,
+  importGlossaryRevisions,
+  revisionHistoryFragment,
+  mergeRevisionHistory,
   renderGlossary,
   escapeCell,
 };

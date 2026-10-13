@@ -12,6 +12,18 @@
 const { countOccurrences } = require("./qa");
 
 /**
+ * The wording a superseded rendering arrives in, inside a term's Notes cell.
+ *
+ * `utils/reference-store/glossary-adapter.js`'s `revisionHistoryFragment` writes it. This is the reader's
+ * copy, and `test/test-glossary-revisions.js` fails if the two ever disagree — because the whole point of
+ * the history line is that it must never be mistaken for a rendering, and a reader that guesses at the
+ * wording is a reader that stops working the day the wording changes.
+ *
+ * @type {string}
+ */
+const GLOSSARY_HISTORY_PREFIX = "Earlier rendering:";
+
+/**
  * Parse source-language terms AND their canonical target renderings out of
  * a glossary Markdown file (column 1 = the source term, column 2 = the
  * canonical rendering; see {@link parseGlossaryRows} for the row handling).
@@ -22,13 +34,30 @@ const { countOccurrences } = require("./qa");
  * that the glossary is incomplete instead of quietly translating without the
  * term.
  *
+ * **One pair per term, and the pair is the one the glossary is in force with.** The rendered file holds
+ * one row per term by construction: when a later volume replaces a rendering, the render prints the
+ * replacement and moves the replaced one into the Notes cell as `Earlier rendering: "…" (in force from
+ * volume N)`. Two things follow, and both are guards rather than observations:
+ *
+ *   - **a Notes cell is never a rendering.** The columns are read positionally, so the history line
+ *     cannot become a term→rendering pair by being in the wrong column of the reader's eye. And a row
+ *     whose *rendering* column opens with the history prefix is refused as malformed rather than used —
+ *     that is the shape a hand-edited file produces when somebody pastes the history into the wrong cell,
+ *     and reading it would put a superseded rendering back into the terminology law.
+ *   - **a file that names one term twice yields one pair.** The first row in file order wins, because
+ *     that is the order the render itself uses, and every later row for the same term is reported through
+ *     `onDuplicate` rather than silently chosen. A translation prompt that carries two renderings for one
+ *     term is a prompt that instructs the translator to contradict itself.
+ *
  * @param {string} markdown - The glossary file content.
- * @param {{onMalformed?: (entry: {term: string, section: string, reason: string}) => void}} [opts]
+ * @param {{onMalformed?: (entry: {term: string, section: string, reason: string}) => void, onDuplicate?: (entry: {term: string, rendering: string, section: string, kept: string}) => void}} [opts]
  * @returns {Array<{term: string, rendering: string, section: string}>}
  *   One entry per usable term row, in file order.
  */
-function parseGlossaryTerms(markdown, { onMalformed } = {}) {
+function parseGlossaryTerms(markdown, { onMalformed, onDuplicate } = {}) {
   const entries = [];
+  /** @type {Map<string, {rendering: string, section: string}>} */
+  const kept = new Map();
   for (const { cells, section } of parseGlossaryRows(markdown)) {
     const term = cells[0] || "";
     const rendering = cells.length > 1 ? cells[1] : "";
@@ -46,6 +75,27 @@ function parseGlossaryTerms(markdown, { onMalformed } = {}) {
       }
       continue;
     }
+    if (rendering.startsWith(GLOSSARY_HISTORY_PREFIX)) {
+      if (typeof onMalformed === "function") {
+        onMalformed({
+          term,
+          section,
+          reason:
+            "rendering column holds a superseded rendering's history line, not a rendering — the history " +
+            "belongs in the Notes column, and reading it here would make the terminology law use the " +
+            "rendering this glossary replaced",
+        });
+      }
+      continue;
+    }
+    const already = kept.get(term);
+    if (already) {
+      if (typeof onDuplicate === "function") {
+        onDuplicate({ term, rendering, section, kept: already.rendering });
+      }
+      continue;
+    }
+    kept.set(term, { rendering, section });
     entries.push({ term, rendering, section });
   }
   return entries;
@@ -258,6 +308,7 @@ module.exports = {
   cleanTableCell,
   splitTableRow,
   parseGlossaryRows,
+  GLOSSARY_HISTORY_PREFIX,
   glossaryBlockMaxChars,
   selectTermsForChapter,
   extractStyleRules,

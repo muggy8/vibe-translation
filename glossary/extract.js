@@ -53,8 +53,11 @@ const {
 // yield is model variance (gotcha 122).
 //
 // `strict: true` + `additionalProperties: false` is the combination the four acceptance graders already
-// send to this endpoint successfully, and this prompt names exactly five keys and its own example produces
-// exactly those five, so the closed shape is describing the contract rather than guessing at one. The voice
+// send to this endpoint successfully, and this prompt names exactly five keys per term and five per
+// revision and its own examples produce exactly those — so the closed shape is describing the contract
+// rather than guessing at one. Strict mode is also why BOTH lists sit in the root `required` array: a
+// property declared outside `required` is a schema a strict server may refuse, so the request asks for
+// both lists and {@link parseTermAnswer} is what tolerates an answer that carries only one. The voice
 // stage's shape is deliberately NOT closed, for the reason recorded in `character-voice/stages.js`.
 //
 // What this read pass ALSO has, and what actually fixed the defect before the envelope existed:
@@ -64,12 +67,23 @@ const {
 /**
  * The `response_format` the term-list call asks this endpoint for.
  *
- * An object root holding the term array, because this endpoint refuses a JSON Schema whose root is an
- * array before it generates. The five properties are the five keys
- * `system-prompts/glossary-terms.md` names, and the prompt's own example produces exactly those five —
- * which is what makes `additionalProperties: false` a description of the contract rather than a guess at
- * one. `rendering` is required because the read pass is the only place on this route that can supply one,
- * and the filing door refuses a row without it.
+ * An object root holding TWO arrays: `terms` (the new rows) and `revisions` (this volume's answer to a
+ * row an earlier volume already published). An object root because this endpoint refuses a JSON Schema
+ * whose root is an array before it generates. Every property of every item is in its `required` list
+ * because `strict: true` is a promise the schema is closed — a property declared outside `required`
+ * under strict mode is a schema the server may refuse, and this endpoint already refuses one bad root
+ * with HTTP 400 and 0 tokens (gotcha 138). That is why `revisions` is required on the WIRE while
+ * {@link parseTermAnswer} still reads an answer that omits it: asking for both lists and tolerating one
+ * is the reader's job, not the request's.
+ *
+ * The five `terms` properties are the five keys `system-prompts/glossary-terms.md` names, and the
+ * prompt's own example produces exactly those five — which is what makes `additionalProperties: false`
+ * a description of the contract rather than a guess at one. `rendering` is required because the read
+ * pass is the only place on this route that can supply one, and the filing door refuses a row without
+ * it. The five `revisions` properties are the five the prompt's revision block names, and `quote` is
+ * among them because a revision without a line this volume's own text prints is refused at the filing
+ * door (`utils/reference-store/glossary-adapter.js`), so asking for it is what makes the refusal rare
+ * rather than automatic.
  *
  * @returns {{type: "json_schema", json_schema: {name: string, strict: boolean, schema: Object}}}
  */
@@ -97,8 +111,23 @@ function termsResponseFormat() {
               additionalProperties: false,
             },
           },
+          revisions: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                term: { type: "string" },
+                rendering: { type: "string" },
+                note: { type: "string" },
+                quote: { type: "string" },
+                reason: { type: "string" },
+              },
+              required: ["term", "rendering", "note", "quote", "reason"],
+              additionalProperties: false,
+            },
+          },
         },
-        required: ["terms"],
+        required: ["terms", "revisions"],
         additionalProperties: false,
       },
     },
@@ -106,17 +135,18 @@ function termsResponseFormat() {
 }
 
 /**
- * Pull the term array out of the answer, in whichever of the two forms it arrived.
+ * Pull the answer value out of the reply, in whichever of the forms it arrived.
  *
- * The envelope (`{"terms": […]}`) is what the request asks for and what the prompt now asks the model to
- * write. The bare array is still read, because a server that ignores `response_format` answers in the form
- * its prompt used to ask for, and a stage that can read both is a stage that does not break when the
- * endpoint changes. Tolerance is the reader's job; the request always asks for the envelope.
+ * The envelope (`{"terms": […], "revisions": […]}`) is what the request asks for and what the prompt now
+ * asks the model to write. The bare array is still read, because a server that ignores `response_format`
+ * answers in the form its prompt used to ask for, and a stage that can read both is a stage that does not
+ * break when the endpoint changes. Tolerance is the reader's job; the request always asks for the envelope.
  *
  * @param {string} text - The answer, already fence-stripped.
- * @returns {Array<Object>|null} The entries, or null when this answer holds no term array at all.
+ * @returns {Array<Object>|Object|null} The parsed value — the envelope object or the bare array — or null
+ *   when this answer holds no term list in either form.
  */
-function termArrayFromAnswer(text) {
+function answerValueFromText(text) {
   /**
    * Parse one candidate span, or return undefined when it is not JSON.
    * @param {string} span
@@ -132,38 +162,84 @@ function termArrayFromAnswer(text) {
   /**
    * Is this value an answer — a bare array, or an object holding a `terms` array?
    * @param {Object} value
-   * @returns {Array<Object>|null}
+   * @returns {Array<Object>|Object|null}
    */
-  const asList = (value) => {
+  const asAnswer = (value) => {
     if (Array.isArray(value)) return value;
-    if (value && typeof value === "object" && Array.isArray(value.terms)) return value.terms;
+    if (value && typeof value === "object" && Array.isArray(value.terms)) return value;
     return null;
   };
 
   const whole = tryJson(text);
   if (whole !== undefined) {
-    const list = asList(whole);
-    if (list) return list;
+    const answer = asAnswer(whole);
+    if (answer) return answer;
   }
   const objStart = text.indexOf("{");
   const objEnd = text.lastIndexOf("}");
   if (objStart !== -1 && objEnd > objStart) {
-    const list = asList(tryJson(text.slice(objStart, objEnd + 1)));
-    if (list) return list;
+    const answer = asAnswer(tryJson(text.slice(objStart, objEnd + 1)));
+    if (answer) return answer;
   }
   const arrStart = text.indexOf("[");
   const arrEnd = text.lastIndexOf("]");
   if (arrStart !== -1 && arrEnd > arrStart) {
-    const list = asList(tryJson(text.slice(arrStart, arrEnd + 1)));
-    if (list) return list;
+    const answer = asAnswer(tryJson(text.slice(arrStart, arrEnd + 1)));
+    if (answer) return answer;
   }
   return null;
 }
 
 /**
- * Parse the AI's term-list output into the rows the record files.
- * Tolerates markdown fences, surrounding prose, the `{"terms": […]}` envelope the request asks for, and
- * the bare JSON array a server that ignores `response_format` still answers in.
+ * Pull the term array out of the answer, in whichever of the two forms it arrived.
+ *
+ * Kept as its own name because it is what {@link parseTerms} and the prompt audit both reach for, and
+ * because "the terms this volume found" is a question a caller asks without wanting the revisions.
+ *
+ * @param {string} text - The answer, already fence-stripped.
+ * @returns {Array<Object>|null} The entries, or null when this answer holds no term array at all.
+ */
+function termArrayFromAnswer(text) {
+  const answer = answerValueFromText(text);
+  if (!answer) return null;
+  return Array.isArray(answer) ? answer : answer.terms;
+}
+
+/**
+ * One `revisions` element, in the shape the filing door takes.
+ *
+ * `quote` and `reason` are kept as separate fields rather than folded into `note`, because they answer
+ * two different questions the record asks separately: **where in this volume's text** the revision comes
+ * from (the evidence rule checks that against the book), and **why** the earlier rendering is being
+ * replaced (the note is what the published glossary prints). A door that read the reason as the quote
+ * would file a justification as evidence, which is the shape of claim this store refuses.
+ *
+ * @param {Object} entry - One element of the answer's `revisions` array.
+ * @returns {{term: string, rendering: string, note: string, quote: string, reason: string}|null}
+ *   Null when the entry names no term at all.
+ */
+function revisionFromAnswer(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const term = typeof entry.term === "string" ? entry.term.trim() : "";
+  if (!term) return null;
+  const text = (value) => (typeof value === "string" ? value.trim() : "");
+  return {
+    term,
+    rendering: text(entry.rendering),
+    note: text(entry.note),
+    quote: text(entry.quote),
+    reason: text(entry.reason),
+  };
+}
+
+/**
+ * Parse the AI's term-list output into the two lists it carries.
+ *
+ * Tolerates markdown fences, surrounding prose, the `{"terms": […], "revisions": […]}` envelope the
+ * request asks for, and the bare JSON array a server that ignores `response_format` still answers in.
+ * A bare array carries no revisions, and an envelope missing the `revisions` key carries none — both are
+ * read, because the request asking for a list and the answer omitting it are different facts and the
+ * stage must not lose the terms over the difference.
  *
  * The answer carries the target‑language rendering and the one‑line note, because on this route the
  * read pass is the ONLY place a rendering is chosen — the file is rendered from the record afterwards
@@ -171,27 +247,36 @@ function termArrayFromAnswer(text) {
  * are still read: `section` is the preferred bucket and `type` is the fallback the older answers and
  * the offline fixture still use.
  *
+ * `revisions` is this volume's answer about a row an EARLIER volume published. It is parsed here and
+ * filed by a different door (`importGlossaryRevisions`), because it is a different act: it replaces a
+ * published row rather than adding one, and the guard that makes that legal — a quote this volume's own
+ * text prints — is not the guard that admits a new term.
+ *
  * @param {string} output - The raw AI output.
- * @returns {Array<{term: string, rendering: string, note: string, section: string, type: string, query: string}>}
+ * @returns {{terms: Array<{term: string, rendering: string, note: string, section: string, type: string, query: string}>, revisions: Array<{term: string, rendering: string, note: string, quote: string, reason: string}>}}
  * @throws {Error} When the answer holds no array of terms in either form.
  */
-function parseTerms(output) {
+function parseTermAnswer(output) {
   if (!output || typeof output !== "string") {
-    return [];
+    return { terms: [], revisions: [] };
   }
   let text = output.trim();
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenceMatch) {
     text = fenceMatch[1].trim();
   }
-  const parsed = termArrayFromAnswer(text);
-  if (parsed === null) {
+  const answer = answerValueFromText(text);
+  if (answer === null) {
     throw new Error(
       "No JSON array found in the term-list output: the answer is neither a JSON array nor an object " +
         'holding a "terms" array.'
     );
   }
-  return parsed
+  const rawTerms = Array.isArray(answer) ? answer : answer.terms;
+  // An envelope that omits `revisions` is an answer with no revisions, not a malformed answer. The
+  // request asks for both lists; a server that answers one is answered.
+  const rawRevisions = Array.isArray(answer) ? [] : answer.revisions;
+  const terms = rawTerms
     .filter((entry) => entry && typeof entry.term === "string" && entry.term.trim() !== "")
     .map((entry) => ({
       term: entry.term.trim(),
@@ -201,6 +286,27 @@ function parseTerms(output) {
       type: typeof entry.type === "string" && entry.type.trim() !== "" ? entry.type.trim() : "concept",
       query: typeof entry.query === "string" && entry.query.trim() !== "" ? entry.query.trim() : entry.term.trim(),
     }));
+  const revisions = [];
+  for (const entry of Array.isArray(rawRevisions) ? rawRevisions : []) {
+    const revision = revisionFromAnswer(entry);
+    if (revision) revisions.push(revision);
+  }
+  return { terms, revisions };
+}
+
+/**
+ * Parse the AI's term-list output into the rows the record files.
+ *
+ * The terms half of {@link parseTermAnswer}, kept as its own name because it is what every existing
+ * caller and the offline tests reach for, and because "what terms did this volume find" is a question
+ * that does not want the revisions with it.
+ *
+ * @param {string} output - The raw AI output.
+ * @returns {Array<{term: string, rendering: string, note: string, section: string, type: string, query: string}>}
+ * @throws {Error} When the answer holds no array of terms in either form.
+ */
+function parseTerms(output) {
+  return parseTermAnswer(output).terms;
 }
 
 
@@ -288,23 +394,27 @@ function classifyExtractionFailure(err) {
  * @param {(attempt: {attempt: number, thinkingLevel: string|null}) => Promise<string>} params.ask - Runs the one-shot for one paid read.
  * @param {string} params.label - What the log lines call this read.
  * @param {(line: string) => void} [params.warn] - Where the retry is announced.
- * @returns {Promise<{terms: Array<Object>, attempts: Array<Object>, failed: boolean, failure: {kind: string, because: string}|null}>}
+ * @returns {Promise<{terms: Array<Object>, revisions: Array<Object>, attempts: Array<Object>, failed: boolean, failure: {kind: string, because: string}|null}>}
  * @throws {Error} Re-throws a size failure (`ran-out-mid-shape`) unchanged, which is what the stage did before this file existed.
  */
 async function readTermList({ ask, label, warn = console.warn }) {
   /** @type {Array<Object>} */
   const attempts = [];
-  /** @type {{terms: Array<Object>, failure: {kind: string, because: string}}|null} */
+  /** @type {{terms: Array<Object>, revisions: Array<Object>, failure: {kind: string, because: string}}|null} */
   let lastFailure = null;
 
   for (let attempt = 1; attempt <= EXTRACTION_MAX_ATTEMPTS; attempt++) {
     const thinkingLevel = attempt === 1 ? null : EXTRACTION_RETRY_THINKING_LEVEL;
     /** @type {Array<Object>} */
     let terms = [];
+    /** @type {Array<Object>} */
+    let revisions = [];
     /** @type {{kind: string, because: string}|null} */
     let failure = null;
     try {
-      terms = parseTerms(await ask({ attempt, thinkingLevel }));
+      const answer = parseTermAnswer(await ask({ attempt, thinkingLevel }));
+      terms = answer.terms;
+      revisions = answer.revisions;
     } catch (err) {
       const kind = classifyExtractionFailure(err);
       if (kind === "ran-out-mid-shape") {
@@ -317,10 +427,11 @@ async function readTermList({ ask, label, warn = console.warn }) {
       attempt,
       thinkingLevel: thinkingLevel || "run default",
       terms: terms.length,
+      revisions: revisions.length,
       failure,
     });
-    if (!failure) return { terms, attempts, failed: false, failure: null };
-    lastFailure = failure;
+    if (!failure) return { terms, revisions, attempts, failed: false, failure: null };
+    lastFailure = { terms, revisions, failure };
     if (attempt < EXTRACTION_MAX_ATTEMPTS) {
       warn(
         `${label}: the term list ${failure.kind === "shape-refused" ? "was refused by the endpoint (it could not answer in the shape it was asked for)" : "arrived in a shape this stage cannot parse"} — re-asking once at ${EXTRACTION_RETRY_THINKING_LEVEL}.`
@@ -332,7 +443,13 @@ async function readTermList({ ask, label, warn = console.warn }) {
     `${label}: NO term list after ${EXTRACTION_MAX_ATTEMPTS} paid read(s) (${attempts.map((a) => `${a.thinkingLevel}: ${a.failure.kind}`).join("; ")}). ` +
       `Whatever this read was supposed to find is missing, and that is not the same as finding nothing.`
   );
-  return { terms: [], attempts, failed: true, failure: lastFailure };
+  return {
+    terms: [],
+    revisions: lastFailure ? lastFailure.revisions : [],
+    attempts,
+    failed: true,
+    failure: lastFailure ? lastFailure.failure : null,
+  };
 }
 
 /**
@@ -699,6 +816,8 @@ function truncationNote({ total, kept, relevantTotal, relevantShown, dropped, dr
 
 module.exports = {
   parseTerms,
+  parseTermAnswer,
+  revisionFromAnswer,
   termsResponseFormat,
   EXTRACTION_MAX_ATTEMPTS,
   EXTRACTION_RETRY_THINKING_LEVEL,

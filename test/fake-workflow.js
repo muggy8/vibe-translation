@@ -311,7 +311,60 @@ function newTermsForVolume(installment) {
   return TERMS.filter((t) => t.volumes.includes(installment) && !previous.has(t.term));
 }
 
+/**
+ * The revisions this volume's scripted answer proposes.
+ *
+ * Both the accepted one and the planted defect are returned: the door decides which lands, and a fixture
+ * that pre-filtered the bad one would test the door's happy path only.
+ *
+ * @param {string} installment
+ * @returns {Array<Object>}
+ */
+function revisionsForVolume(installment) {
+  return REVISIONS.filter((r) => r.volumes.includes(installment));
+}
+
 const stripWhitespace = (text) => String(text || "").replace(/\s+/g, "");
+
+/**
+ * The renderings a later volume REPLACES, and the one the fixture plants so the refusal is proven.
+ *
+ * The first is the real thing: volume 02's text treats 禁忌の書 as a specific book the characters can
+ * point at, so the article belongs to the name from volume 02 on. Its `quote` is a line volume 02's own
+ * source text prints, which is the guard the revision door exists to enforce.
+ *
+ * The second is a deliberate defect. Its quote is volume 01's line with one word changed — 三つ where the
+ * book says 二つ — so it is a line **no volume prints**, and it is refused with
+ * `revision-quote-not-in-source`. It is in the fixture because the accepted half alone would only prove
+ * that a revision lands; the loop has to prove that a revision justified by something the volume does not
+ * contain does not.
+ *
+ * The new rendering is chosen so the fixture's own scripted texts stay true: "the Forbidden Book" is a
+ * substring of the sentence volume 02's draft and polished text already contain, so the translation
+ * stage's deterministic QA still finds the glossary's rendering in the text it grades, and the superseded
+ * "Forbidden Book" is still findable too.
+ */
+const REVISIONS = [
+  {
+    term: "禁忌の書",
+    rendering: "the Forbidden Book",
+    note: "Volume 02 treats it as the specific book somebody wrote, not a shelf label.",
+    quote: "禁忌の書を書いていたのは、十年前にこの学園にいた誰かだった。",
+    reason: "Volume 02 names an author for it, so the name carries the article from this volume on.",
+    volumes: ["02"],
+  },
+  {
+    term: "屋上",
+    rendering: "the roof of the old building",
+    note: "A wider rendering, justified by a line about the chairs.",
+    quote: "屋上には古い椅子が三つあった。",
+    reason: "The chairs on the roof are described in more detail later in the series.",
+    volumes: ["02"],
+    // The fixture's planted defect: this quote is volume 01's line with 三つ where the book says 二つ,
+    // so it is in no volume's text and the door must refuse it.
+    expectRefused: "revision-quote-not-in-source",
+  },
+];
 
 /**
  * Which volume a piece of prompt text is working on, by finding the volume's own
@@ -608,6 +661,36 @@ function selfCheck() {
       if (!src.includes(term.term)) continue;
       push(volume.installment, `glossary rendering: ${term.term}`, draft.includes(term.rendering) && polished.includes(term.rendering), `"${term.rendering}" in the draft and the polished text`);
     }
+    // The scripted revisions have to satisfy the door's own two premises, or the loop proves nothing:
+    // the accepted one quotes a line THIS volume prints, and the planted defect quotes one it does not.
+    const index = VOLUMES.findIndex((v) => v.installment === volume.installment);
+    const previousTerms = index > 0 ? termsForVolume(VOLUMES[index - 1].installment) : [];
+    for (const revision of revisionsForVolume(volume.installment)) {
+      const quotedHere = src.split("\n").some((line) => line.includes(revision.quote));
+      const wantsRefusal = Boolean(revision.expectRefused);
+      push(
+        volume.installment,
+        `revision quote: ${revision.term}`,
+        quotedHere !== wantsRefusal,
+        wantsRefusal
+          ? `the planted defect must NOT be findable in volume ${volume.installment}'s text (it is ${revision.quote ? `"${revision.quote}"` : "empty"})`
+          : `the revision quotes a line volume ${volume.installment}'s own text prints: ${revision.quote}`
+      );
+      push(
+        volume.installment,
+        `revision of a published term: ${revision.term}`,
+        previousTerms.some((t) => t.term === revision.term),
+        `a revision replaces a rendering an earlier volume published; "${revision.term}" is in volume ${index > 0 ? VOLUMES[index - 1].installment : "—"}'s terms`
+      );
+      if (!wantsRefusal) {
+        push(
+          volume.installment,
+          `revision rendering survives the draft: ${revision.term}`,
+          draft.includes(revision.rendering) && polished.includes(revision.rendering),
+          `"${revision.rendering}" must still be findable in volume ${volume.installment}'s draft and polished text, or the translation QA reports the glossary's own rendering as missing`
+        );
+      }
+    }
   }
   return out;
 }
@@ -719,6 +802,7 @@ function answer(req, ctx) {
   switch (kind) {
     case "glossary-extract": {
       const terms = newTermsForVolume(vol.installment);
+      const revisions = revisionsForVolume(vol.installment);
       return {
         text: JSON.stringify(
           {
@@ -728,6 +812,13 @@ function answer(req, ctx) {
               note: t.note,
               type: t.type,
               query: `${SERIES.alt} ${t.rendering}`,
+            })),
+            revisions: revisions.map((r) => ({
+              term: r.term,
+              rendering: r.rendering,
+              note: r.note,
+              quote: r.quote,
+              reason: r.reason,
             })),
           },
           null,
@@ -978,6 +1069,7 @@ function writeFixtureSources(seriesDir) {
 module.exports = {
   SERIES,
   TERMS,
+  REVISIONS,
   VOLUMES,
   ACCEPTANCE_SCORES,
   VERIFY_SCORES,
@@ -995,6 +1087,7 @@ module.exports = {
   fixedTextOf,
   termsForVolume,
   newTermsForVolume,
+  revisionsForVolume,
   volumeForText,
   stripWhitespace,
   glossaryMarkdown,
