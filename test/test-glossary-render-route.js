@@ -13,7 +13,7 @@
  *
  *   1. **The stage has no author, validator or feedback agent.** Read off the module layer: no
  *      `glossary-author` / `glossary-validator` / `glossary-feedback` kind survives anywhere in the
- *      stage, the only agent handle it opens is the research reader, and the file is written by
+ *      stage, it opens no agent handle at all, and the file is written by
  *      `renderGlossaryArtifact` in both routes.
  *   2. **The render is the same bytes in a fresh process.** Two child processes render the same
  *      fixture record and produce the same sha256. A renderer whose order came from whatever SQLite
@@ -135,12 +135,12 @@ function openThroughTheStage(fx, index) {
 // ─── Scenario 1 ───────────────────────────────────────────────────────────────
 
 /**
- * The author agent, the whole-document validator agent and the feedback agent are gone from the
- * stage's own code, and the file is written by the render in both routes.
+ * The author agent, the whole-document validator agent, the feedback agent and the per-term research agent
+ * are gone from the stage's own code, and the file is written by the render in both routes.
  *
- * This is a source-text pin, and it is the narrowest honest form of "the agent is deleted": the kinds
- * do not exist, no agent handle is created for them, and the only `createAgentHandle` left in the
- * stage is the research reader.
+ * This is a source-text pin, and it is the narrowest honest form of "the agent is deleted": the kinds do
+ * not exist, no agent handle is created for them, and after slice 5 of the glossary route **no agent handle
+ * is created at all** — the read pass, the research reading call and the grade are all tool-less one-shots.
  * @returns {void}
  */
 function scenarioTheStageHasNoAuthorAgent() {
@@ -154,8 +154,8 @@ function scenarioTheStageHasNoAuthorAgent() {
   ok(!layer.includes("seedGlossaryFromPrevious"), "the stage still copies the previous volume's document in before rendering");
 
   const agentHandles = layer.match(/createAgentHandle\(/g) || [];
-  same(agentHandles.length, 1, "the stage opens more than one agent turn; its only one is the research reader");
-  ok(/name: `researcher-/.test(layer), "the one agent turn the stage opens is not the research reader");
+  same(agentHandles.length, 0, "the glossary stage opens an agent turn; after slice 5 it opens none");
+  ok(!layer.includes("RESEARCHER_SYSTEM_PROMPT"), "the deleted researcher agent's system prompt is still in the layer");
 
   // Both routes publish through the render door.
   ok(/renderGlossaryArtifact\(/.test(layer), "no route renders the glossary out of the record");
@@ -177,7 +177,7 @@ function scenarioTheStageHasNoAuthorAgent() {
   ok(fs.existsSync(path.join(ROOT, "system-prompts/glossary-terms.md")), "the read pass's own prompt is missing");
   ok(fs.existsSync(path.join(ROOT, "system-prompts/glossary-acceptance.md")), "the acceptance rubric is missing — the gate is unchanged");
 
-  console.log("glossary render route: the stage has no author, validator or feedback agent; its one agent turn is the research reader, and both routes render the file out of the record");
+  console.log("glossary render route: the stage has no author, validator, feedback or research agent; it opens no agent turn at all, and both routes render the file out of the record");
 }
 
 // ─── Scenario 2 ───────────────────────────────────────────────────────────────

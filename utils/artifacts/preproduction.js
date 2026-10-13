@@ -167,7 +167,7 @@ const PREPRODUCTION_SPECS = {
         name: "glossary-research.md",
         level: "expected",
         shape: "document",
-        why: "the per-term research notes",
+        why: "the research log: what this volume looked up, what came back, and what the per-volume research bound refused to pay for",
         when: researchEnabled,
       },
     ],

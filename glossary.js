@@ -45,6 +45,7 @@ const __config = require("./glossary/config");
 const __extract = require("./glossary/extract");
 const __notes = require("./glossary/notes");
 const __research = require("./glossary/research");
+const __researchable = require("./glossary/researchable");
 const __carry_forward = require("./glossary/carry-forward");
 const __qa = require("./glossary/qa");
 const __chunked = require("./glossary/chunked");
@@ -57,6 +58,7 @@ module.exports = {
   ...__extract,
   ...__notes,
   ...__research,
+  ...__researchable,
   ...__carry_forward,
   ...__qa,
   ...__chunked,

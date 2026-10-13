@@ -165,7 +165,7 @@ const FACT_CHARACTER_ROLES = ["subject", "agent", "patient", "witness"];
 // ─── Version ──────────────────────────────────────────────────────────────────
 
 /** The schema this build of the code writes. */
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 /**
  * The migrations, oldest first. Version 1 is the whole design as built.
@@ -501,6 +501,48 @@ const MIGRATIONS = [
       `CREATE INDEX IF NOT EXISTS idx_attribution_answers_volume ON attribution_answers(volume, answer)`,
     ],
   },
+  {
+    version: 8,
+    name: "glossary route slice 5 — what research returned is its own record",
+    // A glossary row says what a term means. A lookup against Wikipedia can add to that answer, and the
+    // only legal way to add it is a row of its own: a published, sealed row is never edited, moved or
+    // deleted (AGENTS.md rule 5, and the reason `challenge_fact` exists at all). So what volume 5 learned
+    // about 芥川賞 is owned by volume 5 and keyed to the term, and `renderGlossary` is where the row and
+    // the annotation meet.
+    //
+    // Keyed on the TERM rather than on the fact id, because the term is the glossary row's identity
+    // everywhere else in this layer (`documentTermAlreadyStored`, the carry-forward gate) — and a note
+    // that outlives the row it was attached to would otherwise be stranded. `term_fact_id` is kept
+    // beside it so the row it was filed against is still nameable, and it is nullable for exactly that
+    // reason: a row can be re-filed, a note should not be lost with it.
+    //
+    // `found = 0` is a row, not a hole. "Nobody asked" and "somebody asked and the lookup came back
+    // empty" have to be distinguishable in the record, which is the same reason `attribution_answers`
+    // keeps `unknown` (v7). One row per (asking volume, term) is the unit the research bound spends:
+    // one turn per term per volume, and re-running a volume replaces its own answer instead of stacking
+    // a second copy of it.
+    up: [
+      `CREATE TABLE IF NOT EXISTS research_notes (
+         term            TEXT NOT NULL,
+         term_fact_id    TEXT REFERENCES facts(id),
+         section         TEXT,
+         found           INTEGER NOT NULL CHECK (found IN (0,1)),
+         page            TEXT,
+         lang            TEXT,
+         url             TEXT,
+         note            TEXT NOT NULL,
+         asked_by_volume INTEGER NOT NULL,
+         asked_by_stage  TEXT NOT NULL,
+         asked_at        TEXT NOT NULL,
+         PRIMARY KEY (asked_by_volume, term)
+       )`,
+
+      // The render's own query is "every note for this term, oldest volume first", and the stage's log
+      // query is "every note this volume filed". Both are covered here.
+      `CREATE INDEX IF NOT EXISTS idx_research_notes_term ON research_notes(term, asked_by_volume)`,
+      `CREATE INDEX IF NOT EXISTS idx_research_notes_asker ON research_notes(asked_by_volume, found)`,
+    ],
+  },
 ];
 
 /**
@@ -528,6 +570,7 @@ const COUNTED_TABLES = [
   "cast_presence_match",
   "record_reopens",
   "attribution_answers",
+  "research_notes",
 ];
 
 // ─── Applying it ──────────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { transformUserPrompt, writePromptDump } = require("../utils/prompt");
-const { STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, validateRequiredEnv } = require("../configs/shared");
+const { validateRequiredEnv } = require("../configs/shared");
 const { fileExists, inlineReferenceMessage } = require("../utils/fs");
 const { loadGlossaryDisputes } = require("../utils/disputes");
 const { runVolumeWithModeFallback } = require("../utils/qa-loop");
@@ -28,9 +28,10 @@ const {
   chapterSegmentNote,
 } = require("../utils/source");
 
-const { acceptanceSystemPromptFile, acceptanceUserPromptTemplateFile, researchEnabled, seriesDir, termsSystemPromptFile, termsUserPromptTemplateFile } = require("./config");
+const { acceptanceSystemPromptFile, acceptanceUserPromptTemplateFile, seriesDir, termsSystemPromptFile, termsUserPromptTemplateFile } = require("./config");
 const { buildDisputesNote, buildUnusedEntriesNote } = require("./notes");
-const { RESEARCHER_SYSTEM_PROMPT, buildPerTermResearchPrompt, pendingPlaceholder, researchBatch } = require("./research");
+const { researchVolumeTerms, RESEARCH_SYSTEM_PROMPT, buildResearchReadingPrompt } = require("./research");
+const { RESEARCH_MAX_TERMS_PER_VOLUME } = require("./researchable");
 const { assertGlossaryCarryForward } = require("./carry-forward");
 const { openGlossaryRecord, fileGlossaryExtraction, fileGlossaryTermRows, renderGlossaryArtifact, quarantineGlossaryArtifact, sealGlossaryRecord } = require("./store");
 const { writeGlossaryCoverageReport } = require("./coverage");
@@ -263,6 +264,11 @@ async function buildVolumeContext({ folderName, index, folders, volumeByFolder, 
     // Set by the QA loop when it ends on an accepted grade. It starts false so a volume that threw
     // on the way there — or retried through the mode fallback — cannot inherit an earlier yes.
     qaAccepted: false,
+    // The research bound, carried on the context because the chapter-by-chapter route spends it a chapter
+    // at a time and the bound is per volume. A volume that re-enters this function gets a fresh number,
+    // which is what a (re)generated volume is owed.
+    researchTurnsLeft: RESEARCH_MAX_TERMS_PER_VOLUME,
+    researchLog: null,
   };
 
   // Report → input: the previous volume's coverage audit (which glossary entries were never used)
@@ -345,29 +351,35 @@ async function collectFeedbackNotes(ctx, values) {
 /**
  * `--dry-run`: write the exact prompts a live run would send, and make no AI call.
  *
- * The preview must match the live run, and the live run has two calls and one agent kind: the read pass
- * that decides what the glossary contains, the researcher agents that look those terms up, and the grade
- * that judges the result. The document itself is written by `renderGlossary`, which is code, so there is no
- * author turn to preview — and the render's own output is not a prompt, so the preview says what the render
- * will be asked to print instead of pretending to be it.
+ * The preview must match the live run, and the live run has three one-shot kinds and no agent turn at
+ * all: the read pass that decides what the glossary contains, the research reading call that says what a
+ * looked-up term refers to, and the grade that judges the result. The lookup itself is an HTTP request
+ * made by code, and the document is written by `renderGlossary`, which is code — so the preview says what
+ * the render will be asked to print instead of pretending to be it.
  *
  * @param {GlossaryVolumeCtx} ctx
  * @returns {Promise<void>}
  */
 async function dumpVolumePreview(ctx) {
   const { values } = ctx;
-  // The term-dependent prompts carry an illustrative term list (the real list only exists after the
-  // extraction call, which dry-run skips).
-  const illustrativeTerms = [
-    { term: "（例の用語）", rendering: "Example Term", note: "（例）", type: "concept", query: "（例の用語）" },
-  ];
+  // The term-dependent prompts carry an illustrative term (the real list only exists after the
+  // extraction call, which dry-run skips, and the research list only exists after the filing).
+  const illustrativeRow = {
+    term: "（例の用語）",
+    rendering: "Example Term",
+    notes: "Real brand named outright in chapter 3",
+    section: "Terms & Concepts",
+  };
   const sections = [
     { title: "One-shot — terms extraction system prompt", prompt: ctx.termsSystemPrompt },
     { title: "One-shot — terms extraction user prompt", prompt: ctx.termsPrompt },
-    { title: "AGENT — researcher system prompt", prompt: RESEARCHER_SYSTEM_PROMPT },
+    { title: "One-shot — research reading system prompt (tool-less)", prompt: RESEARCH_SYSTEM_PROMPT },
     {
-      title: "AGENT — per-term researcher turn (illustrative term list, concurrency=" + RESEARCH_CONCURRENCY + ")",
-      prompt: buildPerTermResearchPrompt(ctx, illustrativeTerms[0], 0),
+      title: `ONE-SHOT — research reading prompt (illustrative term; at most ${RESEARCH_MAX_TERMS_PER_VOLUME} per volume, and the lookup is made by code, not by the model)`,
+      prompt: buildResearchReadingPrompt(
+        { ...illustrativeRow, targetLanguage: values.TARGET_LANGUAGE },
+        [{ lang: "ja", title: "（例の用語）", url: "https://ja.wikipedia.org/wiki/（例の用語）", extract: "（例の用語）は…" }]
+      ),
     },
     {
       title: "CODE — the artifact this stage publishes (no prompt, no model call)",
@@ -375,7 +387,9 @@ async function dumpVolumePreview(ctx) {
         `glossary.md is rendered by utils/reference-store/glossary-adapter.js's renderGlossary() out of this ` +
         `volume's reference record: the document's own prose first, then every row the record holds, in the ` +
         `order their own volume filed them. The rows come from the extraction answer above, filed through ` +
-        `glossary/store.js's fileGlossaryTermRows(). Nothing an agent writes reaches this file.`,
+        `glossary/store.js's fileGlossaryTermRows(). A row's Notes cell also carries the research notes filed ` +
+        `against its term (utils/reference-store/research-notes.js), merged at render time — the row itself is ` +
+        `never edited. Nothing an agent writes reaches this file.`,
     },
     { title: "One-shot — acceptance user prompt (always tool-less)", prompt: ctx.acceptancePrompt },
   ];
@@ -397,13 +411,18 @@ async function dumpVolumePreview(ctx) {
 
 /**
  * Process a single volume: extract the terms (one model call per chapter-group) -> file what was found
- * in the volume's record -> research the new terms -> **render `glossary.md` out of the record** ->
- * run the cumulative gate -> grade it.
+ * in the volume's record -> research what the record says is worth a lookup -> **render `glossary.md` out
+ * of the record** -> run the cumulative gate -> grade it.
  *
- * There is no author agent here, and no file an agent writes. The published glossary is the record's
- * own content, printed by `renderGlossary`, which is cumulative because the record this volume opened was
- * copied forward from the previous volume's sealed record. What the stage asks the model for is the
- * content of a row — the term, its canonical rendering and a note — and one grade for the result.
+ * There is no author agent here, no research agent, and no file an agent writes. The published glossary is
+ * the record's own content, printed by `renderGlossary`, which is cumulative because the record this volume
+ * opened was copied forward from the previous volume's sealed record. What the stage asks the model for is
+ * the content of a row — the term, its canonical rendering and a note — what a looked-up term refers to,
+ * and one grade for the result.
+ *
+ * Research sits between the filing and the render, and that order is the whole point of slice 5: the bound
+ * is a query over rows the record already holds, and the answer is filed back onto the record before the
+ * render prints it. Research before the filing would have to guess which terms the record would accept.
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
  */
@@ -415,6 +434,7 @@ async function runVolumeAgent(ctx) {
     // is the volume's published file, so the tail below is the same tail the whole-installment route runs.
     await runChunkedVolumeAgent(ctx);
   } else {
+    await prepareVolumeFolder(ctx);
     const terms = await extractNewTerms(ctx);
     // Two filings, on purpose, from the same list. These are the extractor's claims — the record of what
     // this volume's read pass found — which is what makes "the glossary has no row for a term the
@@ -425,14 +445,12 @@ async function runVolumeAgent(ctx) {
     // and it is what `renderGlossary` prints.
     fileGlossaryTermRows(ctx, terms);
 
-    // Research still runs, and still writes glossary-research.md. What it no longer does is reach the
-    // glossary through an author: filing a research result onto the row it belongs to is slice 5 of
-    // `glossary/plan/01-glossary-route.md`, and until that exists the notes file is read by the wiki
-    // stage and not by this one.
-    if (researchEnabled && terms.length > 0) {
-      await openAgentTools(ctx);
-      await researchNewTerms(ctx, terms);
-    }
+    // Research runs AFTER the filing, on purpose: the bound is a query over what the record now holds,
+    // so a term the evidence rule refused never costs a lookup, a term an earlier volume already
+    // published never costs one either, and the number of reading calls is the number of this volume's
+    // researchable rows capped at RESEARCH_MAX_TERMS_PER_VOLUME. What the answer becomes is a row of the
+    // record (`fileResearchNote`), which is how it reaches the rendered file below.
+    await researchVolumeTerms(ctx);
 
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: rendering the glossary out of the volume's record...`);
     const rendered = await renderGlossaryArtifact(ctx);
@@ -517,23 +535,18 @@ async function extractNewTerms(ctx) {
 
 
 /**
- * Give this volume's agents their tools, and clear the strays an earlier run left behind.
+ * Clear the strays an earlier run left behind in this volume's folder.
  *
- * The gate is the sandbox: reads are allowed anywhere (so the agents can also read the volume source
- * and the previous volume), writes are confined to this volume's folder.
+ * This used to be `openAgentTools`, and it also created the gated file tools and the wiki tools. Nothing
+ * in this stage opens an agent any more — the read pass and the research reading call are both tool-less
+ * one-shots, and the research lookup is made by code through `research.js` — so the sandbox has nothing
+ * to sandbox and creating it would be advertising a tool the stage never uses (AGENTS.md rule 2).
  *
- * @param {GlossaryVolumeCtx} ctx - Mutated with `fsGate` and `wikiTools`.
+ * @param {{ values: Object, volumeDir: string }} ctx - The volume being built.
+ * @returns {Promise<void>}
  */
-async function openAgentTools(ctx) {
+async function prepareVolumeFolder(ctx) {
   const { values, volumeDir } = ctx;
-  ctx.fsGate = await harness.createGatedFsTools({ cwd: volumeDir, allowedDirs: [volumeDir] });
-
-  // Wikipedia research tools for the per-term researcher agents. createWikiTools() is synchronous —
-  // it just wraps research.js with the current RESEARCH_* env settings. (Observed live: this
-  // assignment was missing, so the researcher agents were created with wiki_search/wiki_extract set
-  // to undefined and the model's first tool call threw "Cannot read properties of undefined
-  // (reading 'execute')".)
-  ctx.wikiTools = harness.createWikiTools();
 
   // Remove stale strays from earlier runs (agent name drift): a per-volume classic-style name like
   // "glossary-01.md" is never written by the workflow itself, so anything like that is leftover garbage.
@@ -547,65 +560,8 @@ async function openAgentTools(ctx) {
 }
 
 
-/**
- * Pass 2 — research the extracted terms with parallel agents, one per term, in batches.
- *
- * Skeleton-first: the workflow writes the notes file with a "- (pending)" placeholder under every
- * term, and each agent replaces its own placeholder via editFile. Even a crashed run leaves a usable
- * skeleton, and the placeholders left over at the end are the honest count of what was not answered.
- *
- * @param {GlossaryVolumeCtx} ctx
- * @param {Array<{term: string, type: string, query: string}>} terms
- * @returns {Promise<void>}
- */
-async function researchNewTerms(ctx, terms) {
-  const { values, researchNotesFile } = ctx;
-  console.log(
-    `Volume ${values.INSTALLMENT_NUMBER}: researching ${terms.length} new term(s) ` +
-      `in parallel (concurrency=${RESEARCH_CONCURRENCY})...`
-  );
-  const skeletonLines = ["# Research Notes — Volume " + values.INSTALLMENT_NUMBER, ""];
-  for (const term of terms) {
-    skeletonLines.push(`### ${term.term}`);
-    skeletonLines.push(pendingPlaceholder(term.term));
-  }
-  skeletonLines.push("");
-  await fs.writeFile(researchNotesFile, skeletonLines.join("\n"), "utf8");
-
-  // Tag each term with its original index so the batch function can pass the correct line number to
-  // the per-term prompt.
-  const termsWithIndices = terms.map((term, idx) => ({ ...term, _idx: idx }));
-  for (let i = 0; i < termsWithIndices.length; i += RESEARCH_CONCURRENCY) {
-    const batch = termsWithIndices.slice(i, i + RESEARCH_CONCURRENCY);
-    await researchBatch(ctx, batch);
-    // Politeness delay between batches (not within a batch, which runs in parallel).
-    if (i + RESEARCH_CONCURRENCY < termsWithIndices.length) {
-      const delayMs = parseInt(process.env.RESEARCH_DELAY_MS, 10) || 300;
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-
-  if (!(await fileExists(researchNotesFile))) {
-    console.warn(
-      `Volume ${values.INSTALLMENT_NUMBER}: the research notes file is missing ` +
-        `(the agent deleted it?); continuing without research.`
-    );
-    return;
-  }
-  const remainingText = await fs.readFile(researchNotesFile, "utf8");
-  // Count the unique "- (pending: <term>)" lines still present (a bare "- (pending)" split would
-  // not match the new unique format).
-  const remaining = (remainingText.match(/^- \(pending: .+\)$/gm) || []).length;
-  if (remaining > 0) {
-    console.warn(
-      `Volume ${values.INSTALLMENT_NUMBER}: research finished with ${remaining} ` +
-        `term(s) still unresolved (placeholder left in place).`
-    );
-  }
-}
-
-
 module.exports = {
   glossary,
   runVolumeAgent,
+  prepareVolumeFolder,
 };

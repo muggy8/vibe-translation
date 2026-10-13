@@ -2,17 +2,21 @@
  * glossary/chunked.js — the chapter-by-chapter read pass, on the render route.
  *
  * A volume too large for one extraction call is read chapter by chapter, in reading order. Each chapter
- * goes through the same three steps the whole-installment pass does — **extract** its new terms, **research**
- * them, **file** what was found in the volume's record — and then the volume's `glossary.md` is **rendered**
- * out of the record again, so the next chapter's extractor is shown what the chapters before it already
- * decided.
+ * goes through the same four steps the whole-installment pass does — **extract** its new terms, **file**
+ * what was found in the volume's record, **research** what the record now says is worth a lookup, and
+ * **render** the volume's `glossary.md` out of the record again — so the next chapter's extractor is shown
+ * what the chapters before it already decided, research notes included.
  *
- * What changed when the author agent was deleted (slice 2 of `glossary/plan/01-glossary-route.md`): there is
- * no per-chapter *amend* pass and no per-chapter *validator* agent, no findings-merge agent and no
- * per-chapter feedback agent. The document is not amended between chapters, it is re-printed; the audit is
- * not a chapter-by-chapter reading, it is a query over the whole volume's record. What is left per chapter
- * is the reading, and the one thing a render can still get wrong — a row that was there and is not any
- * more — is checked per chapter, not at the volume boundary.
+ * The order changed in slice 5 of `glossary/plan/01-glossary-route.md`, and the reason is the research
+ * bound: it is a query over rows the record holds, so it can only run after the filing. Researching first
+ * meant guessing which terms the record would accept, and it meant the answer had nowhere to be filed.
+ *
+ * What changed when the author agent was deleted (slice 2): there is no per-chapter *amend* pass and no
+ * per-chapter *validator* agent, no findings-merge agent and no per-chapter feedback agent. The document is
+ * not amended between chapters, it is re-printed; the audit is not a chapter-by-chapter reading, it is a
+ * query over the whole volume's record. What is left per chapter is the reading, and the one thing a render
+ * can still get wrong — a row that was there and is not any more — is checked per chapter, not at the
+ * volume boundary.
  *
  * That between-chapter gate is why the render happens per chapter at all. The observed damage on the live
  * 17-volume run happened DURING volume 06's per-chapter passes, not at its end, and catching it at chapter
@@ -26,54 +30,22 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
-const { STAGE_CONCURRENCY: RESEARCH_CONCURRENCY } = require("../configs/shared");
 const { fileExists, inlineReferenceMessage } = require("../utils/fs");
 const { chapterSegmentNote } = require("../utils/source");
 
-const { pendingPlaceholder, researchBatch } = require("./research");
+const { researchVolumeTerms } = require("./research");
 const { fileGlossaryExtraction, fileGlossaryTermRows, renderGlossaryArtifact } = require("./store");
-const { researchEnabled } = require("./config");
 const { parseTerms, truncateGlossary } = require("./extract");
 const { guardCarryForwardAgainst } = require("./carry-forward");
 
 /**
- * Create or extend the skeleton-first research notes file with this chapter's
- * terms (chunked fallback). Chapter 1 creates the file with the volume header;
- * later chapters append a "## Chapter <id>" section. Each term gets a
- * "### <term>" heading with a unique "- (pending: <term>)" placeholder line.
- *
- * @param {string} researchNotesFile - Absolute path of glossary-research.md.
- * @param {{INSTALLMENT_NUMBER: string}} values - The volume values.
- * @param {import("../types").SourceSegment} segment - The chapter being researched.
- * @param {Array<{term: string, rendering: string, note: string, type: string, query: string}>} terms - Its new terms.
- * @param {boolean} isFirstChapter - True for the first chapter of the volume.
- * @returns {Promise<void>}
- */
-async function appendResearchSkeleton(researchNotesFile, values, segment, terms, isFirstChapter) {
-  const section = [`## Chapter ${segment.id} — ${segment.title}`, ""];
-  for (const t of terms) {
-    section.push(`### ${t.term}`);
-    section.push(pendingPlaceholder(t.term));
-  }
-  section.push("");
-  const text = section.join("\n");
-  if (isFirstChapter || !(await fileExists(researchNotesFile))) {
-    await fs.writeFile(
-      researchNotesFile,
-      `# Research Notes — Volume ${values.INSTALLMENT_NUMBER}\n\n${text}`,
-      "utf8"
-    );
-  } else {
-    await fs.appendFile(researchNotesFile, `\n${text}`, "utf8");
-  }
-}
-
-
-/**
  * Read one volume chapter by chapter (the FALLBACK path, used when the whole installment is too large for
- * one extraction call): each chapter segment goes extract → research → file, in reading order, and the
- * volume's `glossary.md` is rendered out of the record after every chapter so each chapter's extractor sees
- * what the chapters before it decided.
+ * one extraction call): each chapter segment goes extract → file → research → render, in reading order, so
+ * each chapter's extractor sees what the chapters before it published.
+ *
+ * The research bound is per **volume**, not per chapter: `ctx.researchTurnsLeft` starts at
+ * `RESEARCH_MAX_TERMS_PER_VOLUME` and every chapter spends from the same number, and each chapter's pass
+ * is narrowed to the terms that chapter just filed so a term is not looked up twice in one volume.
  *
  * The volume is left rendered and the between-chapter gate has run; the acceptance gate is the volume-level
  * one in `glossary/qa.js`, which the caller runs for both routes.
@@ -86,12 +58,8 @@ async function runChunkedVolumeAgent(ctx) {
   console.log(
     `Volume ${values.INSTALLMENT_NUMBER}: chapter-by-chapter read ` +
       `(${bundle.segments.length} segments, ${bundle.wholeChars} chars whole) — filing each chapter into the ` +
-      `volume's record and re-rendering ${"glossary.md"} after it. No author agent.`
+      `volume's record and re-rendering glossary.md after it. No author agent, no research agent.`
   );
-
-  const fsGate = await harness.createGatedFsTools({ cwd: volumeDir, allowedDirs: [volumeDir] });
-  ctx.fsGate = fsGate;
-  ctx.wikiTools = harness.createWikiTools();
 
   // Stale stray from earlier runs (same name anchor as the whole flow).
   const strayGlossary = path.join(volumeDir, `glossary-${values.INSTALLMENT_NUMBER}.md`);
@@ -105,12 +73,12 @@ async function runChunkedVolumeAgent(ctx) {
     const segment = bundle.segments[si];
     const terms = await extractChapterTerms(ctx, segment, si);
     allChunkedTerms.push(...terms);
-    await researchChapterTerms(ctx, segment, si, terms);
-    // Two filings, from the same list, for the same two reasons the whole-installment pass files twice —
-    // see `glossary/store.js`. The candidates are what this chapter's read pass noticed; the rows are what
-    // the published file is printed from.
+    // The two filings come first, for the same two reasons the whole-installment pass files twice — see
+    // `glossary/store.js`. The candidates are what this chapter's read pass noticed; the rows are what the
+    // published file is printed from, and they are what the research pass is allowed to ask about.
     fileGlossaryExtraction(ctx, terms);
     fileGlossaryTermRows(ctx, terms);
+    await researchChapterTerms(ctx, segment, si, terms);
     await renderChapterGlossary(ctx, segment, si);
   }
 
@@ -138,9 +106,8 @@ async function runChunkedVolumeAgent(ctx) {
  * and this volume's own rendered file afterwards — so each chapter is read against what the chapters before
  * it already published, not against a snapshot from before this volume started.
  *
- * A reply that cannot be parsed is not a failure of the volume: the chapter continues without research, and
- * its own text is still filed. A chapter that returned nothing files nothing, which the coverage audit
- * counts.
+ * A reply that cannot be parsed is not a failure of the volume: the chapter files nothing, which the
+ * coverage audit counts.
  *
  * @param {GlossaryVolumeCtx} ctx
  * @param {import("../types").SourceSegment} segment - The chapter being read.
@@ -177,7 +144,7 @@ async function extractChapterTerms(ctx, segment, si) {
   } catch (err) {
     console.warn(
       `Volume ${values.INSTALLMENT_NUMBER}: could not parse the term list for ` +
-        `chapter ${segment.id} (${err.message}). Continuing without research.`
+        `chapter ${segment.id} (${err.message}). The chapter files nothing.`
     );
   }
   console.log(
@@ -187,38 +154,26 @@ async function extractChapterTerms(ctx, segment, si) {
 }
 
 /**
- * Step 2 of a chapter's pass: research this chapter's new terms (skeleton-first, appended per chapter).
+ * Step 3 of a chapter's pass: research the terms this chapter just filed, from the volume's remaining
+ * research budget.
  *
- * The skeleton is written before any research runs, so a volume that dies half-way still has a file naming
- * every term it meant to look up.
+ * Narrowed to this chapter's terms on purpose. The bound is per volume, and a chapter that re-asked every
+ * researchable row the volume holds would spend the volume's twelve turns on chapter one and leave the
+ * rest of the book with none.
  *
  * @param {GlossaryVolumeCtx} ctx
  * @param {import("../types").SourceSegment} segment
  * @param {number} si
- * @param {Array<{term: string, rendering: string, note: string, type: string, query: string}>} terms - What step 1 found.
- * @returns {Promise<void>}
+ * @param {Array<{term: string, rendering: string, note: string, type: string, query: string}>} terms - What step 1 found, already filed by step 2.
+ * @returns {Promise<Object>} The pass report. When the volume's budget is spent, `asked` is 0 and every
+ *   researchable row of this chapter is in `skipped` — named in the log rather than quietly dropped.
  */
 async function researchChapterTerms(ctx, segment, si, terms) {
-  if (!researchEnabled || terms.length === 0) return;
-  const { values, researchNotesFile } = ctx;
-  console.log(
-    `Volume ${values.INSTALLMENT_NUMBER}: researching ${terms.length} new term(s) ` +
-      `of chapter ${segment.id} (concurrency=${RESEARCH_CONCURRENCY})...`
-  );
-  await appendResearchSkeleton(researchNotesFile, values, segment, terms, si === 0);
-  const termsWithIndices = terms.map((term, idx) => ({ ...term, _idx: idx }));
-  for (let i = 0; i < termsWithIndices.length; i += RESEARCH_CONCURRENCY) {
-    const batch = termsWithIndices.slice(i, i + RESEARCH_CONCURRENCY);
-    await researchBatch(ctx, batch, segment);
-    if (i + RESEARCH_CONCURRENCY < termsWithIndices.length) {
-      const delayMs = parseInt(process.env.RESEARCH_DELAY_MS, 10) || 300;
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
+  return researchVolumeTerms(ctx, { only: terms.map((term) => term.term), chapter: segment.id });
 }
 
 /**
- * Step 3 of a chapter's pass: re-render the volume's glossary out of the record, and refuse if the render
+ * Step 4 of a chapter's pass: re-render the volume's glossary out of the record, and refuse if the render
  * lost a row the previous chapter's render held.
  *
  * The baseline is read BEFORE the render and compared after it. On this route nothing between the two is a
@@ -265,7 +220,6 @@ async function renderChapterGlossary(ctx, segment, si) {
 
 
 module.exports = {
-  appendResearchSkeleton,
   runChunkedVolumeAgent,
   extractChapterTerms,
   researchChapterTerms,

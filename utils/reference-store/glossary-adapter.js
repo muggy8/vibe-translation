@@ -46,6 +46,7 @@ const { EXTRACTION_SOURCE_STAGE } = require("./schema");
 const { readChapterLines } = require("./source-chapters");
 const { DOCUMENT_GLOSSARY, storeDocumentProse, readDocumentProse, markDocumentMirrored } = require("./document-prose");
 const { isBareFirstPersonPronoun } = require("./name-resolution");
+const { researchNotesInRecord, mergeResearchNotes } = require("./research-notes");
 require("../../types"); // JSDoc type definitions
 
 /** The heading the renderer writes when a store holds no title of its own. */
@@ -563,6 +564,53 @@ function documentTermAlreadyStored(store, term) {
 }
 
 /**
+ * The glossary rows this record holds, in the order the render prints them.
+ *
+ * One query, one order, shared by everything that has to ask "what does this volume's glossary contain":
+ * `renderGlossary` prints these rows, `glossary/researchable.js` classifies them to decide what to look
+ * up, and the research door checks that a note has a row to attach to. Reading the table somewhere else
+ * and getting the order slightly wrong is how a renderer and a bound disagree about what the glossary is.
+ *
+ * `source_stage != 'extract'` is the line that makes this the **published** rows rather than the
+ * extraction's candidates (schema.js's `EXTRACTION_SOURCE_STAGE`). The selection is exactly the one
+ * `renderGlossary` has always used — same predicate, same `ORDER BY ord, id` — so factoring it out
+ * cannot change a single byte of the published file.
+ *
+ * @param {{db: Object}} store - The volume's open record.
+ * @returns {Array<{id: string, term: string, rendering: string, notes: string, section: string|null, establishedVolume: number, ord: number}>}
+ */
+function publishedGlossaryRowsInRecord(store) {
+  const rows = store.db
+    .prepare(
+      "SELECT id, section, examples, body, established_volume, ord FROM facts " +
+        "WHERE aspect = 'term_usage' AND source_stage != ? ORDER BY ord, id"
+    )
+    .all(EXTRACTION_SOURCE_STAGE);
+  const out = [];
+  for (const row of rows) {
+    let term = "";
+    let rendering = "";
+    try {
+      const examples = JSON.parse(row.examples || "[]");
+      term = String(examples[0] || "");
+      rendering = String(examples[1] || "");
+    } catch {
+      /* an unparsable examples column renders as an empty term cell, which the diff will show */
+    }
+    out.push({
+      id: row.id,
+      term,
+      rendering,
+      notes: row.body,
+      section: row.section === null || row.section === "" ? null : row.section,
+      establishedVolume: Number(row.established_volume),
+      ord: Number(row.ord),
+    });
+  }
+  return out;
+}
+
+/**
  * Render a volume's glossary rows back into the file shape.
  *
  * Deterministic by construction: the document's own prose first, exactly as it was stored;
@@ -577,11 +625,19 @@ function documentTermAlreadyStored(store, term) {
  */
 function renderGlossary(store, { volume, title = GLOSSARY_TITLE } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
-  const rows = store
-    .db.prepare(
-      "SELECT id, section, examples, body FROM facts WHERE aspect = 'term_usage' AND source_stage != ? ORDER BY ord, id"
-    )
-    .all(EXTRACTION_SOURCE_STAGE);
+  const rows = publishedGlossaryRowsInRecord(store);
+  // What research returned for a term, looked up once per term rather than once per row. The merge is a
+  // render-time join only: the row's own `body` in the record is never rewritten, because a published row
+  // is not edited (AGENTS.md rule 5) and because a note folded into the body would come back through the
+  // door that reads a published file into a record and be appended a second time on the next render.
+  const notesByTerm = new Map();
+  const researchNotes = researchNotesInRecord(store);
+  for (const note of researchNotes) {
+    const key = normalizeQuote(note.term);
+    if (!key) continue;
+    if (!notesByTerm.has(key)) notesByTerm.set(key, []);
+    notesByTerm.get(key).push(note);
+  }
 
   const proseRows = readDocumentProse(store, DOCUMENT_GLOSSARY);
   const opening = proseRows.filter((row) => row.section === null).map((row) => row.text);
@@ -596,16 +652,10 @@ function renderGlossary(store, { volume, title = GLOSSARY_TITLE } = {}) {
   for (const row of rows) {
     const section = row.section === null || row.section === "" ? "(no section)" : row.section;
     if (!sections.has(section)) sections.set(section, { ord: row.ord, items: [] });
-    let term = "";
-    let rendering = "";
-    try {
-      const examples = JSON.parse(row.examples || "[]");
-      term = String(examples[0] || "");
-      rendering = String(examples[1] || "");
-    } catch {
-      /* an unparsable examples column renders as an empty term cell, which the diff will show */
-    }
-    sections.get(section).items.push({ term, rendering, notes: row.body });
+    const term = row.term;
+    const rendering = row.rendering;
+    const notes = mergeResearchNotes(row.notes, notesByTerm.get(normalizeQuote(term)) || []);
+    sections.get(section).items.push({ term, rendering, notes });
   }
 
   // Sections are ordered by where their prose sits in the document, because every section the
@@ -838,6 +888,7 @@ module.exports = {
   importGlossary,
   glossaryRowFromExtraction,
   importGlossaryExtraction,
+  publishedGlossaryRowsInRecord,
   renderGlossary,
   escapeCell,
 };

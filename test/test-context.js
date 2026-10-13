@@ -132,9 +132,9 @@ function offloadOne(messages, extra = {}) {
   assert.strictEqual(ctx.contextManagementEnabled("devteam"), true);
 
   // Every pipeline-stage handle name in this project must be OUTSIDE the list.
-  // (The character-voice stage is not in it: its one route makes no agent call at all. The glossary
-  // stage is only in it through its research reader — the stage's own read pass is a one-shot call and
-  // it has no agent turn, because the file is rendered from the record: glossary route slice 2.)
+  // (No pre-production stage is in it any more: the character-voice stage's one route makes no agent call,
+  // and the glossary stage's research pass is a code lookup plus a tool-less one-shot — the per-term
+  // research agent went with glossary route slice 5.)
   const stageNames = [
     "researcher-如月雨露",
     "style-guide-compile",

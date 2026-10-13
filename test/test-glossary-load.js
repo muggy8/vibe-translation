@@ -26,7 +26,6 @@ process.env.ON_QA_LIMIT = "accept";
 
 const {
   parseTerms,
-  buildPerTermResearchPrompt,
   buildGlossaryIndex,
   compareGlossaryCarryForward,
   reportCarryForwardLoss,
@@ -940,21 +939,34 @@ const { buildUnusedEntriesNote } = require("../glossary");
   assert.ok(bounded.includes("and 160 more"), "and says how many it left out");
 }
 
-// ─── buildPerTermResearchPrompt ──────────────────────────────────────────────
-// The research reader is the one agent turn the glossary stage still opens, and it is the one place
-// the stage still asks for a rendering it cannot decide itself (its notes are read by the wiki stage).
-const researchCtx = {
-  values: { INSTALLMENT_NUMBER: "01", SOURCE_NAME: "test", SOURCE_LANGUAGE: "Japanese", TARGET_LANGUAGE: "English" },
-  folderName: "story_name(1)",
-  isFirst: true,
-  previousFolderName: null,
-  bundle: null,
-};
-const perTermPrompt = buildPerTermResearchPrompt(researchCtx, { term: "ソラ", type: "character", query: "ソラ" }, 0);
-assert.ok(perTermPrompt.includes("ソラ"), "per-term prompt carries the term");
-assert.ok(perTermPrompt.includes("glossary-research.md"), "per-term prompt names the notes file");
-assert.ok(perTermPrompt.includes("- (pending: "), "per-term prompt mentions the unique placeholder");
-assert.ok(perTermPrompt.includes("editFile"), "per-term prompt instructs editFile");
+// ─── The research reading call (glossary route slice 5) ──────────────────────
+// The per-term research AGENT is gone: the lookup is made by code and the model is asked one tool-less
+// question per researchable term. What the prompt must still do is name the term, hand over the extracts
+// the code fetched, and refuse to let the model invent a reference beyond them.
+const { buildResearchReadingPrompt, parseResearchAnswer, classifyResearchable, RESEARCH_MAX_TERMS_PER_VOLUME } = require("../glossary");
+const readingPrompt = buildResearchReadingPrompt(
+  { term: "ソラ", rendering: "Sora", notes: "Parody of a real 1990s anime.", section: "Real-World References", targetLanguage: "English" },
+  [{ lang: "ja", title: "ソラ (アニメ)", url: "https://ja.wikipedia.org/wiki/ソラ", extract: "ソラは実在のアニメ作品である。" }]
+);
+assert.ok(readingPrompt.includes("ソラ"), "the research prompt does not name the term");
+assert.ok(readingPrompt.includes("Parody of a real 1990s anime."), "the research prompt drops what the glossary already says");
+assert.ok(readingPrompt.includes("https://ja.wikipedia.org/wiki/ソラ"), "the research prompt drops the URL the lookup returned");
+assert.ok(readingPrompt.includes("this is everything you have"), "the research prompt does not close off invented references");
+assert.ok(!readingPrompt.includes("editFile"), "the research prompt still instructs a file edit — no agent writes this file any more");
+assert.ok(!readingPrompt.includes("wiki_search"), "the research prompt still offers tools to a tool-less call");
+
+const readAnswer = parseResearchAnswer('```json\n{"found": true, "page": "ソラ", "lang": "ja", "url": "u", "note": "A real anime."}\n```');
+assert.strictEqual(readAnswer.found, true, "the answer's found flag was not read");
+assert.strictEqual(readAnswer.note, "A real anime.", "the answer's note was not read");
+assert.throws(() => parseResearchAnswer("I could not find anything."), /no JSON object/, "an answer with no JSON is not refused");
+assert.throws(() => parseResearchAnswer('{"found": false, "note": "  "}'), /no note/, "an answer with no note is not refused");
+
+// The bound is a constant, and the classifier is the shipped one.
+assert.strictEqual(RESEARCH_MAX_TERMS_PER_VOLUME, 12, "the per-volume research bound moved");
+assert.strictEqual(classifyResearchable({ term: "屋上", section: "Places", notes: "The roof." }).researchable, true, "a Places row is not researchable");
+assert.strictEqual(classifyResearchable({ term: "禁忌の書", section: "Items & Artifacts", notes: "An in-series coinage." }).researchable, false, "a coinage is researchable");
+assert.strictEqual(classifyResearchable({ term: "Ｍマークのバーガーショップ", section: "Terms & Concepts", notes: "Parody of McDonald's." }).researchable, true, "a declared parody is not researchable");
+assert.strictEqual(classifyResearchable({ term: "犬", section: "Terms & Concepts", notes: "Standard Japanese for an animal." }).researchable, false, "the loose marker 'Standard Japanese' still makes a row researchable");
 
 // ─── character-voice: parseVoiceQuirks ──────────────────────────────────────
 // The voice layer's exported surface is what one route needs: the extraction parser, the reference

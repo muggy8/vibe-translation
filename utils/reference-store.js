@@ -51,6 +51,7 @@ const __presence = require("./reference-store/presence");
 const __names = require("./reference-store/name-resolution");
 const __narrator = require("./reference-store/narrator");
 const __attribution = require("./reference-store/attribution");
+const __researchNotes = require("./reference-store/research-notes");
 const __copy = require("./reference-store/copy-forward");
 const __glossary = require("./reference-store/glossary-adapter");
 const __voice = require("./reference-store/voice-adapter");
@@ -81,6 +82,7 @@ module.exports = {
   ...__names,
   ...__narrator,
   ...__attribution,
+  ...__researchNotes,
   ...__copy,
   ...__glossary,
   ...__voice,
