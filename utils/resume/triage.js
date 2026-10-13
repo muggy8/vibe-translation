@@ -31,23 +31,29 @@ function indexStepStates(state) {
 }
 
 /**
- * Index the recurring finding classes by the step they recurred on.
+ * Index the recurring (step, finding kind) facts by the ONE step each one is about.
  *
  * Built before the plan, because it changes what may be *advised*: `index.js` already refuses to
  * repeat "just re-run, it's cheap" when its own ledger says a re-run has not cleared it, and the
  * resume triage giving the opposite advice would undo that.
  *
+ * The step comes from the record rather than from a list the reader widens. `recurringFindings`
+ * (utils/ledger/report.js) keys on (step, kind) precisely so that a kind recorded once on
+ * `glossary` and once on `style-guide` cannot be hung under both and read back as "this step has
+ * already been re-run without clearing it". Indexing under `r.step` is the half that keeps the
+ * sentence true to the ledger it was built from.
+ *
  * @param {Object} state
- * @returns {Map<string, Array<{finding: string, steps: string[], runs: number}>}>
+ * @returns {Map<string, Array<import("../ledger/report").RecurringFinding>}
  */
 function indexRecurringFindings(state) {
-  /** @type {Map<string, Array<{finding: string, steps: string[], runs: number}>>} */
+  /** @type {Map<string, Array<import("../ledger/report").RecurringFinding>>} */
   const recurringFor = new Map();
   for (const r of state.recurring || []) {
-    for (const stepName of r.steps) {
-      if (!recurringFor.has(stepName)) recurringFor.set(stepName, []);
-      recurringFor.get(stepName).push(r);
-    }
+    const stepName = r.step;
+    if (!stepName) continue;
+    if (!recurringFor.has(stepName)) recurringFor.set(stepName, []);
+    recurringFor.get(stepName).push(r);
   }
   return recurringFor;
 }
@@ -159,7 +165,7 @@ function priorStepPlans(order, stateByStep, resumeAt) {
  * @param {Map<string, Object>} stateByStep
  * @param {number} resumeAt
  * @param {string} resumeStep
- * @param {Map<string, Array<{finding: string, steps: string[], runs: number}>}> recurringFor
+ * @param {Map<string, Array<import("../ledger/report").RecurringFinding>} recurringFor
  * @param {string|null} inheritedFinding - The finding the whole plan is a response to.
  * @returns {ResumeStepPlan[]}
  */
@@ -190,10 +196,13 @@ function laterStepPlans(order, stateByStep, resumeAt, resumeStep, recurringFor, 
     if (!blocked && TRANSLATION_STEPS.has(name) && auditReportMissing) {
       reasons.push("it cannot start until `consistency-report.md` exists and says PASS — that entry gate is not mine to bypass");
     }
+    // Only the facts THIS step produced. A kind that recurred on another step says nothing about
+    // whether re-running THIS one has ever failed, and this is the sentence that later turns the
+    // step's repair into a ticket.
     const recurring = recurringFor.get(name) || [];
     if (recurring.length) {
       reasons.push(
-        `the ledger says ${recurring.map((r) => `${r.finding} (${r.runs} runs)`).join(", ")} for this step already — a re-run has not cleared it before, so treat this as a question, not a cheap retry`
+        `the ledger says ${recurring.map((r) => `${r.finding} came back on ${name} in ${r.runs} recorded runs`).join(", ")} — this step has been run before and the same finding is still here, so treat this as a question, not a cheap retry`
       );
     }
     if (!blocked && st.evidenceVolumes.length) {

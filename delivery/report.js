@@ -69,7 +69,39 @@ function renderExecution(execution) {
     if (e.damage && e.damage.length) {
       lines.push(`[delivery]     damage: ${e.damage.join(", ")} — this action is not a fix, whatever it removed`);
     }
+    for (const c of e.ticketsClosed || []) {
+      lines.push(`[delivery]     ticket ${c.id} closed — ${c.outcome}: ${c.note}`);
+    }
+    for (const t of e.ticketsStillOpen || []) {
+      lines.push(`[delivery]     ticket ${t.id} stays ${t.status}: ${t.because}`);
+    }
     if (e.note) lines.push(`[delivery]     ${e.note}`);
+  }
+  return lines.join("\n");
+}
+
+
+/**
+ * The tickets the whole act pass could not close, each with the reason.
+ *
+ * Printed because `endIsProvable` refuses `end` while any of them is open, and a run that ends
+ * "stopped after N decisions without a provable end" without naming WHICH record is holding it is
+ * a run the account owner cannot finish.
+ *
+ * @param {Array<{id: string, step: string, volume: string|null, finding: string, status: string, because: string}>} stillOpen
+ * @returns {string}
+ */
+function renderStillOpenTickets(stillOpen) {
+  if (!stillOpen || !stillOpen.length) return "";
+  const lines = [
+    `[delivery] ── tickets still open (${stillOpen.length}) — \`end\` stays refused while any of them is ──`,
+  ];
+  for (const t of stillOpen) {
+    lines.push(
+      `[delivery]   ${t.id} · ${t.step}${t.volume ? ` volume ${t.volume}` : " (whole step)"} · ` +
+        `${t.finding} · ${t.status}`
+    );
+    lines.push(`[delivery]     why it is still open: ${t.because}`);
   }
   return lines.join("\n");
 }
@@ -80,4 +112,5 @@ function renderExecution(execution) {
 module.exports = {
   renderConsole,
   renderExecution,
+  renderStillOpenTickets,
 };

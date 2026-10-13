@@ -31,7 +31,7 @@ const patches = require("../utils/patches");
 const projectRoot = path.resolve(__dirname, "..");
 
 const { executableSteps, gateBudget, gateMenu, gateSpin, progressOf } = require("./gates");
-const { openTicketFor, recordRefusal } = require("./tickets");
+const { openTicketFor, recordRefusal, closeTicketsAboutStepRun, ticketsStillOpenAfterPass } = require("./tickets");
 
 /**
  * The run this manager's records belong to.
@@ -267,6 +267,22 @@ async function runActPlan({ plan, state, runStep = runPipelineStep }) {
       });
       if (entry.error) log(`  ledger: ${entry.error}`);
 
+      // The ticket this action is the answer to, closed by the same comparison the ledger just
+      // recorded. Without it the escalation ladder has no bottom: act mode opens tickets,
+      // `endIsProvable` refuses `end` while one is open, and the run can never finish.
+      const ticketRun = closeTicketsAboutStepRun({
+        step,
+        comparison,
+        ledgerId: entry.entry ? entry.entry.id : null,
+      });
+      for (const p of ticketRun.problems) log(`  ticket: ${p.message}`);
+      for (const c of ticketRun.closed) {
+        log(`  ticket ${c.id} closed — ${c.outcome} (${c.note})`);
+      }
+      for (const t of ticketRun.stillOpen) {
+        log(`  ticket ${t.id} stays ${t.status}: ${t.because}`);
+      }
+
       execution.push({
         step: step.step,
         actionName: step.actionName,
@@ -278,6 +294,8 @@ async function runActPlan({ plan, state, runStep = runPipelineStep }) {
         account,
         damage: comparison.regressions.map((r) => r.label),
         ledgerId: entry.entry ? entry.entry.id : null,
+        ticketsClosed: ticketRun.closed,
+        ticketsStillOpen: ticketRun.stillOpen,
         note:
           outcome === "unchanged"
             ? `the deliverable did not move. The ledger now counts this as an attempt that did not help: ` +
@@ -305,7 +323,18 @@ async function runActPlan({ plan, state, runStep = runPipelineStep }) {
     releaseRunLock();
   }
 
-  return { exitCode: stopped === "tier-c" ? 2 : stopped ? 1 : 0, execution, run };
+  // Read from the channel, not from memory: this pass closed some of the tickets itself, and the
+  // report has to describe the ones that are open NOW, each with the reason it is still open.
+  const stillOpen = ticketsStillOpenAfterPass(
+    execution.filter((e) => !e.refused).map((e) => ({
+      step: e.step,
+      actionName: e.actionName,
+      fromVolume: (plan.steps.find((sp) => sp.step === e.step) || {}).fromVolume ?? null,
+      finding: (plan.steps.find((sp) => sp.step === e.step) || {}).finding ?? null,
+    }))
+  );
+
+  return { exitCode: stopped === "tier-c" ? 2 : stopped ? 1 : 0, execution, run, ticketsStillOpen: stillOpen };
 }
 
 

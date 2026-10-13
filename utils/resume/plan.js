@@ -228,10 +228,14 @@ function resumeHere(state, { order, stateByStep, recurringFor, resume }) {
   // (The resume step's own recurring finding is escalated above, through `escalate`, so a landed patch
   // can supersede it. What is left here is the free half: the classes that recurred on OTHER steps,
   // reported without changing the plan.)
+  // Each note is one (step, kind) fact and names the step it recurred on. A note that listed the
+  // kinds across steps is how "glossary and style-guide both had missing-required" got read back as
+  // "glossary has already been re-run without clearing it".
   for (const r of state.recurring || []) {
     notes.push(
-      `${r.finding} appeared in ${r.runs} recorded runs${r.steps.length ? ` (${r.steps.join(", ")})` : ""}. ` +
-        "A finding that survives a run is structural, not transient — re-running is not the answer, and the ledger refuses the third attempt."
+      `${r.finding} came back on ${r.step} in ${r.runs} recorded runs. ` +
+        "That step has been run again and the same finding is still there: it is structural, not transient, " +
+        "and the ledger refuses the third identical attempt."
     );
   }
 
@@ -398,9 +402,9 @@ function raiseStructuralTells(plan, notes, { state, resumeState, resumeStep, fro
   if (recurringHere.length) {
     escalate(
       "recurring-finding",
-      `the ledger says ${recurringHere.map((r) => `${r.finding} (${r.runs} runs)`).join(", ")} for this step already`,
+      `the ledger says ${recurringHere.map((r) => `${r.finding} came back on ${resumeStep} in ${r.runs} recorded runs`).join(", ")}`,
       [
-        "re-running it has not cleared it before, and the same action against the same finding is refused on the third attempt (utils/ledger.js).",
+        `${resumeStep} was run in ${recurringHere.map((r) => r.runs).join(", ")} recorded runs and ${recurringHere.map((r) => r.finding).join(", ")} is still there: re-running it has not cleared it before, and the same action against the same finding is refused on the third attempt (utils/ledger.js).`,
       ]
     );
     return;

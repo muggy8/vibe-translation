@@ -70,13 +70,23 @@ const projectRoot = path.resolve(__dirname, "..");
 /** @typedef {import("./postmortem").PostMortemReport} PostMortemReport */
 
 /**
- * The statuses a ticket can hold. Mirrors what utils/tickets.js writes: `open` when the question is
- * asked, `answered` when the diagnostics team has replied, `closed` when the deliverable has been
- * measured before and after. A stored ticket outside this vocabulary was not written by the doors
- * that write tickets, which is exactly what this check is for.
+ * The statuses a ticket can hold. Mirrors what `utils/tickets.js` writes: `open` when the question is
+ * asked, `answered` when the diagnostics team has replied, `chosen` when the manager has picked one of
+ * the offered options (`recordChoice` writes it, and a choice without a reason is refused before it is
+ * written), `closed` when the deliverable has been measured before and after. A stored ticket outside
+ * this vocabulary was not written by the doors that write tickets, which is exactly what this check is
+ * for.
+ *
+ * **This list had fallen behind the channel it audits.** `recordChoice` writes `chosen`
+ * (`utils/tickets/record.js`), and this table stopped at `answered`, so every
+ * `delivery.js --choose` planted a HIGH `record-shape` finding in `delivery.md` about a ticket the layer
+ * had itself written correctly — and the next run batched that finding as a MINOR gap that can take one
+ * of the three investigation places. An audit that reports a correct record as corrupt is worse than no
+ * audit: it spends a real diagnostics turn on a phantom. Nothing failed, because this audit never changes
+ * an exit code.
  * @type {string[]}
  */
-const TICKET_STATUSES = ["open", "answered", "closed"];
+const TICKET_STATUSES = ["open", "answered", "chosen", "closed"];
 
 // ─── What the command claims ──────────────────────────────────────────────────
 

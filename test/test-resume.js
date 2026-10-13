@@ -19,6 +19,8 @@
  *      re-running a deterministic gate produces the identical quarantine);
  *   6. no plan of record → blocked, and the intake questions are named as not the manager's;
  *   7. a finding that survived an earlier recorded run → the "just re-run" advice is refused;
+ *   7b. a kind recorded once on glossary and once on style-guide → neither step is told its own
+ *       re-run has not cleared it, and the repair stays in the plan;
  *   8. the intervention budget is PER STEP — a step that has spent its attempts gets a ticket,
  *      and another step's exhausted budget does not spend this one's;
  *   8b. an attempt that ended `unchanged` or `worse` turns the step into a question. The disk cannot
@@ -389,6 +391,75 @@ async function testRecurringFindings() {
   assert.deepStrictEqual(glossary.wipeFirst, []);
 
   console.log("  recurring finding: the cheap advice is refused, and the ledger is why");
+}
+
+// ─── 7b: a recurrence is a fact about ONE step, not about the kind ──────────────
+
+/**
+ * The false "already re-run" claim, reproduced and refused.
+ *
+ * `glossary` was assessed once (run-one) and `style-guide` once (run-two); both recorded
+ * `missing-required`. Keyed on the kind alone the ledger holds one record —
+ * `missing-required, 2 runs, steps [glossary, style-guide]` — and `indexRecurringFindings` hangs it
+ * under both steps, so the triage escalates glossary with "re-running it has not cleared it before".
+ * Glossary was never re-run. The sentence is built out of style-guide's record, and the move it
+ * refuses — `wipe-and-cascade`, the one that actually repairs a cumulative step — is dropped from
+ * the plan in favour of a diagnostics turn.
+ *
+ * Keyed on (step, kind) the same two ledger entries support no recurrence at all, and the plan keeps
+ * the repair. Scenario 7 above is the other half: the same step, the same kind, two recorded runs,
+ * and the escalation still fires.
+ */
+async function testRecurrenceIsNotBorrowedFromAnotherStep() {
+  const fx = await completeSeries("recurrence-per-step");
+  const vol2 = path.join(fx.dir, "Test Story(02)");
+  for (const e of STEP_ARTIFACT_SPECS.glossary.volume) {
+    fs.rmSync(path.join(vol2, e.name.replace("{installment}", "02")), { force: true });
+  }
+
+  for (const [run, step] of [["run-one", "glossary"], ["run-two", "style-guide"]]) {
+    await appendLedgerEntry({
+      run,
+      kind: "assessment",
+      step,
+      findingKinds: ["missing-required"],
+      counts: { HIGH: 1, MEDIUM: 0, LOW: 0 },
+    });
+  }
+
+  const state = await resume.readWorkingState({ seriesDir: fx.dir });
+  assert.deepStrictEqual(
+    state.recurring,
+    [],
+    `one assessment on glossary and one on style-guide is not a recurrence of anything: ${JSON.stringify(state.recurring)}`
+  );
+
+  const plan = resume.planResume(state);
+  const glossary = plan.steps.find((s) => s.step === "glossary");
+  assert.strictEqual(
+    glossary.actionName,
+    "wipe-and-cascade",
+    `the repair was frozen out by another step's record: ${JSON.stringify(glossary.reasons)}`
+  );
+  assert.strictEqual(glossary.escalation, null, "no escalation, because nothing was re-run");
+  assert.deepStrictEqual(glossary.wipeFirst.length, 1, "the wipe is still proposed, with the volume named");
+  assert.ok(
+    !glossary.reasons.some((r) => /has not cleared it|survived an earlier recorded run/.test(r)),
+    `the plan claims a re-run that never happened: ${JSON.stringify(glossary.reasons)}`
+  );
+  assert.ok(
+    !plan.notes.some((n) => /survived a run is structural/.test(n)),
+    `the free note repeats the same false claim: ${JSON.stringify(plan.notes)}`
+  );
+
+  // And the step that WAS assessed in the newest run is not told it was re-run either.
+  const styleGuide = plan.steps.find((s) => s.step === "style-guide");
+  assert.ok(
+    !styleGuide.reasons.some((r) => /has not cleared it/.test(r)),
+    `style-guide was assessed once: ${JSON.stringify(styleGuide.reasons)}`
+  );
+
+  console.log("  recurrence is per step: another step's record cannot make a plan claim a re-run that never happened");
 }
 
 // ─── 8: the intervention budget is per step ───────────────────────────────────
@@ -1039,6 +1110,7 @@ async function testEscalationVerbs() {
   await testGateRemovedTheOutput();
   await testNoPlan();
   await testRecurringFindings();
+  await testRecurrenceIsNotBorrowedFromAnotherStep();
   await testInterventionBudgetIsPerStep();
   await testAttemptThatDidNotHelp();
   await testTriageReadsItsOwnCorrespondence();

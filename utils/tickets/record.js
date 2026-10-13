@@ -114,6 +114,11 @@ function triedFromLedger(step, volume, finding, ledger) {
  * @param {TicketAttempt[]} [input.tried] - Defaults to whatever the ledger already holds for this
  *   finding, which is the honest default.
  * @param {string} [input.run]
+ * @param {("escalation"|"investigation")} [input.askedAs] - Which door wrote it. An escalation is a
+ *   question about one piece of work at one volume, and running that work is the answer to it. An
+ *   investigation is a question about a finding KIND on a step — "why does this keep happening" —
+ *   and running the step is not an answer to it. The distinction decides which tickets a step run
+ *   may close (`delivery/tickets.js`), so it is recorded rather than inferred from the shape.
  * @param {{json?: string, markdown?: string}} [paths]
  * @returns {{ticket: Ticket|null, written: boolean, problems: TicketShapeProblem[], error: string|null}}
  */
@@ -140,6 +145,7 @@ function createTicket(input, paths = ticketPaths()) {
     ruledOut: input.ruledOut || [],
     question: String(input.question).trim(),
     status: "open",
+    askedAs: input.askedAs === "investigation" ? "investigation" : "escalation",
   };
 
   if (!ticketsEnabled()) return { ticket, written: false, problems: [], error: null };

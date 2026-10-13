@@ -518,10 +518,10 @@ async function readWorkingState({ seriesDir, manifest } = {}) {
   }
 
   const ledger = readLedger();
-  // `recurringFindings` asks "in the CURRENT run, and also in an earlier one". A resume triage
-  // has no run of its own — it is reading what previous runs left — so the run it means is the
-  // newest one recorded. Passing no run id at all makes the check silently return nothing,
-  // which is the failure mode gotcha 67 exists to prevent.
+  // `recurringFindings` asks "in the CURRENT run, and also in an earlier one", per (step, kind).
+  // A resume triage has no run of its own — it is reading what previous runs left — so the run it
+  // means is the newest one recorded. Passing no run id at all makes the check silently return
+  // nothing, which is the failure mode gotcha 67 exists to prevent.
   const entries = ledger.entries || [];
   const latestRun = entries.length ? entries[entries.length - 1].run : null;
 

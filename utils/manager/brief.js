@@ -284,7 +284,7 @@ function renderManagerBrief({ plan, moves, tickets = [], patches = [], correctio
     out.push("");
     out.push("findings that survived an earlier recorded run (structural, not transient):");
     for (const r of plan.recurring) {
-      out.push(`- ${r.finding} in ${r.runs} run(s)${r.steps.length ? ` (${r.steps.join(", ")})` : ""}`);
+      out.push(`- ${r.finding} on ${r.step} in ${r.runs} run(s)`);
     }
   }
   out.push("");

@@ -20,7 +20,9 @@
  * cannot be read is treated as spinning rather than as empty; the veto is scoped to one
  * run, because after a real fix the same action in a new run is legitimate; and a
  * finding class that survived an earlier run is reported, because that is the free
- * signal that a problem is structural.
+ * signal that a problem is structural — where "recurred" is keyed on (step, kind), so a
+ * defect that showed up once on glossary and once on style-guide is two facts and never
+ * becomes "glossary has already been re-run without clearing it".
  *
  * Why the index.js scenario builds its own throwaway series. An earlier version of this
  * suite spawned a real step with only `AI_API_KEY` blanked, and `SERIES_LOCATION` still
@@ -351,13 +353,63 @@ async function scenarioRecurringFindings() {
 
   const quarantine = recurring.find((r) => r.finding === "quarantine-present");
   assert.strictEqual(quarantine.runs, 2);
-  assert.deepStrictEqual(quarantine.steps, ["glossary"], "it must name the step it keeps appearing on");
+  assert.strictEqual(quarantine.step, "glossary", "it must name the ONE step it keeps appearing on");
 
   // The point of the whole module, stated as an assertion: this is the free signal that
   // a re-run is not the answer.
   assert.ok(
     recurring.length > 0,
     "a finding class that survived a re-run must be visible without a model call"
+  );
+}
+
+// ─── 9b. Recurrence is a fact about (step, kind), never about the kind alone ────
+
+/**
+ * The two-halt shape, in a ledger.
+ *
+ * `glossary` was assessed ONCE, in `run-1`. `style-guide` was assessed ONCE, in `run-2`. Both
+ * recorded the same finding kind. Keyed on the kind alone that is one fact —
+ * `wrong-shape, 2 runs, steps [glossary, style-guide]` — and `indexRecurringFindings` then hangs it
+ * under BOTH steps, so the triage tells glossary "a re-run of this step has already not cleared it".
+ * That sentence is about a step that was never re-run, and it is built out of a different step's
+ * record. It is the free signal turned into a free lie: it costs the run a real diagnostics turn
+ * (one measured diagnosis turn is 7.2M prompt tokens) on a repair nobody attempted, and it freezes
+ * the genuine `wipe-and-cascade` out of the plan.
+ *
+ * Keyed on (step, kind) the same ledger is two facts, each with one run, and neither supports the
+ * claim. Re-running glossary a second time makes ONE fact with two runs, and the escalation is true.
+ *
+ * @returns {Promise<void>}
+ */
+async function scenarioRecurrenceIsAStepAndKindFact() {
+  const { file } = await freshLedger("recurrence-per-step");
+  assessment("run-1", "glossary", ["wrong-shape"], { HIGH: 0, MEDIUM: 1, LOW: 0 }, file);
+  assessment("run-2", "style-guide", ["wrong-shape"], { HIGH: 0, MEDIUM: 1, LOW: 0 }, file);
+
+  let recurring = recurringFindings(readLedger(file).entries, "run-2");
+  assert.deepStrictEqual(
+    recurring,
+    [],
+    `one occurrence on glossary and one on style-guide is two single-occurrence facts, not one recurrence: ${JSON.stringify(recurring)}`
+  );
+
+  // The true claim, pinned beside the false one so the anti-spin signal cannot be thrown out with it:
+  // the SAME step recorded the SAME kind in two recorded runs. That IS a re-run that did not clear it.
+  assessment("run-2", "glossary", ["wrong-shape"], { HIGH: 0, MEDIUM: 1, LOW: 0 }, file);
+  recurring = recurringFindings(readLedger(file).entries, "run-2");
+  assert.deepStrictEqual(
+    recurring.map((r) => [r.step, r.finding, r.runs]),
+    [["glossary", "wrong-shape", 2]],
+    "the re-run of glossary is a recurrence, and it is the only one this ledger supports"
+  );
+  assert.ok(
+    !recurring.some((r) => r.step === "style-guide"),
+    "style-guide was never re-run, and nothing in this record may say otherwise"
+  );
+  assert.ok(
+    recurring.every((r) => typeof r.step === "string" && !Array.isArray(r.steps)),
+    "the record names one step: a `steps` array is how the claim gets re-widened at read time"
   );
 }
 
@@ -558,6 +610,7 @@ async function scenarioIndexWiring() {
   console.log("ledger: append-only, citable ids, and a ceiling that admits it trimmed");
 
   await scenarioRecurringFindings();
+  await scenarioRecurrenceIsAStepAndKindFact();
   console.log("ledger: what survives a re-run is reported without a model call");
 
   await scenarioTokens();

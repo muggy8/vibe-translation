@@ -91,8 +91,8 @@ function reportPriorRuns(runLedger, thisRun) {
   if (prior.error) console.log(`[index] ledger: ${prior.error}`);
   for (const r of recurringFindings(prior.entries, thisRun)) {
     console.log(
-      `[index] ledger: ${r.finding} has appeared in ${r.runs} recorded run(s) ` +
-        `(${r.steps.join(", ")}) — a re-run is not clearing it`
+      `[index] ledger: ${r.finding} has appeared on ${r.step} in ${r.runs} recorded run(s) ` +
+        `— re-running ${r.step} is not clearing it`
     );
   }
 }
@@ -183,7 +183,9 @@ function recordStepAssessment(stepName, report, ctx) {
   });
   if (!recorded.written) return;
   for (const r of recurringFindings(readLedger().entries, ctx.thisRun)) {
-    if (!r.steps.includes(stepName)) continue;
+    // The recurrence is this step's or nobody's: a kind another step recorded twice says nothing
+    // about whether re-running THIS step has ever failed (utils/ledger/report.js).
+    if (r.step !== stepName) continue;
     console.log(
       `[index]   ledger: ${r.finding} also appeared in ${r.runs - 1} earlier recorded ` +
         `run(s) on ${stepName} — re-running this step is not clearing it`

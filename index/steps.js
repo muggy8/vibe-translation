@@ -198,9 +198,9 @@ function exitForFailures(results, { runLedger, thisRun }) {
     `[index] ${failed.length} of ${results.length} step(s) failed: ` +
       `${failed.map((f) => f.name).join(", ")}. ` +
       (recurring.length
-        ? `Re-running has NOT cleared: ${recurring.map((r) => r.finding).join(", ")} ` +
-          `(seen in ${recurring[0].runs} recorded runs). A repeat of an action that already ` +
-          `failed is not a repair — read the reports before running again.`
+        ? `Re-running has NOT cleared: ${recurring.map((r) => `${r.finding} on ${r.step} (${r.runs} recorded runs)`).join(", ")}. ` +
+          `Each one is that step's own history. A repeat of an action ` +
+          `that already failed is not a repair — read the reports before running again.`
         : `Re-run (the idempotent skip-checks make a re-run cheap) — the steps that ` +
           `finished are not repeated.`)
   );

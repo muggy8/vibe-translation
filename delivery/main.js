@@ -17,7 +17,7 @@ const { postMortemDir } = require("../utils/postmortem");
 const { ensureRunStateGitignore } = require("../configs/run-state");
 
 const { readArgs, resolveMode } = require("./cli");
-const { renderConsole, renderExecution } = require("./report");
+const { renderConsole, renderExecution, renderStillOpenTickets } = require("./report");
 const { chooseOption, judgePatch, openTicketFromPlan, openInvestigationTickets } = require("./tickets");
 const { runActPlan, runIdFor } = require("./act");
 const { stopStalledRun } = require("./stop-run");
@@ -238,7 +238,13 @@ function executedSection(executed, mode) {
         : `- **${e.step}** — ${e.actionName}: wiped ${e.wiped} file(s), step exited ${e.code}, ` +
           `${e.progress.before} → ${e.progress.after} volumes built → **${e.outcome}**\n` +
           `  - deliverable: ${e.account}` +
-          (e.damage && e.damage.length ? `\n  - damage: ${e.damage.join(", ")}` : "")
+          (e.damage && e.damage.length ? `\n  - damage: ${e.damage.join(", ")}` : "") +
+          ((e.ticketsClosed || []).length
+            ? `\n  - tickets closed by this measurement: ${e.ticketsClosed.map((c) => `${c.id} (${c.outcome})`).join(", ")}`
+            : "") +
+          ((e.ticketsStillOpen || []).length
+            ? `\n  - tickets still open: ${e.ticketsStillOpen.map((t) => `${t.id} — ${t.because}`).join("; ")}`
+            : "")
     )
     .join("\n");
 }
@@ -256,7 +262,7 @@ function executedSection(executed, mode) {
  * @returns {number} 0 when both files were written, 1 when they were not.
  */
 function writePlanRecord(args, plan, mode, execution) {
-  const written = { ...plan, mode, run: execution.run, execution: execution.execution };
+  const written = { ...plan, mode, run: execution.run, execution: execution.execution, ticketsStillOpen: execution.ticketsStillOpen || [] };
   written.markdown = `${plan.markdown}\n\n## What was executed\n\n${executedSection(execution.execution, mode)}\n`;
 
   const dir = postMortemDir();
@@ -351,7 +357,11 @@ async function main() {
       ? await runActPlan({ plan, state })
       : { exitCode: 0, execution: [], run: state.run || null };
 
-  if (mode === "act") console.log(renderExecution(execution.execution));
+  if (mode === "act") {
+    console.log(renderExecution(execution.execution));
+    const stillOpen = renderStillOpenTickets(execution.ticketsStillOpen);
+    if (stillOpen) console.log(stillOpen);
+  }
 
   if (args.write) {
     const code = writePlanRecord(args, plan, mode, execution);

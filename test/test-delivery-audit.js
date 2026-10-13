@@ -54,7 +54,7 @@ const ROOT = path.resolve(__dirname, "..");
 
 const { DELIVERY_COMMANDS, STEP_ARTIFACT_SPECS, specForStep } = require("../utils/artifacts");
 const { postMortemDir, renderPostMortemMarkdown, finding } = require("../utils/postmortem");
-const { createTicket, recordDiagnosis, closeTicket, ticketPaths, writeTickets } = require("../utils/tickets");
+const { createTicket, recordDiagnosis, recordChoice, closeTicket, ticketPaths, writeTickets } = require("../utils/tickets");
 const { auditDeliveryRun, claimsFromInvocation, displayPath } = require("../utils/delivery-audit");
 
 const savedPostMortemDir = process.env.POSTMORTEM_DIR;
@@ -754,6 +754,24 @@ async function scenarioRealDoors() {
 
   const clean = await auditDeliveryRun({ step: "diagnose", argv: [`--ticket=${opened.ticket.id}`], exitCode: 0, quiet: true });
   assert.strictEqual(clean.report.findings.length, 0, `a ticket answered through the real doors reported:\n${clean.report.markdown}`);
+
+  // The manager picking an option is a state of its own, and the audit's status vocabulary had fallen
+  // behind the door that writes it. `recordChoice` writes `chosen` (utils/tickets/record.js);
+  // TICKET_STATUSES stopped at `answered`, so EVERY `delivery.js --choose` planted a HIGH `record-shape`
+  // finding in `delivery.md` about a ticket the layer had itself written correctly — and the next run
+  // batched that phantom as a MINOR gap that can take one of the three investigation places. Nothing
+  // failed, because this audit never changes an exit code.
+  const chosenOption = (answered.ticket.options || [])[0];
+  assert.ok(chosenOption, "the diagnosis offered no option to choose");
+  const chosen = recordChoice(opened.ticket.id, {
+    optionId: chosenOption.id,
+    reason: "counting the rows is the cheapest thing that says whether the row was dropped or never extracted",
+    decidedBy: "manager",
+  });
+  assert.ok(chosen.ticket, chosen.error);
+  assert.strictEqual(chosen.ticket.status, "chosen", "the door writes a status the audit has to recognise");
+  const afterChoose = await auditDeliveryRun({ step: "diagnose", argv: ["--open"], exitCode: 0, quiet: true });
+  assert.strictEqual(afterChoose.report.findings.length, 0, `a ticket chosen through the real doors reported:\n${afterChoose.report.markdown}`);
 
   const closed = closeTicket(opened.ticket.id, { outcome: "unchanged", note: "nothing has been rebuilt yet" });
   assert.ok(!closed.error, closed.error);

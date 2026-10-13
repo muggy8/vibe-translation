@@ -39,7 +39,11 @@
  *      `utils/tickets.js` deliberately does not ban, which is why the acceptance test is what has
  *      to catch it (gotcha 70);
  *   8. a ticket closes on the same comparison act mode writes to the ledger, and closing one as
- *      `finding-gone` is still refused.
+ *      `finding-gone` is still refused;
+ *   9. the step run itself closes the ticket it is the answer to, from the comparison act mode
+ *      already measured, and the run can then end;
+ *  10. a ticket whose step was not run stays open and is named with the reason it is still open;
+ *  11. the closure reads no environment variable and has no manual verb.
  *
  * Stubbing, and which half is real: scenarios 1–4 never reach execution, so they use no stub at
  * all. Scenario 5 spawns the real step runner with `--dry-run` (no model call, no artifacts) —
@@ -65,6 +69,7 @@ const delivery = require("../delivery");
 const { appendLedgerEntry, readLedger } = require("../utils/ledger");
 const { createTicket, closeTicket, readTickets } = require("../utils/tickets");
 const { measureDeliverable } = require("../utils/delivery-verify");
+const manager = require("../utils/manager");
 const { runLockPath, runInProgress, acquireRunLock, releaseRunLock, pidIsAlive } = require("../utils/runlock");
 
 const FIXTURES = path.resolve("/tmp/opencode/delivery-act-tests");
@@ -854,6 +859,204 @@ async function testTicketClosesOnTheSameMeasurement() {
   console.log("  ticket closure: judged by the measurement act mode also records, and `finding-gone` is still refused");
 }
 
+// ─── 9: the step run closes the ticket it is the answer to ────────────────────
+
+/**
+ * The closure door is inside act mode, not beside it.
+ *
+ * `delivery/act.js` already takes a `measureDeliverable` snapshot before the step, runs the step,
+ * re-measures, and writes the comparison to the ledger. A ticket opened about this exact
+ * (step, volume, finding) is a question whose answer is that comparison — so the comparison closes
+ * it. Nothing else may: not "the finding went away", not "the manager is satisfied", and not a
+ * human typing a verb that asserts a closure nobody measured.
+ *
+ * Without this half the ladder has no bottom. `autopilot/loop.js` runs `delivery.js --open-ticket`
+ * by itself in act mode, `endIsProvable` refuses `end` while any ticket is open, and no command
+ * closes one — so every act run that escalates ends "stopped after N decisions without a provable
+ * end" even after its repair landed and its deliverable improved.
+ */
+async function testStepRunClosesTheTicketItAnswers() {
+  const fx = await completeSeries("closure-wired");
+  await breakGlossaryAt02(fx);
+  const { state, plan } = await planFor(fx);
+  const line = glossaryLine(plan);
+
+  const opened = createTicket({
+    run: RUN,
+    step: "glossary",
+    volume: "02",
+    finding: line.finding,
+    evidence: [{ file: "glossary-validation.md", note: "volume 02 holds the glossary and none of the reports that always come with it" }],
+    question: "Why is volume 02's glossary missing its validation report?",
+  });
+  assert.ok(opened.ticket, (opened.problems || []).join("; "));
+  assert.strictEqual(opened.ticket.status, "open");
+
+  const rebuildsTheVolume = async ({ step, seriesDir }) => {
+    for (const v of fx.volumes) await writeVolumeOutputs(seriesDir, v, step);
+    await writeSeriesOutputs(seriesDir, step);
+    return { ok: true, code: 0, output: "" };
+  };
+
+  const res = await delivery.runActPlan({ plan, state, runStep: rebuildsTheVolume });
+  const done = res.execution[0];
+  assert.strictEqual(done.outcome, "improved", "the step ran and the deliverable moved");
+
+  const closed = readTickets().tickets.find((t) => t.id === opened.ticket.id);
+  assert.strictEqual(closed.status, "closed", "the step the ticket is about ran, and its measurement closed the ticket");
+  assert.strictEqual(closed.closure.outcome, "improved", "the closure is the measured outcome and nothing else");
+  assert.ok(closed.closure.note.includes("measured on the deliverable"), closed.closure.note);
+  assert.ok(closed.closedAt, "and it is dated");
+
+  // The closure is in the FILE. A ticket closed only in a returned object is a ticket still open.
+  const onDisk = JSON.parse(await fs.promises.readFile(path.join(fx.dir, ".postmortem", "tickets.json"), "utf8")).tickets;
+  const stored = onDisk.find((t) => t.id === opened.ticket.id);
+  assert.strictEqual(stored.status, "closed", "the closure is written to the ticket file, not only reported");
+  assert.strictEqual(stored.closure.outcome, "improved");
+
+  // And it is reported, so "the ticket is gone" is never a silent side effect of running a step.
+  assert.deepStrictEqual((done.ticketsClosed || []).map((t) => t.id), [opened.ticket.id], JSON.stringify(done));
+
+  // The whole point: the run can now end.
+  const retriaged = await planFor(fx);
+  assert.strictEqual(retriaged.plan.verdict, "nothing-to-do", retriaged.plan.headline);
+  const proof = manager.endIsProvable({
+    plan: retriaged.plan,
+    tickets: retriaged.state.tickets,
+    patches: retriaged.state.patches,
+  });
+  assert.deepStrictEqual(proof.reasons, [], `the closed ticket still blocks the end: ${JSON.stringify(proof.reasons)}`);
+
+  console.log("  closure: the step run closes the ticket it is the answer to, and the end becomes provable");
+}
+
+// ─── 10: a ticket whose step was not run stays open, and says why ──────────────
+
+async function testTicketWhoseStepWasNotRunStaysOpen() {
+  const fx = await completeSeries("closure-stays-open");
+  await breakGlossaryAt02(fx);
+  const { state, plan } = await planFor(fx);
+  const line = glossaryLine(plan);
+
+  // About glossary, but a DIFFERENT volume: the run picks glossary up at 02, and the measurement
+  // says nothing about 01.
+  const otherVolume = createTicket({
+    run: RUN,
+    step: "glossary",
+    volume: "01",
+    finding: line.finding,
+    evidence: [{ file: "glossary.md", note: "volume 01's glossary is the one being asked about" }],
+    question: "Why does volume 01's glossary disagree with volume 02's?",
+  });
+  assert.ok(otherVolume.ticket, (otherVolume.problems || []).join("; "));
+
+  // About a step this plan runs only as a follow-on, at no volume of its own.
+  const otherStep = createTicket({
+    run: RUN,
+    step: "style-guide",
+    volume: "02",
+    finding: "missing-required",
+    evidence: [{ file: "style-guide.md", note: "volume 02's style guide" }],
+    question: "Why does volume 02's style guide carry a category the glossary does not?",
+  });
+  assert.ok(otherStep.ticket, (otherStep.problems || []).join("; "));
+
+  // An INVESTIGATION question about the exact (step, volume, finding) this plan acts on. The key
+  // matches, so the only thing that can keep it open is `askedAs`: running a step is not an answer to
+  // "why does this finding keep happening", and closing it unanswered would make
+  // `investigationAnswerFrom` report it as neither asked nor pending — measured on a throwaway
+  // channel, that turns a free `pending` into an `actionable` question and spends a ceiling slot and a
+  // diagnostics turn on something somebody already asked.
+  const investigation = createTicket({
+    run: RUN,
+    step: "glossary",
+    volume: "02",
+    finding: line.finding,
+    askedAs: "investigation",
+    evidence: [{ file: "glossary.md", note: "the same kind in three volumes of the same step" }],
+    question: "Why does volume 02 keep losing the report that always comes with its glossary?",
+  });
+  assert.ok(investigation.ticket, (investigation.problems || []).join("; "));
+  assert.strictEqual(investigation.ticket.askedAs, "investigation", "the record says which door wrote it");
+
+  const rebuildsTheVolume = async ({ step, seriesDir }) => {
+    for (const v of fx.volumes) await writeVolumeOutputs(seriesDir, v, step);
+    await writeSeriesOutputs(seriesDir, step);
+    return { ok: true, code: 0, output: "" };
+  };
+
+  const res = await delivery.runActPlan({ plan, state, runStep: rebuildsTheVolume });
+  const glossaryRun = res.execution.find((e) => e.step === "glossary");
+
+  const tickets = readTickets().tickets;
+  const stillOpen = tickets.filter((t) => t.status !== "closed");
+  assert.deepStrictEqual(
+    stillOpen.map((t) => t.id).sort(),
+    [otherVolume.ticket.id, otherStep.ticket.id, investigation.ticket.id].sort(),
+    "a step run closes only the ticket that step is the answer to"
+  );
+
+  const named = (glossaryRun.ticketsStillOpen || []).concat(
+    ...res.execution.map((e) => e.ticketsStillOpen || [])
+  );
+  const forVolume01 = named.find((t) => t.id === otherVolume.ticket.id);
+  assert.ok(forVolume01, `the ticket left open is not named: ${JSON.stringify(named)}`);
+  assert.ok(/volume 01/.test(forVolume01.because), forVolume01.because);
+  const forStyleGuide = named.find((t) => t.id === otherStep.ticket.id);
+  assert.ok(forStyleGuide, `the ticket left open is not named: ${JSON.stringify(named)}`);
+  assert.ok(/style-guide/.test(forStyleGuide.because), forStyleGuide.because);
+  const forInvestigation = named.find((t) => t.id === investigation.ticket.id);
+  assert.ok(forInvestigation, `the investigation question is not named: ${JSON.stringify(named)}`);
+  assert.ok(/investigation/.test(forInvestigation.because), forInvestigation.because);
+
+  // An open ticket is unfinished work, whatever else improved.
+  const retriaged = await planFor(fx);
+  const proof = manager.endIsProvable({
+    plan: retriaged.plan,
+    tickets: retriaged.state.tickets,
+    patches: retriaged.state.patches,
+  });
+  assert.strictEqual(proof.provable, false);
+  assert.ok(
+    proof.reasons.some((r) => r.includes("ticket(s) still open")),
+    JSON.stringify(proof.reasons)
+  );
+
+  console.log("  closure: a ticket whose step was not run stays open, and the report names why");
+}
+
+// ─── 11: the closure reads no environment variable ────────────────────────────
+
+async function testClosureHasNoKnob() {
+  const { readModuleLayer } = require("./module-layer");
+  const root = path.resolve(__dirname, "..");
+
+  // The door that writes the closure reads no environment variable at all.
+  const ticketsSrc = readModuleLayer(root, "delivery/tickets.js");
+  assert.ok(ticketsSrc.includes("closeTicketsAboutStepRun"), "the closure door exists");
+  assert.ok(
+    !/process\.env/.test(ticketsSrc),
+    "delivery/tickets.js reads no environment variable: a closure that can be switched off is not a closure (rule 3)"
+  );
+
+  // Act mode calls it, and nothing in act mode gates that call on a setting.
+  const actSrc = readModuleLayer(root, "delivery/act.js");
+  assert.ok(actSrc.includes("closeTicketsAboutStepRun"), "act mode calls it, rather than leaving it beside the run");
+  for (const [name, src] of [["delivery/act.js", actSrc], ["delivery/tickets.js", ticketsSrc]]) {
+    for (const line of src.split("\n")) {
+      if (!/process\.env/.test(line)) continue;
+      assert.ok(!/TICKET|CLOSE|CLOSURE/i.test(line), `${name}: a closure a setting can switch off is not a closure — ${line.trim()}`);
+    }
+  }
+
+  // And there is no verb that lets a person assert a closure without a measurement.
+  for (const file of ["delivery/main.js", "delivery/cli.js"]) {
+    assert.ok(!/--close-ticket/.test(readModuleLayer(root, file)), `${file} offers a manual close verb`);
+  }
+
+  console.log("  closure: no environment knob, no manual close verb");
+}
+
 // ─── Runner ───────────────────────────────────────────────────────────────────
 
 (async function main() {
@@ -868,6 +1071,9 @@ async function testTicketClosesOnTheSameMeasurement() {
   await testRebuildIsJudgedImproved();
   await testShrinkingFixIsRecordedAsDamage();
   await testTicketClosesOnTheSameMeasurement();
+  await testStepRunClosesTheTicketItAnswers();
+  await testTicketWhoseStepWasNotRunStaysOpen();
+  await testClosureHasNoKnob();
   delete process.env.POSTMORTEM_DIR;
   delete process.env.INDEX_RUN_ID;
   console.log("delivery act mode: ok");

@@ -636,6 +636,63 @@ function testEndIsProvable() {
   console.log("  end: provable only from the records, and a hole in the book is not a failure of the run");
 }
 
+// ─── 5b: the ticket lifecycle, and which of its stages block the end ──────────
+
+/**
+ * opened → answered → chosen → closed by measurement.
+ *
+ * The first three are the manager's own conversation, and none of them is a repair. Only the last
+ * one is, and it is a measurement rather than a claim. `end` is refused at every stage before it,
+ * because "the question has been looked at" is not the same fact as "the deliverable moved".
+ */
+function testTicketLifecycleBlocksEndUntilItIsMeasured() {
+  const open = manager.endIsProvable({ plan: cleanPlan(), tickets: [ticketOf()], patches: [] });
+  assert.strictEqual(open.provable, false, "an open ticket is an unfinished piece of work");
+
+  const answered = manager.endIsProvable({ plan: cleanPlan(), tickets: [answeredTicket()], patches: [] });
+  assert.strictEqual(answered.provable, false, "an answer is not a repair");
+  assert.ok(
+    answered.reasons.join(" ").includes("answered"),
+    `and the refusal says which stage it is stuck at: ${answered.reasons.join("; ")}`
+  );
+
+  const chosen = manager.endIsProvable({
+    plan: cleanPlan(),
+    tickets: [answeredTicket({ status: "chosen", choice: { optionId: "TCK-1/O1", reason: "it changes the test" } })],
+    patches: [],
+  });
+  assert.strictEqual(chosen.provable, false, "a chosen option is work somebody still has to do");
+  assert.ok(chosen.reasons.join(" ").includes("chosen"), chosen.reasons.join("; "));
+
+  const closed = manager.endIsProvable({
+    plan: cleanPlan(),
+    tickets: [
+      ticketOf({
+        status: "closed",
+        closure: { outcome: "improved", note: "measured on the deliverable: improved. glossary terms carried 445 → 460" },
+        closedAt: new Date().toISOString(),
+      }),
+    ],
+    patches: [],
+  });
+  assert.strictEqual(closed.provable, true, `a ticket closed by the measurement no longer blocks the end: ${closed.reasons.join("; ")}`);
+
+  // A closure that measured `worse` is still a closure: the question is finished, and the ledger
+  // carries the damage. What it does NOT do is make the run clean — that is the triage's verdict
+  // and the deliverable's own counts, both read separately.
+  const closedWorse = manager.endIsProvable({
+    plan: cleanPlan(),
+    tickets: [ticketOf({ status: "closed", closure: { outcome: "worse", note: "measured on the deliverable: worse" } })],
+    patches: [],
+  });
+  assert.ok(
+    closedWorse.reasons.every((r) => !r.includes("ticket")),
+    `a closed ticket is not re-opened by its outcome: ${closedWorse.reasons.join("; ")}`
+  );
+
+  console.log("  ticket lifecycle: opened, answered and chosen all block the end; only the measured closure clears it");
+}
+
 // ─── 6: an unattended accept is the narrowest thing here ──────────────────────
 
 function testAutoAcceptSafety() {
@@ -899,6 +956,7 @@ function testMaxTokens() {
   testValidation();
   await testMistypedIds();
   testEndIsProvable();
+  testTicketLifecycleBlocksEndUntilItIsMeasured();
   testAutoAcceptSafety();
   testMaxTokens();
   await testTheCall();

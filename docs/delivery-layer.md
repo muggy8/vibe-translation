@@ -156,10 +156,11 @@ waste being closed. A ticket file that cannot be read is reported, never read as
 one ticket per `actionable` investigation (volume `null`: the question is about the step, not one book),
 is idempotent through the ticket channel rather than through a counter, and names everything it declined
 to open and why. Its command is `npm run delivery -- --open-investigations`. It is **not** folded into
-`--open-ticket` and nothing calls it by itself: `endIsProvable` refuses `end` while any ticket is open,
-and **no command closes a ticket today** (`closeTicketOnDeliverable` is reached only from act mode's
-intervention path and from tests), so a door that opened tickets on its own initiative would make a clean
-run permanently un-endable. Closing that gap is an open item, not a bug this slice fixed.
+`--open-ticket`, because the two kinds of question close differently: an escalation ticket is a question
+about one piece of work at one volume, and running that work is the answer to it (see "The ticket
+lifecycle" below); an investigation ticket asks *why a finding kind keeps happening on a step*, and
+running the step is not an answer to that. `createTicket` records which door wrote it as `askedAs`
+(`"escalation"` / `"investigation"`) rather than leaving a later reader to guess from the shape.
 
 **The gate refuses the same question twice in one run.** `validateManagerAction` already refused a second
 diagnosis of an *answered ticket* (`already-answered`). It now also refuses a `diagnose` whose ticket asks
@@ -298,10 +299,27 @@ stage). Three properties keep it from becoming the guard that gets disabled: onl
 *repetition* is blocked (a different action, or a different volume, is a new attempt);
 an attempt that `improved` is not evidence against anything; and the count is scoped to
 one run, so after a real fix the same action is legitimate again. `recurringFindings`
-reports, for free, the finding classes that survived an earlier run — and `index.js`
+reports, for free, the **(step, finding kind) pairs that survived an earlier run** — and `index.js`
 then declines to repeat the advice "just re-run, it's cheap" when the ledger shows a
 re-run has already not cleared it. A ledger that cannot be read is treated as spinning
 rather than as empty: refusing an action is recoverable, spinning is not.
+
+**Why the recurrence is keyed on the step and not on the finding kind alone.** The claim this feeds is a
+sentence *about a step*: the resume triage tells a step "a re-run of THIS step has already not cleared
+it", and `utils/resume/escalate.js` turns that sentence into a ticket that drops the repair. A key on the
+kind alone cannot support that sentence. Measured on the two-halt probe (`test/test-pause-resume.js`
+scenario 3): `glossary` ran once and `style-guide` ran once, both recording `wrong-shape`; keyed on the
+kind that is **one** record — `wrong-shape, 2 runs, steps [glossary, style-guide]` — and indexing it under
+every step it names made the triage say of glossary *"the ledger says a re-run of this step has already not
+cleared it"* and choose `open-ticket` over `wipe-and-cascade`. **Glossary was never re-run.** The claim was
+built out of a different step's record, and what it cost was the repair. A defect that recurred in two
+steps is two facts, each about its own step, and neither says anything about the other; keyed per step the
+same ledger supports no recurrence at all, and re-running glossary a second time produces exactly one fact
+that says "glossary, twice, same kind" — which is the claim the escalation makes. The anti-spin half is
+untouched by this: `isSpinning` / `interventionAllowed` key on (step, volume, finding) over `intervention`
+entries **in one run**, while `recurringFindings` reads `assessment` entries **across runs**. Narrowing the
+key there removes a claim nothing earned; it does not weaken the guarantee that a step genuinely re-run and
+genuinely not cleared still escalates, and `test/test-ledger.js` and `test/test-resume.js` pin both halves.
 
 **Tickets (`utils/tickets.js`) — the only thing the manager can say to a team that can see the
 code.** When re-running stops working, the manager opens a ticket. A ticket is a question with its
@@ -336,6 +354,62 @@ with `verify: "the finding disappears"` as its only stated check. That is exactl
 before/after comparison of the deliverable exists to reject, and `test/test-tickets.js` pins that
 split rather than smoothing it over. Refused options stay on the ticket with their reason, because a
 dropped option looks like it was never thought of.
+
+**The ticket lifecycle: opened → answered → chosen → closed by measurement.** A ticket is only finished
+when something on disk says the thing it asked about got better, and each stage blocks a different move:
+
+| stage | what it means | what it blocks |
+|---|---|---|
+| `open` | the question is written, with its evidence and what was already tried | `end` — `endIsProvable` refuses it while any ticket is open |
+| `answered` | the diagnostics team replied, through `recordDiagnosis` | a second diagnosis of the same ticket without `--reask`, and a second diagnosis of the same (step, finding) in the same run on a different ticket |
+| `chosen` | the manager picked an option, with a reason | nothing by itself — a choice is a plan, not a result |
+| `closed` | a before/after measurement of the **deliverable** says `improved` / `unchanged` / `worse` | nothing — it is the end of the ladder, and it is what makes `end` provable again |
+
+Closing is a **record, never a deletion** (Tier C): the ticket, its evidence, its diagnosis, its options,
+its refusals, its choice and its history all stay in `tickets.json`; only `status`, `closure` and
+`closedAt` are added. `closeTicket` accepts only a measured outcome — never `finding-gone`, never "the
+manager thinks it is fine" — and `utils/delivery-audit.js` reports a `closed` ticket with no measured
+outcome as HIGH.
+
+**One disagreement this slice found and did not fix.** `recordChoice` writes `status: "chosen"`, and
+`utils/delivery-audit.js`'s ticket vocabulary is `["open", "answered", "closed"]` — so every ticket the
+manager chooses is reported by the layer's own after-run audit as `record-shape` **HIGH**: *"has status
+"chosen", which is not a status this layer writes. It was not written through the doors that write
+tickets"*, when it was written by `utils/tickets/record.js`. Measured on a throwaway channel built
+through the real doors (`createTicket` → `recordDiagnosis` → `recordChoice`): 1 finding, HIGH severity,
+level `MINOR`. `record-shape` is MINOR, so it is not a stop — it is batched as a gap in the next run's
+triage, where it can take one of the three investigation places and cost a diagnostics turn to explain
+correct behaviour. `auditDeliveryRun` never changes the exit code, so nothing fails. The fix is one entry
+in a vocabulary list in `utils/delivery-audit.js`, which is outside the files this slice may edit; it is
+reported rather than quietly patched.
+
+**The bottom of the ladder, and what it took to build it.** `autopilot/loop.js` runs
+`delivery.js --open-ticket` by itself in act mode, `endIsProvable` refuses `end` while any ticket is open,
+and until now **nothing closed one**. Measured on a throwaway fixture at commit 48317f4: the step ran, the
+deliverable **improved**, the triage then said `nothing-to-do`, and `endIsProvable` still answered
+`1 ticket(s) still open: TCK-run-probe-1 (open)` — every act run that ever escalated was un-endable, and
+the loop's last line was "stopped after N decisions without a provable end". `delivery/act.js` now closes
+the ticket the step run in front of it is the answer to, through `closeTicketsAboutStepRun`
+(`delivery/tickets.js`) and the **same** `closureFromComparison` that produced the ledger entry a few lines
+earlier — so the layer cannot write `worse` in the ledger and `improved` on the ticket. The key is
+`matchesTicketKey(ticket, {step, volume: fromVolume, finding})`, the same predicate the anti-spin gate uses,
+unchanged. What it refuses to close, each named out loud with the reason:
+
+- **a ticket about a different step, a different volume, or a different finding** than the action that just
+  ran. A ticket about volume 01 is not closed by a run that picked the step up at volume 02.
+- **an investigation question** (`askedAs: "investigation"`). Running the step is not an answer to "why does
+  this keep happening", and closing it would also make `investigationAnswerFrom` report the question as
+  neither asked nor pending, so `boundInvestigations` would file it as fresh and spend a second diagnostics
+  turn on it. Its answer is a diagnosis on the ticket itself.
+- **anything the ticket channel cannot be read for** — `tickets-unreadable`, reported rather than read as
+  "there was nothing to close".
+
+The still-open ones are printed, per step and once more for the whole pass
+(`renderStillOpenTickets`, and `ticketsStillOpen` in the written plan record), because a run that ends
+"stopped without a provable end" without naming WHICH record is holding it is a run the account owner
+cannot finish. There is deliberately **no `--close-ticket` verb and no environment knob** on any of it: a
+closure a person can type is a closure the manager can get without the work being done.
+
 
 **Uncapped turns, and what replaces the cap (`utils/context.js`).** The diagnostics team and the dev team have **no step limit**. That is not a loosening for its own sake: the failure this layer kept producing was a turn that ran out of budget in the middle of work it had already paid for. The diagnosis turn that started this change ran 702 seconds, 7.2M prompt tokens and 73 tool calls, re-opened one file twelve times, hit its cap at step 39, and answered with **zero characters** — while the answer was already written down in this file (gotcha 68). A step cap cannot tell "still working" from "spinning", and it punishes the first while permitting the second.
 
@@ -531,6 +605,12 @@ that is demonstrably right about a real run. `--mode=act` now exists, and what i
   before and after. `improved` / `unchanged` / `worse` is recorded in the ledger under the **newest
   recorded run**, not a fresh run id per invocation — otherwise the anti-spin gate can never see the whole
   story, and the count only resets when a genuinely new `npm run pipeline` run makes its own id.
+- The same comparison then **closes the ticket that step run is the answer to** — the ticket whose
+  (step, volume, finding) matches the action, through `closeTicketsAboutStepRun` and the identical
+  `closureFromComparison` the ledger entry came from, so the layer cannot record `worse` in the ledger and
+  `improved` on the ticket. Everything else stays open and is printed with the reason it stayed
+  (`it is about style-guide, and the action that just ran was glossary`), including the investigation
+  questions, which a step run never answers. See "The ticket lifecycle".
 - The plan is a **sequence**: the first refusal or failed step stops it, because every later step is
   written on the assumption that the earlier one was repaired.
 - It refuses to start while a pipeline run holds the run lock, and refuses `--no-write` together with
@@ -565,7 +645,8 @@ rather than a scoreboard:
 The account is printed and stored (`ledger.json`'s `signals` field), because a verdict with no numbers
 next to it is a verdict nobody can argue with afterwards — least of all the diagnostics team. A ticket
 closes through the same comparison (`closureFromComparison`, reached from `delivery.js`'s
-`closeTicketOnDeliverable`), so "did it help?" has one answer in this codebase rather than two. See
+`closeTicketOnDeliverable`) and by the ticket closure a step run performs on itself
+(`closeTicketsAboutStepRun`), so "did it help?" has one answer in this codebase rather than two. See
 gotcha 73.
 
 **The run lock (`utils/runlock.js`) — "is something else writing these volumes right now?"** A manager

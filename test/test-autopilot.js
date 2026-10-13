@@ -507,6 +507,71 @@ async function testProvableEnd() {
   console.log("  end: accepted when the records prove it, refused when they do not");
 }
 
+// ─── 5b: the ticket lifecycle, seen from the loop ──────────────────────────────
+
+/**
+ * The loop's last line used to be reachable from a run that had already repaired everything.
+ *
+ * `autopilot/loop.js` runs `delivery.js --open-ticket` by itself in act mode, and `endIsProvable`
+ * refuses `end` while any ticket is open. Nothing closed one, so an act run that escalated ended
+ * "stopped after N decisions without a provable end" even after its repair landed. The closure door
+ * is now inside act mode (`delivery/act.js` → `closeTicketsAboutStepRun`), and these two lines are
+ * the loop's side of it: a ticket closed by the measurement stops holding the end, and a ticket
+ * that has merely been ANSWERED still does — an answer is not a repair.
+ */
+async function testClosedTicketStopsBlockingTheEnd() {
+  const delivery = require("../delivery");
+  const { measureDeliverable } = require("../utils/delivery-verify");
+  const { createTicket, attachOptions, readTickets } = require("../utils/tickets");
+
+  const fx = await completeSeries("end-after-closure", FIXTURES);
+  const opened = createTicket({
+    run: "run-loop",
+    step: "glossary",
+    volume: "02",
+    finding: "missing-required",
+    evidence: [{ file: "Test Story(02)/glossary.md", note: "the fixture's own glossary" }],
+    question: "Why does volume 02's glossary disagree with volume 01's?",
+  });
+  assert.ok(opened.ticket, (opened.problems || []).join("; "));
+
+  // Answered, and NOT closed: the diagnostics team replied, and the loop still may not end.
+  attachOptions(opened.ticket.id, [
+    { id: `${opened.ticket.id}/O1`, label: "compare the aliases inside a term cell", touches: ["utils/prompt.js"], cost: "low", risk: "low", verify: "term rows counted" },
+  ]);
+  const stub = scriptManager([json({ action: "end", reason: "the ticket has an answer, so the run is finished" })]);
+  try {
+    const answered = await autopilot.runLoop({ mode: "act", seriesDir: fx.dir, iterationCap: 12, log: () => {} });
+    assert.strictEqual(answered.exitCode, 1, "an answer is not a repair");
+    assert.strictEqual(answered.decisions[0].kind, "end-not-provable", answered.decisions[0].refusal);
+    assert.ok(answered.decisions[0].refusal.includes("answered"), answered.decisions[0].refusal);
+  } finally {
+    stub.restore();
+  }
+
+  // Now close it the only way it may close: by measuring the deliverable.
+  const before = await measureDeliverable({ seriesDir: fx.dir });
+  const closed = await delivery.closeTicketOnDeliverable({
+    ticketId: opened.ticket.id,
+    before,
+    seriesDir: fx.dir,
+    note: "the step the ticket is about was re-run and re-measured",
+  });
+  assert.strictEqual(closed.error, null, closed.error);
+  assert.strictEqual(readTickets().tickets.find((t) => t.id === opened.ticket.id).status, "closed");
+
+  const stub2 = scriptManager([json({ action: "end", reason: "the ticket is closed on a measurement and every step left what it claims to have" })]);
+  try {
+    const done = await autopilot.runLoop({ mode: "act", seriesDir: fx.dir, iterationCap: 12, log: () => {} });
+    assert.strictEqual(done.exitCode, 0, done.why);
+    assert.strictEqual(done.decisions[0].action.action, "end", JSON.stringify(done.decisions[0]));
+  } finally {
+    stub2.restore();
+  }
+
+  console.log("  ticket lifecycle from the loop: answered still blocks the end, closed by measurement does not");
+}
+
 // ─── 6: act mode writes the question the triage says is the answer ────────────
 
 async function testActModeOpensTheTicket() {
@@ -873,6 +938,7 @@ function testCli() {
   await testWatchModeWritesNothing();
   await testIllegalDecisionStops();
   await testProvableEnd();
+  await testClosedTicketStopsBlockingTheEnd();
   await testActModeOpensTheTicket();
   await testFailedStepGoesToTheInvestigation();
   await testUnattendedAcceptIsGated();
