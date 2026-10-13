@@ -123,6 +123,7 @@ module.exports = {
   LOOP_STAGES_NOT_GATED: halt.LOOP_STAGES_NOT_GATED,
   NO_VOLUME_LOOP_STAGES: halt.NO_VOLUME_LOOP_STAGES,
   MISSING_OUTPUT_KINDS: halt.MISSING_OUTPUT_KINDS,
+  HALT_RECORD_SCHEMA: halt.HALT_RECORD_SCHEMA,
   haltsForStep: halt.haltsForStep,
   haltTriggerFor: halt.haltTriggerFor,
   VolumeHaltError: halt.VolumeHaltError,

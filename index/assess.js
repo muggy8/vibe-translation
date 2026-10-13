@@ -25,7 +25,8 @@ const projectRoot = path.join(__dirname, ".."); // the runner's ROOT
  *
  * @param {string} step
  * @param {Object} report - The `PostMortemReport` for this step, or null when the
- *   assessment itself could not run.
+ *   assessment itself could not run. When it carries `halt` (the step stopped itself at the volume
+ *   boundary), the entry is filed against the volume it stopped after.
  * @param {{volume: string|null, structural: Object|null, stepOk: boolean}} ctx
  * @returns {{written: boolean, error: string|null}}
  */
@@ -37,7 +38,7 @@ function recordAssessment(step, report, ctx) {
     ? [...new Set(report.findings.map((f) => f.kind))]
     : [];
 
-  const note = ctx.structural
+  let note = ctx.structural
     ? `structural failure: ${ctx.structural.message}`
     : report && report.error
       ? `assessment could not run: ${report.error}`
@@ -45,10 +46,23 @@ function recordAssessment(step, report, ctx) {
         ? "step exited non-zero"
         : undefined;
 
+  // A step that HALTED at the volume boundary is a step with a resume point, and the ledger is the only
+  // place a later process reads what this run decided. The structural message already names the volumes
+  // in prose; what the entry adds is the machine-readable half — which volume to pick up at, and how
+  // much of the missing output the pause accounts for rather than explains.
+  const halt = report && report.halt ? report.halt : null;
+  if (halt) {
+    const unattempted = (halt.unattemptedVolumes || []).join(", ") || "none";
+    note =
+      `${note || ""} halted after volume ${halt.haltedAfterVolume}; volumes ${unattempted} never attempted; ` +
+      `${halt.suppressedMissing || 0} missing-output finding(s) accounted for by the pause` +
+      (halt.trigger && halt.trigger.length ? `; trigger: ${halt.trigger.map((t) => `${t.level} ${t.kind}`).join(", ")}` : "");
+  }
+
   const result = appendLedgerEntry({
     kind: "assessment",
     step,
-    volume: ctx.volume || null,
+    volume: halt ? halt.haltedAfterVolume : ctx.volume || null,
     findings: counts,
     findingKinds,
     decidedBy: "runner",

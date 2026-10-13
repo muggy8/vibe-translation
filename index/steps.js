@@ -10,7 +10,7 @@
 const path = require("path");
 
 const { readLedger, recurringFindings, renderLedgerMarkdown, runId, ledgerPath } = require("../utils/ledger");
-const { postMortemDir } = require("../utils/postmortem");
+const { postMortemDir, readVolumeHalt } = require("../utils/postmortem");
 const { isStopping, stoppingSignal } = require("../utils/shutdown");
 const { runStep, digestOf } = require("./run-step");
 const {
@@ -23,6 +23,26 @@ const {
 
 const projectRoot = path.join(__dirname, ".."); // the runner's ROOT
 
+/**
+ * Run one step, assess what it left, and decide whether the run may continue.
+ *
+ * Three endings, and they mean different things to the run's memory:
+ *   - the step exited 0 → assess it, and let `failOn` decide whether its findings still count as a
+ *     failure;
+ *   - the step failed STRUCTURALLY because it STOPPED ITSELF at the volume boundary (the gate in
+ *     `utils/series-run/loop.js`) → assess it anyway, because a pause nobody can read is a pause
+ *     nobody can resume, and record it against the volume it stopped at;
+ *   - the step failed structurally for any other reason → record the failure without assessing,
+ *     because the report for a step that broke everywhere is a wall of `missing-required` findings
+ *     that says nothing the error message does not already say.
+ *
+ * @param {{name: string, run: Function}} step
+ * @param {{gulpArgs: string[], runAssessment: boolean, failOn: string, seriesDir: string,
+ *   volumeArg: string|null, outDir: string, runLedger: boolean, thisRun: string}} ctx
+ * @returns {Promise<{entry: {name: string, ok: boolean, code: number|null, structural: Object|null,
+ *   findings?: Object, halt?: Object|null}, stop: boolean}>} The step's record, and whether the walk
+ *   ends here.
+ */
 async function runOneStep(step, ctx) {
   const started = Date.now();
   console.log(`\n[index] === ${step.name} ===`);
@@ -44,7 +64,37 @@ async function runOneStep(step, ctx) {
       `[index] ${step.name} failed STRUCTURALLY (${run.structural.message}) — ` +
         `stopping. The remaining steps depend on what this step did not build.`
     );
-    recordStepAssessment(step.name, null, {
+
+    // A pause the run's own records cannot read is a pause nobody can resume.
+    //
+    // This branch used to short-circuit before the assessment, so a step that STOPPED ITSELF after
+    // volume 3 — the volume-boundary gate in `utils/series-run/loop.js`, which is a deliberate act —
+    // left no post-mortem report at all and a ledger entry reading `findings {0,0,0}` /
+    // `findingKinds []`. The MAJOR that stopped it appeared nowhere except inside the free-text note.
+    // The next process to ask "where is this run?" therefore could not tell a halt from a crash, which
+    // is the one thing `utils/postmortem/halt.js` exists to make distinguishable.
+    //
+    // Narrow on purpose: it runs only when THIS step's own halt record is on disk. A step killed by a
+    // timeout or an unhandled error has no halt record and still gets no mid-failure assessment — the
+    // after-step report for a step that died everywhere is fourteen `missing-required` findings, and
+    // `applyVolumeHalt` is the only thing that makes that list mean the right thing.
+    let report = null;
+    if (ctx.runAssessment && readVolumeHalt(step.name)) {
+      report = await assessStep(step.name, ctx);
+      entry.findings = report;
+      entry.halt = report.halt || null;
+      reportAssessment(step.name, report, ctx.outDir);
+      if (entry.halt) {
+        console.log(
+          `[index]   ${step.name} is PAUSED after volume ${entry.halt.haltedAfterVolume}: ` +
+            `${(entry.halt.unattemptedVolumes || []).length} volume(s) never attempted ` +
+            `(${entry.halt.suppressedMissing || 0} missing-output finding(s) accounted for by the halt ` +
+            `rather than reported as broken books). Pick it up at volume ${entry.halt.haltedAfterVolume}.`
+        );
+      }
+    }
+
+    recordStepAssessment(step.name, report, {
       volumeArg: ctx.volumeArg,
       structural: run.structural,
       stepOk,
@@ -111,7 +161,13 @@ function printSummary(results, { stopped, outDir, runLedger, thisRun }) {
     const f = r.findings
       ? ` — post-mortem ${r.findings.counts.HIGH}H/${r.findings.counts.MEDIUM}M/${r.findings.counts.LOW}L`
       : "";
-    const why = r.structural ? " (structural)" : "";
+    // "structural" and "paused at a volume boundary" are different endings, and the operator's next
+    // command depends on which one it was: a pause has a volume to pick up at, a crash does not.
+    const why = r.structural
+      ? r.halt
+        ? ` (paused after volume ${r.halt.haltedAfterVolume})`
+        : " (structural)"
+      : "";
     console.log(`[index]   ${r.name}: ${r.ok ? "ok" : "FAILED"}${f}${why}`);
   }
   if (stopped) console.log(`[index]   (stopped early — later steps did not run)`);
@@ -187,7 +243,7 @@ async function runPipelineSteps(parsed) {
   // What an EARLIER run already saw, printed before this one spends anything.
   reportPriorRuns(runLedger, thisRun);
 
-  /** @type {Array<{name: string, ok: boolean, code: number|null, findings?: Object, structural?: Object|null}>} */
+  /** @type {Array<{name: string, ok: boolean, code: number|null, findings?: Object, structural?: Object|null, halt?: Object|null}>} */
   const results = [];
   let stopped = false;
 

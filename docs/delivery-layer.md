@@ -202,14 +202,47 @@ exempt is not gated, and the table sits in the same closed path as the level tab
 
 A halt is a **named error** (`VolumeHaltError`, `structural: true`), so `ON_VOLUME_ERROR=skip` and
 `ON_TASK_ERROR=continue` cannot walk past it — the skip policy is for flaky model calls, not for a
-broken book. It writes one record, `<run records>/last-volume-halt.json`
-(`{ step, haltedAfterVolume, attemptedVolumes, unattemptedVolumes, trigger, at }`), and
-`runPostMortem` reads it back on the after-step assessment: the volumes the step never reached do not
-become `missing-required` HIGH findings (they are counted in `report.halt.suppressedMissing` instead),
-the volume that tripped the gate keeps every finding it earned, and the report is never `ok`. Without
-that record a step that stopped after book 3 on purpose and a step that broke on books 4–17 print the
-same fourteen HIGH findings, which is the exact confusion this layer exists to prevent. The gate makes
-no model call and writes no report mid-step. Pinned by `test/test-volume-halt-gate.js`.
+broken book. It writes a record into `<run records>/last-volume-halt.json`
+(`{ schema: 2, halts: { <step>: { step, haltedAfterVolume, attemptedVolumes, unattemptedVolumes,
+trigger, at } } }`), and `runPostMortem` reads it back on the after-step assessment: the volumes the
+step never reached do not become `missing-required` HIGH findings (they are counted in
+`report.halt.suppressedMissing` instead), the volume that tripped the gate keeps every finding it
+earned, and the report is never `ok`. Without that record a step that stopped after book 3 on purpose
+and a step that broke on books 4–17 print the same fourteen HIGH findings, which is the exact confusion
+this layer exists to prevent. The gate makes no model call and writes no report mid-step. Pinned by
+`test/test-volume-halt-gate.js`.
+
+**The record holds one entry per step, and it used to hold one record.** Measured on a three-volume
+fixture: `glossary` halts after volume 02, a later run halts `style-guide` after volume 02, and the
+second write erased the first. The triage then read `glossary` as `incomplete` rather than `paused`,
+its never-attempted volume was reported as plain `missing-required` damage, and the plan lost the line
+that says the step stopped itself. The resume *number* survived by luck — the damaged volume happens to
+be the halted one — the pause did not. `clearVolumeHalt(step)` still clears only the step about to run;
+`writeVolumeHalt` now joins the halts other steps already recorded instead of replacing them.
+
+**A halted step is assessed and recorded like any other failed step.** The runner used to short-circuit
+on a structural failure before the after-step assessment, so the one failure mode that is *deliberate*
+was the one the run's own memory could not read: no `<step>.md` report at all, and a ledger entry
+reading `findings {0,0,0}` / `findingKinds []` beside a note quoting the halt. `index/steps.js` now
+runs the assessment when — and only when — that step's own halt record is on disk. Measured on the
+three-volume fixture: the report exists and opens with "The step halted after volume 02 … 1 volume(s) —
+03 — were never attempted … (6 finding(s) suppressed here for that reason)", the ledger entry is filed
+against volume 02 with `findingKinds: ["wrong-shape", …]`, and the runner's own summary prints
+`glossary: FAILED — post-mortem 1H/2M/0L (paused after volume 02)`. A step killed by a timeout or an
+unhandled error has no halt record and still gets no mid-failure assessment.
+
+**The pause is executable end to end** (`test/test-pause-resume.js`, 76 checks, the scripted server, 0
+real model calls). A `wrong-shape` MAJOR planted in volume 02 of a three-volume fixture halts the step
+after volume 02 (12 billed calls: 6 for volume 01, 6 for volume 02, none for volume 03). The triage
+reports `glossary` as `paused`, resumes it at **volume 02 — not 03** — and chooses `wipe-and-cascade`
+with volume 02's six declared outputs named. `delivery.js --mode=act` removes exactly those six files,
+re-runs the step, and the resumed pass bills **volume 02 (6 calls) and the never-attempted volume 03
+(6 calls) and nothing for volume 01**, which the skip-checks keep. The halt record is gone, the step's
+post-mortem is `CLEAN (0 HIGH, 0 MEDIUM, 0 LOW, 23 expectations checked)`, and the run finishes
+(exit 0). The control — the same fixture, re-run with no wipe — bills **0 calls** and halts in the same
+place on the same finding, which is what "the same assessment would stop it in the same place" means.
+Volume 01's glossary outputs are byte-identical across the whole exercise and the staged book survives
+(Tier C).
 
 **The gate's first act on real material was a halt on a false positive, and that is worth keeping in
 the record.** Its first run through the offline pipeline loop stopped the `translate` stage after
@@ -429,7 +462,9 @@ Six rules in it are load-bearing, and each one is a mistake this module actually
   whole-series run, where the cascade rebuilds the tail and the accepted volumes before *n* are kept
   free by the skip-checks rather than re-paid for. Without the `paused` state the two shapes print as
   the same fourteen `missing-required` findings and the reader cannot tell "stopped after book 3 on
-  purpose" from "broke on books 4–17".
+  purpose" from "broke on books 4–17". The ledger entry for a halted step is filed against the volume
+  it stopped at and carries the trigger kind, so "have I already tried this, and did it help?" is a
+  question the run's memory can answer for a pause as well as for a crash.
 - **A quarantine belongs to the artifact it names, not to every step that declares the pattern.**
   `utils/artifacts.js` declares one pattern for all three cumulative gates, so pattern-matching
   attributes a `character-voice.md.rejected` to glossary — which then justifies "glossary's own

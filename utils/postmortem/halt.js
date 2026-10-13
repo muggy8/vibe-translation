@@ -39,8 +39,10 @@
  * after-step assessment (`index/assess.js`) runs regardless. Left alone it would report fourteen
  * `missing-required` HIGH findings, which is exactly the confusion this layer exists to prevent: a
  * deliberate halt indistinguishable from a step that broke on every remaining book. So the halt writes
- * one record into the run's own records folder, and `runPostMortem` reads it back: the volumes the
- * step never attempted are not counted as broken books, and the volume that tripped the gate is.
+ * a record into the run's own records folder, and `runPostMortem` reads it back: the volumes the
+ * step never attempted are not counted as broken books, and the volume that tripped the gate is. The
+ * record holds **one entry per step**, because two steps can each halt and both pauses are facts — see
+ * `HALT_RECORD_SCHEMA` for the one-slot bug that this replaced.
  *
  * This file requires `./levels` (the trigger) and `./render` (where the run's records live). It
  * requires nothing from `utils/ledger`, `utils/tickets`, `utils/patches` or `utils/runlock` — a module
@@ -252,6 +254,21 @@ class VolumeHaltError extends Error {
 const HALT_RECORD_FILE = "last-volume-halt.json";
 
 /**
+ * The shape of that file: one entry per step that halted.
+ *
+ * It used to be ONE record, and one record is one slot. Measured on a four-volume fixture: `glossary`
+ * halts after volume 02, a later run halts `style-guide` after volume 02, and the second write erases
+ * the first. The triage then reads `glossary` as `incomplete` instead of `paused`, its two
+ * never-attempted volumes are reported as six plain `missing-required` findings, and the plan loses the
+ * line that says "this step stopped itself on purpose". The resume NUMBER survives (the damaged volume
+ * happens to be the halted one); the pause does not. That is the exact confusion this record was
+ * written to prevent, reintroduced by the record's own file layout.
+ *
+ * Schema 1 (one bare record) is still read, so a record written before this change is not lost.
+ */
+const HALT_RECORD_SCHEMA = 2;
+
+/**
  * What one halt looks like on disk.
  *
  * @typedef {Object} VolumeHaltRecord
@@ -273,12 +290,43 @@ function haltRecordPath() {
 }
 
 /**
+ * The halt file as a step → record map, whatever schema is on disk.
+ *
+ * Schema 1 held one bare record, so it contributes exactly one entry — the step it names. A file that
+ * cannot be read is an empty map, which is what every caller already treats it as.
+ *
+ * @returns {Map<string, VolumeHaltRecord>}
+ */
+function readHaltMap() {
+  /** @type {Map<string, VolumeHaltRecord>} */
+  const map = new Map();
+  let parsed = null;
+  try {
+    parsed = JSON.parse(fs.readFileSync(haltRecordPath(), "utf8"));
+  } catch {
+    return map;
+  }
+  if (!parsed || typeof parsed !== "object") return map;
+  if (parsed.halts && typeof parsed.halts === "object") {
+    for (const [step, record] of Object.entries(parsed.halts)) {
+      if (record && typeof record === "object" && record.step) map.set(step, { ...record, step: record.step || step });
+    }
+    return map;
+  }
+  if (parsed.step) map.set(parsed.step, parsed);
+  return map;
+}
+
+/**
  * Record a halt where a separate process can read it.
  *
  * The step runs in its own process (`index/run-step.js`), so an in-process flag cannot cross the
  * boundary — this is the same channel `withStructuralMarker` uses for `last-structural-failure.json`,
  * with the two things that file cannot say: which volume the step stopped after, and which volumes it
  * therefore never attempted.
+ *
+ * It joins the halts already recorded for OTHER steps rather than replacing them: two steps can each
+ * halt in their own run, and both pauses are facts the triage has to be able to read back.
  *
  * @param {Omit<VolumeHaltRecord, "at">} record
  * @returns {{written: boolean, file: string, error: string|null}}
@@ -287,7 +335,12 @@ function writeVolumeHalt(record) {
   const file = haltRecordPath();
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({ ...record, at: new Date().toISOString() }, null, 2) + "\n", "utf8");
+    const map = readHaltMap();
+    map.set(record.step, { ...record, at: new Date().toISOString() });
+    /** @type {Object<string, VolumeHaltRecord>} */
+    const halts = {};
+    for (const [step, entry] of map) halts[step] = entry;
+    fs.writeFileSync(file, JSON.stringify({ schema: HALT_RECORD_SCHEMA, halts }, null, 2) + "\n", "utf8");
     return { written: true, file, error: null };
   } catch (err) {
     // A halt that cannot write its own record still halts: the error it throws is the guarantee,
@@ -297,18 +350,23 @@ function writeVolumeHalt(record) {
 }
 
 /**
- * Read the halt record, or null when there is none (or it cannot be read).
+ * Read one step's halt record, or null when that step has none (or the file cannot be read).
  *
+ * Called without a step it returns the most recent halt of any step, for a caller that only wants to
+ * know whether something is paused.
+ *
+ * @param {string} [step] - The step whose halt is being asked for.
  * @returns {VolumeHaltRecord|null}
  */
-function readVolumeHalt() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(haltRecordPath(), "utf8"));
-    if (!parsed || typeof parsed !== "object" || !parsed.step) return null;
-    return parsed;
-  } catch {
-    return null;
+function readVolumeHalt(step) {
+  const map = readHaltMap();
+  if (!map.size) return null;
+  if (step) return map.get(String(step)) || null;
+  let newest = null;
+  for (const record of map.values()) {
+    if (!newest || String(record.at || "") > String(newest.at || "")) newest = record;
   }
+  return newest;
 }
 
 /**
@@ -318,15 +376,25 @@ function readVolumeHalt() {
  * loop clears its own step's record before it walks, which is the same rule `index/run-step.js`
  * applies to the structural marker ("this step's outcome, not the previous step's").
  *
- * @param {string} step - The step about to walk. A record belonging to another step is left alone,
- *   because that step's assessment has not run yet.
+ * Only this step's entry goes. Another step's pause is a fact about a step whose assessment has not
+ * run in this process, and deleting it would put this run's memory back to one slot.
+ *
+ * @param {string} step - The step about to walk.
  * @returns {void}
  */
 function clearVolumeHalt(step) {
-  const existing = readVolumeHalt();
-  if (!existing || existing.step !== step) return;
+  const map = readHaltMap();
+  if (!map.has(String(step))) return;
+  map.delete(String(step));
   try {
-    fs.rmSync(haltRecordPath());
+    if (!map.size) {
+      fs.rmSync(haltRecordPath());
+      return;
+    }
+    /** @type {Object<string, VolumeHaltRecord>} */
+    const halts = {};
+    for (const [key, entry] of map) halts[key] = entry;
+    fs.writeFileSync(haltRecordPath(), JSON.stringify({ schema: HALT_RECORD_SCHEMA, halts }, null, 2) + "\n", "utf8");
   } catch {
     /* a record that cannot be deleted is reported by the assessment that reads it */
   }
@@ -345,7 +413,7 @@ function clearVolumeHalt(step) {
  * @returns {import("../postmortem").PostMortemReport}
  */
 function applyVolumeHalt(report) {
-  const record = readVolumeHalt();
+  const record = readVolumeHalt(report.step);
   if (!record || record.step !== report.step) return report;
 
   const unattempted = new Set(record.unattemptedVolumes || []);
@@ -387,6 +455,7 @@ module.exports = {
   NO_VOLUME_LOOP_STAGES,
   MISSING_OUTPUT_KINDS,
   HALT_RECORD_FILE,
+  HALT_RECORD_SCHEMA,
   haltsForStep,
   haltTriggerFor,
   VolumeHaltError,
