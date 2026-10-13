@@ -5,6 +5,42 @@ guide, the consistency audit and handoff, and the translation stage.
 
 Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md).
 
+## 3.4. The order of these pipelines is a gate, not a convention
+
+Since 2026-10-13 the order is declared data in `utils/prereqs.js` and enforced by a door on every
+gulp task, before the task's own code is reached:
+
+- `extract` needs `discover`.
+- **glossary, jump-in-wiki, character-voice and style-guide each need `discover` + `extract` and
+  nothing else** — so they may run in any order relative to each other, and a run that does them in
+  a different order is not wrong.
+- `consistency-audit` needs all four, because it is the check that they agree with each other.
+- `translate` needs the intake, the extraction, all four references and the audit.
+- `translate-qa` needs `translate`; `polish` needs `translate` **and** `translate-qa`.
+- `verify-translate`, `retranslate` and `translation-report` are declared with no prerequisites:
+  each is a half of the translation stage that only makes sense after `translate` has already run,
+  and each is reached through it.
+
+**"Complete" is read off the disk.** A prerequisite counts as finished when the files that step's
+own declaration in `utils/artifacts.js` promises are there, in the shape that declaration says, and —
+where the step grades its volumes — when the volume's persisted acceptance window still passes. A
+`.rejected` cumulative artifact in the folder means that step's own gate refused it, so the step is
+not complete; a quarantined translate draft does not, because keeping it is how `retranslate` is
+meant to work.
+
+**There is no override, and that is the owner's rule, not an omission.** `--force`, `--allow-fail`,
+`ON_TASK_ERROR=continue`, the ledger and the resume menu are not read by the gate. The refusal is a
+**structural** error, so no run policy walks past it; it costs no model call and writes nothing into
+the series. `--allow-no-glossary` is **deleted** — "translate a volume with no glossary" is exactly
+the case the gate now refuses, and an override for a case that cannot happen is a knob attached to
+nothing. `--dry-run` prints what is missing and continues, because a dry run exists to show you that.
+
+`--volume NN` narrows the check to the volumes the run is about to touch, so a series with a broken
+volume 14 can still be worked on one book at a time.
+
+→ `utils/prereqs.js`, `gulpfile.js`'s `withPrerequisiteGate`, `test/test-prerequisite-gate.js`,
+docs/map-helpers.md, gotcha 140.
+
 ## 3.5. Pipeline 0: extract (`extract.js`) — check the books before anything is built on them
 
 Per volume, and nothing else: **no model call, no prompt, no agent.** `npx gulp extract`, or

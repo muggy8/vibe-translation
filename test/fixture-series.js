@@ -245,6 +245,31 @@ async function removeStepOutputs(seriesDir, step, folder, installment) {
 }
 
 /**
+ * Remove one step's declared records from the run's own records folder — the mirror of
+ * `writeRunOutputs`, and the shape of "this step never ran" that a `run`-scope step leaves.
+ *
+ * @param {string} runDir - The fixture's `POSTMORTEM_DIR`.
+ * @param {string} step
+ * @param {Array<{folder: string, installmentNumber: string}>} volumes
+ * @returns {Promise<number>} How many records were removed.
+ */
+async function removeRunOutputs(runDir, step, volumes) {
+  const spec = STEP_ARTIFACT_SPECS[step];
+  if (!spec || !spec.run || spec.run.length === 0) return 0;
+  let removed = 0;
+  for (const e of spec.run) {
+    const names = e.perInstallment
+      ? (volumes || []).map((v) => e.name.replace("{installment}", runScopeVolumeKey(v)))
+      : [e.name];
+    for (const name of names) {
+      await fs.promises.rm(path.join(runDir, name), { force: true });
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+/**
  * The volume-15 shape: the step's output is gone AND its own gate evidence sits in the same folder.
  * Re-running the step rebuilds the file and the same deterministic check refuses it again, which is
  * why the triage turns this into a question rather than a wipe (gotcha 68).
@@ -326,6 +351,7 @@ module.exports = {
   writeSeriesOutputs,
   writeRunOutputs,
   removeStepOutputs,
+  removeRunOutputs,
   leaveGateEvidenceBesideTheGap,
   completeSeries,
   writeChannel,

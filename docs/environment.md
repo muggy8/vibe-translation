@@ -201,6 +201,14 @@ un-monitored values). Skipped work is picked up on a cheap idempotent re-run.
 | `ON_TASK_ERROR` | `abort` | Default run: `abort` stops at the first failing step; `continue` runs the remaining steps, then fails the run with a summary |
 | `DISCOVER_MAX_ATTEMPTS` | `2` | Intake-agent attempts before failing the step (fresh agent each attempt, 10 s apart; per-attempt endpoint retries still apply via `AI_RETRY`). See docs/architecture.md.5 |
 
+**None of these reach the prerequisite gate.** Since 2026-10-13 every gulp step is refused before it
+starts when the steps it needs are not complete (`utils/prereqs.js`, docs/pipelines.md §3.4), and the
+refusal is a **structural** error: `ON_TASK_ERROR=continue`, `ON_VOLUME_ERROR=skip`,
+`ON_MISSING_PREVIOUS=skip`, `--force` and the ledger are not inputs to that question, and there is no
+environment variable that turns the gate off — a check you can switch off is not a check (AGENTS.md §4
+rule 3). The command-line flag `--allow-no-glossary` was **deleted** in the same change; `--allow-fail`
+stays, because it answers an audit verdict that came back FAIL rather than work that was never built.
+
 ### Output locations
 
 | Var | Default | Meaning |

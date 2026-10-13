@@ -90,6 +90,8 @@ const { writeTranslationReport } = require("./utils/translation-report");
 const { getTranslationTarget } = require("./get-translation-target");
 const { withHooks, PIPELINE_TASK } = require("./utils/hooks");
 const { isStructuralError } = require("./configs/shared");
+const { readRunArgs } = require("./utils/series-run");
+const { evaluatePrerequisites, prerequisiteRefusal } = require("./utils/prereqs");
 const { postMortemDir } = require("./utils/postmortem");
 const { acquireRunLock, releaseRunLock, runLockPath } = require("./utils/runlock");
 const { installShutdownWatch } = require("./utils/shutdown");
@@ -138,6 +140,58 @@ function withStructuralMarker(name, taskFn) {
       }
       throw err;
     }
+  };
+}
+
+
+// ─── The prerequisite gate ────────────────────────────────────────────────────
+
+/**
+ * Refuse to start a step whose foundation is not finished.
+ *
+ * The account owner's rule: pre-production → translation → polish, the reference artifacts are
+ * frozen once the run is translating, and a step may not start before the steps it needs have run
+ * and completed — including when a run is resumed days later. The order itself is declared data in
+ * `utils/prereqs.js`; this is only the door.
+ *
+ * Where it sits in the wrapping, and why:
+ *   - INSIDE `withRunLock`, because a collision is the more urgent refusal and a refusal should not
+ *     be the reason a run's lock was taken and released for nothing.
+ *   - OUTSIDE `withHooks`, because a step that never runs must not cost a model container switch
+ *     (gotcha 22) and must not leave a post-hook describing work that never happened.
+ *   - INSIDE `withStructuralMarker`, so the refusal reaches the parent process. A gulp child cannot
+ *     hand an error object across the process boundary, and `index.js` decides "never continued
+ *     past, whatever ON_TASK_ERROR says" from the marker the wrapper writes (gotcha 21). The gate
+ *     itself writes nothing into the corpus and makes no model call; the marker is the run's own
+ *     record, and `index.js` deletes it before every step.
+ *
+ * There is no flag that turns this off, and that is the owner's decision, not an omission:
+ * `--force`, `--allow-fail`, `ON_TASK_ERROR=continue`, the ledger and the resume menu are not read
+ * here at all. `--dry-run` is the one case that does not throw — a dry run exists to show you what
+ * you are missing, so the verdict is printed and the step continues into its own offline path.
+ *
+ * @param {string} name - The gulp task name, which is the key in `utils/prereqs.js`.
+ * @param {Function} taskFn - The wrapped task.
+ * @returns {Function} A drop-in async gulp task.
+ */
+function withPrerequisiteGate(name, taskFn) {
+  return async function gated(...args) {
+    const { dryRun, volumeArg } = readRunArgs();
+    const verdict = await evaluatePrerequisites({
+      step: name,
+      seriesDir: process.env.SERIES_LOCATION,
+      volumeArg,
+    });
+    if (verdict.ok) return taskFn(...args);
+    if (dryRun) {
+      console.error(
+        `[gate] ${name} — DRY RUN, so the prerequisite gate reports and does NOT refuse: ` +
+          `${verdict.gaps.length} prerequisite(s) would not be complete.`
+      );
+      for (const bullet of verdict.bullets) console.error(`[gate]   - ${bullet}`);
+      return taskFn(...args);
+    }
+    throw prerequisiteRefusal(verdict.message);
   };
 }
 
@@ -230,31 +284,62 @@ async function extractStep() {
   await extractVolumes();
 }
 
-// Each step is wrapped three times: the run lock on the outside (so a collision is refused
-// before a hook switches a model container in), the hook runner next, and the structural
-// marker on the inside (closest to the error, so it records the failure the task module
-// actually threw).
-const discoverTask = withRunLock("discover", withHooks("discover", withStructuralMarker("discover", discover)));
-const extractTask = withRunLock("extract", withHooks("extract", withStructuralMarker("extract", extractStep)));
-const glossaryTask = withRunLock("glossary", withHooks("glossary", withStructuralMarker("glossary", glossary)));
+// Each step is wrapped four times: the run lock on the outside (so a collision is refused before
+// anything else is paid for), the structural marker next (closest to the refusal, so the parent
+// process can tell a deliberate stop from a crash — see `withPrerequisiteGate`), the prerequisite
+// gate next (before the hooks, so a step that never runs never switches a model container), and the
+// hook runner innermost around the task itself.
+const discoverTask = withRunLock(
+  "discover",
+  withStructuralMarker("discover", withPrerequisiteGate("discover", withHooks("discover", discover)))
+);
+const extractTask = withRunLock(
+  "extract",
+  withStructuralMarker("extract", withPrerequisiteGate("extract", withHooks("extract", extractStep)))
+);
+const glossaryTask = withRunLock(
+  "glossary",
+  withStructuralMarker("glossary", withPrerequisiteGate("glossary", withHooks("glossary", glossary)))
+);
 const characterVoiceTask = withRunLock(
   "character-voice",
-  withHooks("character-voice", withStructuralMarker("character-voice", characterVoice))
+  withStructuralMarker(
+    "character-voice",
+    withPrerequisiteGate("character-voice", withHooks("character-voice", characterVoice))
+  )
 );
-const styleGuideTask = withRunLock("style-guide", withHooks("style-guide", withStructuralMarker("style-guide", styleGuide)));
-const jumpInWikiTask = withRunLock("jump-in-wiki", withHooks("jump-in-wiki", withStructuralMarker("jump-in-wiki", jumpInWiki)));
+const styleGuideTask = withRunLock(
+  "style-guide",
+  withStructuralMarker("style-guide", withPrerequisiteGate("style-guide", withHooks("style-guide", styleGuide)))
+);
+const jumpInWikiTask = withRunLock(
+  "jump-in-wiki",
+  withStructuralMarker("jump-in-wiki", withPrerequisiteGate("jump-in-wiki", withHooks("jump-in-wiki", jumpInWiki)))
+);
 const consistencyAuditTask = withRunLock(
   "consistency-audit",
-  withHooks("consistency-audit", withStructuralMarker("consistency-audit", consistencyAudit))
+  withStructuralMarker(
+    "consistency-audit",
+    withPrerequisiteGate("consistency-audit", withHooks("consistency-audit", consistencyAudit))
+  )
 );
-const translateTask = withRunLock("translate", withHooks("translate", withStructuralMarker("translate", translate)));
+const translateTask = withRunLock(
+  "translate",
+  withStructuralMarker("translate", withPrerequisiteGate("translate", withHooks("translate", translate)))
+);
 const verifyTranslateTask = withRunLock(
   "verify-translate",
   withHooks("verify-translate", withStructuralMarker("verify-translate", verifyTranslate))
 );
 const retranslateTask = withRunLock("retranslate", withHooks("retranslate", withStructuralMarker("retranslate", retranslate)));
-const translateQaTask = withRunLock("translate-qa", withHooks("translate-qa", withStructuralMarker("translate-qa", translateQa)));
-const polishTask = withRunLock("polish", withHooks("polish", withStructuralMarker("polish", polish)));
+const translateQaTask = withRunLock(
+  "translate-qa",
+  withStructuralMarker("translate-qa", withPrerequisiteGate("translate-qa", withHooks("translate-qa", translateQa)))
+);
+const polishTask = withRunLock(
+  "polish",
+  withStructuralMarker("polish", withPrerequisiteGate("polish", withHooks("polish", polish)))
+);
 
 /**
  * The "translation-report" step: rebuild the series-level translation report

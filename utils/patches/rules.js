@@ -97,14 +97,15 @@ const BANNED_PATCH_PATHS = [
     // of a layer whose rules now live in `utils/tickets/`, so a pattern that ends in `.js`
     // protects the cover of the book and not the book — and the cover is the file a
     // well-meaning reader would never edit anyway.
-    pattern: /^utils\/(?:tickets|resume|delivery-verify|ledger|runlock|patches|reference-store|postmortem)(?:\.js|\/)/,
+    pattern: /^utils\/(?:tickets|resume|delivery-verify|ledger|runlock|patches|reference-store|postmortem|prereqs)(?:\.js|\/)/,
     because:
       "these are the rules that constrain the manager, the diagnostics team and this team: the " +
       "banned-option filter, the closed action menu, the deliverable signal table, the anti-spin " +
       "ledger, the run lock, the patch channel itself, the reference store's evidence and " +
       "ownership guards — the checks that decide whether a claim in the glossary or the character " +
-      "reference is allowed to be in it at all — and the finding level table, which decides how far " +
-      "a fault is allowed to travel before anyone is told. A role that can edit the rules that judge " +
+      "reference is allowed to be in it at all — the finding level table, which decides how far " +
+      "a fault is allowed to travel before anyone is told, and the prerequisite table, which " +
+      "decides which step is allowed to start at all. A role that can edit the rules that judge " +
       "it is not being judged.",
     escalateTo:
       "the account owner. If one of these tables is genuinely wrong, say so in ownerNote with the " +
@@ -113,15 +114,17 @@ const BANNED_PATCH_PATHS = [
   {
     id: "constraint-tests",
     pattern:
-      /^test\/(?:test-(?:tickets|resume|delivery-verify|ledger|delivery-act|diagnostics|patches|finding-levels|reference-store(?:-(?:copy|artifacts|ownership))?)|fixture-reference-store)\.js$/,
+      /^test\/(?:test-(?:tickets|resume|delivery-verify|ledger|delivery-act|diagnostics|patches|finding-levels|prerequisite-gate|reference-store(?:-(?:copy|artifacts|ownership))?)|fixture-reference-store)\.js$/,
     because:
       "these are the tests that pin the constraints above. Editing the test that proves a guard works " +
       "is how a guard becomes decoration while the suite stays green (gotcha 67: a check that can " +
       "never fail is not a check). `test-finding-levels.js` is on the list because it is the only " +
       "thing that keeps the level table complete — every emitted kind declared, and the count of " +
-      "kinds the triage cannot see pinned at a number that may only fall. The reference-store fixture " +
-      "is on the list for the same reason in the other direction: it is what keeps those suites " +
-      "pointed at a two-volume toy series instead of the books (gotcha 69).",
+      "kinds the triage cannot see pinned at a number that may only fall. `test-prerequisite-gate.js` " +
+      "is on the list because it is the only thing that keeps the prerequisite table a DAG, keeps it " +
+      "covering every pipeline step, and pins that no flag and no run policy can wave it past. The " +
+      "reference-store fixture is on the list for the same reason in the other direction: it is what " +
+      "keeps those suites pointed at a two-volume toy series instead of the books (gotcha 69).",
     escalateTo: "the account owner, who is the only role that may relax one of these guarantees.",
   },
   {

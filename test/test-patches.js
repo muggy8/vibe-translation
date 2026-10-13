@@ -286,10 +286,14 @@ async function scenarioBannedPathsNameTheirRule() {
     // claim is allowed into the glossary lives in this layer.
     ["utils/reference-store/evidence.js", "constraint-tables"],
     ["utils/reference-store/facts.js", "constraint-tables"],
+    // The prerequisite table: the rule that decides which step may start at all. A team that can
+    // reorder it can start `translate` before the glossary exists.
+    ["utils/prereqs.js", "constraint-tables"],
     ["test/test-tickets.js", "constraint-tests"],
     ["test/test-patches.js", "constraint-tests"],
     ["test/test-reference-store-ownership.js", "constraint-tests"],
     ["test/fixture-reference-store.js", "constraint-tests"],
+    ["test/test-prerequisite-gate.js", "constraint-tests"],
     ["hooks/pre-glossary.sh", "edit-hooks"],
     ["hooks/README.md", "edit-hooks"],
     [".env", "edit-env"],

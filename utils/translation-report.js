@@ -18,7 +18,7 @@
 const fs = require("fs").promises;
 const path = require("path");
 require("../types"); // JSDoc type definitions
-const { writeProvenanceSidecar, fileExists } = require("./fs");
+const { writeProvenanceSidecar } = require("./fs");
 const { seriesArtifactFile } = require("../configs/shared");
 const { loadGlossaryDisputes, DISPUTES_FILE, DISPUTES_REPORT } = require("./disputes");
 const {
@@ -472,39 +472,46 @@ function summarizeReportRows(rows) {
 }
 
 /**
- * The translation stage's entry gate.
+ * The translation stage's own entry gate: the audit VERDICT.
  *
- * The pipeline produces two things no later stage can repair: the reference
- * artifacts' internal consistency, and the glossary's terminology decisions.
- * Both were advisory — a FAIL consistency report and a volume with no glossary
- * at all each produced one console line that scrolls past in an overnight run,
- * and the translation stage then spent hours producing a book whose terminology
- * nothing had agreed on.
+ * The pre-translation sign-off is a document the pipeline produces and then ignores unless somebody
+ * reads it. A FAIL verdict and a report with no verdict in it each used to produce one console line
+ * that scrolls past in an overnight run, and the translation stage then spent hours producing a book
+ * whose terminology and character voices nothing had agreed on.
  *
- * Both are now gates, with explicit overrides so the un-monitored path stays
- * usable when the operator has decided the gap is acceptable:
- *   `--allow-fail`       translate despite a FAIL (or missing) consistency audit
- *   `--allow-no-glossary` translate a volume that has no glossary
+ * What this gate owns, and what it does not:
+ *   - it owns the VERDICT. A FAIL means the work was done and came back negative — that is an answer,
+ *     not missing work, and `--allow-fail` is the operator's legitimate way of accepting it.
+ *   - it does NOT own "was the work done at all". That is `utils/prereqs.js`, which refuses
+ *     `translate` before this function is ever reached, and which no flag can wave past. The
+ *     `--allow-no-glossary` override that used to live here is DELETED: "translate a volume with no
+ *     glossary" is exactly the case that gate refuses, and an override for a case that can no longer
+ *     happen is a knob attached to nothing.
+ *
+ * The missing-report branch is kept because the offline pipeline loop
+ * (`test/test-pipeline-loop.js`) calls the task modules directly and therefore never reaches the
+ * gulp wrapper. Through every door that runs a gulp task the prerequisite gate has already refused,
+ * so the two never both report the same fact in the same run.
  *
  * @param {{
  *   seriesDir: string,
  *   volumes: Array<{folder: string, installmentNumber: string}>,
  *   allowFail?: boolean,
- *   allowNoGlossary?: boolean,
  *   dryRun?: boolean,
- * }} p
+ * }} p - `volumes` is still passed by the callers and is no longer consulted: the per-volume half of
+ *   the old entry gate moved to `utils/prereqs.js`, which checks every volume in the run's scope
+ *   before the task is reached.
  * @returns {Promise<void>}
- * @throws {Error} When a gate fails and no override was given.
+ * @throws {Error} When the audit verdict is missing or FAIL and `--allow-fail` was not given.
  */
-async function checkTranslationPreconditions({ seriesDir, volumes, allowFail, allowNoGlossary, dryRun }) {
+async function checkTranslationPreconditions({ seriesDir, volumes, allowFail, dryRun }) {
   if (dryRun) return;
   const problems = [];
 
-  // 1. The pre-translation sign-off. consistency-audit exists precisely to be
-  //    the gate before an expensive translation run; ignoring it makes it a
-  //    document nobody reads.
-  // consistency-audit.js writes the report at the series ROOT (not the
-  // artifacts directory) — the gate must look at the same file it writes.
+  // The pre-translation sign-off. consistency-audit exists precisely to be the gate before an
+  // expensive translation run; ignoring it makes it a document nobody reads.
+  // consistency-audit.js writes the report at the series ROOT (not the artifacts directory) — the
+  // gate must look at the same file it writes.
   const auditFile = path.join(seriesDir, "consistency-report.md");
   const audit = await readFileOrEmpty(auditFile);
   if (!audit.trim()) {
@@ -529,40 +536,20 @@ async function checkTranslationPreconditions({ seriesDir, volumes, allowFail, al
     }
   }
 
-  // 2. Terminology. The glossary is the one artifact no later stage can fix:
-  //    verification can flag a wrong rendering, but only the glossary task can
-  //    decide the right one, and a volume translated without it invents its own.
-  const missingGlossary = [];
-  for (const volume of volumes) {
-    const glossaryFile = path.join(seriesDir, volume.folder, "glossary.md");
-    if (!(await fileExists(glossaryFile))) missingGlossary.push(volume.installmentNumber);
-  }
-  if (missingGlossary.length > 0) {
-    problems.push(
-      `${missingGlossary.length} volume(s) have no glossary.md: ${missingGlossary.join(", ")}. ` +
-        `Run \`npx gulp glossary\` first — terminology consistency is the one thing the translation ` +
-        `stage cannot repair afterwards. Override with --allow-no-glossary.`
-    );
-  }
-
   if (problems.length > 0) {
-    if (allowFail && allowNoGlossary) {
+    if (allowFail) {
       console.warn(
-        `[translate] overriding the entry gate (${problems.length} problem(s)) — you asked for ` +
-        `--allow-fail and --allow-no-glossary:\n  - ${problems.join("\n  - ")}`
+        `[translate] overriding the audit verdict gate (${problems.length} problem(s)) — you asked for ` +
+        `--allow-fail:\n  - ${problems.join("\n  - ")}`
       );
       return;
     }
-    const missingOverride = [
-      !allowFail ? "--allow-fail" : null,
-      !allowNoGlossary ? "--allow-no-glossary" : null,
-    ]
-      .filter(Boolean)
-      .join(" / ");
     throw new Error(
       `translate refuses to start (${problems.length} unresolved problem(s)):\n  - ` +
         problems.join("\n  - ") +
-        `\nResolve the artifact problems first, or pass ${missingOverride} to proceed anyway.`
+        `\nResolve the audit first, or pass --allow-fail to proceed anyway. ` +
+        `(A prerequisite that was never built is not an audit verdict: no flag waves past ` +
+        `utils/prereqs.js.)`
     );
   }
 }

@@ -2,6 +2,12 @@
 
 Series intake, the four cumulative reference pipelines, the audit, the handoff, and what each step is declared to leave behind.
 
+Each of the four reference pipelines is gated before it starts: `utils/prereqs.js` refuses it unless
+`discover` and `extract` are complete for the volumes in the run's scope, and refuses
+`consistency-audit` unless all four are. They are **not** ordered among themselves — any order of
+glossary / jump-in-wiki / character-voice / style-guide is legal, and a test runs three of them.
+→ docs/pipelines.md §3.4, gotcha 140.
+
 Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md).
 
 ## The file map — intake and the four pre-production pipelines

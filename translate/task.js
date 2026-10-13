@@ -160,14 +160,13 @@ async function translate() {
   const { manifest, folders, volumes, volumeByFolder } = series;
   const volumeEntries = volumes.map((folder) => volumeByFolder.get(folder)).filter(Boolean);
 
-  // The entry gate: the consistency sign-off and the glossary. Both are things no later stage can
-  // repair, so they stop the run instead of scrolling past as a warning in an overnight one.
-  // Explicit overrides keep the un-monitored path usable (see utils/translation-report.js).
+  // The audit VERDICT gate. Whether the artifacts were built at all is answered earlier, by the
+  // prerequisite gate in gulpfile.js (`utils/prereqs.js`), which no flag reaches — this one only
+  // decides what to do with a sign-off that came back FAIL.
   await checkTranslationPreconditions({
     seriesDir,
     volumes: volumeEntries,
     allowFail: process.argv.includes("--allow-fail"),
-    allowNoGlossary: process.argv.includes("--allow-no-glossary"),
     dryRun,
   });
 

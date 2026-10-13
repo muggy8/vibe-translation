@@ -49,10 +49,14 @@ const BANNED_OPTIONS = [
     id: "allow-fail-or-no-glossary",
     pattern: /--allow-fail|--allow-no-glossary|translate (despite|even with)out a (glossary|audit)/i,
     because:
-      "these skip the entry gate that stops a token being spent on a foundation that was never " +
-      "built. A volume translated with no glossary has no terminology law, and the drift shows up " +
-      "later as a book that renders one name four ways.",
-    escalateTo: "the account owner",
+      "`--allow-fail` is the operator's answer to an audit verdict that came back FAIL, and it stays. " +
+      "`--allow-no-glossary` NO LONGER EXISTS: it was deleted on 2026-10-13 because \"translate a " +
+      "volume with no glossary\" is exactly the case the prerequisite gate in utils/prereqs.js now " +
+      "refuses, and a flag that waves past a gate with no override is a knob attached to nothing. " +
+      "Asking for either one here is asking for the entry gate to be skipped, and a volume translated " +
+      "with no glossary has no terminology law — the drift shows up later as a book that renders one " +
+      "name four ways.",
+    escalateTo: "the account owner — the prerequisite gate has no override, and only a human may add one",
   },
   {
     id: "lower-a-threshold",

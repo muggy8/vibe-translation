@@ -339,7 +339,7 @@ always the one that removes the *finding* rather than the *fault*, and here that
 no error at all. So the constraint cannot be "the manager should choose wisely": a manager given a
 menu picks the cheap item on it. `attachOptions` therefore runs `optionIsBanned` on the diagnostics
 team's reply, and refuses options that would remove a finding without changing the deliverable —
-disabling a carry-forward guard, `--allow-fail` / `--allow-no-glossary`, lowering `PASSING_SCORE` or
+disabling a carry-forward guard, `--allow-fail` / `--allow-no-glossary` (the second was **deleted** on 2026-10-13 — the filter still refuses the name, because refusing a flag that no longer exists is still refusing it, and the prerequisite gate in `utils/prereqs.js` has no override for anyone to ask for), lowering `PASSING_SCORE` or
 any acceptance threshold, deleting `.rejected` files or reports, editing `hooks/`, declaring an
 artifact expectation away, flipping an `ON_*` run policy to `skip`, or disabling the ledger. Each
 refusal names the escalation: if diagnostics genuinely believes one of these is correct, it says so
@@ -577,7 +577,8 @@ newest recorded run, groups them by step, and a step that has spent its budget b
 `open-ticket` — the honest reading of "I have run out of moves on this step" is that it needs
 somebody who can see the code. Tier C is not a limit the
 manager can reach — editing code or prompts, deleting anything, `--allow-fail` /
-`--allow-no-glossary`, renaming a volume folder, touching `old (do not touch)/` or a staged book, or
+`--allow-no-glossary` (deleted 2026-10-13; the name is still on the menu precisely so it can be
+refused by name), renaming a volume folder, touching `old (do not touch)/` or a staged book, or
 running intake — and each Tier C entry carries the `why` so a refusal can name what it refused.
 `delivery.js` re-checks every action the plan names against the menu and exits 2 on one it does not
 find, so the menu cannot be widened by a bug in the triage.
@@ -587,6 +588,18 @@ its own questions (which files are volumes, in what order, what the series is ca
 questions in `translation-plan.md` are intake-and-account-owner decisions. When there is no plan of
 record the triage reports `blocked`, says the intake questions are not its own, and never proposes
 `run-intake` — which is Tier C. What the manager owns is **resumption**.
+
+**And the order of the steps is not the manager's to decide either.** Since 2026-10-13 the run's
+step order is enforced before any step starts, by the prerequisite gate in `gulpfile.js`
+(`utils/prereqs.js`), and it is not a menu item: a plan that proposes `re-run-step` on `translate`
+reaches the step runner, the runner spawns `index.js --stages=translate`, `index.js` spawns
+`npx gulp translate`, and the gate refuses there — a **structural** failure, so the runner stops
+rather than continuing, and the manager's before/after measurement records that the step did not
+finish. Measured on a fixture whose `character-voice` output was removed: the refusal reaches the
+manager in 12 ms with **0 model calls**, the step runner exits 1, and nothing in the volume folders
+changes. The gate is not on the closed menu, has no flag, and is a banned patch path — which is the
+point: a role that can move the rule about which steps may start is not being stopped by it.
+→ gotcha 140, docs/map-helpers.md.
 
 **Report mode is the default; act mode is what it earns.** `DELIVERY_MODE=report` writes a proposal and
 executes nothing, and that ordering is the point: the manager earns the right to act by writing a report
