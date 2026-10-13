@@ -47,7 +47,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const { specForStep } = require("./artifacts");
+const { specForStep, classifyVolumeQuarantine } = require("./artifacts");
 const { assessRunScope, declaresRunScope, postMortemDir } = require("./postmortem");
 // `assessFile` is the post-mortem's own one-file verdict — exists / is not a stub / parses / has the
 // declared shape. It is required from its module rather than re-implemented here, because a second
@@ -343,20 +343,40 @@ function readVolumesInScope(seriesDir, volumeArg) {
 }
 
 /**
- * Whether a quarantine pattern makes a prerequisite incomplete.
+ * Whether a quarantine file in a volume folder makes a prerequisite incomplete.
  *
- * Only a HIGH quarantine does. `QUARANTINED_CUMULATIVE` (HIGH) means the volume's own gate rejected
- * the artifact and every later volume cascades from it. `QUARANTINED_DRAFT` (MEDIUM) means a draft
- * failed the deterministic QA and was kept ON PURPOSE so `retranslate` has something to repair
- * (gotcha 39) — a volume that went through a repair round and came out fine still carries those
- * files, so treating them as "not complete" would refuse `polish` on a legitimately repaired book.
- * That is gotcha 130's lesson: a gate that halts on a false positive is worse than no gate.
+ * Not by its name, and not by its severity. Three acts write through the one quarantine door
+ * (`utils/reference-store/quarantine.js`'s `moveArtifactAside`): the carry-forward guard refusing an
+ * artifact, the acceptance grade refusing one, and a re-render replacing one and keeping the copy it
+ * replaced. All three write the same name, and the third is what `npx gulp glossary --force` and every
+ * resumed run do. So the question is the one `utils/artifacts` answers from the disk: **is the artifact
+ * this quarantine NAMES also in the folder?** Present → a kept copy, and the volume is finished. Absent
+ * → a gate refused this volume's output and nothing replaced it.
  *
- * @param {import("./artifacts").QuarantineExpectation} quarantine
+ * `QUARANTINED_DRAFT` names no declared artifact (`translation-<id>.rejected.md` is not a declared
+ * name), so it is never damage: the draft is kept ON PURPOSE so `retranslate` has something to repair
+ * (gotcha 39), and a volume that went through a repair round and came out fine still carries those
+ * files. Gotcha 130's lesson: a gate that halts on a false positive is worse than no gate — and this
+ * gate was refusing `glossary`, `character-voice` AND `style-guide` on one `character-voice.md.rejected`,
+ * because the pattern is shared and the name was the only thing it asked.
+ *
+ * @param {import("./artifacts").QuarantineExpectation} quarantine - The expectation that matched.
+ * @param {Object} facts
+ * @param {string} facts.name - The file name that matched.
+ * @param {import("./artifacts").StepArtifactSpec} facts.spec - The prerequisite step being checked.
+ * @param {string} facts.installment - The volume's installment number.
+ * @param {Set<string>} facts.presentNames - Every regular file in that volume folder.
  * @returns {boolean}
  */
-function quarantineBlocksCompletion(quarantine) {
-  return quarantine.severity === "HIGH";
+function quarantineBlocksCompletion(quarantine, facts) {
+  const read = classifyVolumeQuarantine({
+    quarantine,
+    name: facts.name,
+    spec: facts.spec,
+    installment: facts.installment,
+    presentNames: facts.presentNames,
+  });
+  return read.blocksCompletion;
 }
 
 /**
@@ -412,12 +432,37 @@ async function volumeGaps({ step, spec, seriesDir, volumeEntry, ctx }) {
     return [`volume ${installment} has no folder (${volumeEntry.folder}) — ${step} never wrote it`];
   }
 
-  // 1. Every `required` expectation, judged by the post-mortem's own one-file verdict.
+  // 0. The gate evidence in this folder, read beside the folder. A quarantine whose named artifact is
+  //    ALSO here is the copy a re-render replaced — normal output, and no business of this gate. One
+  //    whose named artifact is absent is a refusal, and it belongs to the step that declares that
+  //    artifact and to no other (`QUARANTINED_CUMULATIVE` is one pattern shared by three steps, so
+  //    matching the pattern alone used to refuse `glossary`, `character-voice` AND `style-guide` on one
+  //    `character-voice.md.rejected`).
+  const presentNames = new Set(names);
+  /** @type {Map<string, {name: string, meaning: string}[]>} stem -> the refusals that name it */
+  const refusals = new Map();
+  for (const quarantine of spec.quarantines || []) {
+    for (const name of names) {
+      if (!quarantine.pattern.test(name)) continue;
+      const read = classifyVolumeQuarantine({ quarantine, name, spec, installment, presentNames });
+      if (!read.blocksCompletion) continue;
+      const list = refusals.get(read.stem) || [];
+      list.push({ name, meaning: read.meaning });
+      refusals.set(read.stem, list);
+    }
+  }
+
+  // 1. Every `required` expectation, judged by the post-mortem's own one-file verdict. When the gap is
+  //    one a gate left its evidence beside, the evidence rides along in the same sentence: "volume 01
+  //    has no glossary.md" is true and useless next to "…and it holds glossary.md.rejected, the gate's
+  //    own account". One gap per damaged artifact, never two.
   const volumeCtx = { ...ctx, installment };
+  const requiredNames = new Set();
   for (const expectation of spec.volume) {
     if (expectation.level !== "required") continue;
     if (expectation.when && !expectation.when(volumeCtx)) continue;
     const name = expectation.name.replace("{installment}", installment);
+    requiredNames.add(name);
     const res = await assessFile(
       path.join(volumeDir, name),
       { ...expectation, name },
@@ -425,7 +470,9 @@ async function volumeGaps({ step, spec, seriesDir, volumeEntry, ctx }) {
       installment,
       `${volumeEntry.folder}/${name}`
     );
-    if (res) gaps.push(`volume ${installment} ${gapPhrase(res, { ...expectation, name })}`);
+    if (!res) continue;
+    const evidence = (refusals.get(name) || []).map((r) => `and it holds ${r.name}: ${r.meaning}`).join("; ");
+    gaps.push(`volume ${installment} ${gapPhrase(res, { ...expectation, name })}${evidence ? ` — ${evidence}` : ""}`);
   }
 
   // 2. The acceptance grade, through the same test the idempotent skip-check uses.
@@ -445,11 +492,13 @@ async function volumeGaps({ step, spec, seriesDir, volumeEntry, ctx }) {
     }
   }
 
-  // 3. A gate that fired and left its evidence in this folder.
-  for (const quarantine of spec.quarantines || []) {
-    if (!quarantineBlocksCompletion(quarantine)) continue;
-    const hit = names.find((name) => quarantine.pattern.test(name));
-    if (hit) gaps.push(`volume ${installment} holds ${hit}: ${quarantine.meaning}`);
+  // 3. A refusal this gate has not already named through a `required` expectation — a quarantine of an
+  //    artifact this step declares at `expected` level, or one whose declared name is a template this
+  //    volume's folder does not use. Nothing a guard refused may be dropped because the wording did not
+  //    line up.
+  for (const [stem, list] of refusals) {
+    if (requiredNames.has(stem)) continue;
+    for (const r of list) gaps.push(`volume ${installment} holds ${r.name} and has no ${stem}: ${r.meaning}`);
   }
 
   return gaps;

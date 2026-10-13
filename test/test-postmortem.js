@@ -374,12 +374,21 @@ const DEFECT_CASES = [
     severity: "MEDIUM",
   },
   {
-    label: "a carry-forward gate quarantined a glossary and nobody read it",
+    label: "a gate refused this volume's glossary and nothing replaced it",
     async plant(dir) {
+      await fs.rm(path.join(dir, "Test Story(02)", "glossary.md"));
       await fs.writeFile(path.join(dir, "Test Story(02)", "glossary.md.rejected"), TABLE, "utf8");
     },
     expect: "quarantine-present",
     severity: "HIGH",
+  },
+  {
+    label: "a re-render replaced this volume's glossary and kept the copy it replaced",
+    async plant(dir) {
+      await fs.writeFile(path.join(dir, "Test Story(02)", "glossary.md.rejected.2"), TABLE, "utf8");
+    },
+    expect: "quarantine-present",
+    severity: "LOW",
   },
   {
     label: "a stale stray is sitting in the volume folder",

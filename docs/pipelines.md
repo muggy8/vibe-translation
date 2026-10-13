@@ -24,9 +24,12 @@ gulp task, before the task's own code is reached:
 **"Complete" is read off the disk.** A prerequisite counts as finished when the files that step's
 own declaration in `utils/artifacts.js` promises are there, in the shape that declaration says, and —
 where the step grades its volumes — when the volume's persisted acceptance window still passes. A
-`.rejected` cumulative artifact in the folder means that step's own gate refused it, so the step is
-not complete; a quarantined translate draft does not, because keeping it is how `retranslate` is
-meant to work.
+`.rejected` file counts against the step **only when the artifact it names is gone**: a carry-forward
+refusal and a failing grade both move the live file aside, so the missing file is what refuses the next
+step and the quarantine is the sentence that says why. A `.rejected` lying beside the artifact it names
+is the copy a re-render replaced — `npx gulp glossary --force` and every resumed volume leave one — and
+it does not make the volume unfinished; a quarantined translate draft does not either, because keeping it
+is how `retranslate` is meant to work. → gotcha 141.
 
 **There is no override, and that is the owner's rule, not an omission.** `--force`, `--allow-fail`,
 `ON_TASK_ERROR=continue`, the ledger and the resume menu are not read by the gate. The refusal is a

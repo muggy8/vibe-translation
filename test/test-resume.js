@@ -218,29 +218,35 @@ async function testComplete() {
   console.log("  complete: says so, and proposes nothing");
 }
 
-// ─── 4: gate evidence beside COMPLETE output ──────────────────────────────────
+// ─── 4: a kept copy beside COMPLETE output ────────────────────────────────────
 
+/**
+ * A `.rejected` lying beside the artifact it NAMES is the copy a re-render replaced — what
+ * `npx gulp glossary --force` and every resumed volume leave behind. It is named, it is not damage, it
+ * is not evidence, and it opens nothing. Scenario 5 is the other half: the same file with nothing
+ * standing in the named artifact's place.
+ */
 async function testEvidenceIsNotAResumePoint() {
-  const fx = await completeSeries("evidence-beside-complete");
-  // Volume 02's glossary is complete. A `.rejected` from an earlier run is lying beside it.
+  const fx = await completeSeries("kept-copy-beside-complete");
+  // Volume 02's glossary is complete. A `.rejected` from an earlier render is lying beside it.
   await fs.promises.writeFile(path.join(fx.dir, "Test Story(02)", "glossary.md.rejected"), "old quarantine\n", "utf8");
 
-  const plan = resume.planResume(await resume.readWorkingState({ seriesDir: fx.dir }));
+  const state = await resume.readWorkingState({ seriesDir: fx.dir });
+  const plan = resume.planResume(state);
 
-  assert.strictEqual(plan.verdict, "evidence", plan.headline);
-  assert.ok(plan.headline.includes("evidence"), plan.headline);
+  assert.strictEqual(plan.verdict, "nothing-to-do", plan.headline);
   const glossary = plan.steps.find((s) => s.step === "glossary");
-  assert.strictEqual(glossary.action, "ticket", "reading the evidence is a question, not a rebuild");
-  assert.strictEqual(glossary.actionName, "open-ticket");
+  assert.strictEqual(glossary.action, "none", "a kept copy is not a question to open and not work to do");
   assert.deepStrictEqual(glossary.wipeFirst, [], "complete output is not removed because a leftover file is next to it");
-  assert.ok(
-    glossary.reasons.some((r) => r.includes("not a reason to rebuild")),
-    "the report has to say out loud that this volume is finished"
-  );
-  // And it must not become a wipe-and-cascade under any name.
   assert.ok(!plan.markdown.includes("wipe-and-cascade"), plan.markdown.slice(0, 400));
+  const glossaryState = state.stepStates.find((s) => s.step === "glossary");
+  assert.ok(
+    glossaryState.noteKinds.includes("quarantine-present"),
+    `the kept copy is still named in the report: ${JSON.stringify(glossaryState)}`
+  );
+  assert.ok(!glossaryState.damageKinds.includes("quarantine-present"), "and it is not damage");
 
-  console.log("  evidence beside finished work: read it, do not rebuild thirteen volumes of it");
+  console.log("  a kept copy beside finished work: named, not damage, and it rebuilds nothing");
 }
 
 // ─── 5: gate evidence beside MISSING output (volume 15) ───────────────────────

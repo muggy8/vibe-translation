@@ -17,8 +17,9 @@
  *   2. a **MINOR** finding does not stop a run and does not open one — it is batched per (kind, step)
  *      and proposed for investigation;
  *   3. a **NOTE** is reported only;
- *   4. `quarantine-present` beside complete output is still evidence, never damage, and never a wipe
- *      (Tier C — this is the volume-15 rule and it must survive the re-routing);
+ *   4. a kept `.rejected` copy beside complete output is a **NOTE**, and a `quarantine-present` naming an
+ *      artifact that is gone is **evidence** — either way never damage and never a wipe (Tier C — this is
+ *      the volume-15 rule and it must survive the re-routing);
  *   5. a step that HALTED at the volume boundary is a distinct state from a step that failed: the plan
  *      says which book it stopped after, which books were never attempted, and proposes resuming from
  *      that book rather than re-running from volume 1;
@@ -305,7 +306,13 @@ async function testMinorDoesNotOpenTheRun() {
 /**
  * Two things that must survive the re-routing unchanged:
  *   - a NOTE-level kind is a line in the report and nothing else;
- *   - `quarantine-present` beside COMPLETE output is evidence: read it, never rebuild, never wipe.
+ *   - a gate's evidence is never damage and never a wipe (Tier C).
+ *
+ * What changed on 2026-10-13 is WHICH file counts as that evidence. A `.rejected` beside the artifact
+ * it NAMES is the copy a re-render replaced — a NOTE about how the volume was made. A `.rejected` with
+ * nothing standing in the named artifact's place is a gate that refused the volume, and that is the
+ * evidence the triage means. Both halves are pinned here, because the two used to be one finding and
+ * the difference is what made a routine `--force` re-render read as an unfinished volume.
  *
  * @returns {Promise<void>}
  */
@@ -325,26 +332,39 @@ async function testNoteAndEvidence() {
     "a NOTE is reported"
   );
 
-  // The volume-15 lesson, on disk: a gate's evidence beside output that is complete.
-  const f = await fx.completeSeries("evidence-beside-complete-routing", FIXTURE_ROOT);
-  await fs.promises.writeFile(path.join(f.dir, "Test Story(02)", "glossary.md.rejected"), "old quarantine\n", "utf8");
-  const { state, plan } = await triage(f);
+  // A kept copy beside output that is complete: named, at LOW, and it opens nothing.
+  const kept = await fx.completeSeries("kept-copy-beside-complete-routing", FIXTURE_ROOT);
+  await fs.promises.writeFile(path.join(kept.dir, "Test Story(02)", "glossary.md.rejected"), "the copy a re-render replaced\n", "utf8");
+  const keptTriage = await triage(kept);
+  const keptGlossary = stepState(keptTriage.state, "glossary");
+  ok(keptGlossary.noteKinds.includes("quarantine-present"), "the kept copy is still named");
+  ok(!keptGlossary.damageKinds.includes("quarantine-present"), "it is not damage");
+  ok(!keptGlossary.evidenceKinds.includes("quarantine-present"), "and it is not evidence either — the artifact it names is standing there");
+  same(keptTriage.plan.verdict, "nothing-to-do", keptTriage.plan.headline);
+  const keptLine = line(keptTriage.plan, "glossary");
+  same(keptLine.wipeFirst, [], "complete output is not removed because a leftover file is next to it");
+  ok(!keptTriage.plan.markdown.includes("wipe-and-cascade"), `Tier C survives: ${keptTriage.plan.markdown.slice(0, 400)}`);
 
-  const glossary = stepState(state, "glossary");
-  ok(glossary.evidenceKinds.includes("quarantine-present"), "the quarantine is still evidence");
-  ok(!glossary.damageKinds.includes("quarantine-present"), "and it is still not damage");
-  same(plan.verdict, "evidence", plan.headline);
-  const l = line(plan, "glossary");
-  same(l.action, "ticket", "reading the evidence is a question, not a rebuild");
-  same(l.actionName, "open-ticket");
-  same(l.wipeFirst, [], "complete output is not removed because a leftover file is next to it");
-  ok(!plan.markdown.includes("wipe-and-cascade"), `Tier C survives the re-routing: ${plan.markdown.slice(0, 400)}`);
+  // The volume-15 shape on disk: the gate's evidence with NOTHING in the refused artifact's place.
+  const refused = await fx.completeSeries("evidence-beside-a-gap-routing", FIXTURE_ROOT);
+  await fx.removeStepOutputs(refused.dir, "glossary", "Test Story(01)", "01");
+  await fs.promises.writeFile(path.join(refused.dir, "Test Story(01)", "glossary.md.rejected"), "the gate's own account\n", "utf8");
+  const refusedTriage = await triage(refused);
+  const refusedGlossary = stepState(refusedTriage.state, "glossary");
+  ok(refusedGlossary.evidenceKinds.includes("quarantine-present"), "a refusal with nothing beside it is still evidence");
+  ok(!refusedGlossary.damageKinds.includes("quarantine-present"), "and it is still not itself damage");
+  ok(refusedGlossary.damageKinds.includes("missing-required"), "the damage is the missing artifact, which the triage does see");
+  const refusedLine = line(refusedTriage.plan, "glossary");
   ok(
-    l.reasons.some((r) => r.includes("not a reason to rebuild")),
-    "the plan still says out loud that this volume is finished"
+    !refusedLine.wipeFirst.some((w) => String(w).includes("Test Story(02)")),
+    `volume 02's finished glossary is not in the wipe list: ${JSON.stringify(refusedLine.wipeFirst)}`
+  );
+  ok(
+    refusedLine.reasons.some((r) => r.includes("not a reason to rebuild") || refusedLine.actionName !== "wipe-and-cascade"),
+    `the plan does not rebuild a volume because a leftover file is next to it: ${JSON.stringify(refusedLine.reasons)}`
   );
 
-  console.log("  NOTE is reported only; evidence beside finished work is still evidence");
+  console.log("  NOTE is reported only; a kept copy is a NOTE, a refusal with nothing beside it is evidence, and neither is a wipe");
 }
 
 // ─── 4. A step that halted is a distinct state ────────────────────────────────

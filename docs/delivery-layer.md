@@ -80,7 +80,7 @@ that decides what a finding *does*:
 | `MAJOR` | **damage** — same, and when the halt record says the step stopped itself at a volume boundary the plan reports it as **paused**: which book it stopped after, which books were **never attempted**, and that the step picks up at *that* book (for a cumulative step that is the whole-series run — the cascade is what rebuilds the tail, and the accepted books before it are kept free by the skip-checks rather than re-paid for, gotcha 66) | `paused` (halt record present) or `incomplete` |
 | `MINOR` | a **gap**: batched per (kind, step) whatever number of volumes it fired in, reported, and **proposed** for investigation. It never opens the run, never wipes, never spends the intervention budget | `gaps` |
 | `NOTE` | a line in the report and nothing else | `gaps` |
-| `quarantine-present` and its cousins (`EVIDENCE_KINDS`) | unchanged: a HIGH one is **evidence** beside finished output — read it, never rebuild it, never delete it (Tier C); a MEDIUM one is still the note it always was | `quarantined` |
+| `quarantine-present` and its cousins (`EVIDENCE_KINDS`) | a HIGH one — a `.rejected` with **nothing standing in the named artifact's place** — is **evidence**: read it, never rebuild on top of it, never delete it (Tier C). A LOW one is the copy a re-render replaced and kept, and it is a NOTE like any other; a MEDIUM one is the kept translate draft it always was (`utils/artifacts/specs.js`'s `classifyVolumeQuarantine` decides which of the three a file is, gotcha 141) | `quarantined` (evidence) / `gaps` (a kept copy) |
 
 Severity survives in exactly one place in the triage: that evidence branch. `classifyFindings` looks the
 route **up in `LEVEL_ROUTES`** rather than re-deciding it in a chain of `if`s — and both tables are
@@ -542,7 +542,16 @@ Six rules in it are load-bearing, and each one is a mistake this module actually
 - **A quarantine belongs to the artifact it names, not to every step that declares the pattern.**
   `utils/artifacts.js` declares one pattern for all three cumulative gates, so pattern-matching
   attributes a `character-voice.md.rejected` to glossary — which then justifies "glossary's own
-  gate removed this file" for a volume whose glossary gate never fired.
+  gate removed this file" for a volume whose glossary gate never fired. The rule now lives beside the
+  pattern (`quarantineOwner` / `classifyVolumeQuarantine` in `utils/artifacts/specs.js`) and every door
+  — the post-mortem, the prerequisite gate, the resume triage — asks it, because three doors each
+  holding their own opinion is how one leftover file became three unfinished steps (gotcha 141).
+- **A file name cannot say which act wrote it.** A carry-forward refusal, a failing acceptance grade and
+  a routine `--force` re-render all go through `utils/reference-store/quarantine.js`'s `moveArtifactAside`
+  and all write `glossary.md.rejected`. The folder says which one: is the artifact the quarantine NAMES
+  also there? Absent → a gate refused this volume's output (HIGH, and the prerequisite gate refuses).
+  Present → the copy a re-render replaced (LOW, named, and the volume is finished). Getting this backwards
+  is what made `npx gulp glossary --force` leave a volume the run called unfinished (gotcha 141).
 - **A declared name is a template.** `jump-in-wiki-validation-{installment}.md` compared against a
   directory listing is never equal, so a finished step reads as missing and a wipe list gets a
   literal `{installment}` in it, which deletes nothing.

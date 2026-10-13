@@ -111,6 +111,23 @@ require("../types"); // JSDoc type definitions
  */
 
 /**
+ * One quarantine file, read beside the folder that holds it.
+ *
+ * The name says a gate fired. The folder says whether anything stands in the refused artifact's place
+ * — which is the difference between a volume a guard refused and a volume a re-render rebuilt.
+ *
+ * @typedef {Object} QuarantineReading
+ * @property {string|null} stem - The artifact the file NAMES, or null when it names none.
+ * @property {string|null} owner - The step that declares THAT artifact, or null when no step declares
+ *   it — which is what makes a kept translation draft a different kind of file from a refused reference.
+ * @property {boolean} owned - Whether the step asking is the step that owns the named artifact.
+ * @property {boolean} damage - The named artifact is absent: a gate refused this volume's output.
+ * @property {boolean} blocksCompletion - `damage`, and this step is the one that owes that artifact.
+ * @property {"HIGH"|"MEDIUM"|"LOW"} severity - The declared severity for damage, LOW for a kept copy.
+ * @property {string} meaning - The sentence a report carries.
+ */
+
+/**
  * Everything one step is expected to leave.
  *
  * @typedef {Object} StepArtifactSpec
@@ -138,4 +155,10 @@ module.exports = {
   DELIVERY_COMMANDS: delivery.DELIVERY_COMMANDS,
   isKnownVolumeFile: rules.isKnownVolumeFile,
   KNOWN_VOLUME_FILE_PATTERNS: rules.KNOWN_VOLUME_FILE_PATTERNS,
+  quarantineStem: rules.quarantineStem,
+  QUARANTINED_COPY_SEVERITY: rules.QUARANTINED_COPY_SEVERITY,
+  QUARANTINED_COPY_MEANING: rules.QUARANTINED_COPY_MEANING,
+  resolveDeclaredName: specs.resolveDeclaredName,
+  quarantineOwner: specs.quarantineOwner,
+  classifyVolumeQuarantine: specs.classifyVolumeQuarantine,
 };

@@ -22,8 +22,9 @@
  *   9. `--dry-run` reports and does not refuse;
  *  10. no flag overrides it: `--force`, `--allow-fail`, `--allow-no-glossary` (deleted),
  *      `ON_TASK_ERROR=continue`, and a ledger that already recorded this step failing;
- *  11. a failed acceptance grade is not complete, and a quarantined `.rejected` artifact is not
- *      complete — while a quarantined translation DRAFT (kept on purpose, gotcha 39) still is;
+ *  11. a failed acceptance grade is not complete, and a `.rejected` whose artifact is gone is not
+ *      complete — while a re-render's kept copy and a quarantined translation DRAFT (kept on purpose,
+ *      gotcha 39) both still are;
  *  12. the gate fires from every door: `npx gulp <step>`, `npx gulp` (the default series),
  *      `npm run pipeline -- --stages=`, `npm run delivery -- --mode=act`, and the autopilot's act
  *      command line;
@@ -518,7 +519,7 @@ async function scenarioNoOverride() {
 
 // ─── 11. a grade that failed, and a gate that fired ───────────────────────────
 
-/** A failed acceptance grade is not complete; a quarantined cumulative artifact is not complete; a quarantined draft still is. */
+/** A failed acceptance grade is not complete; a `.rejected` whose artifact is gone is not complete; a re-render's kept copy and a repaired draft still are. */
 async function scenarioGradeAndQuarantine() {
   const built = await series("grade-and-quarantine", true);
   const stateFile = path.join(built.dir, "Test Story(01)", "glossary-validation-rolling-state.json");
@@ -549,15 +550,50 @@ async function scenarioGradeAndQuarantine() {
   );
   const r = await prereqs.evaluatePrerequisites({ step: "polish", seriesDir: repaired.dir });
   ok(r.ok, `a kept-and-repaired draft does not block polish (${r.message})`);
+  // What a quarantine means is decided beside the folder it sits in, not by its severity. The same
+  // file blocks completion when the artifact it names is gone and does not when a re-render replaced
+  // that artifact and kept the copy — which is the difference between a guard refusing a volume and
+  // `npx gulp glossary --force` rebuilding one.
+  const cumulative = STEP_ARTIFACT_SPECS.glossary.quarantines[0];
+  const draft = STEP_ARTIFACT_SPECS.translate.quarantines[0];
+  const installment = "01";
   ok(
-    prereqs.quarantineBlocksCompletion(STEP_ARTIFACT_SPECS.glossary.quarantines[0]) === true,
-    "a HIGH quarantine blocks completion"
+    prereqs.quarantineBlocksCompletion(cumulative, {
+      name: "glossary.md.rejected",
+      spec: STEP_ARTIFACT_SPECS.glossary,
+      installment,
+      presentNames: new Set(["glossary-validation.md", "glossary.md.rejected"]),
+    }) === true,
+    "a cumulative quarantine with nothing in the refused artifact's place blocks completion"
   );
   ok(
-    prereqs.quarantineBlocksCompletion(STEP_ARTIFACT_SPECS.translate.quarantines[0]) === false,
-    "a MEDIUM quarantine (a draft kept for repair) does not"
+    prereqs.quarantineBlocksCompletion(cumulative, {
+      name: "glossary.md.rejected.2",
+      spec: STEP_ARTIFACT_SPECS.glossary,
+      installment,
+      presentNames: new Set(["glossary-validation.md", "glossary.md.rejected.2"]),
+    }) === true,
+    "and the numbered one blocks exactly the same way"
   );
-  console.log("  failed grade and .rejected cumulative artifact: not complete; a repaired draft: still complete");
+  ok(
+    prereqs.quarantineBlocksCompletion(cumulative, {
+      name: "glossary.md.rejected",
+      spec: STEP_ARTIFACT_SPECS.glossary,
+      installment,
+      presentNames: new Set(["glossary.md", "glossary.md.rejected"]),
+    }) === false,
+    "the same file beside the artifact it names does not — that is a re-render, not a refusal"
+  );
+  ok(
+    prereqs.quarantineBlocksCompletion(draft, {
+      name: "translation-ch3.rejected.md",
+      spec: STEP_ARTIFACT_SPECS.translate,
+      installment,
+      presentNames: new Set(["translation.md", "translation-state.json", "translation-ch3.rejected.md"]),
+    }) === false,
+    "a MEDIUM quarantine (a draft kept for repair) does not (gotcha 39)"
+  );
+  console.log("  failed grade and .rejected cumulative artifact: not complete; a re-render's kept copy and a repaired draft: still complete");
 }
 
 // ─── 12. every door ───────────────────────────────────────────────────────────

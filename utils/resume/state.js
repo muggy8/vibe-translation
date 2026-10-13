@@ -7,7 +7,7 @@
 const fs = require("fs");
 const path = require("path");
 const { PIPELINE_STEPS } = require("../../gulpfile");
-const { STEP_ARTIFACT_SPECS, specForStep } = require("../artifacts");
+const { STEP_ARTIFACT_SPECS, specForStep, quarantineStem } = require("../artifacts");
 const { runPostMortem } = require("../postmortem");
 const { FINDING_LEVELS } = require("../postmortem/levels");
 const { readLedger, recurringFindings } = require("../ledger");
@@ -228,7 +228,10 @@ function quarantineBelongsToStep(step, name, installment) {
   const spec = specForStep(step);
   if (!spec || !spec.perVolume) return false;
   if (!spec.quarantines.some((q) => q.pattern.test(name))) return false;
-  const stem = name.replace(/\.rejected(-passage)?\.md$/, "").replace(/\.rejected$/, "");
+  // The same stem the artifact table uses. Stripping the suffix here as well is how the numbered family
+  // (`character-voice.md.rejected.4`) became a file the triage counted but attributed to nobody.
+  const stem = quarantineStem(name);
+  if (!stem) return false;
   return spec.volume.some((expect) => resolveDeclaredName(expect.name, installment) === stem);
 }
 

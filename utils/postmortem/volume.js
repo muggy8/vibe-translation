@@ -12,7 +12,7 @@ const path = require("path");
 const { fileExists } = require("../fs");
 const { finding } = require("./rules");
 const { assessFile } = require("./file");
-const { isKnownVolumeFile } = require("../artifacts");
+const { isKnownVolumeFile, classifyVolumeQuarantine } = require("../artifacts");
 const { loadRollingState, isAcceptedState } = require("../../configs/shared");
 const { isVolumeArtifact } = require("../../get-translation-target");
 
@@ -104,21 +104,31 @@ async function assessVolume({ spec, step, seriesDir, volumeEntry, ctx }) {
     if (res) findings.push(res);
   }
 
-  // 5: quarantine files a gate left behind.
+  // 5: quarantine files a gate left behind — read beside the folder, because the name alone cannot say
+  //    which act wrote it. A carry-forward refusal, a failing grade and a routine re-render all go
+  //    through `utils/reference-store/quarantine.js`'s `moveArtifactAside` and all write the same name;
+  //    the folder says whether the artifact the quarantine NAMES is standing there in its place.
+  //    Present → a kept copy, LOW. Absent → a gate refused this volume's output, at the declared
+  //    severity. And a quarantine belongs to the step that declares the artifact it names, never to
+  //    every step that declares the same pattern (gotchas-70-80 #15, now shared through `utils/artifacts`).
+  const presentNames = new Set(names);
+  const reported = new Set();
   for (const q of spec.quarantines) {
     for (const name of names) {
-      if (q.pattern.test(name)) {
-        findings.push(
-          finding(
-            q.severity,
-            "quarantine-present",
-            step,
-            installment,
-            `${volumeEntry.folder}/${name}`,
-            `${name} is present: ${q.meaning}`
-          )
-        );
-      }
+      if (reported.has(name) || !q.pattern.test(name)) continue;
+      const read = classifyVolumeQuarantine({ quarantine: q, name, spec, installment, presentNames });
+      if (read.owner && read.owner !== step) continue; // another step's gate evidence, reported by that step
+      reported.add(name);
+      findings.push(
+        finding(
+          read.severity,
+          "quarantine-present",
+          step,
+          installment,
+          `${volumeEntry.folder}/${name}`,
+          `${name} is present: ${read.meaning}`
+        )
+      );
     }
   }
 
