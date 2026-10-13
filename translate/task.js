@@ -24,6 +24,8 @@ const {
   roleEndpoint,
   describeEndpoint,
   loadVolumeReferences,
+  compareSettledGlossary,
+  describeSettledGlossary,
   readFileOrEmpty,
   previousVolumeTail,
   logRunEstimate,
@@ -35,6 +37,23 @@ const {
 
 const { continuityChars, seriesDir, translateSampling, translateTemplateFile, translateThinkingMode } = require("./config");
 const { processTranslateVolume } = require("./volume");
+
+/**
+ * The lines one volume's translation run prints about its terminology law.
+ *
+ * Two questions, both answerable without the model: which record the settled renderings came from, and
+ * whether the published `glossary.md` files — the series-root final one and this volume's own snapshot —
+ * say the same thing the chapters are about to be translated under. A disagreement is printed, not filed:
+ * a finding a stage builds inside its own process never reaches the post-mortem (gotcha 138), so naming a
+ * new finding kind for it would be a promise the delivery layer cannot keep yet.
+ *
+ * @param {{seriesDir: string, volumeDir: string, volume: {installmentNumber: string}}} args
+ * @returns {string[]} One line per fact worth printing, in the order a reader wants them.
+ */
+function reportTerminologyLaw({ seriesDir, volumeDir, volume }) {
+  const comparison = compareSettledGlossary({ seriesDir, volumeDir });
+  return describeSettledGlossary(comparison, { volumeLabel: `Volume ${volume.installmentNumber}` });
+}
 
 /**
  * Translate one volume: resolve its source, decide which references the translator sees, and hand
@@ -70,6 +89,14 @@ async function translateOneVolume(
   // matter to THIS book.
   const volumeSourceText = await readFileOrEmpty(bundle.wholePath || path.join(volumeDir, bundle.segments[0].file));
   const refs = await loadVolumeReferences(volumeDir, volumeSourceText);
+
+  // The terminology law this volume is translated under, and every published glossary file that disagrees
+  // with it (settled-glossary.js). Deterministic, no model call: a translation built on a rule the
+  // published file contradicts is the failure this stage exists to avoid, so the disagreement is named
+  // before a token is spent rather than discovered by a reader comparing two files by hand.
+  for (const line of reportTerminologyLaw({ seriesDir, volumeDir, volume })) {
+    console.log(`  [terminology] ${line}`);
+  }
 
   const result = await processTranslateVolume({
     volume,

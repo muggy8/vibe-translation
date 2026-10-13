@@ -1,8 +1,16 @@
 /**
- * The reference material a chapter is translated with: the volume's cumulative
- * references (shared wiki, volume wiki, POV map, voice notes, glossary terms,
- * disputed renderings), the per-chapter invalidation key, and the cross-volume
+ * The reference material a chapter is translated with: the settled terminology law (read out of the
+ * reference record), the volume's cumulative background references (shared wiki, volume wiki, POV map,
+ * voice notes), the disputed renderings, the per-chapter invalidation key, and the cross-volume
  * continuity tail.
+ *
+ * Two sources, and the split is the point. The **glossary comes from the settled reference record** —
+ * the newest row of every supersede chain, wherever in the series it was filed — because the terminology
+ * decision is a series-wide fact and a volume's own file is only a snapshot of it as of that volume
+ * (`settled-glossary.js`, and `translate/plan/01-translation-route.md` §9 question 1, answered by the
+ * account owner on 2026-10-13). The **other five are still read from the volume folder**, deliberately:
+ * `shared-wiki.md` is the story state *through this volume*, and reading the series-root copy would leak
+ * later-volume spoilers into an earlier volume's prompt. Widening that is a later slice, not this one.
  *
  * References are injected BY RELEVANCE to the text being processed, never by
  * document position (gotcha 41) — the artifacts are cumulative, so "the first N
@@ -20,6 +28,7 @@ const { tailOf } = require("./merge");
 const { MERGED_FILE } = require("./state");
 const { readFileOrEmpty, sha256 } = require("./internal");
 const { extractStyleRules, parseGlossaryTerms, selectTermsForChapter } = require("./terminology");
+const { readSettledGlossary } = require("./settled-glossary");
 
 /**
  * Which parts of the cumulative reference files get injected into a translation
@@ -64,14 +73,18 @@ async function previousVolumeTail(seriesDir, manifest, folderName, chars) {
 // ─── One volume's reference artifacts ───────────────────────────────────────
 
 /**
- * The six reference artifacts a volume's translation is built against, read as they are on disk.
+ * The five cumulative reference artifacts a volume's translation is built against, read as they are on
+ * disk. The glossary is not one of them: it comes out of the settled reference record
+ * ({@link readSettledGlossary}), and reading the volume folder's `glossary.md` as terminology law is the
+ * behaviour this slice removed.
  *
  * A missing file reads as an empty string rather than throwing: the translation stage runs without a
  * wiki or a POV map (with a warning for the one that matters most), and which ones are missing is
- * something the caller reports, not something that stops the volume.
+ * something the caller reports, not something that stops the volume. The glossary is the opposite case —
+ * a missing record is a refusal, and it throws.
  *
  * @param {string} volumeDir
- * @returns {Promise<{glossaryText: string, styleGuideText: string, sharedWikiText: string, wikiText: string, povMapText: string, voiceText: string}>}
+ * @returns {Promise<{styleGuideText: string, sharedWikiText: string, wikiText: string, povMapText: string, voiceText: string}>}
  */
 async function readReferenceFiles(volumeDir) {
   const read = async (name) => {
@@ -81,15 +94,14 @@ async function readReferenceFiles(volumeDir) {
       return "";
     }
   };
-  const [glossaryText, styleGuideText, sharedWikiText, wikiText, povMapText, voiceText] = await Promise.all([
-    read("glossary.md"),
+  const [styleGuideText, sharedWikiText, wikiText, povMapText, voiceText] = await Promise.all([
     read("style-guide.md"),
     read("shared-wiki.md"),
     read("wiki.md"),
     read("pov-map.md"),
     read("character-voice.md"),
   ]);
-  return { glossaryText, styleGuideText, sharedWikiText, wikiText, povMapText, voiceText };
+  return { styleGuideText, sharedWikiText, wikiText, povMapText, voiceText };
 }
 
 /**
@@ -99,15 +111,19 @@ async function readReferenceFiles(volumeDir) {
  * offending terms named: a silent gap in terminology law looks exactly like a translator who chose a
  * different rendering on purpose.
  *
- * @param {string} volumeDir - Named in the warnings, because the fix is a file in that folder.
- * @param {string} glossaryText
+ * The text handed to the reader is the settled record rendered as markdown, not the volume folder's file,
+ * so the reader's own guard still applies: a rendering column that opens with the superseded-rendering
+ * history line is refused as malformed rather than used, and a term named twice yields one pair.
+ *
+ * @param {string} volumeDir - Named in the warnings, because the fix is a step that rebuilds this volume's record.
+ * @param {string} glossaryText - The settled glossary, rendered by `renderGlossary` at the settled volume.
  * @returns {Array<Object>} The parsed terms.
  */
 function parseGlossaryForTranslation(volumeDir, glossaryText) {
   if (!glossaryText.trim()) {
     console.warn(
-      `[translation] ${volumeDir}: no glossary.md — the translation will run WITHOUT terminology constraints. ` +
-        `Run the glossary task first for best results.`
+      `[translation] ${volumeDir}: the settled reference record holds no glossary rows — the translation will run WITHOUT ` +
+        `terminology constraints. Run the glossary task for every volume first for best results.`
     );
   }
   const malformed = [];
@@ -202,13 +218,15 @@ function fingerprintReferences(texts) {
 }
 
 /**
- * Load the reference artifacts the translation stage injects into its prompts, from a volume folder:
- * the glossary as terminology law, the style rules as law, the wiki / POV / voice artifacts as bounded
- * background, the disputes the translation stage itself opened, and the fingerprints that decide
- * whether an existing draft is still current.
+ * Load the reference artifacts the translation stage injects into its prompts: the settled terminology
+ * law (read out of the reference record), the style rules as law, the wiki / POV / voice artifacts as
+ * bounded background read from the volume folder, the disputes the translation stage itself opened, and
+ * the fingerprints that decide whether an existing draft is still current.
  *
- * All six are optional — a missing artifact degrades to an empty reference, except the glossary, which
- * is the canonical terminology source and is warned about by name.
+ * The five background artifacts are optional — a missing one degrades to an empty reference. The glossary
+ * is not: **a series with no readable settled reference record is a refusal, not a fallback.** Falling
+ * back to the volume folder's `glossary.md` is gotcha 119's shape — every stage would then be translating
+ * under a rule nothing reports — so the error is structural and names the file it looked for.
  *
  * `background` is the story-context layer (shared wiki → volume wiki → POV map, in that order): the
  * "what is happening up to this installment" context. It feeds translate/retranslate (the [Translation
@@ -218,16 +236,27 @@ function fingerprintReferences(texts) {
  * "through this volume". The series-root copy holds the LATEST volume's state and would leak
  * later-volume spoilers into earlier volumes' prompts (observed design constraint of the two-file wiki
  * architecture: per-volume `wiki.md` is frozen to its own volume; `shared-wiki.md` is the cumulative
- * state).
+ * state). The glossary is the one reference where that reasoning does NOT apply: a settled rendering is
+ * not a spoiler, and a term a later volume settled is the answer this volume's chapters should have used
+ * all along.
  *
  * @param {string} volumeDir - Absolute path to the volume folder.
  * @param {string} [sourceText] - The volume's own text, used to decide WHICH sections of the cumulative references to inject (see {@link pickRelevantSections}). Omit it and the references fall back to their document order.
- * @returns {Promise<{glossaryText: string, terms: Array<{term: string, rendering: string, section: string}>, styleRules: string, background: string, voiceNotes: string, contextHash: string, sharedContextHash: string, disputes: Array<Object>, disputedTerms: Set<string>}>}
- *   `contextHash` is the fingerprint of the raw artifacts — the idempotency key: regenerating any of them invalidates the drafts built against them.
+ * @param {{seriesDir?: string}} [opts] - The series folder the settled record lives in. Defaults to SERIES_LOCATION, then to the volume folder's parent.
+ * @returns {Promise<{glossaryText: string, terms: Array<{term: string, rendering: string, section: string}>, styleRules: string, background: string, voiceNotes: string, contextHash: string, sharedContextHash: string, disputes: Array<Object>, disputedTerms: Set<string>, terminologySource: {file: string, folder: string, volume: number, termCount: number}}>}
+ *   `contextHash` is the fingerprint of the raw artifacts — the idempotency key: regenerating any of them invalidates the drafts built against them. `terminologySource` names the record the law came from, so a run log says which record a volume was translated under.
  */
-async function loadVolumeReferences(volumeDir, sourceText = "") {
+async function loadVolumeReferences(volumeDir, sourceText = "", { seriesDir } = {}) {
   const references = await readReferenceFiles(volumeDir);
-  const { glossaryText, styleGuideText, sharedWikiText, wikiText, povMapText, voiceText } = references;
+  const { styleGuideText, sharedWikiText, wikiText, povMapText, voiceText } = references;
+
+  // The terminology law, read from the settled reference record (settled-glossary.js). Resolved at call
+  // time, never from a module constant (gotchas 79 / 94), and never from a folder-name guess (gotcha 119).
+  const resolvedSeriesDir =
+    (typeof seriesDir === "string" && seriesDir.trim()) ||
+    (process.env.SERIES_LOCATION ? path.resolve(process.env.SERIES_LOCATION) : path.resolve(volumeDir, ".."));
+  const settled = readSettledGlossary({ seriesDir: resolvedSeriesDir });
+  const glossaryText = settled.glossaryText;
 
   const terms = parseGlossaryForTranslation(volumeDir, glossaryText);
   const styleRules = extractStyleRules(styleGuideText);
@@ -235,7 +264,9 @@ async function loadVolumeReferences(volumeDir, sourceText = "") {
   const voiceNotes = pickRelevantSections(voiceText, /^### /m, 4000, "character section(s)", sourceText);
 
   // The same fingerprint WITHOUT the glossary (see chapterContextHash): every reference except the one
-  // whose rows are selected per chapter.
+  // whose rows are selected per chapter. The glossary half is now the settled render, so a rendering a
+  // later volume filed moves this key too — the safe direction, and the per-chapter key below is what
+  // keeps the invalidation narrow.
   const contextHash = fingerprintReferences([glossaryText, styleGuideText, sharedWikiText, wikiText, povMapText, voiceText]);
   const sharedContextHash = fingerprintReferences([styleGuideText, sharedWikiText, wikiText, povMapText, voiceText]);
 
@@ -244,10 +275,7 @@ async function loadVolumeReferences(volumeDir, sourceText = "") {
   // translator improvising a third rendering — but the prompt must SAY it is provisional, or the next
   // verifier flags the same thing again and the QA loop oscillates against a term nobody is allowed to
   // change.
-  const seriesDir = process.env.SERIES_LOCATION
-    ? path.resolve(process.env.SERIES_LOCATION)
-    : path.resolve(volumeDir, "..");
-  const disputes = await loadGlossaryDisputes(seriesDir);
+  const disputes = await loadGlossaryDisputes(resolvedSeriesDir);
   const disputedTerms = disputedTermSet(disputes);
 
   return {
@@ -260,6 +288,12 @@ async function loadVolumeReferences(volumeDir, sourceText = "") {
     sharedContextHash,
     disputes,
     disputedTerms,
+    terminologySource: {
+      file: settled.record.file,
+      folder: settled.record.folder,
+      volume: settled.record.volume,
+      termCount: settled.termCount,
+    },
   };
 }
 
@@ -267,7 +301,7 @@ async function loadVolumeReferences(volumeDir, sourceText = "") {
 /**
  * The idempotency key for ONE chapter.
  *
- * The volume-level `contextHash` hashes six whole files, so editing one glossary
+ * The volume-level `contextHash` hashes the whole references, so editing one glossary
  * term invalidates every chapter of every volume — on a 17-volume series that is
  * thousands of model calls spent re-translating chapters that never contained the
  * edited word. A chapter's own key is the non-glossary references (whole, exactly
@@ -278,6 +312,12 @@ async function loadVolumeReferences(volumeDir, sourceText = "") {
  *   - edit a term this chapter never says → the chapter keeps its draft (correct)
  *   - regenerate the style guide / wiki / voice reference → every chapter
  *     invalidates, exactly as before (correct: those are injected whole)
+ *
+ * The same rule is what makes the settled-terminology change survivable. The glossary rows in the key
+ * now come from the settled record, so a rendering a later volume replaced invalidates exactly the
+ * chapters that print that term and no others — including the chapters of the volumes that came first,
+ * which is the point of the change. It is also the reason the change has a price: a run that has already
+ * paid for a chapter translated under the old rendering pays for it again.
  *
  * @param {{sharedContextHash?: string, terms: Array<{term: string, rendering: string}>}} refs
  * @param {string} sourceText - The chapter's source text (selects the terms).

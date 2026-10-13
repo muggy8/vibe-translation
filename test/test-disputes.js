@@ -54,6 +54,7 @@ const {
   buildTranslationTaskLines,
   HARD_MARKER,
 } = require("../utils/translate");
+const { openReferenceStore, importGlossary, DOCUMENT_SOURCE_STAGE } = require("../utils/reference-store");
 
 // ─── 1. Parsing the verifier's dispute blocks ────────────────────────────────
 
@@ -156,23 +157,26 @@ async function scenarioDisputesFlowBackwards() {
   const draft = "The laboratory was quiet.\n\nThe old recording system, Mirror, had run silently for twenty years.";
   await fs.writeFile(path.join(volumeDir, "src-ch1.md"), source + "\n", "utf8");
   await fs.writeFile(path.join(volumeDir, "translation-ch1.md"), draft + "\n", "utf8");
-  // The volume's own glossary snapshot — loadVolumeReferences reads the term list
-  // from this file, exactly as a real run does.
-  await fs.writeFile(
-    path.join(volumeDir, "glossary.md"),
-    [
-      "# Glossary — Test Series",
-      "",
-      "Current through volume 01.",
-      "",
-      "## Terms & Concepts",
-      "| Source | Rendering | Notes |",
-      "|---|---|---|",
-      "| 鏡 | Mirror | the recording system |",
-      "",
-    ].join("\n"),
-    "utf8"
-  );
+  // The volume's own glossary snapshot, kept on disk because it is still the human-facing file — but the
+  // term list `loadVolumeReferences` uses now comes from the volume's reference record, so the fixture
+  // builds that record through the store's own door and imports the same rows into it.
+  const glossaryMarkdown = [
+    "# Glossary — Test Series",
+    "",
+    "Current through volume 01.",
+    "",
+    "## Terms & Concepts",
+    "| Source | Rendering | Notes |",
+    "|---|---|---|",
+    "| 鏡 | Mirror | the recording system |",
+    "",
+  ].join("\n");
+  await fs.writeFile(path.join(volumeDir, "glossary.md"), glossaryMarkdown, "utf8");
+
+  const record = openReferenceStore({ volume: 1, folder: "Book(01)", seriesDir, stage: DOCUMENT_SOURCE_STAGE });
+  record.registerChaptersFromSource([{ id: "ch1", file: "src-ch1.md" }]);
+  const filed = importGlossary(record, glossaryMarkdown);
+  assert.strictEqual(filed.importedCount, 1, `the fixture record filed ${filed.importedCount} rows: ${JSON.stringify(filed.refused)}`);
 
   const bundle = {
     format: "txt",
@@ -271,7 +275,7 @@ async function scenarioDisputesFlowBackwards() {
 
     // The translation stage now sees the dispute and SAYS so to the translator —
     // while still requiring the canonical rendering, so the loop cannot argue.
-    const refs2 = await loadVolumeReferences(volumeDir, source);
+    const refs2 = await loadVolumeReferences(volumeDir, source, { seriesDir });
     assert.ok(refs2.disputedTerms.has("鏡"), "the term is marked disputed for this volume");
     const term = chapterTerminology(refs2, source);
     assert.deepStrictEqual(term.lines, ["鏡→Mirror"], "the pair line itself carries no annotation");
@@ -305,6 +309,11 @@ async function scenarioDisputesFlowBackwards() {
     void seenPrompt;
   } finally {
     harness.runOneShot = original;
+    try {
+      record.close();
+    } catch {
+      /* the fixture is being deleted; a handle that will not close is not a finding */
+    }
     if (previousSeriesLocation === undefined) delete process.env.SERIES_LOCATION;
     else process.env.SERIES_LOCATION = previousSeriesLocation;
     fsSync.rmSync(seriesDir, { recursive: true, force: true });

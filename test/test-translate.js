@@ -62,6 +62,12 @@ const {
   thinkingOutputFactor,
   measureOutputRatio,
 } = require("../utils/translate");
+const {
+  openReferenceStore,
+  importGlossary,
+  fileGlossaryRevision,
+  DOCUMENT_SOURCE_STAGE,
+} = require("../utils/reference-store");
 
 // ─── sha256 ───────────────────────────────────────────────────────────────────
 
@@ -525,7 +531,31 @@ assert.strictEqual(sha256("a"), sha256("a"));
 // ─── chapterContextHash (per-chapter invalidation) ───────────────────────────
 
 (async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-client-chash-"));
+  const seriesDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-client-chash-"));
+  const folder = "Book(01)";
+  const dir = path.join(seriesDir, folder);
+  fs.mkdirSync(dir);
+
+  // The terminology law lives in the volume's reference record now, so this scenario builds one through
+  // the store's own doors and changes the law the way a later volume changes it: a replacement row, not an
+  // edit to a file.
+  const chapterA = "ソラは部屋を見た。";
+  const chapterB = "黒鋼は部屋を見た。";
+  const segments = [
+    { id: "ch1", file: "b-ch1.md" },
+    { id: "ch2", file: "b-ch2.md" },
+  ];
+  fs.writeFileSync(path.join(dir, "b-ch1.md"), `${chapterA}\n`, "utf8");
+  fs.writeFileSync(path.join(dir, "b-ch2.md"), `${chapterB}\n`, "utf8");
+  fs.writeFileSync(path.join(dir, "b-whole.md"), `${chapterA}\n${chapterB}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(dir, "b-bundle.meta.json"),
+    JSON.stringify({ format: "txt", schema: 8, base: "b", wholeFile: "b-whole.md", segments }),
+    "utf8"
+  );
+  fs.writeFileSync(path.join(dir, "style-guide.md"), "# Style\n- Keep honorifics.\n", "utf8");
+  fs.writeFileSync(path.join(dir, "character-voice.md"), "# Voices\n- Sora: formal.\n", "utf8");
+
   const glossary = [
     "# Glossary",
     "",
@@ -537,49 +567,52 @@ assert.strictEqual(sha256("a"), sha256("a"));
     "| 黒鋼 | Kurogane | the other one |",
     "",
   ].join("\n");
-  fs.writeFileSync(path.join(dir, "glossary.md"), glossary, "utf8");
-  fs.writeFileSync(path.join(dir, "style-guide.md"), "# Style\n- Keep honorifics.\n", "utf8");
-  fs.writeFileSync(path.join(dir, "character-voice.md"), "# Voices\n- Sora: formal.\n", "utf8");
 
-  const chapterA = "ソラは部屋を見た。";
-  const chapterB = "黒鋼は部屋を見た。";
+  const store = openReferenceStore({ volume: 1, folder, seriesDir, stage: DOCUMENT_SOURCE_STAGE });
+  store.registerChaptersFromSource(segments);
+  const imported = importGlossary(store, glossary);
+  assert.strictEqual(imported.importedCount, 2, `the fixture record filed ${imported.importedCount} rows: ${JSON.stringify(imported.refused)}`);
 
-  const refs1 = await loadVolumeReferences(dir);
+  const refs1 = await loadVolumeReferences(dir, "", { seriesDir });
   const hashA1 = chapterContextHash(refs1, chapterA);
   const hashB1 = chapterContextHash(refs1, chapterB);
   assert.notStrictEqual(hashA1, hashB1, "two chapters with different terms have different keys");
 
-  // Edit a term chapter A never says: A's key is UNCHANGED (its draft survives),
-  // B's key changes (its draft must be re-made). This is the whole point — the
-  // volume-level hash changes for both, which is what used to re-translate a
-  // whole 17-volume series for one renamed side character.
-  fs.writeFileSync(
-    path.join(dir, "glossary.md"),
-    glossary.replace("| 黒鋼 | Kurogane | the other one |", "| 黒鋼 | Blacksteel | renamed |"),
-    "utf8"
-  );
-  const refs2 = await loadVolumeReferences(dir);
+  // Edit a term chapter A never says — through the revision door, which files a replacement row and never
+  // edits the one it replaces: A's key is UNCHANGED (its draft survives), B's key changes (its draft must
+  // be re-made). This is the whole point — the volume-level hash changes for both, which is what used to
+  // re-translate a whole 17-volume series for one renamed side character.
+  const revised = fileGlossaryRevision(store, {
+    term: "黒鋼",
+    rendering: "Blacksteel",
+    note: "renamed",
+    quote: chapterB,
+    reason: "the record's own row is not the evidence; the line is",
+  });
+  assert.ok(revised.ok, `the fixture's revision was refused: ${JSON.stringify(revised.refusal)}`);
+  const refs2 = await loadVolumeReferences(dir, "", { seriesDir });
   assert.strictEqual(chapterContextHash(refs2, chapterA), hashA1, "an unrelated glossary edit leaves chapter A's key alone");
   assert.notStrictEqual(chapterContextHash(refs2, chapterB), hashB1, "the chapter that DOES use the term invalidates");
   assert.notStrictEqual(refs2.contextHash, refs1.contextHash, "the volume-level key still changes for both (the fast path)");
 
   // A term added to the glossary that chapter A contains: A invalidates.
-  fs.writeFileSync(
-    path.join(dir, "glossary.md"),
-    glossary.replace("| 黒鋼 | Kurogane | the other one |", "| 黒鋼 | Kurogane | the other one |\n| 部屋 | room | a room |"),
-    "utf8"
+  const added = importGlossary(
+    store,
+    glossary.replace("| 黒鋼 | Kurogane | the other one |", "| 黒鋼 | Kurogane | the other one |\n| 部屋 | room | a room |")
   );
-  const refs3 = await loadVolumeReferences(dir);
+  assert.strictEqual(added.importedCount, 1, `the new term was not filed: ${JSON.stringify(added.refused)}`);
+  const refs3 = await loadVolumeReferences(dir, "", { seriesDir });
   assert.notStrictEqual(chapterContextHash(refs3, chapterA), hashA1, "a new term this chapter uses invalidates it");
 
   // The non-glossary references are injected whole, so changing them invalidates
   // every chapter — same as before.
   fs.writeFileSync(path.join(dir, "style-guide.md"), "# Style\n- Drop honorifics.\n", "utf8");
-  const refs4 = await loadVolumeReferences(dir);
+  const refs4 = await loadVolumeReferences(dir, "", { seriesDir });
   assert.notStrictEqual(chapterContextHash(refs4, chapterA), hashA1, "a style-guide change invalidates the chapter");
   assert.notStrictEqual(refs4.sharedContextHash, refs1.sharedContextHash);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  store.close();
+  fs.rmSync(seriesDir, { recursive: true, force: true });
 })();
 
 // ─── checkChapterListConsistency (the handoff vs the extraction) ─────────────
@@ -695,7 +728,29 @@ assert.strictEqual(sha256("a"), sha256("a"));
 // ─── loadVolumeReferences: relevance-ordered injection ───────────────────────
 
 (async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-client-refs-"));
+  const seriesDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-client-refs-"));
+  const folder = "Book(01)";
+  const dir = path.join(seriesDir, folder);
+  fs.mkdirSync(dir);
+
+  const volumeText = "主人公は黒鋼と再会した。";
+  fs.writeFileSync(path.join(dir, "r-ch1.md"), `${volumeText}\n`, "utf8");
+  fs.writeFileSync(path.join(dir, "r-whole.md"), `${volumeText}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(dir, "r-bundle.meta.json"),
+    JSON.stringify({ format: "txt", schema: 8, base: "r", wholeFile: "r-whole.md", segments: [{ id: "ch1", file: "r-ch1.md" }] }),
+    "utf8"
+  );
+  // The terminology law this volume is translated under now comes from the record, so the fixture builds
+  // one; the two artifacts below are the ones still read from the volume folder.
+  const store = openReferenceStore({ volume: 1, folder, seriesDir, stage: DOCUMENT_SOURCE_STAGE });
+  store.registerChaptersFromSource([{ id: "ch1", file: "r-ch1.md" }]);
+  const imported = importGlossary(
+    store,
+    ["# Glossary", "", "## Characters", "", "| Term | Rendering | Notes |", "|---|---|---|", "| 主人公 | the protagonist | volume 1's cast |", ""].join("\n")
+  );
+  assert.strictEqual(imported.importedCount, 1, `the fixture record filed ${imported.importedCount} rows: ${JSON.stringify(imported.refused)}`);
+
   // A cumulative voice reference: the volume-1 cast at the TOP (where a
   // cumulative document keeps them forever), then 40 later characters.
   const cast = "### 主人公\n- speech: 〜である (formal)\n\n### 黒鋼\n- speech: 〜だぜ (rough)\n\n";
@@ -711,8 +766,7 @@ assert.strictEqual(sha256("a"), sha256("a"));
     "utf8"
   );
 
-  const volumeText = "主人公は黒鋼と再会した。";
-  const refs = await loadVolumeReferences(dir, volumeText);
+  const refs = await loadVolumeReferences(dir, volumeText, { seriesDir });
 
   // The old rule (slice(0, 4000)) showed the FIRST characters in the file and
   // nothing else; with 40 later characters the volume-1 protagonists were the
@@ -725,7 +779,7 @@ assert.strictEqual(sha256("a"), sha256("a"));
   assert.ok(refs.background.length <= 8000 + 400, `background stays inside its budget (${refs.background.length})`);
 
   // Without the source text the old head-of-document behavior is kept.
-  const legacy = await loadVolumeReferences(dir);
+  const legacy = await loadVolumeReferences(dir, "", { seriesDir });
   assert.ok(!legacy.voiceNotes.includes("occurs in the text being processed"), "no source text → no relevance claim");
 
   // The selection rule is part of the fingerprint, so drafts built under the old
@@ -733,7 +787,8 @@ assert.strictEqual(sha256("a"), sha256("a"));
   assert.strictEqual(refs.contextHash.length, 64);
   assert.notStrictEqual(refs.contextHash, refs.sharedContextHash, "the glossary is excluded from the shared half");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  store.close();
+  fs.rmSync(seriesDir, { recursive: true, force: true });
 })();
 
 // ─── planTargetedRepair (fix the passage, not the chapter) ──────────────────

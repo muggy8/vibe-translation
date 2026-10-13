@@ -55,6 +55,7 @@ if (!childScenario) {
 }
 
 const { startFakeBackend } = require("./fake-backend");
+const { openReferenceStore, importGlossary, DOCUMENT_SOURCE_STAGE } = require("../utils/reference-store");
 
 // ─── The fixture ─────────────────────────────────────────────────────────────
 
@@ -165,8 +166,8 @@ const GLOSSARY_MD = `# Glossary
 
 /**
  * Build a temp series the translate task can run on: two volumes, each with a
- * staged plain-text source and a glossary, plus the PASS consistency sign-off
- * the stage's entry gate demands.
+ * staged plain-text source, a glossary, and the reference record the stage now reads its terminology law
+ * out of, plus the PASS consistency sign-off the stage's entry gate demands.
  *
  * @returns {{seriesDir: string, manifest: Object}}
  */
@@ -179,6 +180,17 @@ function makeSeries() {
     fs.mkdirSync(volumeDir, { recursive: true });
     fs.writeFileSync(path.join(volumeDir, `${folder}.md`), SOURCE_TEXT, "utf8");
     fs.writeFileSync(path.join(volumeDir, "glossary.md"), GLOSSARY_MD, "utf8");
+    // The terminology law the stage is constrained by lives in the volume's record. Built through the
+    // store's own door, from the same rows the published file states, so the fixture's glossary and the
+    // fixture's record cannot drift apart.
+    const record = openReferenceStore({ volume: Number(installment), folder, seriesDir, stage: DOCUMENT_SOURCE_STAGE });
+    record.registerChaptersFromSource([{ id: "whole", file: `${folder}.md` }]);
+    const filed = importGlossary(record, GLOSSARY_MD);
+    if (filed.importedCount !== 2) {
+      record.close();
+      throw new Error(`fixture volume ${installment}: the record filed ${filed.importedCount} glossary rows: ${JSON.stringify(filed.refused)}`);
+    }
+    record.close();
     volumes.push({
       folder,
       sourceFile: `${folder}/${folder}.md`,

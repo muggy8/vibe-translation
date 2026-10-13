@@ -311,12 +311,19 @@ Two consequences have to be designed for, not discovered later:
 
 Five changes, in the order they have to land.
 
-**6.1 The translator reads the record, not a file.**
-`readReferenceFiles` (`utils/translate/references.js:76-93`) reads six files from the volume
-folder. The target reads the same six things from the volume's **reference record** — the store the
-glossary and voice stages already write, and which already knows which row is in force, which is
-`superseded`, and which is `disputed`. `renderGlossary` stays the published file for humans; the
-translator stops depending on a snapshot.
+**6.1 The translator reads the record, not a file. — BUILT (2026-10-13, slice 1).**
+`readReferenceFiles` (`utils/translate/references.js`) now reads **five** files from the volume
+folder; the glossary is not one of them. `utils/translate/settled-glossary.js` resolves the
+**settled record** — the highest-numbered volume `series.db` on disk, each candidate asked which
+volume it is out of its own `volumes` row — and `readSettledGlossary` asks it for the rows in force
+at **its own** volume, which is the newest row of every supersede chain. `renderGlossary` of those
+same rows is what the stage carries as `glossaryText`, so the published file for humans and the
+machine-facing law are the same render of the same rows, and `compareSettledGlossary` checks the two
+published files against it at translation time with 0 model calls. **A missing or unreadable record
+refuses structurally; there is no fallback to the markdown and no knob on the decision.** The other
+five references stay file-based on purpose: `shared-wiki.md` is the story state *through this
+volume*, and the series-root copy is the LATEST volume's state — a settled rendering is not a
+spoiler, a later volume's plot is. → gotcha 143.
 
 **6.2 A term→chapter index, so a revision can name what it invalidates.**
 There is **no such index anywhere**. The reference store has no term-presence table and no
@@ -353,11 +360,28 @@ engine's own restart log for the containers the stage actually swaps. Deliverabl
 this plan, replacing the anchor in §3. **Nothing else in this plan should be scheduled until slice
 0 reports.**
 
-**Slice 1 — which glossary the translator reads.**
-Point `readReferenceFiles` at the record, keep the published file for humans, and prove it on the
-real corpus with **0 model calls**: the same 133 chapters, the same per-chapter term lists, the
-same `chapterContextHash` values, against a copy of volume 01's record. Numbers to beat: today's
-measured per-chapter term counts (avg 21.4 / 34.7) and the 0-of-16 cap firings.
+**Slice 1 — which glossary the translator reads. — BUILT (2026-10-13).**
+`readReferenceFiles` no longer reads `glossary.md`; `utils/translate/settled-glossary.js` reads the
+settled record and `loadVolumeReferences` hands the stage that render, with `refs.terminologySource`
+naming the record it came from. Built first against a 3-volume fixture, red before green: with
+`utils/translate/references.js` stashed, 6 of the 9 scenarios fail, including the one that matters —
+volume 1's chapter was being translated under `百花祭→Hyakusai Festival`, the rendering volume 3 had
+replaced. Measured, **0 model calls**: the new suite `test/test-translation-terminology-source.js`
+(9 scenarios, 62 checks); the offline loops unmoved at **81 calls / 16 prompt kinds** and
+**27 / 5**, second pass **0** in both, prompt audit **23 checks / 0 findings** in both. Against a
+**copy** of the real volume 01 record: **137 settled rows, 0 supersede chains, a 43,597-byte render,
+driftCount 0**, and the comparison says out loud that no series-root `glossary.md` exists. The two
+real revisions replayed on the fixture — `百花祭` "Hyakusai Festival"→"Hyakka Festival" and
+`夫人界のアガシ` "Agassi of the madam world"→"Agassi of the Lady world", both published at volume 1 and
+settled at volume 3 — move the per-chapter key for **exactly** the chapters that print them: 1 of
+volume 1's 2 chapters, 1 of volume 2's 1, 1 of volume 3's 1; the chapter that never prints a revised
+term keeps its draft. **On the live corpus the honest answer is still 0 chapters, because no
+translation exists** (0 `translation.md` files), and that is said here rather than dressed up.
+What the slice deliberately did **not** do: the other five references stay file-based; the
+published-file/record disagreement is **printed, not filed** (a stage's own finding list never reaches
+the post-mortem — gotcha 138 — so the level table stays at 68 kinds); and
+`REFERENCE_SELECTION_VERSION` was not bumped, because bumping it moves every chapter's key, which is
+the opposite of what the per-chapter key exists to prevent. → gotcha 143.
 
 **Slice 2 — the term→chapter index.**
 Record which terms each chapter was translated with, in the store, and make "which chapters print
@@ -411,10 +435,12 @@ chunked-glossary loop **27 calls / 5 kinds**. Measured green on 2026-10-13 at HE
 
 Written out in `/tmp/opencode/translation-plan-questions.md` before any of them is answered.
 
-1. **Which glossary does the translator read** — the volume's own published file (today's
-   behaviour, newest-wins only from the volume forward) or the record as it stands now (newest
-   wins everywhere)? This plan recommends the record. It changes what a published translation was
-   built on, so it is the account owner's call, and it interacts with the freeze.
+1. **Which glossary does the translator read** — **ANSWERED by the account owner on 2026-10-13, and
+   built (slice 1)**: the record as it stands now, newest wins everywhere. The owner's words were
+   "the translator should obviously make use of the final revised version of the glossary … this way,
+   as much of the foreshadowing is preserved as possible." The freeze (gotcha 142) is what the answer
+   interacts with, and it holds: a published `translation.md` still freezes the artifacts it was built
+   from, so re-running a pre-production door on a translated volume is still refused per volume.
 2. **Is 27 the right bound, and is a per-volume cap the right shape?** The candidate list is a
    series-wide fact, but every other bound in this repo is per volume.
 3. **Where does a foresight answer get filed?** Neither existing door fits it. Through

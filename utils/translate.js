@@ -43,6 +43,7 @@ const __progress = require("./translate/progress");
 const __consistency = require("./translate/consistency");
 const __repair = require("./translate/repair");
 const __references = require("./translate/references");
+const __settled = require("./translate/settled-glossary");
 
 module.exports = {
   ...__internal,
@@ -59,4 +60,5 @@ module.exports = {
   ...__consistency,
   ...__repair,
   ...__references,
+  ...__settled,
 };

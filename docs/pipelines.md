@@ -455,22 +455,36 @@ jump-in-wiki task on both the processed and skipped paths:
 ## 8.5. Pipeline F: the translation stage (multi-model)
 
 **`translate/plan/01-translation-route.md` is the plan of record for rebuilding this stage onto
-the reference record** (written 2026-10-13, **nothing in it is built**). It measures what the stage
-costs today for the first time — 17 volumes, 133 chapters, 2,450,316 source characters,
-~1,477,922 estimated source tokens, **133 translate calls with zero chapter splits**, the binding
-limit being admission not feasibility, and **6 container switches on a clean pass / 23 on a
+the reference record** (written 2026-10-13, **slice 1 built**, slices 0 and 2–5 not built). It
+measures what the stage costs today for the first time — 17 volumes, 133 chapters, 2,450,316 source
+characters, ~1,477,922 estimated source tokens, **133 translate calls with zero chapter splits**, the
+binding limit being admission not feasibility, and **6 container switches on a clean pass / 23 on a
 worst-case pass** — and records that **the cost of one switch has never been measured**, which is
-why its slice 0 is a measurement and why the batching is deliberately not designed. It also
-records the two wiring gaps the section below depends on: the translator reads the **volume
-folder's** `glossary.md` (`utils/translate/references.js:84-91`), not the series-root copy or the
-record, so a rendering revised in volume 11 never reaches volume 3's chapters; and the disputes the
-verify stage writes to `glossary-disputes.md` are read by the translator and by the glossary's log
-and **resolved by nothing** — `resolveChallenge` has no caller outside tests. Across all 17 glossaries
-the previous run produced, **2 of 555 distinct terms changed rendering**. The door that lets a later
-volume replace an earlier volume's rendering **does exist and works** (`fileGlossaryRevisions`,
-`glossary/store.js:326` → `utils/reference-store/glossary-adapter.js:841-892`, gated on a quote from
-this volume's own book); what the plan finds missing is the **backward** half — nothing names the
-already-written chapters a revision invalidates.
+why its slice 0 is a measurement and why the batching is deliberately not designed.
+
+**Slice 1 closed the first of the two wiring gaps it named.** The translator no longer reads the
+**volume folder's** `glossary.md`: `utils/translate/settled-glossary.js` reads the **settled
+reference record** — the highest-numbered volume record on disk, asked for the rows in force at its
+own volume, which is the newest row of every supersede chain — and `loadVolumeReferences` hands the
+stage that render as the terminology law, naming the record it came from
+(`refs.terminologySource`). A rendering volume 11 settled now reaches volume 1's chapters, and the
+superseded rendering is offered to no prompt anywhere; it survives only in the record's chain and in
+the published file's `Earlier rendering:` line. **A series with no readable record refuses
+structurally rather than falling back to the markdown** (gotcha 119's shape), and no flag or setting
+reaches that decision. The five other references — `style-guide.md`, `shared-wiki.md`, `wiki.md`,
+`pov-map.md`, `character-voice.md` — are still read from the volume folder, deliberately: a settled
+rendering is not a spoiler, but the series-root wiki is the LATEST volume's story state. At
+translation time the stage also prints, with 0 model calls, every published `glossary.md` that
+disagrees with the record it is about to translate under. → gotcha 143.
+
+**The second gap is open.** The disputes the verify stage writes to `glossary-disputes.md` are read
+by the translator and by the glossary's log and **resolved by nothing** — `resolveChallenge` has no
+caller outside tests. Across all 17 glossaries the previous run produced, **2 of 555 distinct terms
+changed rendering**. The door that lets a later volume replace an earlier volume's rendering **does
+exist and works** (`fileGlossaryRevisions`, `glossary/store.js:326` →
+`utils/reference-store/glossary-adapter.js:841-892`, gated on a quote from this volume's own book);
+what the plan still finds missing is the **backward** half — nothing names the already-written
+chapters a revision invalidates, which is slice 2's term→chapter index.
 
 The final stage turns the reference artifacts into the actual translation.
 It runs **per chapter** (segment ids from `chapters.json` / the source
@@ -670,14 +684,17 @@ container answers, docs/architecture.md):
   is part of the fingerprint (`REFERENCE_SELECTION_VERSION`), so changing it
   invalidates the drafts built under the old one (the safe direction, gotcha 27).
 - **Per-chapter invalidation** (`chapterContextHash`) — the volume-level
-  `contextHash` hashes six whole files, so editing one glossary term invalidated
-  every chapter of every volume (on a 17-volume series: thousands of calls spent
-  re-translating chapters that never contained the edited word). A chapter's own
+  `contextHash` hashes the whole references (five files plus the settled glossary render), so editing
+  one glossary term invalidated every chapter of every volume (on a 17-volume series: thousands of
+  calls spent re-translating chapters that never contained the edited word). A chapter's own
   key is the non-glossary references (whole) plus the glossary rows THAT CHAPTER
   actually uses: edit a term it contains → invalidates; edit a term it never says
   → keeps its draft; regenerate the style guide / wiki / voice reference → every
-  chapter invalidates, exactly as before. An entry written before the key existed
-  falls back to the volume-level hash.
+  chapter invalidates, exactly as before. Since slice 1 the glossary half of both keys is the
+  **settled** render, so a rendering a later volume replaced invalidates exactly the chapters that
+  print that term — including the chapters of the volumes that came first, which is the point, and
+  which is also the price: a chapter already paid for under the old rendering is paid for again.
+  An entry written before the key existed falls back to the volume-level hash.
 - **Cross-volume continuity** (`previousVolumeTail`) — a volume's first chapter
   is translated with the tail of the PREVIOUS volume's PUBLISHED text (polished
   text when it won the merge) as continuity context, labelled honestly in the
