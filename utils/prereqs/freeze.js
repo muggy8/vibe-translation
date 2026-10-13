@@ -215,6 +215,19 @@ const FREEZE_DOORS = Object.freeze({
       "a published claim a translation was built on is left standing but marked contested, which " +
       "changes what the reference says about who speaks those words",
   },
+  "glossary-settlement": {
+    door: "glossary-settlement",
+    scope: "series",
+    writes:
+      "the series' `glossary.md` (it is rendered out of the settled record) and the settled terminology " +
+      "the published translations were rendered under",
+    missingIsRepair: false,
+    because:
+      "the settlement files new supersede rows into the reference records and republishes the series " +
+      "glossary from them, which rewrites the terminology law a published translation was translated " +
+      "against. A series with no root `glossary.md` yet is not excused: what this door rewrites is the " +
+      "law, not one file",
+  },
 });
 
 /**
@@ -229,6 +242,9 @@ const DOOR_OWNER = Object.freeze({
   "extract-voice": "character-voice",
   "reopen-volume": "character-voice",
   "attribute-voice": "character-voice",
+  // The settlement is the glossary step's own end-of-run act, so the artifact it threatens is the
+  // glossary stage's series declaration.
+  "glossary-settlement": "glossary",
 });
 
 /**
@@ -250,7 +266,8 @@ const RELEASE_RECORD_SCHEMA = 1;
  * The freeze is on REWRITING, not on looking, and that rule is enforced here rather than left to each
  * caller's restraint: a door that reports one of these is not asking to overwrite anything, and the gate
  * says so in its own verdict instead of trusting that nobody would ask. `extract` on a warm cache,
- * `discover` reusing the plan of record, and a volume whose skip stands are the three real cases.
+ * `discover` reusing the plan of record, a volume whose skip stands, and a glossary settlement with
+ * nothing left to decide are the four real cases.
  *
  * Anything NOT listed is treated as a rewrite, including a word this file has never seen — a gate that
  * failed closed on an unrecognised cancellation would be a gate a caller could not widen by inventing a
@@ -263,6 +280,11 @@ const NOT_A_REWRITE = Object.freeze({
   "cache-verified": "the extracted text was verified against the archive and rewritten by nobody",
   "plan-cached": "the plan of record was reused from disk",
   "audit-fresh": "the report still fingerprints the four artifacts it audited",
+  // The glossary settlement, on a run that has nothing left to decide. The caller computes this from
+  // the two facts the gate cares about — no agenda term has a question that has never been asked, and
+  // the render of the settled record is byte-for-byte the file already on disk — rather than from a
+  // flag, so it cannot be claimed by a door that would in fact rewrite something.
+  "settlement-no-change": "every settlement question this series asks has already been answered, and the series glossary already matches the render of the settled record",
 });
 
 /**
@@ -554,6 +576,9 @@ const CANCEL_WORDS = Object.freeze({
   // the same shape — "X would be rewritten because <the act>" — instead of printing a bare word.
   act: "this command was asked to re-read and re-file this volume's reference record",
   apply: "`--apply` publishes into the volume folder and seals the record beside it",
+  // The glossary settlement is the glossary step's own end-of-run act: it has no skip decision to
+  // cancel, so its cancellation is the act the step just performed.
+  settle: "the glossary step finished reading every volume and is about to settle the terminology the whole series produced",
 });
 
 /**

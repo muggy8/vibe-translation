@@ -41,6 +41,7 @@ const DETERMINISTIC_STAGES = new Set(["extract", "translation-report"]);
 const ONE_SHOT_KINDS = new Set([
   "glossary-extract",
   "glossary-research",
+  "glossary-settlement",
   "voice-extract",
   "style-extract",
   "acceptance",
@@ -95,6 +96,7 @@ const AGENT_KINDS = new Set([
 const DATA_RESPONSE_FORMATS = {
   "glossary-extract": require("../glossary/extract").termsResponseFormat(),
   "glossary-research": require("../glossary/research").researchResponseFormat(),
+  "glossary-settlement": require("../glossary/settlement/decide").settlementResponseFormat(),
   "voice-extract": require("../character-voice/stages").voiceResponseFormat(),
   "style-extract": require("../style-guide/amend").styleResponseFormat(),
 };

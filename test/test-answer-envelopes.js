@@ -344,12 +344,10 @@ function scenarioAMalformedClaimInsideAnEnvelopeCostsOnlyItself() {
  * @returns {void}
  */
 function scenarioEveryDeclaredShapeIsExpressible() {
-  const declared = {
-    "glossary-extract": termsResponseFormat(),
-    "voice-extract": voiceResponseFormat(),
-    "style-extract": styleResponseFormat(),
-    "glossary-research": require("../glossary/research").researchResponseFormat(),
-  };
+  // The audit's own registry, not a copy of it kept here. A local list of "the shapes we know about" is
+  // how this suite fell behind the settlement pass: the shape was declared, the audit saw it, and this
+  // scenario still asserted about four shapes while the repository had five.
+  const declared = DATA_RESPONSE_FORMATS;
   for (const [kind, shape] of Object.entries(declared)) {
     let accepted = true;
     try {
@@ -376,7 +374,7 @@ function scenarioEveryDeclaredShapeIsExpressible() {
     ok(refused, `${kind}: an array-rooted version of its own shape was not refused before it was sent`);
   }
 
-  console.log("6/10: all four declared shapes have an object root, and the array-rooted version of each is refused");
+  console.log(`6/10: all ${Object.keys(declared).length} declared shapes have an object root, and the array-rooted version of each is refused`);
 }
 
 // ─── Scenario 7 ───────────────────────────────────────────────────────────────
@@ -579,8 +577,10 @@ function scenarioThePromptsAskForTheEnvelope() {
  * @returns {void}
  */
 function scenarioTheAuditRefusesAnArrayRootedDeclaredShape() {
-  same([...DATA_SHAPE_KINDS].sort(), ["glossary-extract", "glossary-research", "style-extract", "voice-extract"],
-    "the set of data-shaped calls is not the four this repository declares");
+  same([...DATA_SHAPE_KINDS].sort(),
+    ["glossary-extract", "glossary-research", "glossary-settlement", "style-extract", "voice-extract"],
+    "the set of data-shaped calls is not the five this repository declares — the fourth added 2026-10-13 is " +
+      "the glossary settlement pass, whose answer is a term decision the pipeline files as law");
   same(Object.keys(DATA_RESPONSE_FORMATS).sort(), [...DATA_SHAPE_KINDS].sort(),
     "DATA_RESPONSE_FORMATS and DATA_SHAPE_KINDS disagree — a data-shaped call with no declared shape");
   same(declaredShapesAreExpressible(DATA_RESPONSE_FORMATS), [],

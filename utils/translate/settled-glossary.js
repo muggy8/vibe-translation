@@ -237,20 +237,50 @@ function settledGlossaryRecord({ seriesDir } = {}) {
  * @param {Object} [opts]
  * @param {string} [opts.seriesDir] - Absolute series folder. Defaults to SERIES_LOCATION (read at call time).
  * @param {Object} [opts.record] - A record already resolved by {@link settledGlossaryRecord}, so a caller that resolved it does not resolve it twice.
+ * @param {string} [opts.title] - The title block to render with, for a caller that publishes the render
+ *   as a document rather than reading it for its rows. `renderGlossary`'s own default is a bare heading;
+ *   the glossary stage's published files carry its title block, and a series-root render meant to sit
+ *   beside them has to carry the same one or the two files disagree about what they are.
  * @returns {{record: Object, rows: Array<Object>, glossaryText: string, termCount: number}}
  * @throws {Error} structural, when no readable record exists or the record cannot be read
  */
-function readSettledGlossary({ seriesDir, record } = {}) {
+function readSettledGlossary({ seriesDir, record, title } = {}) {
+  const settled = record || settledGlossaryRecord({ seriesDir });
+  return withSettledRecord({ seriesDir, record: settled }, (handle) => {
+    const rows = publishedGlossaryRowsInRecord(handle, { volume: settled.volume });
+    const glossaryText = renderGlossary(handle, {
+      volume: settled.volume,
+      ...(title ? { title } : {}),
+    });
+    return { record: { ...settled, termCount: rows.length }, rows, glossaryText, termCount: rows.length };
+  });
+}
+
+/**
+ * Ask the settled record something, through a handle that cannot write.
+ *
+ * The read-only discipline lives here rather than in every caller: one `openDatabase(…, {readOnly: true})`,
+ * one handle shaped the way the store's read queries want it (`{db, volume}` — no scope, no write door),
+ * one close. A caller that opened the database itself would be one `readOnly` flag away from gotcha 124
+ * (opening a corpus record with a write-capable client folds its write-ahead log in and deletes the
+ * sidecars in the folder it was read from), and the glossary settlement pass needs the same rows the
+ * translation stage reads plus the queries beside them.
+ *
+ * @param {Object} [opts]
+ * @param {string} [opts.seriesDir] - Absolute series folder. Defaults to SERIES_LOCATION (read at call time).
+ * @param {Object} [opts.record] - A record already resolved by {@link settledGlossaryRecord}.
+ * @param {(handle: {db: Object, volume: number}) => any} use - Called once with the open handle; its return value is this function's.
+ * @returns {any} Whatever `use` returned.
+ * @throws {Error} structural, when no readable record exists or the record cannot be read
+ */
+function withSettledRecord({ seriesDir, record } = {}, use) {
   const settled = record || settledGlossaryRecord({ seriesDir });
   let db = null;
   try {
     db = openDatabase(settled.file, { readOnly: true });
-    // The duck the read queries actually ask for: a handle and a volume. No scope, no write door.
-    const handle = { db, volume: settled.volume };
-    const rows = publishedGlossaryRowsInRecord(handle, { volume: settled.volume });
-    const glossaryText = renderGlossary(handle, { volume: settled.volume });
-    return { record: { ...settled, termCount: rows.length }, rows, glossaryText, termCount: rows.length };
+    return use({ db, volume: settled.volume });
   } catch (err) {
+    if (err && err.structural === true) throw err;
     throw terminologyRefusal(
       `the settled reference record at ${settled.file} could not be read: ` +
         `${String(err && err.message ? err.message : err)}.\n` +
@@ -459,15 +489,23 @@ function describeSettledGlossary(comparison, { volumeLabel = "" } = {}) {
 
   const volume = comparison.volume;
   if (volume && volume.present && volume.differences.length) {
+    // One line per superseded term, with the volume its rendering was in force from. This is the block
+    // a reader can act on — the file in this folder says X and this volume's chapters are translated
+    // with Y — and a semicolon-joined run of them is the block nobody reads.
     lines.push(
       `${volumeLabel || "this volume"}'s own ${GLOSSARY_FILE_NAME} states ${volume.differences.length} rendering(s) the record has since ` +
-        `replaced; its chapters are translated with the record's. ${named(volume.differences)}`
+        `replaced; its chapters are translated with the record's:`
     );
+    for (const d of volume.differences) lines.push(`  - ${named([d])}`);
   }
   if (volume && volume.present && volume.missingFromFile.length) {
+    // A count, not a list. A volume's own snapshot not listing the terms the series introduces later is
+    // the expected shape of a snapshot — volume 1's file cannot contain volume 9's coinages — and naming
+    // 417 of them on a 17-volume series buries the two lines a reader can actually do something about.
+    const shown = volume.missingFromFile.slice(0, 10).map((d) => `"${d.term}"→"${d.recordRendering}"`).join(", ");
     lines.push(
       `${volumeLabel || "this volume"}'s own ${GLOSSARY_FILE_NAME} does not list ${volume.missingFromFile.length} term(s) the settled record ` +
-        `introduces later in the series: ${volume.missingFromFile.map((d) => `"${d.term}"→"${d.recordRendering}"`).join(", ")}`
+        `introduces later in the series${volume.missingFromFile.length > 10 ? ` (${volume.missingFromFile.length - 10} more not named)` : ""}: ${shown}`
     );
   }
   return lines;
@@ -477,6 +515,7 @@ module.exports = {
   GLOSSARY_FILE_NAME,
   findReferenceRecords,
   settledGlossaryRecord,
+  withSettledRecord,
   readSettledGlossary,
   compareSettledGlossary,
   describeSettledGlossary,

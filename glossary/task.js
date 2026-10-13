@@ -21,7 +21,7 @@ const { validateRequiredEnv } = require("../configs/shared");
 const { fileExists, inlineReferenceMessage } = require("../utils/fs");
 const { loadGlossaryDisputes } = require("../utils/disputes");
 const { runVolumeWithModeFallback } = require("../utils/qa-loop");
-const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifacts, volumeAlreadyAccepted, publishLatestToSeriesRoot, runVolumeSeries } = require("../utils/series-run");
+const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifacts, volumeAlreadyAccepted, runVolumeSeries } = require("../utils/series-run");
 const {
   resolveSourceBundle,
   decideProcessingMode,
@@ -38,6 +38,8 @@ const { writeGlossaryCoverageReport } = require("./coverage");
 const { truncateGlossary, readTermList, termsResponseFormat } = require("./extract");
 const { runChunkedVolumeAgent } = require("./chunked");
 const { runQaLoop } = require("./qa");
+const { settleGlossaryRun } = require("./settlement");
+const { SETTLEMENT_MAX_TERMS_PER_RUN, readSettlementSystemPrompt, buildSettlementPrompt } = require("./settlement");
 
 /** The glossary stage's own file names inside a volume folder. */
 const OUTPUT_FILE = "glossary.md";
@@ -93,15 +95,17 @@ async function glossary() {
     folders,
     volumeByFolder,
     processVolume: (folderName, index) => processGlossaryVolume({ folderName, index }, run),
-    // Copy the last volume's glossary to the series root for easy access (skipped for
-    // single-volume runs, which would publish a stale snapshot).
+    // Settle the terminology the whole series has produced, then publish the series-root glossary as a
+    // RENDER of the settled record rather than a copy of the last volume's snapshot. The copy was the
+    // wrong source: a per-volume file prints the row in force AT that volume, so the series' own final
+    // glossary was the last place a rendering a later volume replaced could still be read as law.
+    // Skipped for a `--volume` run and a `--dry-run`, exactly as the copy was.
     afterVolumes: () =>
-      publishLatestToSeriesRoot({
+      settleGlossaryRun({
         seriesDir,
         folders,
-        fileName: OUTPUT_FILE,
-        envKey: "GLOSSARY_OUTPUT_FILE",
-        label: "glossary",
+        volumeByFolder,
+        runSettings,
         volumeArg,
         dryRun,
       }),
@@ -400,6 +404,40 @@ async function dumpVolumePreview(ctx) {
         `glossary/store.js's fileGlossaryTermRows(). A row's Notes cell also carries the research notes filed ` +
         `against its term (utils/reference-store/research-notes.js), merged at render time — the row itself is ` +
         `never edited. Nothing an agent writes reaches this file.`,
+    },
+    {
+      title: "One-shot — settlement system prompt (tool-less, at most one per agenda term, at most " +
+        `${SETTLEMENT_MAX_TERMS_PER_RUN} per run — asked after the last volume, not per volume)`,
+      prompt: await readSettlementSystemPrompt(),
+    },
+    {
+      title: "ONE-SHOT — settlement reading prompt (illustrative term; the agenda is a query over the settled record, never a list the model picks)",
+      prompt: buildSettlementPrompt(
+        {
+          term: illustrativeRow.term,
+          rendering: illustrativeRow.rendering,
+          notes: illustrativeRow.notes,
+          section: illustrativeRow.section,
+          because: 'its own note points at something the book had not said yet ("revealed later")',
+          flaggingVolume: Number(values.INSTALLMENT_NUMBER) || 1,
+          superseded: [{ rendering: "Example Term (older)", appliesFromVolume: 1 }],
+          evidence: [{ quote: "（例の用語）は後巻で正体が明かされる。", volume: Number(values.INSTALLMENT_NUMBER) || 1 }],
+        },
+        { targetLanguage: values.TARGET_LANGUAGE }
+      ),
+    },
+    {
+      title: "CODE — the series-root glossary this step publishes after the last volume (no prompt, no model call per volume)",
+      prompt:
+        `After every volume is walked, the settlement pass asks which terms the settled record itself says are ` +
+        `worth re-examining — the terms whose rendering a later volume already replaced, and the terms whose own ` +
+        `note points at something the book had not said yet — and pays at most ${SETTLEMENT_MAX_TERMS_PER_RUN} ` +
+        `tool-less reading call(s) for the whole series, one per term, never in parallel. A "change it" answer is ` +
+        `filed through the same revision door this stage uses (a new row beside the row it replaces, refused unless ` +
+        `the line it quotes is in the flagging volume's own text) and carried to the settled record through the ` +
+        `store's own top-up door. The series-root glossary.md is then RENDERED out of that settled record rather ` +
+        `than copied from the last volume's file. No per-volume glossary.md is rewritten. Every answer is recorded ` +
+        `in the run's own records, so a second pass over the same agenda pays 0 calls.`,
     },
     { title: "One-shot — acceptance user prompt (always tool-less)", prompt: ctx.acceptancePrompt },
   ];

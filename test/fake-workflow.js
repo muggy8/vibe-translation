@@ -705,6 +705,7 @@ const SIGNATURES = [
   ["# Series Intake Agent", "intake"],
   ["**Terminology Extraction Specialist**", "glossary-extract"],
   ["You are a reference researcher supporting", "glossary-research"],
+  ["You are the terminology settler for", "glossary-settlement"],
   ["**Quality Gatekeeper** for a translation glossary", "acceptance"],
   ["**Voice and Perspective Analyst**", "voice-extract"],
   ["**Quality Gatekeeper** for a character voice", "acceptance"],
@@ -824,6 +825,21 @@ function answer(req, ctx) {
           null,
           2
         ),
+      };
+    }
+    case "glossary-settlement": {
+      // The settlement pass asks one question per agenda term. The fixture's agenda is the one term its
+      // own glossary already revised (禁忌の書), and the scripted answer is "keep": the loop's job here is
+      // to prove the pass runs, costs one call, files nothing new, and pays NOTHING on the second pass —
+      // not to re-litigate a revision the glossary stage already proved through the same door.
+      const current = (/Current settled rendering:\s*"([^"]*)"/.exec(req.userText) || [])[1] || "";
+      return {
+        text: JSON.stringify({
+          decision: "keep",
+          rendering: current,
+          quote: "",
+          reason: "The settled rendering is the one this fixture's own translated texts already use.",
+        }),
       };
     }
     case "voice-extract":
