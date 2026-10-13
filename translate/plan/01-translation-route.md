@@ -511,6 +511,19 @@ Written out in `/tmp/opencode/translation-plan-questions.md` before any of them 
 6. **Is the cross-model tiebreak worth a container switch** — 133 chapters re-graded on a second
    model, paid for in restarts — or should borderline chapters be re-sampled on the same model,
    which `repeatBorderlineSamples` (`verify-translate/task.js:153`) already does for repeat samples?
+7. **Does a settlement pass that can file nothing count as rewriting the terminology law?** —
+   **answered by the conductor, 2026-10-13: no.** `glossary/settlement.js` asks the freeze gate only
+   when the pass could actually file an answer for a pending question, which is narrower than
+   "any unanswered question is a rewrite". The case the narrowing lets through is the one where the
+   term's flagging volume is not in this run's plan: under the wider rule that term kept the glossary
+   step refused **forever** on any series with published translations, for an act that writes nothing.
+   Pinned from both sides by a scenario that plants a `translation.md` and shows the same series
+   refused when the plan lists the volume and running at 0 calls when it does not.
+8. **Is the settlement record a declared artifact, and does the pass get its own command?** — **both
+   open, neither built.** The two files live in the run's own records and are checked by nothing, so a
+   pass that asked nothing looks like a pass that succeeded: the same hole gotcha 138 records, and
+   deciding one decides the other. A root command would be a thin wrapper over an already-pinned freeze
+   door, and a new door in the closed action menu is the owner's call.
 
 ---
 
