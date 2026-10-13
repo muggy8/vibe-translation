@@ -36,8 +36,8 @@
 // every chapter block below is written longer than that, so each chapter is exactly one segment.
 process.env.SOURCE_TEXT_PART_TARGET_CHARS = "1000";
 delete process.env.SOURCE_CHUNK_THRESHOLD_CHARS;
-delete process.env.GLOSSARY_STORE_VALIDATORS;
-delete process.env.VOICE_STORE_VALIDATORS;
+// Neither reference-store stage has a setting in front of its record any more, so there is
+// nothing here to blank before the store's values are read.
 
 require("./test-home"); // the run's records get a throwaway home (gotcha 69)
 

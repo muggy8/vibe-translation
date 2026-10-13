@@ -89,7 +89,7 @@ Six steps, and the model is asked exactly twice per chapter-group: once to read,
    each told to report only what this chapter adds to what the earlier chapters already filed.
    This is `glossary/chunked.js`'s existing per-chapter extraction, unchanged.
 2. **File what was found into the volume's record.** Each term becomes a row with its quote,
-   checked against the book as it is written. Already built, behind `GLOSSARY_STORE_VALIDATORS`.
+   checked against the book as it is written. Already built, and now unconditional (slice 1).
 3. **Render `glossary.md` out of the record.** `renderGlossary` already exists in
    `utils/reference-store/glossary-adapter.js`, is tested for a byte-clean round trip, and is
    deterministic across processes. **It has no production caller today.** The author agent is
@@ -111,10 +111,13 @@ Research sits between 2 and 3, and §5 is about what it becomes.
 Not deprecated — deleted, the way the character-voice author route was, with the commit hash
 recorded so it can be read in history.
 
-- `GLOSSARY_STORE_VALIDATORS` as a setting. The flag exists because a stage that has never run a
-  real volume through the new path keeps the old one, and switching it mid-series strands every
-  already-accepted volume (`AGENTS.md` gotcha 97). **Both of those reasons are gone.** A flag
-  with no reason is a way to turn a guard off.
+- The setting that switched the glossary stage's reference record on, and the loop flag that
+  pinned it. **Deleted in slice 1, 2026-10-13.** The setting existed because a stage that had never
+  run a real volume through the new path keeps the old one, and switching it mid-series strands every
+  already-accepted volume (`AGENTS.md` gotcha 97). **Both of those reasons are gone:** the corpus was
+  reset to zero on 2026-10-12, so no volume is accepted on the old path, and the offline loops have run
+  the new path end to end. A flag with no reason is a way to turn a guard off. The loop flag is
+  refused by name rather than ignored, so whoever types it is told what replaced it.
 - The author agent and its turn.
 - The validator agent, the per-chapter validator partials, and the findings-merge agent.
 - The feedback pass, and with it the rolling-window re-grades and the consensus confirmations
@@ -173,7 +176,7 @@ worker that does not know the two repositories exist will look for files that ar
 
 | # | slice | acceptance test |
 |---|---|---|
-| 1 | The record becomes unconditional: open it per volume, file the extraction's terms, seal after the grade. Delete `GLOSSARY_STORE_VALIDATORS`. | The store loop's glossary path *is* the default loop's glossary path; the flag's name appears nowhere in the repository. |
+| 1 | **Built 2026-10-13.** The record becomes unconditional: open it per volume, file the extraction's terms, seal after the grade. Delete the setting and the loop flag that pinned it. | **Met.** The store loop's glossary path *is* the default loop's glossary path — both open, file, audit, grade and seal every volume, and the default loop's glossary stage dropped its whole-document validator agent (21 calls → 15, and the whole loop 93 → 87). The setting's name appears nowhere in the repository except the suite that refuses the old flag and the index row the conductor writes. |
 | 2 | Publish `renderGlossary(store)` instead of the author agent's file. | A rendered glossary and an authored one are compared entry-for-entry on a real volume, and every entry the authored one had is accounted for. |
 | 3 | Delete the validator agent, the per-chapter validators and the findings-merge agent. | The report file is still written, still named the same, still carries `**Recommendation:**`, and the prompt audit still passes. |
 | 4 | Delete the feedback pass and the re-grade machinery that feeds it. | One acceptance grade per volume in the offline loop, and a failing grade still quarantines and still leaves the record a draft. |

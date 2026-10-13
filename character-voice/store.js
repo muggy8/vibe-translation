@@ -10,9 +10,10 @@
  * **No agent reaches any of this.** There is no tool here, no prompt mentions it, and an agent cannot
  * read, write, or query the record through it. That is slice 7.
  *
- * Nothing here is behind a flag. The stage renders both artifacts out of this record, so a run with the
- * record switched off is not a cheaper run — it is a run with no artifact. (The glossary stage's half is
- * still behind `GLOSSARY_STORE_VALIDATORS`; that stage can still build its document without the store.)
+ * Nothing here is behind a flag, and neither is the glossary stage's half: both stages open, file,
+ * audit, grade and seal the volume's record on every run. A run with the record switched off is not a
+ * cheaper run — for the voice stage it is a run with no artifact at all, and for the glossary stage it
+ * is a run that publishes a reference no later volume can trust.
  *
  * The mirror verb that used to be here (`mirrorVoiceArtifact`) went with the route that needed it: an
  * agent wrote `character-voice.md`, so the record had to be rebuilt from the file to audit it. On this

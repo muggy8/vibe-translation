@@ -508,21 +508,32 @@ per-chapter partial stayed empty and the "never wrote real output" guard correct
 route removed (§7.11) the character-voice stage has one path: it reads the volume chapter by chapter
 whatever the volume's size. There is no fallback to force onto it, so `--chunked=character-voice` is
 refused by the loop and `CHUNKABLE_STAGES` is `glossary, style-guide, jump-in-wiki`. The loop is now
-`npm run pipeline-loop-store`: `discover → glossary → character-voice`, with the **glossary** forced
-chapter-by-chapter, the fixture cut into chapter-sized parts, and `GLOSSARY_STORE_VALIDATORS` pinned on.
-What is unique about it is the store being on and the fixture having several chapters per volume — which
-is also what makes the voice stage read several chapters instead of one.
+`npm run pipeline-loop-chunked-glossary`: `discover → glossary → character-voice`, with the **glossary**
+forced chapter-by-chapter and the fixture cut into chapter-sized parts. It used to pin the glossary
+stage's store switch on for that run; the switch is deleted (slice 1 of `glossary/plan/01-glossary-route.md`),
+so the flag is gone and the loop is named for the one thing still unique about it — the fixture has
+several chapters per volume, which is the only way to reach the glossary's chapter-by-chapter store
+path offline, and it is also what makes the voice stage read several chapters instead of one.
 
-| character-voice stage, two fixture volumes | flags off, one chapter per volume | store on, several chapters per volume |
+| character-voice stage, two fixture volumes | default loop, one chapter per volume | chunked-glossary loop, several chapters per volume |
 |---|---|---|
 | model calls | 8 | 10 |
-| prompt characters | 69,703 | 85,295 |
+| prompt characters | 77,707 | 94,535 |
 | agent turns | 0 | 0 |
 | validator-family calls | 0 | 0 |
 
-The whole loop is 93 calls with the flags off and 39 in the store loop; both second passes are zero
-calls. Before the route was removed the same stage cost 22 calls whole and 26 chunked, and 6 of the
-whole-mode calls were validator agents.
+(Both columns re-measured 2026-10-13 from the loops' own `report/wire-log.json`, on this slice's tree and
+on the tree before it. The voice stage is **not** what this slice moved: 8 calls before and after, and
+78,415 → 77,707 prompt characters. The 69,703 / 85,295 the route-removal slice recorded are an older
+fixture shape and are kept here only as the history of that slice's measurement.)
+
+The whole loop is **87 calls** in the default loop and **39** in the chunked-glossary loop; both second
+passes are zero calls (measured again 2026-10-13, after slice 1 of `glossary/plan/01-glossary-route.md`
+deleted the glossary stage's switch: the default loop went 93 → 87 because its glossary stage stopped
+paying a whole-document validator agent, 21 → 15, and the `glossary-validator` prompt kind stopped
+existing; the chunked-glossary loop was already on the store path and is unmoved). Before the route was
+removed the same stage cost 22 calls whole and 26 chunked, and 6 of the whole-mode calls were validator
+agents.
 
 **The store path runs end to end here, and it seals.** The deterministic audit fires (25 and 27 citations
 re-checked on the fixture's two volumes), the extraction claims are filed, the adopted rows are rendered
@@ -906,8 +917,10 @@ for checking rather than wandering; `DETECTIVE_TOKEN_BUDGET = 120,000` prompt to
 the model's own usage numbers, after which the rest are reported as unanswered rather than paid for. The
 agent may read, in that volume's folder only; the write tools are not offered at all, and the approve
 predicate refuses every mutating call, so the gate is strictly tighter than a stage agent's. **It is not
-wired into the stage**: the stage's cost is unchanged, and the offline call baseline is unchanged at 93 calls
-(default loop) and 39 (store loop).
+wired into the stage**: the stage's cost is unchanged, and the offline call baseline is unchanged at 87
+calls (default loop) and 39 (chunked-glossary loop) — the figures this door was measured against were 93
+and 39, and the default loop has since moved for a reason that has nothing to do with this door (slice 1
+of `glossary/plan/01-glossary-route.md`, 2026-10-13).
 
 **What an answer is, and what it cannot be.** Filed in `attribution_answers` (schema **v7**, in
 `COUNTED_TABLES`): one row per (volume, entry) with the answer, the speaker, the reason in the answerer's own
@@ -987,7 +1000,7 @@ fixture series (`test/fixture-series.js`); none may reach the real 17 volumes.
 | 3 | Copy-forward as a **guarded step** | **Done 2026-10-10; reviewed.** A planted corrupt source file is refused and reported HIGH. A clean copy has identical row counts and records its source hash |
 | 4 | Import both artifacts for one volume, **render them back** | **Done 2026-10-10; reviewed, and the review's corrections are applied.** Measured on the real volume 01: the rendered glossary is byte-identical to the file on disk except for the one row the store refused, and the character-voice reference reproduces its content (its line structure differs only where the file itself has a 54,341-character welded line) |
 | 5 | Sealing and ownership | **Done 2026-10-10; reviewed.** An agent updates and deletes its own unsealed rows. The same call against another volume's row changes **zero** rows and returns a refusal naming the real owner and pointing at `challenge_fact`. After sealing, delete is refused |
-| 6 | Replace the AI validators with queries + a graded sample | **Done 2026-10-10, behind `GLOSSARY_STORE_VALIDATORS` (default off) — and, for the character-voice stage, behind no flag at all** (§7.11: that stage renders its artifacts out of the record, so a switch in front of the record is a switch in front of the stage, and `VOICE_STORE_VALIDATORS` was removed). Each planted defect is caught at the right severity — `test/test-reference-store-pipeline.js`, twenty scenarios, the shape `test/test-postmortem.js` uses. The whole-document validators make no model calls: on the offline fixture loop the glossary stage goes 21 → 15 calls and 186,301 → 116,602 prompt characters, the character-voice stage 22 → 16 and 221,281 → 157,828, the whole run 107 → 95 and 1,131,401 → 998,663, and the `glossary-validator` / `voice-validator` kinds (12 calls, 149,454 characters) stop existing. On the real volume 01, measured without a model call, one acceptance grade drops from 227,782 characters to 23,473 for the character-voice reference and from 31,763 to 17,472 for the glossary. **No real volume has been run through the stage's flag-gated path yet** — which is why both flags default off (§12). What *has* now run on a real volume is the store itself: volume 02's record was opened, filled, audited, rendered and sealed by `extract-voice.js` + `rebuild-voice.js` with the flags off, because that route has no flag in front of its record door (§7.9, gotcha 106) |
+| 6 | Replace the AI validators with queries + a graded sample | **Done 2026-10-10 behind a setting that defaulted off, and unconditional since 2026-10-13** — the glossary stage's switch was deleted by slice 1 of `glossary/plan/01-glossary-route.md`, and the character-voice stage was never behind one (§7.11: that stage renders its artifacts out of the record, so a switch in front of the record is a switch in front of the stage, and `VOICE_STORE_VALIDATORS` was removed). Each planted defect is caught at the right severity — `test/test-reference-store-pipeline.js`, twenty scenarios, the shape `test/test-postmortem.js` uses. The whole-document validators make no model calls: on the offline fixture loop the glossary stage goes 21 → 15 calls and 186,301 → 116,602 prompt characters, the character-voice stage 22 → 16 and 221,281 → 157,828, the whole run 107 → 95 and 1,131,401 → 998,663, and the `glossary-validator` / `voice-validator` kinds (12 calls, 149,454 characters) stop existing. On the real volume 01, measured without a model call, one acceptance grade drops from 227,782 characters to 23,473 for the character-voice reference and from 31,763 to 17,472 for the glossary. **No real volume had been run through that path when it shipped** — which is why the switch defaulted off (§12). What *had* run on a real volume was the store itself: volume 02's record was opened, filled, audited, rendered and sealed by `extract-voice.js` + `rebuild-voice.js` with the flags off, because that route has no flag in front of its record door (§7.9, gotcha 106) |
 | 7 | Give the pre-production agents the read and write tools, with budgets | Tested against the scripted endpoint in `test/fake-backend.js`, **including a model that asks for more than the window can hold — that grant must be refused, not honoured** |
 | 8 | Two-tier injection into the translator | The card tier is never dropped. The full tier is ranked by appearance in the chapter. A volume-N translation cannot see a volume-N+1 fact. Bumped through `REFERENCE_SELECTION_VERSION` so dependent drafts invalidate deliberately (gotcha 27) |
 | 9 | The repair loop as query-and-propose | A repair agent makes **no file edits** on a published artifact |
@@ -1005,10 +1018,12 @@ the published file untouched.
 **Slices 1–5 are built, and they add a parallel implementation that no agent touches** — nothing about what a prompt
 says or which calls the pipeline makes changes, so they can be merged and tested without any
 behavioural risk. **Slice 6 is built too, and it does change which calls the pipeline makes** (the whole-document validators
-stop running), so it shipped behind two flags that both defaulted off: the rehearsal was `GLOSSARY_STORE_VALIDATORS=1
-VOICE_STORE_VALIDATORS=1 npm run pipeline-loop`, and the switch back was un-setting them (gotcha 97). **The voice half of
-that switch is gone** (§7.11): the character-voice stage renders its artifacts out of the record, so its record is opened
-unconditionally and only the glossary still has the flag. **Slices 7–9 change what the agents are able to do.**
+stop running), so it shipped behind two flags that both defaulted off, and the rehearsal was the offline loop with them
+exported (gotcha 97). **Both are gone.** The voice half went first (§7.11): that stage renders its artifacts out of the
+record, so a switch in front of the record is a switch in front of the stage. The glossary half went with slice 1 of
+`glossary/plan/01-glossary-route.md` (2026-10-13), because the two reasons the switch had — a stage that had never run a
+real volume through the new path, and a mid-series switch that would strand volumes already accepted on the old one —
+were both gone once the corpus was reset to zero. Neither stage's record door has a setting in front of it now. **Slices 7–9 change what the agents are able to do.**
 Review gates accordingly: 1–5 are safe to merge on a green suite, 6 needs the cost and quality numbers checked, 7–9 need the flag.
 
 **One-time cost to accept**, carried forward from 5.1: every existing `contextHash` and rolling-state

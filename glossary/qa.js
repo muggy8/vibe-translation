@@ -142,6 +142,9 @@ async function runQaLoop(ctx) {
     limitReachedLogLine: () => `Volume ${values.INSTALLMENT_NUMBER}: reached the validation iteration limit without a passing grade. The last feedback pass is unvalidated; re-run to validate it.`,
   });
   ctx.limitReached = result.limitReached;
+  // The seal is the end of the volume's pre-production, and this is the only place that knows
+  // whether the volume reached it. `glossary/store.js` refuses to seal without it.
+  ctx.qaAccepted = result.accepted === true;
   return result;
 }
 

@@ -16,7 +16,7 @@
  *
  * The other half of the suite is the rule that keeps the new questions honest: an absence measured
  * from the volume's own text must not fire, and must not touch a claim; an extraction claim must not
- * count as coverage; and with the flag off, nothing in this layer writes anything at all.
+ * count as coverage; and with no record open, nothing in this layer writes anything at all.
  *
  * The roster scenarios are the same shape applied to the roster itself. Volume 01's record carries an
  * entry keyed `俺` with 14 of the protagonist's claims under it, and that record is sealed. So the suite
@@ -39,9 +39,8 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 
-// The two flags must be read as a fresh clone reads them, before anything caches their values.
-delete process.env.GLOSSARY_STORE_VALIDATORS;
-delete process.env.VOICE_STORE_VALIDATORS;
+// Neither reference-store stage has a setting in front of its record any more, so there is nothing
+// here to blank before the store's values are read.
 
 const {
   openReferenceStore,
@@ -83,7 +82,6 @@ const {
   BARE_FIRST_PERSON_PRONOUNS,
 } = require("../utils/reference-store");
 const { documentMirrored, documentRebuilt, glossaryBackfilled, DOCUMENT_VOICE } = require("../utils/reference-store/document-prose");
-const { STORE_VALIDATORS } = require("../configs/shared");
 const { envMaxLineLength } = require("../ai/env");
 const { fixtureStoreSeries, assertInsideFixture, GLOSSARY_01, SOURCE_02, VOICE_01, VOICE_01_MISSING_CHARACTERS, EXTRACTION_01 } = require("./fixture-reference-store");
 const voiceStore = require("../character-voice/store");
@@ -1173,20 +1171,20 @@ function scenarioAuditCountsAreTheStoresOwn() {
   console.log("reference-store pipeline: the audit re-checks every citation it holds and reports its own counts");
 }
 
-// ─── The flag: off means the glossary glue runs nothing ───────────────────────
+// ─── No record open means the stage glue runs nothing ─────────────────────────
 
 /**
- * The glossary flag defaults off, and with it off the stage glue touches nothing: no record is opened,
- * no row is written, no file is changed. That is the rollback guarantee, tested rather than asserted.
+ * With no record open, the stage glue touches nothing: no record is created, no row is written, no
+ * file is changed.
  *
- * The voice half of the flag is gone (the voice stage renders its artifacts out of the record, so the
- * record is not optional), and `voiceStore.*` with no record open is the same guarantee from the other
- * side: every glue verb returns null and writes nothing.
+ * This used to be the flag-off rollback guarantee. The flag is deleted (`glossary/plan/01-glossary-route.md`
+ * §4), so the guarantee is now about the two cases that still leave a volume with no record open: a
+ * `--dry-run`, which never reaches the store block, and a volume the run skipped before opening one.
+ * A stage that never opened a record must not be able to half-write one, and both stages' glue are
+ * pinned from the same side: every glue verb returns null and writes nothing.
  */
-async function scenarioFlagOffTouchesNothing() {
-  assert.deepStrictEqual(STORE_VALIDATORS, { glossary: false }, "the glossary flag defaults off (plan 04 §12: a stage that has not run a real volume through the new path keeps the old one)");
-
-  const fx = fixtureStoreSeries("pipeline-flag-off");
+async function scenarioNoRecordOpenTouchesNothing() {
+  const fx = fixtureStoreSeries("pipeline-no-record");
   const ctx = {
     values: { INSTALLMENT_NUMBER: "01" },
     folderName: "Test Story(01)",
@@ -1208,10 +1206,10 @@ async function scenarioFlagOffTouchesNothing() {
   voiceStore.sealVoiceRecord(ctx);
   glossaryStore.sealGlossaryRecord(ctx);
 
-  assert.strictEqual(fs.existsSync(path.join(fx.volumes[0].dir, "series.db")), false, "with the flag off, no volume's record is created at all");
+  assert.strictEqual(fs.existsSync(path.join(fx.volumes[0].dir, "series.db")), false, "with no record open, no volume's record is created at all");
   assert.strictEqual(fs.existsSync(path.join(fx.volumes[1].dir, "series.db")), false);
 
-  console.log("reference-store pipeline: with the flags off, the stage glue writes nothing and no record is created");
+  console.log("reference-store pipeline: with no record open, the stage glue writes nothing and no record is created");
 }
 
 /**
@@ -1626,7 +1624,7 @@ function scenarioAFoldedHeadingFilesOntoTheSurvivorAndStillRenders() {
   scenarioReportKeepsTheShapeItsReadersExpect();
   scenarioReportSectionsAreBoundedAndSayHowBigTheyAre();
   scenarioAuditCountsAreTheStoresOwn();
-  await scenarioFlagOffTouchesNothing();
+  await scenarioNoRecordOpenTouchesNothing();
   scenarioExtractionRowsNeverRenderIntoADocument();
   console.log("reference-store pipeline: all checks passed.");
 })().catch((err) => {

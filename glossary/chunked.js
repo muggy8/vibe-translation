@@ -390,6 +390,8 @@ async function runChunkedQaLoop(ctx) {
 
   ctx.acceptedBy = result.acceptedBy;
   ctx.limitReached = result.limitReached;
+  // Same as the whole-installment loop: only a volume the gate accepted reaches the seal.
+  ctx.qaAccepted = result.accepted === true;
 }
 
 

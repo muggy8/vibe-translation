@@ -34,8 +34,8 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 
-delete process.env.GLOSSARY_STORE_VALIDATORS;
-delete process.env.VOICE_STORE_VALIDATORS;
+// Neither reference-store stage has a setting in front of its record any more, so there is
+// nothing here to blank before the store's values are read.
 
 const {
   openReferenceStore,
@@ -1176,8 +1176,8 @@ function scenarioASealedVoiceRecordRefusesARebuild() {
  * seals the volume at the end of its own work on it. So when the character-voice stage reaches a
  * volume, its record is already sealed — with nothing in it but glossary rows. Refusing on the seal
  * marker alone told that stage it was overwriting a published reference when the reference it was about
- * to write was the first one the volume ever had. This is the shape the offline loop with
- * `GLOSSARY_STORE_VALIDATORS` on actually runs, and it is the shape that made that loop fail.
+ * to write was the first one the volume ever had. This is the shape every run actually takes, and it
+ * is the shape that made the rebuild door fail when it was first wired into the pipeline.
  *
  * The guard is the rows, not the marker: a sealed character-voice row is out of reach, a sealed glossary
  * row is a different document, and the second rebuild — the one over the reference this render just

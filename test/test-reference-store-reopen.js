@@ -41,8 +41,8 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 
-delete process.env.GLOSSARY_STORE_VALIDATORS;
-delete process.env.VOICE_STORE_VALIDATORS;
+// Neither reference-store stage has a setting in front of its record any more, so there is
+// nothing here to blank before the store's values are read.
 
 const {
   openReferenceStore,

@@ -12,6 +12,11 @@
  *
  *   1. a MAJOR finding in volume 02 stops the walk AFTER volume 02: volume 03 is never attempted and
  *      its folder holds nothing but the book;
+ *
+ * The defect is planted through two different doors, because the two stages write their validation
+ * report differently: the style-guide stage still pays a validator agent (the plant rewrites that
+ * agent's `writeFile`), and the glossary stage does not (its report is written by the reference
+ * store's deterministic audit, so the plant writes the wrong-shaped file itself). See `reply`.
  *   2. the halt is a record the run can read back — the post-mortem report exists, names the pause and
  *      counts the never-attempted volumes instead of reporting them as broken books;
  *   3. the ledger entry for the halted step names the volume it stopped at and the finding kind that
@@ -125,61 +130,52 @@ function cumulativeGlossary(installment) {
 }
 
 /**
- * A validation report in the shape the validator prompt prescribes, for a volume the scripted brain
- * does not know about.
- *
- * @param {string} installment
- * @returns {string}
- */
-function properValidation(installment) {
-  return [
-    `# glossary Validation — ${workflow.SERIES.alt}, Volume ${installment}`,
-    "",
-    "Report: glossary-validation.md",
-    "Artifact audited: glossary.md",
-    "",
-    "## Completeness",
-    "",
-    "- Every term the source text carries is present in the artifact.",
-    "",
-    "## Findings",
-    "",
-    "1. **[LOW] A note is thinner than the rest.**",
-    "   - Fix: state which volume carried the entry.",
-    "",
-    "**Recommendation:** Pass with minor edits",
-    "",
-  ].join("\n");
-}
-
-/**
  * The scripted brain, plus the three-volume shim, plus the plant.
  *
  * The plant is the defect this suite is about: a file that exists, has real content, and is not the
  * document its prompt asked for — `wrong-shape`, which `utils/postmortem/levels.js` declares MAJOR.
+ *
+ * **The two halves are planted differently, and that is the glossary stage's route, not a fixture
+ * preference.** The style-guide stage still pays a validator agent, so its report is still written by
+ * a model tool call and the plant rewrites that call. The glossary stage no longer has one: its
+ * `glossary-validation.md` is written by the reference store's deterministic audit
+ * (`glossary/qa.js` → `glossary/store.js`), which no model call can reach. So the glossary half
+ * writes the wrong-shaped report itself, at the moment the volume's acceptance grade is asked for —
+ * the last thing that touches that file before the volume is assessed. Same file, same finding kind,
+ * same level, same halt point; only the door the defect arrives through had to move.
+ *
+ * The plant stays armed for the whole step rather than being consumed by the first grade, so a second
+ * QA iteration (which would re-run the audit and overwrite the report) cannot quietly repair the
+ * defect. `runStep` disarms when the step ends.
  *
  * @param {import("./fake-backend").FakeRequest} req
  * @returns {import("./fake-backend").FakeReply}
  */
 function reply(req) {
   const answer = workflow.answer(req, { seriesDir: where.dir, log: () => {} });
-  const nn = ((req.userText || "").match(/Volume (\d{2})/) || [])[1] || null;
+  const info = workflow.classify(req);
+  // Which volume is this request about? The prompt's own "Volume NN" header first: every fixture
+  // folder holds the SAME book text, so the scripted brain's source-text lookup cannot tell volume 03
+  // from volume 02. The classified volume is the fallback for the calls that carry no header — the
+  // acceptance grade, which is shown the artifact and the report, never the source.
+  const nn = ((req.userText || "").match(/Volume (\d{2})/) || [])[1]
+    || (info.volume ? info.volume.installment : null);
+
+  if (nn && info.kind === "acceptance" && armed.has(`glossary:${nn}`)) {
+    const folder = FOLDERS[Number(nn) - 1];
+    if (folder) fs.writeFileSync(path.join(where.dir, folder, "glossary-validation.md"), PLANTED, "utf8");
+  }
+
   if (!Array.isArray(answer.toolCalls)) return answer;
   for (const call of answer.toolCalls) {
     if (call.name !== "writeFile") continue;
     const file = String(call.arguments.filePath);
-    const isValidation = file === "glossary-validation.md" || file === "style-guide-validation.md";
-    const armedKey = `${file === "style-guide-validation.md" ? "style-guide" : "glossary"}:${nn}`;
-    if (!isValidation) {
-      if (file === "glossary.md" && nn === "03") call.arguments.content = cumulativeGlossary(nn);
+    if (file === "glossary-validation.md") continue; // written by the audit, planted above
+    if (file === "style-guide-validation.md") {
+      if (armed.has(`style-guide:${nn}`)) call.arguments.content = PLANTED;
       continue;
     }
-    if (armed.has(armedKey)) {
-      call.arguments.content = PLANTED;
-      armed.delete(armedKey);
-    } else if (file === "glossary-validation.md" && nn === "03") {
-      call.arguments.content = properValidation(nn);
-    }
+    if (file === "glossary.md" && nn === "03") call.arguments.content = cumulativeGlossary(nn);
   }
   return answer;
 }
@@ -311,6 +307,9 @@ async function runStep(args, label) {
       resolve({ code: exitCode, output: out });
     });
   });
+  // The plant is a property of ONE step, not of the suite: whatever this step did is finished, and a
+  // defect that stayed armed would be planted into the next step's volumes too.
+  armed.clear();
   const list = transcripts();
   // A step that makes no model call creates no transcript of its own. Billing the previous step's
   // transcript would report its cost as this step's.
@@ -359,6 +358,9 @@ function snapshot(dir) {
   return out;
 }
 
+/** @type {import("./fake-backend").FakeBackend|null} The scripted server, kept reachable so a red run can still shut it down. */
+let activeBackend = null;
+
 async function main() {
   fs.mkdirSync(HOOKS_DIR, { recursive: true });
 
@@ -366,6 +368,7 @@ async function main() {
     model: ["stub", "stub-translate", "stub-verify", "stub-edit", "stub-audit"],
     reply,
   });
+  activeBackend = backend;
   backend.pointEnvAt({ prefixes: ["TRANSLATE", "VERIFY", "EDIT", "AUDIT"] });
 
   process.env.AI_CONTEXT_WINDOW = "32768";
@@ -401,8 +404,8 @@ async function main() {
   const halted = await runStep(["--stages=glossary"], "halted");
 
   ok(halted.code === 1, "the step that halted exits non-zero");
-  same(halted.perVolume["01"], 6, "volume 01 was built and paid for");
-  same(halted.perVolume["02"], 6, "volume 02 was built and paid for");
+  same(halted.perVolume["01"], 5, "volume 01 was built and paid for");
+  same(halted.perVolume["02"], 5, "volume 02 was built and paid for");
   ok(!halted.perVolume["03"], "volume 03 was never attempted, so it was never paid for");
 
   const halt = readVolumeHalt("glossary");
@@ -476,8 +479,8 @@ async function main() {
   ok(glossaryRun, "the manager ran glossary");
   same(glossaryRun.ok, true, "and it finished");
   same(glossaryRun.perVolume["01"], undefined, "the volume already accepted was NOT paid for again");
-  same(glossaryRun.perVolume["02"], 6, "the volume that tripped the gate was rebuilt");
-  same(glossaryRun.perVolume["03"], 6, "and the volume the halt never attempted was built");
+  same(glossaryRun.perVolume["02"], 5, "the volume that tripped the gate was rebuilt");
+  same(glossaryRun.perVolume["03"], 5, "and the volume the halt never attempted was built");
 
   const vol1After = snapshot(vol1Dir);
   // Tier C: a pause never justifies deleting accepted work. The later steps of the plan legitimately
@@ -504,7 +507,7 @@ async function main() {
   armed.add("glossary:02");
   const first = await runStep(["--stages=glossary"], "control-first");
   same(first.code, 1, "the control halts too");
-  same(first.billed, 12, "and pays for the two volumes it attempted");
+  same(first.billed, 10, "and pays for the two volumes it attempted");
 
   armed.add("glossary:02");
   const again = await runStep(["--stages=glossary"], "control-again");
@@ -569,7 +572,14 @@ async function main() {
   console.log(`OK: ${checks} checks on halting at volume n and resuming at volume n.`);
 }
 
-main().catch((e) => {
-  console.error(e && e.stack ? e.stack : String(e));
-  process.exitCode = 1;
-});
+main()
+  .catch((e) => {
+    console.error(e && e.stack ? e.stack : String(e));
+    process.exitCode = 1;
+  })
+  // A red suite that never exits is worse than a red suite: the scripted model server is still
+  // listening, so the event loop stays alive and `npm test` hangs instead of failing. The server is
+  // closed on the way out whatever the outcome, so a failed check ends the run.
+  .finally(() => {
+    if (activeBackend) activeBackend.close().catch(() => {});
+  });

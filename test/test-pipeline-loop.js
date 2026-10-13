@@ -43,8 +43,6 @@
  *   node test/test-pipeline-loop.js --chunked=glossary
  *                                                    # force those stages down the chapter-by-chapter
  *                                                    # path (the fixture is cut into chapter-sized parts)
- *   node test/test-pipeline-loop.js --store-validators
- *                                                    # pin GLOSSARY_STORE_VALIDATORS on for this run
  *   node test/test-pipeline-loop.js --no-second-pass
  *   node test/test-pipeline-loop.js --audit-selftest   plant known prompt defects
  *                                                    and prove the audit reports them
@@ -116,19 +114,29 @@ const ROLE_PREFIXES = ["TRANSLATE", "VERIFY", "EDIT", "AUDIT"];
 const CHUNKABLE_STAGES = ["glossary", "style-guide", "jump-in-wiki"];
 
 /**
- * Whether this run pins the reference-store flag on.
+ * Refuses `--store-validators`, which is no longer an option of this loop or of any stage.
  *
- * `--store-validators`. It is a production setting and it defaults off; this is the loop's own way of
- * measuring the flag-on path without the caller remembering to export a variable, and without an npm
- * script that only works in a POSIX shell. It sets the child's environment; it does not change a
- * default. (The character-voice stage's record is not behind any flag: its artifacts are rendered out
- * of the record.)
+ * The switch it named is gone: the glossary stage opens, files, audits, grades and seals its volume's
+ * reference record on every run, so there is no off path left to compare against and nothing for the
+ * flag to pin on. A flag that selects nothing is refused rather than
+ * ignored — an operator who typed it believes they are getting the record path and would not notice if
+ * they were not. This is the same shape `--route=` is refused in the character-voice stage.
  *
- * @returns {boolean}
+ * @param {string[]} argv - The loop's own command line.
+ * @returns {void}
+ * @throws {Error} Always, when `--store-validators` is present.
  */
-function storeValidatorsPinned() {
-  return process.argv.includes("--store-validators");
+function refuseStoreValidatorsFlag(argv) {
+  if (!argv.includes("--store-validators")) return;
+  throw new Error(
+    "--store-validators is not an option of this loop or of any stage: the switch it named is deleted, " +
+      "and the glossary stage's reference record is unconditional — every volume is opened, filed, " +
+      "audited, graded and sealed by the glossary stage on every run, with no setting in front of it. " +
+      "Drop the flag; `--chunked=glossary` is the option that still selects the glossary's " +
+      "chapter-by-chapter path."
+  );
 }
+refuseStoreValidatorsFlag(process.argv);
 
 /**
  * The stages this run forces down the chapter-by-chapter path.
@@ -270,9 +278,6 @@ function childEnv(endpoint) {
     // for the fallback, the fixture is cut into chapter-sized parts (utils/source/config.js). Only
     // then: the default loop keeps the production split, and its call baseline with it.
     ...(chunkedStages().length > 0 ? { SOURCE_TEXT_PART_TARGET_CHARS: "200" } : {}),
-
-    // `--store-validators`: the flag-on path, pinned here rather than inherited from the shell.
-    ...(storeValidatorsPinned() ? { GLOSSARY_STORE_VALIDATORS: "1" } : {}),
 
     // The production defaults, spelled out so the run is reproducible.
     PASSING_SCORE: "70",
@@ -891,6 +896,7 @@ async function main() {
     console.log(`forced chapter-by-chapter: ${chunkedStages().join(", ")} (fixture parts cut to 200 chars so the fallback path exists)`);
   }
   console.log("character-voice: one route — read the volume chapter by chapter, render both artifacts from the record, no agent turn (--chunked means nothing to it).");
+  console.log("glossary: opens, files, audits, grades and seals each volume's reference record — unconditional, no switch in front of it.");
   if (!reportSelfCheck()) {
     console.error("The scripted answers would fail the pipeline's own checks. Fix the fixture before running.");
     process.exitCode = 1;

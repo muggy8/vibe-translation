@@ -17,7 +17,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { transformUserPrompt, writePromptDump } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, validateRequiredEnv, STORE_VALIDATORS } = require("../configs/shared");
+const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, validateRequiredEnv } = require("../configs/shared");
 const { fileExists, inlineReferenceMessage } = require("../utils/fs");
 const { loadGlossaryDisputes } = require("../utils/disputes");
 const { runVolumeWithModeFallback } = require("../utils/qa-loop");
@@ -178,17 +178,16 @@ async function processGlossaryVolume({ folderName, index }, run) {
   // A volume is being (re)generated; later volumes depend on it.
   cascade.regeneratedAny = true;
 
-  // Slice 6: open this volume's reference record, carrying the previous volume's published record in
-  // first. The integrity gate inside that copy is the hard stop — a volume whose character-voice
-  // reference lost characters this volume's text contains is not carried forward, with no exception
-  // and no downgrade. Behind GLOSSARY_STORE_VALIDATORS; with the flag off this block does not run.
-  if (STORE_VALIDATORS.glossary) {
-    const previous = ctx.previousFolderName ? volumeByFolder.get(ctx.previousFolderName) : null;
-    const attempt = openGlossaryRecord(ctx, previous ? previous.installmentNumber : null);
-    if (!attempt.ok) throw new Error(`Volume ${values.INSTALLMENT_NUMBER}: ${attempt.error}`);
-    ctx.refStore = attempt.opened.store;
-    ctx.storeCarried = attempt.opened.carried;
-  }
+  // Open this volume's reference record, carrying the previous volume's published record in first.
+  // The integrity gate inside that copy is the hard stop — a volume whose character-voice reference
+  // lost characters this volume's text contains is not carried forward, with no exception and no
+  // downgrade. There is no switch in front of this block: the record is where this stage's findings
+  // live, so a run that skipped it would be a run that published a glossary with nothing behind it.
+  const previous = ctx.previousFolderName ? volumeByFolder.get(ctx.previousFolderName) : null;
+  const attempt = openGlossaryRecord(ctx, previous ? previous.installmentNumber : null);
+  if (!attempt.ok) throw new Error(`Volume ${values.INSTALLMENT_NUMBER}: ${attempt.error}`);
+  ctx.refStore = attempt.opened.store;
+  ctx.storeCarried = attempt.opened.carried;
 
   await runVolumeWithModeFallback({
     label: `Volume ${volume.installmentNumber}`,
@@ -215,6 +214,12 @@ async function processGlossaryVolume({ folderName, index }, run) {
   // The glossary stage seals the volume at the end of its own work on it, and the character-voice
   // stage seals it again at the end of its work (see glossary/store.js's header for why the seal is
   // per stage and not per volume). Closing here only releases this stage's handle.
+  //
+  // The seal is the END of the volume's pre-production, so it is reached only by a volume the
+  // acceptance gate accepted. A volume that ran out of QA iterations under ON_QA_LIMIT=accept is
+  // left a draft on purpose: the next volume's copy-forward then refuses it with
+  // `reference-volume-unsealed` (HIGH), which is the gate — publishing a record nobody signed off
+  // would let every later volume build on it.
   sealGlossaryRecord(ctx);
   if (ctx.refStore) {
     ctx.refStore.close();
@@ -263,6 +268,9 @@ async function buildVolumeContext({ folderName, index, folders, volumeByFolder, 
     validatorSystemPrompt: prompts.validatorSystemPrompt,
     acceptanceSystemPrompt: prompts.acceptanceSystemPrompt,
     feedbackSystemPrompt: prompts.feedbackSystemPrompt,
+    // Set by the QA loop when it ends on an accepted grade. It starts false so a volume that threw
+    // on the way there — or retried through the mode fallback — cannot inherit an earlier yes.
+    qaAccepted: false,
   };
 
   // Report → input: the previous volume's coverage audit (which glossary entries were never used)

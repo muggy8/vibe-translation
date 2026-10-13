@@ -8,8 +8,16 @@
  *
  * **No agent reaches any of this.** No tool, no prompt, no agent-facing query. That is slice 7.
  *
- * Everything is behind `GLOSSARY_STORE_VALIDATORS` (checked by the caller, once): with the flag off,
- * `ctx.refStore` is never set and every function here returns without touching anything.
+ * Nothing here is behind a setting. The glossary stage opens the volume's record on every volume it
+ * builds (`glossary/task.js`), because the record is where the stage's findings live: a run that
+ * skipped it would publish a glossary with nothing behind it and leave the next volume with nothing
+ * to copy forward. The switch that used to sit in front of this file is deleted — see
+ * `glossary/plan/01-glossary-route.md` §4 and `docs/environment.md`.
+ *
+ * What a `null` return still means: no record is open for this volume. That happens on a `--dry-run`
+ * (which never reaches the store block) and on a volume the run skipped before opening one, and it
+ * is the guarantee `test/test-reference-store-pipeline.js` pins — the glue writes nothing when there
+ * is no record, so a stage that never opened one cannot half-write a volume.
  *
  * One asymmetry worth naming, because it is the shape of the pipeline rather than a preference: the
  * glossary stage **does** seal the volume, and the character-voice stage seals it again. `npx gulp`
@@ -190,20 +198,39 @@ async function glossaryGradeSample(ctx) {
 }
 
 /**
- * Seal this volume's record at the end of the glossary stage's work on it.
+ * Seal this volume's record at the end of the glossary stage's work on it — when the acceptance
+ * gate accepted that work.
+ *
+ * The gate is the seal's precondition, not an advisory. `sealVolumeRecord` is what makes a
+ * volume's record published and frozen, and freezing a record nobody signed off is how a bad
+ * volume becomes seventeen volumes' worth of foundation: the next volume's copy-forward would
+ * carry it, and the `reference-volume-unsealed` HIGH finding that exists to stop exactly that
+ * would never fire. So a volume whose QA loop ran out its iterations under `ON_QA_LIMIT=accept`
+ * leaves its record a draft, and the draft is what stops the next volume (gotcha 102).
  *
  * Idempotent, and deliberately not the last seal the volume gets — see the module header.
  *
- * @param {{ values: Object, refStore: Object|null }} ctx
- * @returns {void}
+ * @param {{ values: Object, refStore: Object|null, qaAccepted?: boolean }} ctx
+ * @returns {{sealed: boolean, because: string|null}} What happened, so a caller and a log can see
+ *   that a draft was left on purpose rather than by an accident on the way out.
  */
 function sealGlossaryRecord(ctx) {
-  if (!ctx.refStore) return;
+  if (!ctx.refStore) return { sealed: false, because: "no record is open for this volume" };
+  if (ctx.qaAccepted !== true) {
+    const volume = ctx.values.INSTALLMENT_NUMBER;
+    console.log(
+      `Volume ${volume}: the acceptance gate did not accept this volume's glossary, so its reference record is ` +
+        "left a DRAFT and is not sealed. The next volume's copy-forward will refuse to build on it — that refusal " +
+        "is the gate. Re-run the volume to grade it again, or reopen the record to re-derive it."
+    );
+    return { sealed: false, because: "the acceptance gate did not accept this volume" };
+  }
   const sealed = sealVolumeRecord(ctx.refStore);
   console.log(
     `Volume ${ctx.values.INSTALLMENT_NUMBER}: reference record sealed by the glossary stage ` +
       `(${sealed.sealedRows} row(s) newly sealed${sealed.alreadySealed ? ", the record was already published" : ""}).`
   );
+  return { sealed: true, because: null };
 }
 
 module.exports = {
