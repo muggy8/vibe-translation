@@ -5,6 +5,9 @@ permissions:
   - action: edit
     resource: "*"
     effect: deny
+  - action: question
+    resource: "*"
+    effect: deny
 ---
 
 # You are a verifier

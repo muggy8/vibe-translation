@@ -95,6 +95,12 @@ Six steps, and the model is asked exactly twice per chapter-group: once to read,
    and nothing else changed the stage published an **11-byte** file. The read pass is the only place
    left that can choose a rendering, so it has to be asked for one. A row that arrives without a
    rendering is refused at filing (`missingRendering`) rather than published as an empty column.
+   **And for this series chapter-by-chapter is not a fallback — it is the only route.** Measured
+   2026-10-13, every one of the 17 volumes is over the allowance (volume 01 is 99,573 tokens against
+   65,484), so the whole-installment path runs only on the offline loop's deliberately small fixture
+   book. The allowance is `window × 0.75 − the reply cap − the chat template`, and the reply cap in
+   force is 131,072, not the derived 65,536 (gotcha 24); both figures are pinned by
+   `test/test-tokens.js` §6b so they cannot be confused for each other again.
 2. **File what was found into the volume's record.** Each term becomes a row with its quote,
    checked against the book as it is written. Already built, and now unconditional (slice 1). Filed
    twice on purpose: once as the read pass's **candidate** (`extract` scope, never rendered) and once

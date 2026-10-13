@@ -76,6 +76,30 @@ Do not pass a previous session's id. A session kept alive across several tasks s
 answering from its own compressed history instead of from what it just did, and it produces
 reports that read well and describe nothing. Fresh session, every time.
 
+**The one exception, and it is narrow.** A worker that stopped *before its report* because it
+hit a decision it was not allowed to make may be resumed **once**, with the answer in the
+dispatch text, to finish the same slice. That is the case the rule was never about: the session
+is shallow, it has one task in it, and the thing it needs is an answer rather than a memory.
+
+Everything else stays forbidden, and the exception keeps its own guardrails:
+
+- one resume, for that slice only, and never to hand it new work;
+- the resume prompt repeats the slice's acceptance test and its baselines, because a resumed
+  session does not re-read them;
+- the verification is unchanged — every claim is checked against the disk before anything is
+  committed. A resumed session is exactly as untrusted as a fresh one.
+
+If the worker's questions arrived in its **final report** rather than stopping it, that is not
+this case: answer them in the next dispatch, to a fresh session.
+
+## Workers cannot ask; they write down
+
+`builder` and `verifier` have the question tool denied in their agent config. A worker that
+needs the account owner writes the question into `/tmp/opencode/<slice>-questions.md` — the
+options, what each costs, and its recommendation — and then either takes the branch that cannot
+damage anything or stops and puts the question at the top of its report. Read that file before
+you read the report, and put the answer into the next dispatch.
+
 ## Verify before you speak
 
 Run these yourself, or send the `verifier` subagent and spot-check its headline numbers:

@@ -223,6 +223,19 @@ Three rules in it are load-bearing, and they are here because they were learned 
    by continuing its own story, and a continued story looks exactly like a report. The same
    job given to a session started fresh — 480 messages, 854k input tokens, six minutes —
    produced work that survived verification.
+
+   **The one exception, and it is narrow.** A worker that stopped *before its report* because it
+   reached a decision it was not allowed to make may be resumed **once**, with the answer written
+   into the dispatch text, to finish that same slice — that session is shallow, holds one task, and
+   needs an answer rather than a memory. Never to hand it new work, and the verification is
+   unchanged. The guardrails are in the `dispatching-slices` skill.
+
+   **Workers no longer have a question tool.** `builder` and `verifier` deny the `question`
+   permission in their agent config, because a subagent that stops to ask the account owner blocks a
+   child session nobody is watching, and two slices ended that way with the question still in the
+   air. A worker that needs a decision writes it to `/tmp/opencode/<slice>-questions.md` — the
+   options, what each costs, its recommendation — and then takes the branch that cannot damage
+   anything or stops and puts the question at the top of its report.
 2. **A worker's report is a hypothesis until it has been checked against the filesystem.**
    `git status` for the files, `npm test` for the suite, a direct query for the rows, the
    `# Tokens:` headers in `<SERIES_LOCATION>/.run/logs/` for the cost, and the checksums taken

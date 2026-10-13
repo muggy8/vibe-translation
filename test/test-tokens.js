@@ -335,6 +335,42 @@ const { runVolumeWithModeFallback } = require("../utils/qa-loop");
     assert.strictEqual(BUNDLE_SCHEMA_VERSION, 8, "schema 8 records each annotation's own sequence, every chapter's guide-split count and every segment's packaging mark, so every cache written before it re-extracts");
   }
 
+  // ─── 6b. the allowance a real volume is measured against, and what raising the reply cap costs ───
+
+  {
+    // Two numbers get confused for each other, so both are pinned here as FIXTURE
+    // inputs — never read from `.env` (AGENTS.md rule 8). The window is 262,144; the
+    // reply cap is the served model's published final-answer ceiling, 131,072, rather
+    // than the derived quarter. Prompt and answer share one window, so the cap is
+    // subtracted whether or not the model ever uses it (gotcha 24), and what a volume
+    // is actually compared against is the remainder.
+    const inForce = tokenBudgetFor({ roleWindow: 262144, outputReserve: 131072, templateOverhead: 52 });
+    assert.strictEqual(inForce.budget, 65484, `the allowance in force is window×0.75 − the reply cap − the template (${inForce.budget})`);
+
+    const derivedQuarter = tokenBudgetFor({ roleWindow: 262144, outputReserve: 65536, templateOverhead: 52 });
+    assert.strictEqual(derivedQuarter.budget, 131020, `the derived-quarter allowance the older notes quote (${derivedQuarter.budget})`);
+    assert.strictEqual(
+      derivedQuarter.budget - inForce.budget,
+      131072 - 65536,
+      "raising the reply cap takes exactly that much away from the prompt side — it is not a free change"
+    );
+
+    // The consequence, measured against a book-sized volume: the same book fits under
+    // the old allowance and does not fit under the one in force. Every volume of this
+    // series is therefore read chapter by chapter, which is the route the pre-production
+    // stages are built around — so the chapter-by-chapter path is the real path, and the
+    // whole-installment path is the one only a small book takes.
+    const bookMix = scriptMixOf("あ".repeat(100000));
+    const book = { format: "epub", segments: [{ id: "ch1" }, { id: "ch2" }], wholeChars: 100000, scriptMix: bookMix };
+    const bookTokens = bundleTokenEstimate(book);
+    const fitsOld = planProcessingMode(book, { roleWindow: 262144, outputReserve: 65536, safetyFraction: 0.75 });
+    const fitsNow = planProcessingMode(book, { roleWindow: 262144, outputReserve: 131072, safetyFraction: 0.75 });
+    assert.ok(bookTokens > 65484 && bookTokens < 131020, `a book-sized volume sits between the two allowances (${bookTokens})`);
+    assert.strictEqual(fitsOld.chunked, false, "under the derived-quarter cap the same book was read in one call");
+    assert.strictEqual(fitsNow.chunked, true, "under the cap in force it is read chapter by chapter");
+    assert.ok(fitsNow.reason.includes("against a 65,484-token allowance"), `the run log says which allowance bound it: ${fitsNow.reason}`);
+  }
+
   // ─── 7. the "did not fit in one pass" error class ──────────────────────────
 
   {
