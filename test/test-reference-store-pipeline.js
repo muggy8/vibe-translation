@@ -1198,7 +1198,11 @@ async function scenarioNoRecordOpenTouchesNothing() {
 
   assert.strictEqual(voiceStore.fileVoiceExtraction(ctx, [{ type: "voice", character: "如月雨露", quirkType: "pronoun", description: "x", examples: ["気にすんな！"] }]), null);
   assert.strictEqual(glossaryStore.fileGlossaryExtraction(ctx, [{ term: "会計担当", type: "concept", query: "x" }]), null);
-  assert.strictEqual(await glossaryStore.mirrorGlossaryArtifact(ctx), null);
+  assert.strictEqual(glossaryStore.fileGlossaryTermRows(ctx, [{ term: "会計担当", rendering: "The Accounting Person", type: "concept", query: "x" }]), null);
+  const render = await glossaryStore.renderGlossaryArtifact(ctx);
+  assert.strictEqual(render.ok, false, "a stage with no record open rendered something anyway");
+  assert.strictEqual(render.refusal.rule, "reference-record-not-open", `the render did not name the reason it refused: ${JSON.stringify(render.refusal)}`);
+  assert.strictEqual(fs.existsSync(ctx.glossaryOutputFile), false, "the refused render wrote a file anyway");
   assert.strictEqual(await voiceStore.auditVoiceArtifact(ctx), null);
   assert.strictEqual(await glossaryStore.auditGlossaryArtifact(ctx), null);
   assert.strictEqual(await voiceStore.voiceGradeSample(ctx), null);
@@ -1214,7 +1218,12 @@ async function scenarioNoRecordOpenTouchesNothing() {
 
 /**
  * The two kinds of row are one decision, stated once: which rows are the record and which are
- * candidates. A renderer that mixed them would publish sentences no agent ever put in the document.
+ * candidates. A renderer that mixed them would publish a rendering nobody ever chose — the extraction
+ * candidate half is what an extractor noticed, and noticing a word is not deciding how to write it.
+ *
+ * This is the line the glossary render route has to keep. `fileGlossaryTermRows` files the read pass's
+ * terms as published rows under the document scope; `fileGlossaryExtraction` files the same terms as
+ * candidates. Only the first reaches the file (glossary route slice 2).
  */
 function scenarioExtractionRowsNeverRenderIntoADocument() {
   const { fx, store } = openVolumeOne("pipeline-render-isolation");
@@ -1231,7 +1240,7 @@ function scenarioExtractionRowsNeverRenderIntoADocument() {
   assert.strictEqual(renderVoice(store), voiceBefore, "the reference does not gain the extractor's sentence");
 
   store.close();
-  console.log("reference-store pipeline: extraction rows are filed but never rendered, so a published file keeps only what an agent put in it");
+  console.log("reference-store pipeline: extraction candidates are filed but never rendered, so a published file keeps only the rows whose rendering somebody chose");
 }
 
 /**

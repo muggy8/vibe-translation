@@ -15,6 +15,10 @@ const path = require("path");
 
 const { ON_MISSING_PREVIOUS, readBoolEnv } = require("../../configs/shared");
 const { compareGlossaryCarryForward } = require("./diff");
+// The shared numbered‑quarantine door. Requiring the leaf (`quarantine.js`) rather than the
+// `utils/reference-store` barrel keeps this off the cycle gotcha 85 describes: the store's own
+// glossary adapter reaches back into this folder for the table reader.
+const { moveArtifactAside } = require("../../utils/reference-store/quarantine");
 
 /** @typedef {import("../../../types").GlossaryVolumeCtx} GlossaryVolumeCtx */
 
@@ -34,7 +38,7 @@ const { compareGlossaryCarryForward } = require("./diff");
  * @throws {Error} When terms disappeared (unless the guard is disabled with
  *   GLOSSARY_CARRY_FORWARD_GUARD=false).
  */
-async function assertGlossaryCarryForward(ctx, stageLabel = "the amend pass") {
+async function assertGlossaryCarryForward(ctx, stageLabel = "the render") {
   const { values, isFirst, previousGlossaryFile } = ctx;
   if (isFirst || !previousGlossaryFile) return;
 
@@ -117,29 +121,34 @@ async function guardCarryForwardAgainst(ctx, baselineText, stageLabel, baselineL
  *
  * Renamed, not deleted: the damaged document is the evidence, and
  * `translation-<id>.rejected.md` is the same pattern the translation stage uses.
+ * The move goes through the shared door, so a second rejection is numbered `.rejected.2` instead of
+ * replacing the first — the same rule the character‑voice stage and the render route's own quarantine
+ * use (gotcha 111).
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context.
  * @param {{missing: Array<{term: string}>, previousCount: number, currentCount: number}} diff
  *   The result of compareGlossaryCarryForward.
- * @returns {Promise<void>}
+ * @returns {Promise<string|null>} The name the damaged file was moved to, or null when the move
+ *   failed (the volume is still a failure either way).
  */
 async function quarantineDamagedGlossary(ctx, diff) {
   const { values, glossaryOutputFile } = ctx;
-  const quarantineFile = `${glossaryOutputFile}.rejected`;
-  try {
-    await fs.rename(glossaryOutputFile, quarantineFile);
-    const from = ctx.previousFolderName ? `../${ctx.previousFolderName}/glossary.md` : "the previous volume's glossary";
-    console.error(
-      `Volume ${values.INSTALLMENT_NUMBER}: moved the damaged glossary (${diff.currentCount} of ` +
-        `${diff.previousCount} terms) to "${path.basename(quarantineFile)}" so the next volume ` +
-        `cannot build on it. Re-running this volume starts from ${from}.`
-    );
-  } catch (err) {
+  const volumeDir = ctx.volumeDir || path.dirname(glossaryOutputFile);
+  const aside = moveArtifactAside(volumeDir, path.basename(glossaryOutputFile));
+  if (!aside.ok) {
     console.warn(
       `Volume ${values.INSTALLMENT_NUMBER}: could not move the damaged glossary aside ` +
-        `(${err.message}) — it is still a failure, but the next volume may read it.`
+        `(${aside.refusal ? aside.refusal.because : "unknown error"}) — it is still a failure, ` +
+        `but the next volume may read it.`
     );
+    return null;
   }
+  console.error(
+    `Volume ${values.INSTALLMENT_NUMBER}: moved the damaged glossary (${diff.currentCount} of ` +
+      `${diff.previousCount} terms) to "${path.basename(aside.moved)}" so the next volume cannot ` +
+      `build on it. Re-running this volume re-renders it from the volume's reference record.`
+  );
+  return aside.moved;
 }
 
 

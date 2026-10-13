@@ -137,7 +137,7 @@ const PREPRODUCTION_SPECS = {
         name: "glossary-validation.md",
         level: "required",
         shape: "document",
-        why: "the validator's report (chunked mode assembles it from per-chapter partials)",
+        why: "the deterministic audit's report — written whole from store queries on both routes (chunked mode included)",
       },
       {
         name: "glossary-validation-rolling-state.json",

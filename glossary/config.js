@@ -21,29 +21,15 @@ const termsSystemPromptFile = path.join(clientDir, "system-prompts", "glossary-t
 
 const termsUserPromptTemplateFile = path.join(clientDir, "user-prompts", "glossary-terms.md");
 
-const glossarySystemPromptFile = path.join(clientDir, "system-prompts", "glossary.md");
-
-const glossaryUserPromptTemplateFile = path.join(clientDir, "user-prompts", "glossary.md");
-
-const validatorSystemPromptFile = path.join(clientDir, "system-prompts", "glossary-validator.md");
-
-const validatorUserPromptTemplateFile = path.join(clientDir, "user-prompts", "glossary-validator.md");
-
 const acceptanceSystemPromptFile = path.join(clientDir, "system-prompts", "glossary-acceptance.md");
 
 const acceptanceUserPromptTemplateFile = path.join(clientDir, "user-prompts", "glossary-acceptance.md");
 
-const feedbackSystemPromptFile = path.join(clientDir, "system-prompts", "glossary-feedback.md");
-
-const feedbackUserPromptTemplateFile = path.join(clientDir, "user-prompts", "glossary-feedback.md");
-
-
-// Maximum number of validation -> acceptance -> feedback iterations per volume
-// before the glossary is left as-is. Read from .env, defaulting to 3.
-const maxValidationIterations = Math.max(
-  1,
-  parseInt(process.env.QA_MAX_ITERATIONS, 10) || 3
-);
+// The glossary stage grades once. `QA_MAX_ITERATIONS` belongs to the stages that rewrite an artifact
+// between grades (the style guide, the wiki); this stage renders its artifact out of the volume's record,
+// so a second iteration would re-audit and re-grade a document that cannot have changed. The iteration
+// count is a constant in `glossary/qa.js`, not a setting, for the same reason AGENTS.md rule 3 gives for
+// every other guard: a number a run can raise is a number a run will raise to make a bad grade go away.
 
 
 // Whether to run web research for the new terms (default: enabled).
@@ -78,15 +64,8 @@ module.exports = {
   seriesDir,
   termsSystemPromptFile,
   termsUserPromptTemplateFile,
-  glossarySystemPromptFile,
-  glossaryUserPromptTemplateFile,
-  validatorSystemPromptFile,
-  validatorUserPromptTemplateFile,
   acceptanceSystemPromptFile,
   acceptanceUserPromptTemplateFile,
-  feedbackSystemPromptFile,
-  feedbackUserPromptTemplateFile,
-  maxValidationIterations,
   researchEnabled,
   GLOSSARY_TRUNCATION_THRESHOLD,
   GLOSSARY_TRUNCATION_MAX_ENTRIES,

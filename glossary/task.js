@@ -17,7 +17,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { transformUserPrompt, writePromptDump } = require("../utils/prompt");
-const { AGENT_TOOLS_NOTE, STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, validateRequiredEnv } = require("../configs/shared");
+const { STAGE_CONCURRENCY: RESEARCH_CONCURRENCY, validateRequiredEnv } = require("../configs/shared");
 const { fileExists, inlineReferenceMessage } = require("../utils/fs");
 const { loadGlossaryDisputes } = require("../utils/disputes");
 const { runVolumeWithModeFallback } = require("../utils/qa-loop");
@@ -25,22 +25,17 @@ const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifac
 const {
   resolveSourceBundle,
   decideProcessingMode,
-  sourceMaterialLine,
-  sourceSegmentListLine,
   chapterSegmentNote,
-  chapterContextBlock,
 } = require("../utils/source");
 
-const { acceptanceSystemPromptFile, acceptanceUserPromptTemplateFile, feedbackSystemPromptFile, feedbackUserPromptTemplateFile, glossarySystemPromptFile, glossaryUserPromptTemplateFile, researchEnabled, seriesDir, termsSystemPromptFile, termsUserPromptTemplateFile, validatorSystemPromptFile, validatorUserPromptTemplateFile } = require("./config");
+const { acceptanceSystemPromptFile, acceptanceUserPromptTemplateFile, researchEnabled, seriesDir, termsSystemPromptFile, termsUserPromptTemplateFile } = require("./config");
 const { buildDisputesNote, buildUnusedEntriesNote } = require("./notes");
 const { RESEARCHER_SYSTEM_PROMPT, buildPerTermResearchPrompt, pendingPlaceholder, researchBatch } = require("./research");
-const { buildGlossaryAuthorTurnPrompt, buildGlossaryFeedbackTurnPrompt, buildGlossaryFindingsMergePrompt, buildGlossarySegmentFeedbackPrompt, buildGlossarySegmentValidatorPrompt, buildGlossaryValidatorTurnPrompt } = require("./prompts");
-const { assertGlossaryCarryForward, buildGlossaryIndex, seedGlossaryFromPrevious } = require("./carry-forward");
-const { openGlossaryRecord, fileGlossaryExtraction, mirrorGlossaryArtifact, sealGlossaryRecord } = require("./store");
+const { assertGlossaryCarryForward } = require("./carry-forward");
+const { openGlossaryRecord, fileGlossaryExtraction, fileGlossaryTermRows, renderGlossaryArtifact, quarantineGlossaryArtifact, sealGlossaryRecord } = require("./store");
 const { writeGlossaryCoverageReport } = require("./coverage");
 const { parseTerms, truncateGlossary } = require("./extract");
 const { runChunkedVolumeAgent } = require("./chunked");
-const { generateGlossary } = require("./amend");
 const { runQaLoop } = require("./qa");
 
 /** The glossary stage's own file names inside a volume folder. */
@@ -50,22 +45,23 @@ const RESEARCH_FILE = "glossary-research.md";
 const NEW_TERMS_FILE = "glossary-new-terms.json";
 
 /**
- * Read the glossary stage's prompt pair for each of its five roles.
- * @returns {Promise<Object>} `{ <role>SystemPrompt, <role>Template }` for terms/glossary/validator/acceptance/feedback.
+ * Read the glossary stage's prompt pair for each of the two roles it still has.
+ *
+ * The stage used to load five pairs: terms, author, validator, feedback and acceptance. The author agent
+ * and the feedback agent are deleted (slice 2 of `glossary/plan/01-glossary-route.md`), and the validator
+ * agent was already replaced by the record's queries (slice 1 made the record unconditional), so the three
+ * pairs are gone from the stage and from `glossary/config.js` with it. What is left is the one call that
+ * decides what the glossary contains and the one call that judges it.
+ *
+ * @returns {Promise<Object>} `{ termsSystemPrompt, termsTemplate, acceptanceSystemPrompt, acceptanceTemplate }`.
  */
 async function loadPromptFiles() {
   const read = (file) => fs.readFile(file, "utf-8");
   return {
     termsSystemPrompt: await read(termsSystemPromptFile),
-    glossarySystemPrompt: await read(glossarySystemPromptFile),
-    validatorSystemPrompt: await read(validatorSystemPromptFile),
     acceptanceSystemPrompt: await read(acceptanceSystemPromptFile),
-    feedbackSystemPrompt: await read(feedbackSystemPromptFile),
     termsTemplate: await read(termsUserPromptTemplateFile),
-    glossaryTemplate: await read(glossaryUserPromptTemplateFile),
-    validatorTemplate: await read(validatorUserPromptTemplateFile),
     acceptanceTemplate: await read(acceptanceUserPromptTemplateFile),
-    feedbackTemplate: await read(feedbackUserPromptTemplateFile),
   };
 }
 
@@ -262,12 +258,8 @@ async function buildVolumeContext({ folderName, index, folders, volumeByFolder, 
     glossaryOutputFile: path.join(volumeDir, OUTPUT_FILE),
     validationOutputFile: path.join(volumeDir, VALIDATION_FILE),
     researchNotesFile: path.join(volumeDir, RESEARCH_FILE),
-    glossaryTemplate: prompts.glossaryTemplate,
     termsSystemPrompt: prompts.termsSystemPrompt,
-    glossarySystemPrompt: prompts.glossarySystemPrompt,
-    validatorSystemPrompt: prompts.validatorSystemPrompt,
     acceptanceSystemPrompt: prompts.acceptanceSystemPrompt,
-    feedbackSystemPrompt: prompts.feedbackSystemPrompt,
     // Set by the QA loop when it ends on an accepted grade. It starts false so a volume that threw
     // on the way there — or retried through the mode fallback — cannot inherit an earlier yes.
     qaAccepted: false,
@@ -278,10 +270,12 @@ async function buildVolumeContext({ folderName, index, folders, volumeByFolder, 
   ctx.disputesText = await collectFeedbackNotes(ctx, values);
 
   // Transform the prompts that use only the standard placeholders. The extraction prompt carries the
-  // previous volume's unused-entry audit on the end of it.
-  ctx.termsPrompt = transformUserPrompt(prompts.termsTemplate, values) + (ctx.unusedEntriesNote || "");
-  ctx.validatorPrompt = transformUserPrompt(prompts.validatorTemplate, values);
-  ctx.feedbackPrompt = transformUserPrompt(prompts.feedbackTemplate, values);
+  // previous volume's unused-entry audit and the open disputes on the end of it: the read pass is the one
+  // place a rendering is now chosen, so it is the one place that has to know a rendering is contested.
+  ctx.termsPrompt =
+    transformUserPrompt(prompts.termsTemplate, values) +
+    (ctx.unusedEntriesNote || "") +
+    (ctx.disputesText || "");
   ctx.acceptancePrompt = transformUserPrompt(prompts.acceptanceTemplate, values);
 
   // Whole-installment vs chapter-by-chapter, decided against THIS stage's model window and the
@@ -351,23 +345,21 @@ async function collectFeedbackNotes(ctx, values) {
 /**
  * `--dry-run`: write the exact prompts a live run would send, and make no AI call.
  *
- * The preview must match the live run: a live run copies the previous volume's glossary in before
- * the author turn (seedGlossaryFromPrevious), so from volume 02 on the author is told to edit that
- * file in place — not to recreate it — and the term map that copy produces is part of the preview.
+ * The preview must match the live run, and the live run has two calls and one agent kind: the read pass
+ * that decides what the glossary contains, the researcher agents that look those terms up, and the grade
+ * that judges the result. The document itself is written by `renderGlossary`, which is code, so there is no
+ * author turn to preview — and the render's own output is not a prompt, so the preview says what the render
+ * will be asked to print instead of pretending to be it.
  *
  * @param {GlossaryVolumeCtx} ctx
  * @returns {Promise<void>}
  */
 async function dumpVolumePreview(ctx) {
   const { values } = ctx;
-  ctx.glossarySeeded = !ctx.isFirst;
-  ctx.glossaryIndex = ctx.previousGlossaryFile
-    ? buildGlossaryIndex(await fs.readFile(ctx.previousGlossaryFile, "utf8").catch(() => ""))
-    : "";
   // The term-dependent prompts carry an illustrative term list (the real list only exists after the
   // extraction call, which dry-run skips).
   const illustrativeTerms = [
-    { term: "（例の用語）", type: "character", query: "（例の用語）" },
+    { term: "（例の用語）", rendering: "Example Term", note: "（例）", type: "concept", query: "（例の用語）" },
   ];
   const sections = [
     { title: "One-shot — terms extraction system prompt", prompt: ctx.termsSystemPrompt },
@@ -377,26 +369,23 @@ async function dumpVolumePreview(ctx) {
       title: "AGENT — per-term researcher turn (illustrative term list, concurrency=" + RESEARCH_CONCURRENCY + ")",
       prompt: buildPerTermResearchPrompt(ctx, illustrativeTerms[0], 0),
     },
-    { title: "AGENT — author system prompt", prompt: ctx.glossarySystemPrompt + AGENT_TOOLS_NOTE },
-    { title: "AGENT — author turn (illustrative term list)", prompt: buildGlossaryAuthorTurnPrompt(ctx, illustrativeTerms, false) },
-    { title: "AGENT — validator system prompt", prompt: ctx.validatorSystemPrompt + AGENT_TOOLS_NOTE },
-    { title: "AGENT — validator turn", prompt: buildGlossaryValidatorTurnPrompt(ctx) },
-    { title: "AGENT — feedback turn (applied by the author session)", prompt: buildGlossaryFeedbackTurnPrompt(ctx) },
+    {
+      title: "CODE — the artifact this stage publishes (no prompt, no model call)",
+      prompt:
+        `glossary.md is rendered by utils/reference-store/glossary-adapter.js's renderGlossary() out of this ` +
+        `volume's reference record: the document's own prose first, then every row the record holds, in the ` +
+        `order their own volume filed them. The rows come from the extraction answer above, filed through ` +
+        `glossary/store.js's fileGlossaryTermRows(). Nothing an agent writes reaches this file.`,
+    },
     { title: "One-shot — acceptance user prompt (always tool-less)", prompt: ctx.acceptancePrompt },
   ];
-  // Chunked (fallback) volumes: dump the chapter-scoped variants too.
+  // Chunked (fallback) volumes: dump the chapter-scoped variant of the read pass too.
   if (ctx.chunked && ctx.bundle.segments.length > 1) {
     const seg = ctx.bundle.segments[0];
-    sections.push(
-      {
-        title: "CHUNKED — per-chapter terms extraction user prompt (first chapter)",
-        prompt: ctx.termsPrompt + "\n\n" + chapterSegmentNote(ctx.bundle, seg, 0),
-      },
-      { title: "CHUNKED — segment author turn (illustrative term list)", prompt: buildGlossaryAuthorTurnPrompt(ctx, illustrativeTerms, false, seg, 0) },
-      { title: "CHUNKED — segment validator turn (first chapter)", prompt: buildGlossarySegmentValidatorPrompt(ctx, seg, 0) },
-      { title: "CHUNKED — findings merge turn", prompt: buildGlossaryFindingsMergePrompt(ctx) },
-      { title: "CHUNKED — segment feedback turn (first chapter)", prompt: buildGlossarySegmentFeedbackPrompt(ctx, seg, 0) }
-    );
+    sections.push({
+      title: "CHUNKED — per-chapter terms extraction user prompt (first chapter)",
+      prompt: ctx.termsPrompt + "\n\n" + chapterSegmentNote(ctx.bundle, seg, 0),
+    });
   }
   const dumpFile = await writePromptDump("glossary", values.INSTALLMENT_NUMBER, "agent", sections);
   console.log(
@@ -407,62 +396,68 @@ async function dumpVolumePreview(ctx) {
 
 
 /**
- * Process a single volume: extract terms -> research (researcher agent) ->
- * amend the glossary (author agent) -> QA loop (validator agent + acceptance
- * + feedback). Chunked (fallback) volumes take runChunkedVolumeAgent instead.
+ * Process a single volume: extract the terms (one model call per chapter-group) -> file what was found
+ * in the volume's record -> research the new terms -> **render `glossary.md` out of the record** ->
+ * run the cumulative gate -> grade it.
+ *
+ * There is no author agent here, and no file an agent writes. The published glossary is the record's
+ * own content, printed by `renderGlossary`, which is cumulative because the record this volume opened was
+ * copied forward from the previous volume's sealed record. What the stage asks the model for is the
+ * content of a row — the term, its canonical rendering and a note — and one grade for the result.
  *
  * @param {GlossaryVolumeCtx} ctx - The volume context (see glossary()).
  */
 async function runVolumeAgent(ctx) {
-  const {
-    values,
-    folderName,
-    volumeDir,
-    sourceFile,
-    glossaryOutputFile,
-    researchNotesFile,
-    isFirst,
-    previousFolderName,
-    previousGlossaryFile,
-    termsPrompt,
-    termsSystemPrompt,
-  } = ctx;
+  const { values } = ctx;
 
-  // Chunked (fallback) volumes take the per-chapter flow instead.
   if (ctx.chunked) {
+    // Per chapter: extract → research → file → re-render → between-chapter gate. The last chapter's render
+    // is the volume's published file, so the tail below is the same tail the whole-installment route runs.
     await runChunkedVolumeAgent(ctx);
-    return;
+  } else {
+    const terms = await extractNewTerms(ctx);
+    // Two filings, on purpose, from the same list. These are the extractor's claims — the record of what
+    // this volume's read pass found — which is what makes "the glossary has no row for a term the
+    // extractor found" a query with a number in it. They are NOT rendered.
+    fileGlossaryExtraction(ctx, terms);
+    // And these are the published rows: term, canonical rendering, note, section, each with its quote
+    // checked against the book. This is the only thing in the stage that puts a rendering into the record,
+    // and it is what `renderGlossary` prints.
+    fileGlossaryTermRows(ctx, terms);
+
+    // Research still runs, and still writes glossary-research.md. What it no longer does is reach the
+    // glossary through an author: filing a research result onto the row it belongs to is slice 5 of
+    // `glossary/plan/01-glossary-route.md`, and until that exists the notes file is read by the wiki
+    // stage and not by this one.
+    if (researchEnabled && terms.length > 0) {
+      await openAgentTools(ctx);
+      await researchNewTerms(ctx, terms);
+    }
+
+    console.log(`Volume ${values.INSTALLMENT_NUMBER}: rendering the glossary out of the volume's record...`);
+    const rendered = await renderGlossaryArtifact(ctx);
+    if (!rendered.ok) {
+      throw new Error(`Volume ${values.INSTALLMENT_NUMBER}: ${rendered.refusal.rule} — ${rendered.refusal.because} (fix: ${rendered.refusal.fix})`);
+    }
   }
 
-  const terms = await extractNewTerms(ctx);
-  // Slice 6: the new-terms list is the cheapest data the store needs, because the stage already paid
-  // for it. These are the extractor's claims, not glossary rows — filing them is what makes "the
-  // glossary has no row for a term the extractor found" a query with a number in it.
-  fileGlossaryExtraction(ctx, terms);
-  await openAgentTools(ctx);
+  // The cumulative invariant, unchanged: a plain-code gate over the file the render just wrote, against
+  // the previous volume's published file. A render that lost a carried-forward row is the same failure
+  // whatever produced the file.
+  await assertGlossaryCarryForward(ctx, "the render");
 
-  // Pass 2: research the new terms with parallel agents (one per term, batched).
-  const researchNotesAvailable = researchEnabled && terms.length > 0;
-  if (researchNotesAvailable) {
-    await researchNewTerms(ctx, terms);
-  }
-
-  // Pass 3: amend the glossary with the author agent (standalone — creates and closes its own
-  // session; no persistent context across QA iterations).
-  //
-  // The previous volume's glossary is copied in first (deterministic, no model call), so the agent
-  // amends a real file instead of reproducing a document too large for one reply to write. See
-  // seedGlossaryFromPrevious.
-  await seedGlossaryFromPrevious(ctx);
-
-  console.log(`Volume ${values.INSTALLMENT_NUMBER}: amending the glossary (author agent)...`);
-
-  await generateGlossary(ctx, terms, researchNotesAvailable);
-  await assertGlossaryCarryForward(ctx, "the amend pass");
-  await mirrorGlossaryArtifact(ctx);
-
-  // QA loop: fresh validator per iteration + fresh author for feedback.
   await runQaLoop(ctx);
+
+  if (!ctx.qaAccepted) {
+    const moved = await quarantineGlossaryArtifact(ctx);
+    throw new Error(
+      `Volume ${values.INSTALLMENT_NUMBER}: the acceptance gate did not accept the rendered glossary. ` +
+        `${moved.length ? `${moved.join(", ")} — the file was moved aside so the next volume cannot build on it.` : ""} ` +
+        "This stage has no rewrite pass: the glossary is rendered from the volume's record, so the only way to " +
+        "change what it says is to read the volume again or contest a row. The record is left a draft, and the " +
+        "next volume's copy-forward refuses it."
+    );
+  }
 }
 
 

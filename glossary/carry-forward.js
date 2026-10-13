@@ -10,25 +10,27 @@
  * which is what makes the ON_MISSING_PREVIOUS cascade fire, because a present-but-
  * short artifact is the case that policy cannot otherwise see.
  *
- * The code lives in glossary/carry-forward/: seed.js (start this volume's glossary from the
- * previous volume's, without a model), gates.js (the moment a loss is found and what happens
+ * The code lives in glossary/carry-forward/: gates.js (the moment a loss is found and what happens
  * next), table.js (the glossary read as a table — rows, spellings, renderings, and the index an
- * amend agent is handed), diff.js (what the newer glossary lost, and what it merely changed).
+ * agent is handed), diff.js (what the newer glossary lost, and what it merely changed).
  * This file is the public surface of the cumulative invariant.
+ *
+ * There is no seeding step. The old one copied the previous volume's `glossary.md` into this volume's
+ * folder so an author agent could edit it in place; the file is rendered from the volume's reference
+ * record now, which already holds every earlier volume's entries, so copying a document in would only
+ * give the render something to overwrite (glossary route slice 2).
  *
  * Part of the glossary.js layer (split out of the original single file).
  */
 
 require("dotenv").config(); // before anything that turns a knob into a value at require time
 
-const seed = require("./carry-forward/seed");
 const gates = require("./carry-forward/gates");
 const table = require("./carry-forward/table");
 const diff = require("./carry-forward/diff");
 
 // The public surface, unchanged from the single file.
 module.exports = {
-  seedGlossaryFromPrevious: seed.seedGlossaryFromPrevious,
   assertGlossaryCarryForward: gates.assertGlossaryCarryForward,
   guardCarryForwardAgainst: gates.guardCarryForwardAgainst,
   quarantineDamagedGlossary: gates.quarantineDamagedGlossary,

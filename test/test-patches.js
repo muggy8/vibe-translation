@@ -321,8 +321,10 @@ async function scenarioBannedPathsNameTheirRule() {
   }
 
   // The false-positive half (gotcha 65): a filter that refuses everything is the filter that gets
-  // switched off. `system-prompts/glossary.md` is the file the old corpus regex used to match, and it
-  // is a legitimate patch target — gotcha 68's fix is a prompt edit plus a gate edit.
+  // switched off. `system-prompts/glossary.md` is the path the old corpus regex used to match, and it
+  // was a legitimate patch target — gotcha 68's fix is a prompt edit plus a gate edit. The file itself
+  // is gone (the glossary's author agent was deleted, glossary route slice 2), but the SHAPE is still
+  // what the filter must not mistake for a book: a bare artifact basename sitting next to the prompts.
   const allowed = [
     "system-prompts/glossary.md",
     "user-prompts/glossary-feedback.md",

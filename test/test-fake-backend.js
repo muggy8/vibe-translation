@@ -1113,7 +1113,7 @@ async function scenarioStageHandleDoesNotCompact() {
   try {
     const { tools, approve } = await harness.createGatedFsTools({ cwd: dir, allowedDirs: [dir] });
     const handle = await harness.createAgentHandle({
-      name: "glossary-author-01",
+      name: "stage-agent-01",
       systemPrompt: "You are a pipeline stage agent.",
       tools,
       approve,

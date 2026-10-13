@@ -674,9 +674,13 @@ function runAuditSelfTest() {
     { name: "readFile", description: "", parameters: ["filePath"] },
     { name: "writeFile", description: "", parameters: ["filePath", "content"] },
   ];
-  const authorSystem = sys("glossary.md");
+  // The agent pair the planted agent defects are built on. It used to be the glossary author's, and
+  // that agent is gone: the glossary's file is rendered from the volume's record now, so the stage has
+  // no agent turn left to plant a defect on (glossary route slice 2). The style guide still has one,
+  // and the defects are about the shape of an agent request, not about which stage sends it.
+  const authorSystem = sys("style-guide.md");
   const authorUser = (volume, extra = "") =>
-    `# Glossary Amendment\n\n**Volume being processed:** ${volume.installment}\n\n${extra}${workflow.sourceTextOf(volume)}`;
+    `# Style Guide Amendment\n\n**Volume being processed:** ${volume.installment}\n\n${extra}${workflow.sourceTextOf(volume)}`;
   const translateUser = (volume, tail = "") =>
     `请将以下日语小说翻译成${workflow.SERIES.targetLanguage}，并且严格遵循所有约束要求。\n\n` +
     `【源文】\n${workflow.sourceTextOf(volume)}\n\n【约束要求】\n` +
@@ -694,9 +698,9 @@ function runAuditSelfTest() {
   const gradeShape = acceptanceResponseFormat();
 
   // 1. A tool argument the schema does not have (`text` instead of `content`).
-  log.push(entry(i++, { stage: "glossary", system: authorSystem, user: authorUser(vol01), tools: fsTools, toolCalls: [{ name: "writeFile", arguments: { filePath: "glossary.md", text: "…" } }] }));
+  log.push(entry(i++, { stage: "style-guide", system: authorSystem, user: authorUser(vol01), tools: fsTools, toolCalls: [{ name: "writeFile", arguments: { filePath: "style-guide.md", text: "…" } }] }));
   // 2. A tool the model reached for that was never advertised.
-  log.push(entry(i++, { stage: "glossary", system: authorSystem, user: authorUser(vol01), tools: fsTools, toolCalls: [{ name: "writeGlossary", arguments: { filePath: "glossary.md" } }] }));
+  log.push(entry(i++, { stage: "style-guide", system: authorSystem, user: authorUser(vol01), tools: fsTools, toolCalls: [{ name: "writeStyleGuide", arguments: { filePath: "style-guide.md" } }] }));
   // 3. A tool-less grader handed tool schemas.
   log.push(entry(i++, { stage: "glossary", system: sys("glossary-acceptance.md"), user: `Volume being processed: 01\n\n${workflow.glossaryMarkdown(vol01)}\n\n**Recommendation:** Pass`, tools: fsTools, responseFormat: gradeShape, answer: { text: '{"score":80,"band":"Pass","note":"ok"}' } }));
   // 4. The translator given a system prompt and the wrong sampling.
@@ -725,8 +729,8 @@ function runAuditSelfTest() {
     })
   );
   // 6. Volume 02 translated with no tail of volume 01, and its author turn never
-  //    told where volume 01's glossary lives.
-  log.push(entry(i++, { stage: "glossary", system: authorSystem, user: authorUser(vol02), tools: fsTools, toolCalls: [{ name: "writeFile", arguments: { filePath: "glossary.md", content: "…" } }] }));
+  //    told where volume 01's style guide lives.
+  log.push(entry(i++, { stage: "style-guide", system: authorSystem, user: authorUser(vol02), tools: fsTools, toolCalls: [{ name: "writeFile", arguments: { filePath: "style-guide.md", content: "…" } }] }));
   log.push(
     entry(i++, {
       stage: "translate",
@@ -831,7 +835,7 @@ function runAuditSelfTest() {
   //     failure shape rebuilt out of good intentions.
   log.push(
     entry(i++, {
-      stage: "glossary",
+      stage: "style-guide",
       system: authorSystem,
       user: authorUser(vol01),
       tools: [...fsTools, { name: "manage_context", description: "", parameters: ["note"] }],

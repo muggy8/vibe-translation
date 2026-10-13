@@ -99,38 +99,7 @@ let where = null;
 const armed = new Set();
 
 /**
- * The cumulative glossary a three-volume brain would write for volume 03.
- *
- * `test/fake-workflow.js` knows two volumes; its author answer for volume 03 falls back to volume 01's
- * nine-term table, which loses the term volume 02 added and trips the carry-forward gate for a reason
- * that has nothing to do with this suite. This is the answer the scripted brain would give if its
- * series had a third book. It is a fixture shim, not a production behaviour.
- *
- * @param {string} installment
- * @returns {string}
- */
-function cumulativeGlossary(installment) {
-  const rows = workflow.TERMS.map((t) => `| ${t.term} | ${t.rendering} | ${t.type} | Carried through volume ${installment}. |`);
-  return [
-    `# Glossary — ${workflow.SERIES.alt} (${workflow.SERIES.name})`,
-    "",
-    `Current through volume ${installment}.`,
-    "",
-    "## Proper nouns",
-    "",
-    "| Source term | Rendering | Type | Notes |",
-    "|---|---|---|---|",
-    ...rows,
-    "",
-    "## Notes",
-    "",
-    `- Renderings are fixed for the whole series. Volume ${installment} adds 0 term(s).`,
-    "",
-  ].join("\n");
-}
-
-/**
- * The scripted brain, plus the three-volume shim, plus the plant.
+ * The scripted brain, plus the plant.
  *
  * The plant is the defect this suite is about: a file that exists, has real content, and is not the
  * document its prompt asked for — `wrong-shape`, which `utils/postmortem/levels.js` declares MAJOR.
@@ -147,6 +116,13 @@ function cumulativeGlossary(installment) {
  * The plant stays armed for the whole step rather than being consumed by the first grade, so a second
  * QA iteration (which would re-run the audit and overwrite the report) cannot quietly repair the
  * defect. `runStep` disarms when the step ends.
+ *
+ * There is no shim for volume 03's glossary any more. This suite used to hand the glossary author a
+ * cumulative table for the third book, because the scripted brain only knows two volumes and its
+ * author answer for a third would have dropped volume 02's term and tripped the carry-forward gate for
+ * a reason unrelated to this suite. The glossary file is rendered out of the volume's record now, and
+ * the record already carries every earlier volume's rows, so the cumulative document is what the
+ * render produces on its own (glossary route slice 2).
  *
  * @param {import("./fake-backend").FakeRequest} req
  * @returns {import("./fake-backend").FakeReply}
@@ -170,12 +146,13 @@ function reply(req) {
   for (const call of answer.toolCalls) {
     if (call.name !== "writeFile") continue;
     const file = String(call.arguments.filePath);
-    if (file === "glossary-validation.md") continue; // written by the audit, planted above
+    // The glossary stage writes neither of its files through a model any more: `glossary.md` is
+    // rendered out of the volume's record and `glossary-validation.md` is written by the deterministic
+    // audit, which is why the glossary half of the plant is planted above, on the filesystem.
     if (file === "style-guide-validation.md") {
       if (armed.has(`style-guide:${nn}`)) call.arguments.content = PLANTED;
       continue;
     }
-    if (file === "glossary.md" && nn === "03") call.arguments.content = cumulativeGlossary(nn);
   }
   return answer;
 }
@@ -404,8 +381,10 @@ async function main() {
   const halted = await runStep(["--stages=glossary"], "halted");
 
   ok(halted.code === 1, "the step that halted exits non-zero");
-  same(halted.perVolume["01"], 5, "volume 01 was built and paid for");
-  same(halted.perVolume["02"], 5, "volume 02 was built and paid for");
+  // Four calls per volume: one chapter read pass and the three acceptance samples. The glossary author
+  // agent used to be the fifth (glossary route slice 2).
+  same(halted.perVolume["01"], 4, "volume 01 was built and paid for");
+  same(halted.perVolume["02"], 4, "volume 02 was built and paid for");
   ok(!halted.perVolume["03"], "volume 03 was never attempted, so it was never paid for");
 
   const halt = readVolumeHalt("glossary");
@@ -479,8 +458,8 @@ async function main() {
   ok(glossaryRun, "the manager ran glossary");
   same(glossaryRun.ok, true, "and it finished");
   same(glossaryRun.perVolume["01"], undefined, "the volume already accepted was NOT paid for again");
-  same(glossaryRun.perVolume["02"], 5, "the volume that tripped the gate was rebuilt");
-  same(glossaryRun.perVolume["03"], 5, "and the volume the halt never attempted was built");
+  same(glossaryRun.perVolume["02"], 4, "the volume that tripped the gate was rebuilt");
+  same(glossaryRun.perVolume["03"], 4, "and the volume the halt never attempted was built");
 
   const vol1After = snapshot(vol1Dir);
   // Tier C: a pause never justifies deleting accepted work. The later steps of the plan legitimately
@@ -507,7 +486,7 @@ async function main() {
   armed.add("glossary:02");
   const first = await runStep(["--stages=glossary"], "control-first");
   same(first.code, 1, "the control halts too");
-  same(first.billed, 10, "and pays for the two volumes it attempted");
+  same(first.billed, 8, "and pays for the two volumes it attempted (4 calls each)");
 
   armed.add("glossary:02");
   const again = await runStep(["--stages=glossary"], "control-again");

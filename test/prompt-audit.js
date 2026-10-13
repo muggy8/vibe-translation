@@ -55,9 +55,6 @@ const ONE_SHOT_KINDS = new Set([
 /** Kinds that are agent turns and must therefore carry tool schemas. */
 const AGENT_KINDS = new Set([
   "intake",
-  "glossary-author",
-  "glossary-validator",
-  "glossary-feedback",
   "style-author",
   "style-validator",
   "style-feedback",
@@ -138,6 +135,32 @@ function distinctiveLines(filePath, limit = 3) {
     .map((line) => line.trim())
     .filter((line) => line.length >= 25 && !/^[|#-]+$/.test(line) && !line.startsWith("<!--"))
     .slice(0, limit);
+}
+
+/**
+ * The term→rendering lines a volume's `glossary.md` offers a verifier, in the shape the translation
+ * stage actually injects them (`"term" → "rendering"`, `utils/translate/terminology.js` `glossaryBlock`).
+ *
+ * This rule used to ask for "a distinctive line of glossary.md", and it passed — for the wrong reason.
+ * The fixture's authored glossary and its authored style guide both opened with the same boilerplate
+ * (`Current through volume 01.`), so the check was proving the style guide had reached the verifier.
+ * The glossary's own content never appeared as a line, because the verifier is handed renderings, not
+ * the table. A check that passes on a coincidence is a check that is not running.
+ *
+ * @param {string} filePath
+ * @returns {string[]} The pairs, in file order, empty when the file has no rows.
+ */
+function glossaryRenderingsInFile(filePath) {
+  const { parseGlossaryTableTerms } = require("../glossary/carry-forward/table");
+  let text = "";
+  try {
+    text = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return [];
+  }
+  return parseGlossaryTableTerms(text)
+    .filter((row) => row.term && row.rendering)
+    .map((row) => `"${row.term}" → "${row.rendering}"`);
 }
 
 /**
@@ -348,18 +371,25 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
     if (!flat(prompt).includes(flat(draft).slice(0, 80))) {
       verifyGaps.push(`#${entry.index}: the verify prompt does not contain the draft it is grading (volume ${volume.installment})`);
     }
-    const glossaryLines = distinctiveLines(path.join(volumeDir, "glossary.md"), 2);
-    if (!glossaryLines.some((line) => prompt.includes(line))) {
-      verifyGaps.push(`#${entry.index}: no line of ${volume.folder}/glossary.md reached the verifier`);
+    const glossaryRenderings = glossaryRenderingsInFile(path.join(volumeDir, "glossary.md"));
+    const seenRenderings = glossaryRenderings.filter((line) => prompt.includes(line));
+    if (seenRenderings.length === 0) {
+      verifyGaps.push(
+        `#${entry.index}: none of ${volume.folder}/glossary.md's ${glossaryRenderings.length} term→rendering pair(s) reached the verifier ` +
+          `(checked: ${glossaryRenderings.slice(0, 3).join(", ") || "the file has no rows"})`
+      );
     }
     const backgroundLines = distinctiveLines(path.join(volumeDir, "shared-wiki.md"), 3);
     if (!backgroundLines.some((line) => prompt.includes(line))) {
       verifyGaps.push(`#${entry.index}: no line of ${volume.folder}/shared-wiki.md reached the verifier (story background missing)`);
     }
-    verifySeen.push(`#${entry.index} volume ${volume.installment}: ${entry.promptChars} chars, ${glossaryLines.length} glossary line(s) and ${backgroundLines.length} background line(s) confirmed present`);
+    verifySeen.push(
+      `#${entry.index} volume ${volume.installment}: ${entry.promptChars} chars, ` +
+        `${seenRenderings.length}/${glossaryRenderings.length} glossary rendering(s) and ${backgroundLines.length} background line(s) confirmed present`
+    );
   }
   if (verifyGaps.length) fail("verify-context", "the verifier was missing something it audits against.", verifyGaps);
-  else pass("verify-context", `${byKind("verify").length} verification call(s) all carried the source, the draft, the glossary, the style rules and the story background.`, verifySeen);
+  else pass("verify-context", `${byKind("verify").length} verification call(s) all carried the source, the draft, the glossary's own term→rendering pairs, the style rules and the story background.`, verifySeen);
 
   // ─── 6. The acceptance grader must see the artifact AND the validation report ─
   const acceptanceGaps = [];
@@ -530,9 +560,7 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
     }
   }
   const pairs = [
-    ["glossary-extract", "glossary-author", "glossary extraction before the glossary amend"],
-    ["glossary-author", "glossary-validator", "the glossary author before the glossary validator"],
-    ["glossary-validator", "acceptance", "the validator before the acceptance grade"],
+    ["glossary-extract", "acceptance", "glossary extraction before the acceptance grade"],
     ["style-extract", "style-author", "style extraction before the style compile"],
     ["audit-agent", "translate", "the consistency audit before the first translation"],
     ["verify", "retranslate", "verification before retranslation"],
@@ -546,7 +574,7 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
     if (b < a) orderGaps.push(`${label}: ${after} (#${b}) ran before ${before} (#${a})`);
   }
   if (orderGaps.length) fail("stage-ordering", "the calls did not happen in the order the pipeline is built in.", orderGaps);
-  else pass("stage-ordering", `${seenStages.join(" → ")} — every stage's first call came after the stage it depends on, and within each volume: extract → author → validator → acceptance (the character-voice stage is extract → acceptance: its validator half is a query, not a call).`);
+  else pass("stage-ordering", `${seenStages.join(" → ")} — every stage's first call came after the stage it depends on, and within each volume: the glossary and the character‑voice stage are both extract → acceptance (their validator half is a query the record answers, not a call); the style guide and the wiki are extract → author → validator → acceptance.`);
 
   // ─── 11. Nothing answered with an error, a cut-off, or nothing at all ───────
   const badAnswers = [];
@@ -596,9 +624,6 @@ function auditPromptLog(log, { workflow, seriesDir, firstCallCount, stagesRun = 
 
   // ─── 14. A cumulative agent turn is told where the previous volume's artifact is
   const cumulativeTurnKinds = new Set([
-    "glossary-author",
-    "glossary-validator",
-    "glossary-feedback",
     "style-author",
     "style-validator",
     "style-feedback",

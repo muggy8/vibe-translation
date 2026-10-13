@@ -30,11 +30,17 @@ const {
 } = require("./carry-forward/table");
 
 /**
- * Parse the AI's term-list output into an array of { term, type, query }.
+ * Parse the AI's term-list output into the rows the record files.
  * Tolerates markdown fences and surrounding prose.
  *
+ * The answer carries the target‑language rendering and the one‑line note, because on this route the
+ * read pass is the ONLY place a rendering is chosen — the file is rendered from the record afterwards
+ * and nothing else can supply one (glossary/plan/01-glossary-route.md §3 step 2). `type` and `query`
+ * are still read: `section` is the preferred bucket and `type` is the fallback the older answers and
+ * the offline fixture still use.
+ *
  * @param {string} output - The raw AI output.
- * @returns {Array<{term: string, type: string, query: string}>}
+ * @returns {Array<{term: string, rendering: string, note: string, section: string, type: string, query: string}>}
  */
 function parseTerms(output) {
   if (!output || typeof output !== "string") {
@@ -58,6 +64,9 @@ function parseTerms(output) {
     .filter((entry) => entry && typeof entry.term === "string" && entry.term.trim() !== "")
     .map((entry) => ({
       term: entry.term.trim(),
+      rendering: typeof entry.rendering === "string" ? entry.rendering.trim() : "",
+      note: typeof entry.note === "string" ? entry.note.trim() : "",
+      section: typeof entry.section === "string" && entry.section.trim() ? entry.section.trim() : "",
       type: typeof entry.type === "string" && entry.type.trim() !== "" ? entry.type.trim() : "concept",
       query: typeof entry.query === "string" && entry.query.trim() !== "" ? entry.query.trim() : entry.term.trim(),
     }));

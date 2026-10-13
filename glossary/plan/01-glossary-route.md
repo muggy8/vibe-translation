@@ -84,25 +84,41 @@ is not a cheaper glossary, it is a worse one.
 ## 3. The route
 
 Six steps, and the model is asked exactly twice per chapter-group: once to read, once to grade.
+**Built 2026-10-13 (slice 2), with one change to the plan.**
 
 1. **Read the volume chapter by chapter.** One extraction call per chapter, in reading order,
    each told to report only what this chapter adds to what the earlier chapters already filed.
-   This is `glossary/chunked.js`'s existing per-chapter extraction, unchanged.
+   This is `glossary/chunked.js`'s existing per-chapter extraction. **It is not unchanged:** the
+   answer now has to carry `rendering` and `note` beside `term`, `type` and `query`. The plan said
+   the extraction contract would not move, and that was wrong — the read pass files its terms under
+   `source_stage: 'extract'`, which `renderGlossary` deliberately excludes, so with the author deleted
+   and nothing else changed the stage published an **11-byte** file. The read pass is the only place
+   left that can choose a rendering, so it has to be asked for one. A row that arrives without a
+   rendering is refused at filing (`missingRendering`) rather than published as an empty column.
 2. **File what was found into the volume's record.** Each term becomes a row with its quote,
-   checked against the book as it is written. Already built, and now unconditional (slice 1).
+   checked against the book as it is written. Already built, and now unconditional (slice 1). Filed
+   twice on purpose: once as the read pass's **candidate** (`extract` scope, never rendered) and once
+   as the **published row** (the document scope, with its rendering) — the candidate is what makes
+   "the glossary holds no row for a term this volume found" a query with a number in it.
 3. **Render `glossary.md` out of the record.** `renderGlossary` already exists in
    `utils/reference-store/glossary-adapter.js`, is tested for a byte-clean round trip, and is
-   deterministic across processes. **It has no production caller today.** The author agent is
-   what stands between the record and the published file.
-4. **Audit by query.** The deterministic audit already replaces the validator agent behind the
-   same flag: same report file, written from queries instead of from an agent reading the
-   artifact.
-5. **Grade once.** The acceptance call stays. It is shown a bounded sample chosen by code, with
-   a line saying it is a sample.
+   deterministic across processes. **It is now the published file** (`glossary/store.js`'s
+   `renderGlossaryArtifact`, called by both routes). A render with no rows refuses
+   (`glossary-render-has-no-rows`) and leaves the `glossary.md` already on disk where it is.
+4. **Audit by query.** The deterministic audit writes the same report file, from queries instead of
+   from an agent reading the artifact. The flag that used to gate it is gone (slice 1).
+5. **One acceptance iteration.** The acceptance call stays. It is shown a bounded sample chosen by code,
+   with a line saying it is a sample. `maxIterations: 1` is a constant in `glossary/qa.js`, not a setting
+   — and one iteration is not one score: the shared loop still fills its `ACCEPTANCE_MIN_SAMPLES` window,
+   and on this route it does that by re-grading the same artifact rather than paying for a rewrite round
+   that could change nothing.
 6. **Seal.** The volume's record is sealed when the grade passes, which is what lets the next
    volume copy forward from it.
 
-Research sits between 2 and 3, and §5 is about what it becomes.
+Research sits between 2 and 3, and §5 is about what it becomes. The chapter-by-chapter route keeps the
+between-chapter carry-forward gate by re-rendering after every chapter; only the first render of a
+volume moves an existing file aside, because from chapter 2 on the file being replaced is this volume's
+own previous render.
 
 ---
 
@@ -118,11 +134,20 @@ recorded so it can be read in history.
   reset to zero on 2026-10-12, so no volume is accepted on the old path, and the offline loops have run
   the new path end to end. A flag with no reason is a way to turn a guard off. The loop flag is
   refused by name rather than ignored, so whoever types it is told what replaced it.
-- The author agent and its turn.
-- The validator agent, the per-chapter validator partials, and the findings-merge agent.
+- The author agent and its turn. **Deleted in slice 2, 2026-10-13**: `glossary/authoring.js`,
+  `glossary/amend.js`, `glossary/prompts.js` and `glossary/carry-forward/seed.js` (the step that copied
+  the previous volume's file in so an agent could edit it), plus the orphan prompt pairs
+  `system-prompts/glossary.md`, `glossary-validator.md`, `glossary-feedback.md` and their three
+  `user-prompts/` counterparts. The code is in git history at commit `294351c`.
+- The validator agent, the per-chapter validator partials, and the findings-merge agent. **Deleted in
+  slice 2**: the chapter-by-chapter route's QA loop (`runChunkedQaLoop`) is gone, and both routes end at
+  the one volume-level gate in `glossary/qa.js`.
 - The feedback pass, and with it the rolling-window re-grades and the consensus confirmations
   that exist to decide whether to send feedback to an author. One grade per volume, as the
-  character-voice stage does.
+  character-voice stage does. **Done in slice 2**: `maxIterations: 1` is a constant, `maxValidationIterations`
+  is out of `glossary/config.js`, and the feedback step is a log line. (The shared loop still collects
+  `ACCEPTANCE_MIN_SAMPLES` scores in its rolling window — it re-grades the same artifact instead of paying
+  for a round that would change nothing, which is why one *iteration* is not one *grade*.)
 
 What is *not* deleted: the acceptance rubric, the quarantine door, the report's file name and
 `Recommendation:` line, the carry-forward guard, and the store's own rules.
@@ -177,9 +202,9 @@ worker that does not know the two repositories exist will look for files that ar
 | # | slice | acceptance test |
 |---|---|---|
 | 1 | **Built 2026-10-13.** The record becomes unconditional: open it per volume, file the extraction's terms, seal after the grade. Delete the setting and the loop flag that pinned it. | **Met.** The store loop's glossary path *is* the default loop's glossary path — both open, file, audit, grade and seal every volume, and the default loop's glossary stage dropped its whole-document validator agent (21 calls → 15, and the whole loop 93 → 87). The setting's name appears nowhere in the repository except the suite that refuses the old flag and the index row the conductor writes. |
-| 2 | Publish `renderGlossary(store)` instead of the author agent's file. | A rendered glossary and an authored one are compared entry-for-entry on a real volume, and every entry the authored one had is accounted for. |
-| 3 | Delete the validator agent, the per-chapter validators and the findings-merge agent. | The report file is still written, still named the same, still carries `**Recommendation:**`, and the prompt audit still passes. |
-| 4 | Delete the feedback pass and the re-grade machinery that feeds it. | One acceptance grade per volume in the offline loop, and a failing grade still quarantines and still leaves the record a draft. |
+| 2 | **Built 2026-10-13.** Publish `renderGlossary(store)` instead of the author agent's file, and delete the author turn. | **Met, and the comparison was done first** (gotcha 120's guard held). Three real authored volumes compared entry-for-entry with **0 model calls**: volume 01 — authored 18,025 bytes / 87 rows, the render **byte-identical** (sha256 `d0c92311…f69028`); volume 02 — 28,605 → 27,715 bytes, 124 → 120 rows; volume 17 — 189,759 → 178,406 bytes, 554 → 520 rows. **0 sections lost, 0 prose lines lost, 0 extra entries on all three.** Every one of the 34 rows missing from volume 17 is a row the store's own evidence rule refused at filing: 23 hold a guide-split string the guide-free re-extraction no longer prints (`貞さだ○状態` → `貞○状態`, gotcha 123) and 11 name a term the book never prints at all. Chain across the 17 authored files: 5,392 rows parsed, 520 filed, 4,618 carried, 254 refusals. Pinned by `test/test-glossary-render-route.js` (8 scenarios, 65 checks), including the render being byte-identical **across two fresh processes**. |
+| 3 | **Built 2026-10-13, inside slice 2.** Delete the validator agent, the per-chapter validators and the findings-merge agent. | **Met.** `glossary-validation.md` is still written, still named the same, still carries `**Recommendation:**`, and the prompt audit still passes (22 checks, 0 findings). The chunked loop dropped 12 calls (39 → 27). |
+| 4 | **Built 2026-10-13, inside slice 2.** Delete the feedback pass and the re-grade machinery that feeds it. | **Met.** One acceptance *iteration* per volume in both loops (`maxIterations: 1`, a constant), and a failing grade still quarantines the file to a numbered `.rejected`, still leaves the record a draft, and still throws. |
 | 5 | Bound research to researchable entries, and file what research returns onto the row. | The classifier measured against the 468 tagged rows, both lists read; a researched note survives into the rendered file. |
 | 6 | Re-baseline the offline loops and the docs. | Both loops green with their new call counts written into the plan, and `docs/` describes the route that exists. |
 
@@ -190,26 +215,31 @@ worker that does not know the two repositories exist will look for files that ar
 | measure | today | target |
 |---|---|---|
 | research conversations, whole series | **494** | bounded to the researchable share of new terms |
-| agent conversations in the stage, per volume | author + validator + feedback + per-chapter validators | **0**, plus bounded research |
-| acceptance grades per volume | a rolling window with consensus confirmations | **1** |
-| tokens per volume | **unmeasured** | at or below the character-voice stage's ~1,000,000 |
+| agent conversations in the stage, per volume | author + validator + feedback + per-chapter validators | **0**, plus bounded research — **met**: the stage's only agent turn left is the researcher |
+| acceptance grades per volume | a rolling window with consensus confirmations | **1 iteration** (`maxIterations: 1`), which is not the same as 1 score: the shared loop still fills its `ACCEPTANCE_MIN_SAMPLES` window by re-grading the same artifact |
+| model calls, offline whole-pipeline loop | 93 (validator-agent era) → 87 (slice 1) | **81**, glossary stage 9 (slice 2) |
+| model calls, offline chunked-glossary loop | 39 | **27**, glossary stage 11 |
+| tokens per volume | **still unmeasured** | at or below the character-voice stage's ~1,000,000 |
 | a term that quotes a line that is not in the book | refused at filing | refused at filing |
 
 **Slice 2 has to produce the first real cost number this stage has ever had.** Until it exists,
 "cheaper" is a claim rather than a measurement, and this plan should not be called successful
-without it.
+without it. **Slice 2 did not produce it, and says so:** it was dispatched with a hard rule of **zero
+real model calls**, so every number above is a **call count from the offline scripted loop**, not a
+token count from the endpoint. The token figure needs one live volume, and that is a decision the
+account owner makes, not a side effect of a refactor.
 
 ---
 
 ## 8. Open questions, said plainly
 
-1. **Does the rendered glossary lose prose the authored one had?** This exact failure happened
-   to the POV map: removing the author route silently dropped four summary sections worth 38% of
-   that file's bytes, and it was caught only by comparing the two files afterwards (`AGENTS.md`
-   gotcha 120). The glossary's notes column is the same kind of thing — free prose an agent
-   wrote. **Slice 2 must compare a rendered glossary against an authored one before the author
-   is deleted, not after.** The tagged commit `pre-extraction-fix-2026-10-12` holds 17 authored
-   glossaries to compare against.
+1. **Does the rendered glossary lose prose the authored one had?** — **Answered by slice 2, and the
+   answer is "the rows no, the paragraphs yes".** This exact failure happened to the POV map: removing
+   the author route silently dropped four summary sections worth 38% of that file's bytes, and it was
+   caught only by comparing the two files afterwards (`AGENTS.md` gotcha 120). The comparison was run
+   **before** the author was deleted, on three real authored volumes: **0 sections lost, 0 prose lines
+   lost, 0 extra entries**, and volume 01's render is byte-identical to the authored file. What the
+   render does not produce is described in item 5 below.
 2. **What does a research note attach to?** A row, a section, or the volume? A note attached to
    nothing is a note that renders nowhere.
 3. **Is one grade enough for a 468-row cumulative artifact?** The character-voice stage grades a
@@ -225,3 +255,25 @@ without it.
    which turns it from a script somebody writes by hand into a step with a report. What stays
    here is the consequence: if that audit finds the matchers still tripping on clean text, the
    fix is in the matchers, and slice 1 inherits it.
+5. **The prose between the tables is not published, and nobody decided whether the translator needs
+   it.** The authored glossaries carry paragraphs that are not rows: a style-policy paragraph, the
+   "Series English title" line, the occasional note that sits under a section before its table.
+   `renderGlossary` prints the tables under a title block `glossaryTitleBlock` supplies
+   deterministically (the title line, the canonical-renderings line, and a line saying the file was
+   rendered out of the record), and the only way such a paragraph reaches the file is if the record
+   **backfilled** it from an authored document through
+   `ensureVolumeGlossaryInRecord`. On a series re-derived from scratch, none of it appears. Measured:
+   volume 17's render is 11,353 bytes smaller than the authored file and 34 of its rows are missing,
+   while 0 sections and 0 prose **lines the parser could see** were lost — the difference is the text
+   between the tables, which the comparison counts as neither a row nor a section.
+6. **A glossary dispute has no door any more.** `utils/disputes.js` still writes the queue and the
+   glossary stage still reads it, but it now appends it to the **extraction** prompt instead of handing
+   it to an agent that edits the row. Nothing in the store settles one: there is no term equivalent of
+   `castAlias`/`challenge_fact`, no way to mark a published rendering contested, and no path from "the
+   verifier quoted a line that contradicts this row" back into the record. The channel is currently a
+   one-way notice. Deciding this is a slice of its own, and it is not in the build order yet.
+7. **The 254 refusals are not all defects.** 23 hold a pronunciation-guide string the guide-free
+   re-extraction no longer prints (gotcha 123's cost, which the account owner has to decide about) and
+   11 name a term the book never prints at all. Whether a term the book never prints should still be
+   published — it may be a real-world reference the author names without ever using — is a rule nobody
+   has written, and today the evidence rule answers it by refusing the row.

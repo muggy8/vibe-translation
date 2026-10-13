@@ -178,7 +178,7 @@ the grade accepted it**. A volume the gate did not accept is left a draft on pur
 
 | Var | Default | Meaning |
 |---|---|---|
-| `QA_MAX_ITERATIONS` | `10` | QA-loop cap per volume (increased to allow rolling average to converge) |
+| `QA_MAX_ITERATIONS` | `10` | QA-loop cap per volume (increased to allow rolling average to converge). The glossary stage no longer reads it — its gate runs one iteration with no feedback artifact to watch (glossary route slice 2, 2026-10-13), so no glossary run can reach the cap |
 | `ACCEPTANCE_WINDOW_SIZE` | `2` | Number of recent acceptance checks in the rolling window. How many checks it needs before it can fire is derived from it (`min(2, window)`) — not a separate knob, because a window can never hold more samples than its own size |
 | `ACCEPTANCE_SAMPLE_FLOOR` | `PASSING_SCORE − 15` | The lowest a SINGLE score in the window may be. Without it an average launders a rejection: with a window of 2 and a passing score of 69, `[100, 38]` accepted an artifact one grader called *atrocious*. `0` restores pure averaging |
 | `ACCEPTANCE_EXCEPTIONAL_SCORE` | `85` | A grade at or above this (the rubric's top band) triggers the fast-accept path: `ACCEPTANCE_CONFIRMATION_CHECKS` extra grades, one of them at temperature 0. When every grade stays within `ACCEPTANCE_SCORE_TOLERANCE` of the exceptional score and the deterministic grade agrees, the artifact is accepted immediately — no feedback round (an artifact a grader called perfect does not need a stochastic rewrite to "confirm" it) |

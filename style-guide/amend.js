@@ -12,8 +12,9 @@ const { authorMaxStepsFor } = require("../utils/prompt");
 
 /**
  * The write instruction for a style-guide pass — shared by the compile and
- * feedback passes, whole and per-chapter. See glossaryWriteInstruction (the voice
- * stage's equivalent went with its author route, which is gone): the cumulative
+ * feedback passes, whole and per-chapter. (The glossary and voice stages used to have
+ * the same instruction; both went with their author routes, which are gone —
+ * `75e59a7` and `294351c`): the cumulative
  * document is edited IN PLACE, and the
  * whole-file write is only for a file that does not exist yet.
  *

@@ -48,16 +48,16 @@ const SERIES = {
  * missing whenever the sentence opens with "The Forbidden Book".
  */
 const TERMS = [
-  { term: "月影学園", rendering: "Moonshadow Academy", type: "proper noun", volumes: ["01", "02"] },
-  { term: "灯里", rendering: "Akari", type: "character name", volumes: ["01", "02"] },
-  { term: "悠真", rendering: "Yuma", type: "character name", volumes: ["01", "02"] },
-  { term: "契約", rendering: "Pact", type: "concept", volumes: ["01", "02"] },
-  { term: "生徒会", rendering: "Student Council", type: "institution", volumes: ["01", "02"] },
-  { term: "禁忌の書", rendering: "Forbidden Book", type: "artifact", volumes: ["01", "02"] },
-  { term: "魔法", rendering: "magic", type: "concept", volumes: ["01", "02"] },
-  { term: "屋上", rendering: "roof", type: "place", volumes: ["01", "02"] },
-  { term: "図書室", rendering: "library", type: "place", volumes: ["01", "02"] },
-  { term: "名簿", rendering: "register", type: "institution", volumes: ["02"] },
+  { term: "月影学園", rendering: "Moonshadow Academy", type: "place", note: "The school the series is set in.", volumes: ["01", "02"] },
+  { term: "灯里", rendering: "Akari", type: "character", note: "A student; she stops giving her own name.", volumes: ["01", "02"] },
+  { term: "悠真", rendering: "Yuma", type: "character", note: "Keeps something on the roof; hates the word magic.", volumes: ["01", "02"] },
+  { term: "契約", rendering: "Pact", type: "concept", note: "The in-world word for what is agreed between them.", volumes: ["01", "02"] },
+  { term: "生徒会", rendering: "Student Council", type: "faction", note: "The school's governing body; leaves its documents out.", volumes: ["01", "02"] },
+  { term: "禁忌の書", rendering: "Forbidden Book", type: "item", note: "The written book on the library's third floor.", volumes: ["01", "02"] },
+  { term: "魔法", rendering: "magic", type: "concept", note: "Yuma's word for a request, as opposed to craft.", volumes: ["01", "02"] },
+  { term: "屋上", rendering: "roof", type: "place", note: "Where the two old chairs are.", volumes: ["01", "02"] },
+  { term: "図書室", rendering: "library", type: "place", note: "The building with the third floor.", volumes: ["01", "02"] },
+  { term: "名簿", rendering: "register", type: "item", note: "The list volume 02's chapter turns on.", volumes: ["02"] },
 ];
 
 /**
@@ -620,9 +620,6 @@ function selfCheck() {
 const SIGNATURES = [
   ["# Series Intake Agent", "intake"],
   ["**Terminology Extraction Specialist**", "glossary-extract"],
-  ["**Localization Terminology Specialist** operating in **revision mode**", "glossary-feedback"],
-  ["**Localization Terminology Specialist** maintaining", "glossary-author"],
-  ["**Glossary Auditor**", "glossary-validator"],
   ["**Quality Gatekeeper** for a translation glossary", "acceptance"],
   ["**Voice and Perspective Analyst**", "voice-extract"],
   ["**Quality Gatekeeper** for a character voice", "acceptance"],
@@ -721,7 +718,17 @@ function answer(req, ctx) {
     case "glossary-extract": {
       const terms = newTermsForVolume(vol.installment);
       return {
-        text: JSON.stringify(terms.map((t) => ({ term: t.term, type: t.type, query: `${SERIES.alt} ${t.rendering}` })), null, 2),
+        text: JSON.stringify(
+          terms.map((t) => ({
+            term: t.term,
+            rendering: t.rendering,
+            note: t.note,
+            type: t.type,
+            query: `${SERIES.alt} ${t.rendering}`,
+          })),
+          null,
+          2
+        ),
       };
     }
     case "voice-extract":
@@ -889,21 +896,6 @@ function agentSteps(kind, volume, ctx) {
         { toolCalls: [write("translation-target.draft.json", manifestJson(ctx.seriesDir))], finishReason: "tool_calls" },
         { toolCalls: [write("translation-plan.md", planMarkdown())], finishReason: "tool_calls" },
         done("Staged both volumes into their own folders and wrote the plan of record. Both books are Japanese prose; the order follows the number each file carries."),
-      ];
-
-    case "glossary-author":
-    case "glossary-feedback":
-      return [
-        { toolCalls: [read(volume.stagedFile)], finishReason: "tool_calls" },
-        { toolCalls: [write("glossary.md", glossaryMarkdown(volume))], finishReason: "tool_calls" },
-        done(`Wrote glossary.md for volume ${volume.installment}.`),
-      ];
-
-    case "glossary-validator":
-      return [
-        { toolCalls: [read("glossary.md")], finishReason: "tool_calls" },
-        { toolCalls: [write(reportFileNamed(ctx.userText, "glossary-validation.md"), validationMarkdown("glossary", volume, 1))], finishReason: "tool_calls" },
-        done("Wrote the validation report."),
       ];
 
     case "style-author":

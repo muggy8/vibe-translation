@@ -80,9 +80,24 @@ const {
 } = require("./fixture-reference-store");
 
 /** A term the fixture's volume 01 text never prints: the refusal case for rule 1. */
-const TERM_NOT_IN_THE_BOOK = { term: "存在しない用語", type: "concept", query: "存在しない用語" };
+const TERM_NOT_IN_THE_BOOK = {
+  term: "存在しない用語",
+  rendering: "A Term The Book Never Prints",
+  type: "concept",
+  query: "存在しない用語",
+};
 /** A term it does print, on a known line of `SOURCE_01` ("山田は会計の人である。"). */
-const TERM_IN_THE_BOOK = { term: "会計", type: "concept", query: "会計" };
+const TERM_IN_THE_BOOK = {
+  term: "会計",
+  rendering: "The Accounting Person",
+  note: "The book says it plainly: 「山田は会計の人である。」",
+  type: "concept",
+  query: "会計",
+};
+/** A term only volume 02's fixture text prints, for the cumulative scenario ("駱駝はあとがきに書いた。"). */
+const TERM_IN_VOLUME_TWO = { term: "駱駝", rendering: "The Camel", type: "concept", query: "駱駝" };
+/** A term the read pass returned with no rendering: the filing door refuses it, not files it blank. */
+const TERM_WITHOUT_A_RENDERING = { term: "黒板", type: "item", query: "黒板" };
 
 /**
  * Build the context object `glossary/task.js` hands its store glue, for a fixture volume.
@@ -104,6 +119,7 @@ function stageCtx(fx, index) {
     values: { INSTALLMENT_NUMBER: volume.installmentNumber },
     folderName: volume.folder,
     seriesDir: fx.dir,
+    volumeDir: volume.dir,
     previousFolderName: previous ? previous.folder : null,
     bundle: { segments: meta.segments, sourceFingerprint: "fixture" },
     glossaryOutputFile: path.join(volume.dir, "glossary.md"),
@@ -216,15 +232,26 @@ function scenarioTheDefaultPathOpensFilesAndSealsTheRecord() {
     "the glossary stage never sealed the record it built"
   );
   assert.ok(
-    /reference record mirrors \d+ row/.test(stageLog),
-    "the glossary stage never filed its published rows into the record"
+    /reference record filed \d+ glossary row\(s\)/.test(stageLog),
+    "the glossary stage never filed its read pass's rows into the record it renders"
+  );
+  assert.ok(
+    /rendered glossary\.md out of the volume's record/.test(stageLog),
+    "the glossary stage never rendered the file out of the record — it still had something else write it"
   );
 
-  // The validator agent is gone from this path: the report the grader reads is written by a query.
+  // The stage has no agent turn left: every glossary request is a tool-less one-shot, and the
+  // whole-document validator agent is gone from this path as well as the chapter-by-chapter one.
   const wire = JSON.parse(fs.readFileSync(path.join(reportDir, "wire-log.json"), "utf8"));
   const glossaryRequests = wire.filter((e) => e.stage === "glossary");
   const validatorRequests = glossaryRequests.filter((e) => `${e.systemText || ""}\n${e.userText || ""}`.includes("**Glossary Auditor**"));
   assert.strictEqual(validatorRequests.length, 0, `the glossary stage still pays for a validator agent: ${validatorRequests.map((r) => r.index).join(", ")}`);
+  const agentTurns = glossaryRequests.filter((e) => Array.isArray(e.tools) && e.tools.length > 0);
+  assert.deepStrictEqual(
+    agentTurns.map((r) => r.index),
+    [],
+    `the glossary stage still opens an agent turn: ${agentTurns.map((r) => r.index).join(", ")}`
+  );
   assert.ok(glossaryRequests.length > 0, "the glossary stage made no request at all");
 
   console.log(
@@ -243,9 +270,10 @@ function scenarioTheDefaultPathOpensFilesAndSealsTheRecord() {
 async function scenarioAFailingGradeLeavesTheRecordADraft() {
   const fx = fixtureStoreSeries("glossary-store-draft");
   const { ctx } = openThroughTheStage(fx, 0);
-  fs.writeFileSync(ctx.glossaryOutputFile, GLOSSARY_01, "utf8");
-  glossaryStore.fileGlossaryExtraction(ctx, [TERM_IN_THE_BOOK]);
-  await glossaryStore.mirrorGlossaryArtifact(ctx);
+  const filed = glossaryStore.fileGlossaryTermRows(ctx, [TERM_IN_THE_BOOK]);
+  assert.strictEqual(filed.importedCount, 1, `the read pass's row was not filed: ${JSON.stringify(filed.refused)}`);
+  const rendered = await glossaryStore.renderGlossaryArtifact(ctx);
+  assert.ok(rendered.ok, `the render refused: ${JSON.stringify(rendered.refusal)}`);
   // The gate did not accept. `sealGlossaryRecord` is the stage's only door to the seal.
   ctx.qaAccepted = false;
   glossaryStore.sealGlossaryRecord(ctx);
@@ -275,9 +303,10 @@ async function scenarioAFailingGradeLeavesTheRecordADraft() {
 async function scenarioAPassingGradePublishesTheRecord() {
   const fx = fixtureStoreSeries("glossary-store-seal");
   const { ctx } = openThroughTheStage(fx, 0);
-  fs.writeFileSync(ctx.glossaryOutputFile, GLOSSARY_01, "utf8");
-  glossaryStore.fileGlossaryExtraction(ctx, [TERM_IN_THE_BOOK]);
-  await glossaryStore.mirrorGlossaryArtifact(ctx);
+  const filed = glossaryStore.fileGlossaryTermRows(ctx, [TERM_IN_THE_BOOK]);
+  assert.strictEqual(filed.importedCount, 1, `the read pass's row was not filed: ${JSON.stringify(filed.refused)}`);
+  const rendered = await glossaryStore.renderGlossaryArtifact(ctx);
+  assert.ok(rendered.ok, `the render refused: ${JSON.stringify(rendered.refusal)}`);
 
   ctx.qaAccepted = true;
   glossaryStore.sealGlossaryRecord(ctx);
@@ -299,18 +328,32 @@ async function scenarioAPassingGradePublishesTheRecord() {
 
 /**
  * Plan §2 rule 1, on the stage's own door: a term this volume's text does not print is refused
- * where the stage files it, and it is named.
+ * where the stage files it, and it is named. The same door refuses a term that came back with no
+ * target‑language rendering, because a glossary row with an empty rendering column is a word on a
+ * list rather than a decision a translator can use (glossary route slice 2).
  * @returns {void}
  */
 function scenarioATermTheBookDoesNotPrintIsRefusedAtFiling() {
   const fx = fixtureStoreSeries("glossary-store-refusal");
   const { ctx } = openThroughTheStage(fx, 0);
 
-  const found = glossaryStore.fileGlossaryExtraction(ctx, [TERM_IN_THE_BOOK, TERM_NOT_IN_THE_BOOK]);
+  const found = glossaryStore.fileGlossaryTermRows(ctx, [
+    TERM_IN_THE_BOOK,
+    TERM_NOT_IN_THE_BOOK,
+    TERM_WITHOUT_A_RENDERING,
+  ]);
   assert.ok(found, "the stage's filing door did not run");
   assert.strictEqual(found.importedCount, 1, `expected the printed term to be filed: ${JSON.stringify(found)}`);
-  assert.strictEqual(found.refused.length, 1, `expected exactly one refusal: ${JSON.stringify(found.refused)}`);
-  assert.strictEqual(found.refused[0].term, TERM_NOT_IN_THE_BOOK.term, "the refusal does not name the term it refused");
+  assert.strictEqual(found.refused.length, 2, `expected exactly two refusals: ${JSON.stringify(found.refused)}`);
+
+  const notInBook = found.refused.find((r) => r.term === TERM_NOT_IN_THE_BOOK.term);
+  assert.ok(notInBook, `the refusal does not name the term it refused: ${JSON.stringify(found.refused)}`);
+  assert.match(notInBook.because, /source text/i, `the refusal does not say the book does not print it: ${notInBook.because}`);
+
+  const noRendering = found.refused.find((r) => r.term === TERM_WITHOUT_A_RENDERING.term);
+  assert.ok(noRendering, `the term with no rendering was not refused: ${JSON.stringify(found.refused)}`);
+  assert.ok(found.missingRendering.includes(TERM_WITHOUT_A_RENDERING.term), "the door did not count it as a missing rendering");
+  assert.match(noRendering.because, /rendering/, `the refusal does not name the rendering it is missing: ${noRendering.because}`);
 
   const filed = ctx.refStore.db
     .prepare("SELECT COUNT(*) AS n FROM facts WHERE body LIKE ?")
@@ -318,7 +361,10 @@ function scenarioATermTheBookDoesNotPrintIsRefusedAtFiling() {
   assert.strictEqual(filed, 0, "the refused term reached the record anyway");
 
   ctx.refStore.close();
-  console.log("glossary store unconditional: a term the volume's text does not print is refused at filing and named");
+  console.log(
+    "glossary store unconditional: a term the volume's text does not print is refused at filing, and so is a " +
+      "term the read pass returned with no rendering"
+  );
 }
 
 // ─── Scenario 5 ───────────────────────────────────────────────────────────────
@@ -386,8 +432,9 @@ function scenarioDamageToAReferenceIsStillAHardStop() {
 async function scenarioTheRecordStaysCumulative() {
   const fx = fixtureStoreSeries("glossary-store-cumulative");
   const first = openThroughTheStage(fx, 0);
-  fs.writeFileSync(first.ctx.glossaryOutputFile, GLOSSARY_01, "utf8");
-  await glossaryStore.mirrorGlossaryArtifact(first.ctx);
+  glossaryStore.fileGlossaryTermRows(first.ctx, [TERM_IN_THE_BOOK]);
+  const renderedOne = await glossaryStore.renderGlossaryArtifact(first.ctx);
+  assert.ok(renderedOne.ok, `volume 1's render refused: ${JSON.stringify(renderedOne.refusal)}`);
   const volumeOneRows = glossaryRowsInRecord(first.ctx.refStore, 1);
   assert.ok(volumeOneRows > 0, "volume 1 filed no glossary rows of its own");
   first.ctx.qaAccepted = true;
@@ -398,14 +445,25 @@ async function scenarioTheRecordStaysCumulative() {
   const carriedFromOne = glossaryRowsInRecord(second.ctx.refStore, 1);
   assert.strictEqual(carriedFromOne, volumeOneRows, "the copy did not carry volume 1's glossary rows intact");
 
-  fs.writeFileSync(second.ctx.glossaryOutputFile, `${GLOSSARY_01}\n| 会計担当 | The Accounting Person | amended in volume 2 |\n`, "utf8");
-  await glossaryStore.mirrorGlossaryArtifact(second.ctx);
-  assert.strictEqual(glossaryRowsInRecord(second.ctx.refStore, 1), volumeOneRows, "volume 2's own mirror touched volume 1's published rows");
+  // Volume 2's own read pass: one term it found for the first time, and one the record already holds.
+  const filed = glossaryStore.fileGlossaryTermRows(second.ctx, [TERM_IN_VOLUME_TWO, TERM_IN_THE_BOOK]);
+  assert.strictEqual(filed.importedCount, 1, `volume 2 filed more than its own new term: ${JSON.stringify(filed)}`);
+  assert.ok(filed.carried.includes(TERM_IN_THE_BOOK.term), "the term volume 1 published was not recognised as already stored");
+  const renderedTwo = await glossaryStore.renderGlossaryArtifact(second.ctx, { moveAside: false });
+  assert.ok(renderedTwo.ok, `volume 2's render refused: ${JSON.stringify(renderedTwo.refusal)}`);
+  assert.strictEqual(glossaryRowsInRecord(second.ctx.refStore, 1), volumeOneRows, "volume 2's own filing touched volume 1's published rows");
+
+  // The published file is the cumulative one: volume 1's row is still in it, next to volume 2's.
+  const published = fs.readFileSync(second.ctx.glossaryOutputFile, "utf8");
+  assert.ok(published.includes(`| ${TERM_IN_THE_BOOK.term} |`), "volume 2's glossary lost the row volume 1 published");
+  assert.ok(published.includes(`| ${TERM_IN_VOLUME_TWO.term} |`), "volume 2's glossary does not hold the row volume 2 found");
+  assert.strictEqual(renderedTwo.rows, renderedOne.rows + 1, "the rendered file is not the record's row count");
+
   second.ctx.qaAccepted = true;
   glossaryStore.sealGlossaryRecord(second.ctx);
   second.ctx.refStore.close();
 
-  console.log(`glossary store unconditional: volume 2's record still holds all ${volumeOneRows} of volume 1's glossary rows next to its own`);
+  console.log(`glossary store unconditional: volume 2's record still holds all ${volumeOneRows} of volume 1's glossary rows next to its own, and the file it publishes shows both`);
 }
 
 // ─── Scenario 7 ───────────────────────────────────────────────────────────────
@@ -419,8 +477,9 @@ async function scenarioTheRecordStaysCumulative() {
 async function scenarioTheAcceptanceGateKeepsItsShape() {
   const fx = fixtureStoreSeries("glossary-store-gate");
   const { ctx } = openThroughTheStage(fx, 0);
-  fs.writeFileSync(ctx.glossaryOutputFile, GLOSSARY_01, "utf8");
-  glossaryStore.mirrorGlossaryArtifact(ctx);
+  glossaryStore.fileGlossaryTermRows(ctx, [TERM_IN_THE_BOOK]);
+  const rendered = await glossaryStore.renderGlossaryArtifact(ctx);
+  assert.ok(rendered.ok, `the render refused: ${JSON.stringify(rendered.refusal)}`);
 
   const audit = await glossaryStore.auditGlossaryArtifact(ctx);
   assert.ok(audit, "the deterministic audit did not run");
@@ -434,10 +493,10 @@ async function scenarioTheAcceptanceGateKeepsItsShape() {
 
   const sample = await glossaryStore.glossaryGradeSample(ctx);
   assert.ok(sample && sample.length > 0, "the grader was shown no sample of the artifact");
-  assert.ok(sample.includes(GLOSSARY_01.split("\n").find((l) => l.startsWith("| 会計担当")).trim()), "the sample does not contain the artifact's own rows");
+  assert.ok(sample.includes(`| ${TERM_IN_THE_BOOK.term} |`), "the sample does not contain the rendered row the stage published");
 
   ctx.refStore.close();
-  console.log("glossary store unconditional: the deterministic audit writes glossary-validation.md with its Recommendation line, and the grader is shown a sample of the artifact");
+  console.log("glossary store unconditional: the deterministic audit writes glossary-validation.md with its Recommendation line, and the grader is shown a sample of the rendered artifact");
 }
 
 // ─── Scenario 8 ───────────────────────────────────────────────────────────────
