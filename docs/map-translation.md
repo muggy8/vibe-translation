@@ -4,6 +4,17 @@ The five translation tasks and the helpers they share.
 
 Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md).
 
+**The plan of record for rebuilding this stage onto the reference record is
+[`translate/plan/01-translation-route.md`](../translate/plan/01-translation-route.md)** (written
+2026-10-13, **nothing in it is built**). It is where the stage's cost was first measured — 133
+chapters, 133 translate calls with zero chapter splits, 6 container switches on a clean pass and 23
+on a worst-case pass, and **the cost of one switch still unmeasured** — and where the two wiring
+gaps this map describes but does not resolve are written down: `utils/translate/references.js` reads
+the **volume folder's** `glossary.md`, so a rendering a later volume revised never reaches an
+earlier volume's chapters; and the disputes queue the verify stage writes is read by the translator
+and by the glossary's log and **resolved by nothing** — `resolveChallenge`
+(`utils/reference-store/facts.js:888`) has no caller outside tests.
+
 ## The file map — the translation stage
 | Path | Role |
 |---|---|

@@ -454,6 +454,24 @@ jump-in-wiki task on both the processed and skipped paths:
 
 ## 8.5. Pipeline F: the translation stage (multi-model)
 
+**`translate/plan/01-translation-route.md` is the plan of record for rebuilding this stage onto
+the reference record** (written 2026-10-13, **nothing in it is built**). It measures what the stage
+costs today for the first time — 17 volumes, 133 chapters, 2,450,316 source characters,
+~1,477,922 estimated source tokens, **133 translate calls with zero chapter splits**, the binding
+limit being admission not feasibility, and **6 container switches on a clean pass / 23 on a
+worst-case pass** — and records that **the cost of one switch has never been measured**, which is
+why its slice 0 is a measurement and why the batching is deliberately not designed. It also
+records the two wiring gaps the section below depends on: the translator reads the **volume
+folder's** `glossary.md` (`utils/translate/references.js:84-91`), not the series-root copy or the
+record, so a rendering revised in volume 11 never reaches volume 3's chapters; and the disputes the
+verify stage writes to `glossary-disputes.md` are read by the translator and by the glossary's log
+and **resolved by nothing** — `resolveChallenge` has no caller outside tests. Across all 17 glossaries
+the previous run produced, **2 of 555 distinct terms changed rendering**. The door that lets a later
+volume replace an earlier volume's rendering **does exist and works** (`fileGlossaryRevisions`,
+`glossary/store.js:326` → `utils/reference-store/glossary-adapter.js:841-892`, gated on a quote from
+this volume's own book); what the plan finds missing is the **backward** half — nothing names the
+already-written chapters a revision invalidates.
+
 The final stage turns the reference artifacts into the actual translation.
 It runs **per chapter** (segment ids from `chapters.json` / the source
 bundle — plain-text volumes are one `whole` segment, epub volumes their
