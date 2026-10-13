@@ -248,6 +248,14 @@ Two sources exist on disk, and both were measured:
 The union is **2 revised + 25 forward-noting, 0 overlap → 27 candidate terms for the whole
 17-volume series** (`/tmp/opencode/measure-foresight-candidates.js` → `out-foresight.txt`).
 
+**Corrected by slice 4 (2026-10-13): the real agenda is 10, not 27.** The 25 came from a deliberately
+wide marker net, and two of its shapes fire on legitimate rows — `true-or-hidden-nature` (notes that
+**state** the hidden thing rather than point at a later reveal) and `deliberately-withheld` (a note
+saying the book keeps a detail vague is a fact about the book, not a promise about volume 9) — together
+**46 rows / 7 distinct terms**, all false positives. The shipped rule (`glossary/settlement/agenda.js`,
+15 closed shapes) fires on **59 rows / 8 distinct terms**, so the agenda is **2 chains + 8 forward =
+10 terms**, overlap 0. See §7 slice 4.
+
 **The new pipeline's own output bites too.** Volume 01's *rendered* 137-row glossary — the file the
 new store route published, not the old authored one — has **12 rows whose note points forward**,
 including `図書室` ("a reason that will be explained later") and `黒い蓮の花` ("likely foreshadowing
@@ -394,12 +402,41 @@ against the tag's artifacts or a fixture, and that has to be said out loud rathe
 A command in front of `resolveChallenge`, plus the re-render it implies. Prove it closes a real
 `challenge_fact` row opened by `attribute-voice` and leaves the published row's history intact.
 
-**Slice 4 — the bounded foresight pass.**
-Build the candidate list from §4's two sources, bound it with a constant, ask one tool-less
-one-shot per candidate, and prove the second pass costs **0 calls** over the same candidates — the
-same idempotency guarantee `attribute-voice` has. **Where its answer is filed is not decided** (§9
-question 3): the glossary's revision door refuses it for having no quote from the book, and the
-store's challenge door would mark a confirmed rendering `disputed` on the strength of a guess.
+**Slice 4 — the bounded foresight pass. BUILT (2026-10-13).**
+`glossary/settlement.js` + `glossary/settlement/` (`agenda.js` 352, `decide.js` 717, `records.js` 412,
+`publish.js` 184), wired as the glossary step's `afterVolumes` act. The agenda is a query over the
+settled record — a term with a supersede chain, or a term whose own notes cell matches one of **15**
+closed forward-reveal shapes — never a model's shortlist. Measured against the previous run's 17
+published glossaries (**5,392 data rows**): the shapes fire on **59 rows / 8 distinct terms**, the
+chain half adds **2**, overlap **0**, so the agenda for that whole series is **10 terms**, not the 27
+§4 claimed. **The 27 was wrong**: it counted two shapes that turned out to fire on legitimate rows —
+`true-or-hidden-nature` (僕／俺, 如月茉莉花, 純情可憐ＧＩＲＬ — notes that **state** the hidden thing) and
+`deliberately-withheld` (スタバ, 超有名遊園地, … — a note saying the book keeps a detail vague is a fact
+about the book, not a promise about volume 9) — **46 rows / 7 terms**, all dropped and named in the
+module header. Against the corpus as it stands today (volume 01 only, 137 rows) the agenda is **3**.
+The bound is `SETTLEMENT_MAX_TERMS_PER_RUN = 24`, a constant with no environment knob, **2.4× the
+largest agenda this series has produced**, ≈ **95,000 prompt tokens** at the measured 3,962-token mean.
+**§9 question 3 is answered: the revision door fits, and no new row kind was needed** — the revision is
+filed by the volume whose own text carries the reveal, quoting a line of that volume, which is exactly
+what the door's `revision-quote-not-in-source` rule asks for. **What a second pass pays for is one
+question about the recorded answer** (fixed 2026-10-13, after the suite was red on it): an answer the
+reading call brought back — `keep`, or `revise` whether the door took it or refused it — closes its agenda
+identity, so a **door refusal is never re-asked**; a revision that was filed **and reached the settled
+record** closes the identity of the rendering it chose as well, so the pass does not re-ask the term it
+just settled; and an answer that never arrived is a **failed read**, recorded so the cost is visible and
+**asked again next pass** (gotcha 138). The decision then travels to the settled record through the
+store's own `topUpVolumeRecord` door (`INSERT OR IGNORE`, row ids preserved, so the `supersedes` link
+survives) and is sealed **only if the flagging volume's record was already sealed**. The series-root
+`glossary.md` is now a **render of the settled record**, not a copy of the last volume's snapshot, and
+**no per-volume `glossary.md` is rewritten** — pinned by checksum. The pass is a freeze door of its own
+(`glossary-settlement`, series scope): a series with published translations refuses it, and
+`npm run release-translation` is the only way past. Its two records (`glossary-settlement.md`, `.json`)
+live in the run's records, **not** declared corpus artifacts, so they cannot reach the triage or the halt
+gate — the hole gotcha 138 records. Its system prompt is `system-prompts/glossary-settlement.md`.
+Measured in the offline loops: the main loop **81 → 82 calls / 16 → 17 prompt kinds** and the chunked
+glossary loop **27 → 28 / 5 → 6**, because the fixture's own glossary files one revision and a supersede
+chain is one of the two agenda halves — **one settlement call per loop**, and **0 on the second pass** in
+both. → `test/test-glossary-settlement.js` (15 scenarios, 182 checks, 885 lines, 0 real model calls).
 
 **Slice 5 — batching, if slice 0 says it is worth it.**
 Not scheduled, not designed.
@@ -424,10 +461,16 @@ Not scheduled, not designed.
 | a full clean translation pass, in calls | **~532** (133 translate + 133 verify + 133 polish + 133 audit) — **computed from the measured chapter count and the measured part plan, not measured**; the tiebreak, sampling, consistency-window and retranslate calls on top are unmeasured | §2 |
 | a full clean translation pass, in tokens | **unmeasured** | — |
 
-The offline loop baselines this plan must not move: **81 calls / 16 prompt kinds**, and the
+The offline loop baselines this plan started from: **81 calls / 16 prompt kinds**, and the
 chunked-glossary loop **27 calls / 5 kinds**. Measured green on 2026-10-13 at HEAD `86aac7d`
 (`/tmp/opencode/translation-plan-npmtest.log`, `EXIT=0`, "total model calls: pass 1 = 81, pass 2 =
 0" and "pass 1 = 27, pass 2 = 0"), with nothing in the repository modified at the time.
+
+**They moved to 82 / 17 and 28 / 6 when slice 4 landed, and that move is the plan's, not an
+accident.** One settlement call per loop, because the fixture's own glossary files one revision and a
+supersede chain is one of the two agenda halves. The second pass is still **0 calls** in both loops,
+which is the whole point of the decision record. Measured again at HEAD `351e7ce` with the settlement
+suite in `npm test` (`/tmp/opencode/setfix-npmtest-1.log`, `EXIT=0`).
 
 ---
 
@@ -441,18 +484,28 @@ Written out in `/tmp/opencode/translation-plan-questions.md` before any of them 
    as much of the foreshadowing is preserved as possible." The freeze (gotcha 142) is what the answer
    interacts with, and it holds: a published `translation.md` still freezes the artifacts it was built
    from, so re-running a pre-production door on a translated volume is still refused per volume.
-2. **Is 27 the right bound, and is a per-volume cap the right shape?** The candidate list is a
-   series-wide fact, but every other bound in this repo is per volume.
-3. **Where does a foresight answer get filed?** Neither existing door fits it. Through
-   `challengeFact` it marks the published row `disputed`, which changes the prompt the translator
-   sees for every chapter using that term (`utils/translate/references.js:295` puts "disputed" in
-   the chapter's own hash). Through the glossary's own revision door it is **refused**, because that
-   door requires a quote from this volume's book (`utils/reference-store/glossary-adapter.js:841-852`)
-   and a guess has none. The third option is a new, softer row kind that carries no consequence
-   until a volume's own text confirms it — which is a schema change in a banned patch path
-   (`utils/reference-store/`), so it is the account owner's call.
-4. **Is the `foresight` prompt kind added to the prompt audit?** Adding it moves a call baseline,
-   which AGENTS.md §4.11 treats as a real change, not a cosmetic one.
+2. **Is 27 the right bound, and is a per-volume cap the right shape?** — **the number is answered,
+   the shape is not.** The candidate list measured **10**, not 27 (§4, gotcha 144), so the shipped
+   bound is `SETTLEMENT_MAX_TERMS_PER_RUN = 24` — 2.4× the largest agenda this series has produced,
+   a constant with no environment knob. Whether 24 is the right number is still the owner's, and so
+   is whether a **series-wide** cap is the right shape: every other bound in this repo is per volume,
+   and this one is not.
+3. **Where does a foresight answer get filed?** — **answered, 2026-10-13 (slice 4).** The glossary's own
+   **revision door** fits, and no new row kind was needed. The earlier reading of it — "a guess has no
+   quote" — was wrong about who files the revision: the revision is filed by the volume whose own text
+   carries the reveal, quoting a line of **that** volume, which is exactly what
+   `revision-quote-not-in-source` asks for. `challengeFact` was not used: marking a settled rendering
+   `disputed` would change the prompt of every chapter that prints the term
+   (`utils/translate/references.js:295` puts "disputed" in the chapter's own hash) on the strength of a
+   forward-looking judgement. The third option — a softer row kind — was not needed, so no schema change
+   was made in the banned path.
+4. **Is the `foresight` prompt kind added to the prompt audit?** — **answered by the build,
+   2026-10-13, and it did move a baseline.** The kind is `glossary-settlement`, registered in
+   `test/prompt-audit.js`'s `ONE_SHOT_KINDS` and `DATA_RESPONSE_FORMATS`, so it is audited as a
+   one-shot with a declared, object-rooted answer shape. The main offline loop moved
+   **81 → 82 calls / 16 → 17 prompt kinds** and the chunked-glossary loop **27 → 28 / 5 → 6**, one
+   settlement call each, with the second pass still at **0** in both. Accepting those numbers in
+   AGENTS.md is the conductor's act, not a builder's.
 5. **Does the translation stage get a record of its own** (a store for renderings used per chapter,
    which is what §6.2 needs), or does the index live in the existing reference record?
 6. **Is the cross-model tiebreak worth a container switch** — 133 chapters re-graded on a second
