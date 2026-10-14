@@ -188,9 +188,56 @@ to it — the record has no way to say *who* is being addressed that way.
 The reading pass is the only thing in the voice stage that costs anything, so a change that rides inside
 the chapter call costs nothing extra; a change that adds a call per chapter costs 133 calls.
 
+### 2.9 The roster double-counts people, and the mechanism meant to fix it has no input
+
+Measured 2026-10-14 against **copies** of all 17 volume records (`/tmp/opencode/cast-survey.js`,
+0 model calls, gotcha 124 respected):
+
+| | measured |
+|---|---|
+| distinct cast rows across the 17 records | **196** |
+| cast rows carrying an alias declaration | **0** |
+| `cast_merges` rows (the roster fold actually performed) | **0** |
+| cast rows keyed by 僕 or 俺 | **0** |
+
+The glossary's own Notes say the duplication outright — volume 17's `## Characters` section holds
+**both** 如月雨露 ("The narrator and protagonist… His nickname ジョーロ comes from removing 月 from 如月")
+**and** ジョーロ ("The narrator's nickname… **Used constantly by all other characters to address him**"),
+and the same pair for 日向葵 / ひまわり. They are separate roster entries with nothing linking them. A
+coverage guard keyed on the roster therefore asks for a voice entry per nickname.
+
+**And the door that was built to close this is reading a row that is no longer written.** Gotcha 117's
+mechanism is `importGlossary` reading the glossary's Characters row *"Narrator: switches between 僕 and
+俺"* and declaring both pronouns as aliases. All 17 published glossaries have a `## Characters` section.
+**None of the 17 contains the string "switches between"** — the row was written by the author agent that
+`renderGlossary` replaced (glossary route slice 2), and the render does not produce it. The published
+records confirm the consequence: 0 aliases, 0 merges.
+
+### 2.10 The cast's shape, which decides how a "miss" should be judged
+
+The same survey, on recurrence:
+
+```
+appears in  1 volume :  17 characters   (every one of them: exactly 1 chapter mention)
+appears in  2 volumes:  11              appears in  9 volumes:  7
+appears in  3 volumes:   2              appears in 10 volumes:  9
+appears in  4 volumes:   4              appears in 11 volumes: 16
+appears in  5 volumes:  12              appears in 12 volumes:  8
+appears in  6 volumes:   8              appears in 13 volumes: 13
+appears in  7 volumes:  10              appears in 14 volumes: 15
+appears in  8 volumes:   6              appears in 15 volumes: 19
+                                     appears in 16 volumes: 22
+                                     appears in 17 volumes: 17
+```
+
+**The split is bimodal and unambiguous in this series**: a core cast that recurs, and a tail of 17 names
+that appear once, in one volume, in one chapter. No judgement call is needed to separate them here.
+Whether that holds for a series with a one-volume pivotal character is the open question §10.7 records.
+
 ---
 
 ## 3. What this plan must not rebuild
+
 
 The copy-forward model transfers to voice better than it looks, because the glossary does not copy a
 document and edit it. It copies forward **unmodified**, and a change is a **new row filed beside the old
@@ -459,6 +506,21 @@ pass's own findings now reach the post-mortem, the ledger, the triage and the pa
 6. **Does the second-person axis get a relationship in the record** — *who* is addressed this way — or is
    it a per-character claim? The schema has `fact_characters` with roles (`subject`, `agent`, `patient`,
    `witness`) and it is not used for this today.
+ 7. **How big a miss is worth an investigation.** Answered in principle 2026-10-14 by the account owner
+    with the criterion *"is this character fungible?"* — an interchangeable one-off is not worth a paid
+    investigation, a character the story turns on is, even if the audience only knows them by a nickname.
+    What is **not** yet decided is the computable stand-in for that word. Recurrence across volumes and
+    being talked about by other characters are measurable (§2.10); *narrative importance* is not, and a
+    model asked to judge importance is what §9 forbids. The proxy this corpus supports cleanly is
+    **2 or more volumes, or named inside another character's speech** — which sorts these 196 roster
+    entries into 179 recurring and 17 single-mention names with no judgement call. What the proxy gets
+    wrong is a character pivotal in exactly one volume and never mentioned again.
+ 8. **Does the roster get fixed before the coverage guard is asked to cover it?** §2.9 measured 196 cast
+    rows, 0 alias declarations and 0 roster folds, with the glossary's own Notes saying that ジョーロ is
+    如月雨露's nickname and ひまわり is 日向葵's. A guard that demands a voice entry per roster entry is
+    demanding one per nickname, and the door built to fold them (`importGlossary` reading the glossary's
+    pronoun row) reads a row the render route no longer writes. Fixing the roster is a prerequisite for
+    the coverage question meaning anything, and it is not in this plan's slice list yet.
 
 ---
 
