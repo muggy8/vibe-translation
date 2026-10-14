@@ -31,6 +31,15 @@
  *     time (AGENTS.md §7), and the old `Promise.allSettled` over per-term agents bought nothing there
  *     while lengthening every wait.
  *
+ * **And one thing it now refuses to say.** A lookup has three outcomes — something to read, nothing
+ * there, and could not be reached — and the third one is not an answer. When every lookup for a term
+ * was rejected or never sent, this pass files **nothing**, names the term in the log as unanswered, and
+ * leaves it for the next pass to ask again. Filing "no reference page matched this term" for a term
+ * Wikipedia refused to answer is what the volume-01 run did to 芥川龍之介 (two 429s) and it reached the
+ * published `glossary.md` and every later volume (AGENTS.md gotcha 147). A partial failure — one
+ * language answered, one rejected — is filed, but the log line says the answer rests on half the
+ * reference.
+ *
  * Part of the glossary.js layer (split out of the original single file).
  */
 
@@ -41,16 +50,22 @@ const harness = require("../harness");
 const { RESEARCH_NOTE_MAX_CHARS, fileResearchNote } = require("../utils/reference-store");
 const { researchEnabled } = require("./config");
 const { RESEARCH_MAX_TERMS_PER_VOLUME, selectResearchTargets } = require("./researchable");
+// The three lookup states, and the one rule that decides them, are `research.js`'s. They are imported
+// rather than restated here because "did the reference answer, or did it refuse?" must mean the same
+// thing in the lookup layer and in the pass that files what it brought back — two rules that can drift
+// is how a 429 became a published claim about the reference (AGENTS.md gotcha 147).
+const { LOOKUP_FAILED, LOOKUP_NO_RESULTS, LOOKUP_OK, classifyLookupResult, lookupStatusOf } = require("../research");
 
 /**
  * The default lookup: the Wikipedia Action API through `research.js`.
  *
  * Kept behind a parameter in `researchVolumeTerms` rather than called inline, so the offline suite can
- * stand a fixture in front of it without this module knowing the difference — and so `research.js` itself
- * (which is not part of this slice's folder) stays untouched.
+ * stand a fixture in front of it without this module knowing the difference. The lookup layer itself
+ * (`research.js`) is a shared primitive — the agent wiki tools use the same calls — so it is edited
+ * there, once, and this pass only reads the states it now reports.
  *
  * @param {Array<{term: string, query?: string}>} terms - The terms to look up.
- * @returns {Promise<Array<{term: string, query: string, results: Array<Object>, found: boolean}>>}
+ * @returns {Promise<Array<{term: string, query: string, results: Array<Object>, found: boolean, status: "ok"|"no-results"|"failed"}>>}
  */
 async function defaultWikiLookup(terms) {
   const { researchTerms } = require("../research");
@@ -206,19 +221,63 @@ function parseResearchAnswer(output) {
 /**
  * The lines the lookup produced for one term, for the log.
  *
- * @param {Array<{lang?: string, provider?: string, title: string|null, url: string|null, error?: string}>} results
+ * Every line says **which of the three things happened** in that language: a page was found, the
+ * reference answered and had nothing, or the reference could not be reached. The third case used to
+ * print as `error` and then be filed as "no reference page matched", which is how a rate limit became
+ * a published claim (AGENTS.md gotcha 147).
+ *
+ * @param {Array<{lang?: string, provider?: string, title: string|null, url: string|null, status?: string, error?: string, extractError?: string, httpStatus?: number|null, attempts?: number}>} results
  * @returns {string[]} One line per result the search returned.
  */
 function lookupLogLines(results) {
   const lines = [];
   for (const result of Array.isArray(results) ? results : []) {
     const source = result.lang || result.provider || "source";
-    if (result.error) lines.push(`- lookup [${source}]: error — ${result.error}`);
-    else if (!result.title) lines.push(`- lookup [${source}]: no page matched`);
-    else lines.push(`- lookup [${source}]: ${result.title}${result.url ? ` — ${result.url}` : ""}`);
+    const status = classifyLookupResult(result);
+    if (status === LOOKUP_FAILED) {
+      const where = [
+        result.httpStatus ? `status ${result.httpStatus}` : null,
+        result.attempts ? `${result.attempts} request(s)` : null,
+        result.circuitOpen ? "the lookup circuit was open" : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      lines.push(`- lookup [${source}]: COULD NOT ASK — ${result.error || "the reference could not be reached"}${where ? ` (${where})` : ""}`);
+      continue;
+    }
+    if (status === LOOKUP_NO_RESULTS || (!result.title && !result.extract)) {
+      lines.push(`- lookup [${source}]: no page matched`);
+      continue;
+    }
+    lines.push(`- lookup [${source}]: ${result.title}${result.url ? ` — ${result.url}` : ""}`);
+    if (result.extractError) lines.push(`- lookup [${source}]: the page's intro could not be read — ${result.extractError}`);
   }
   if (!lines.length) lines.push("- lookup: nothing was searched");
   return lines;
+}
+
+/**
+ * The line that says how much of this term's lookup actually reached the reference.
+ *
+ * A partial failure has to be visible in the same log the answer is filed with: one language answered
+ * and one rejected is an answer built on half the reference, and it is not a clean answer.
+ *
+ * @param {{status: "ok"|"no-results"|"failed", answeredLanguages: string[], noResultLanguages: string[], failedLanguages: Array<{lang: string, httpStatus: number|null, attempts: number}>}} state
+ * @returns {string[]} Zero lines when nothing failed, otherwise one line naming what did.
+ */
+function lookupCoverageLines(state) {
+  const failed = state.failedLanguages || [];
+  if (!failed.length) return [];
+  const who = failed
+    .map((f) => `${f.lang}${f.httpStatus ? ` (status ${f.httpStatus})` : ""}`)
+    .join(", ");
+  if (!state.answeredLanguages.length) {
+    return [`- lookup coverage: COULD NOT ASK — no language reached the reference (${who}). Nothing was filed.`];
+  }
+  return [
+    `- lookup coverage: PARTIAL — ${state.answeredLanguages.length} language(s) answered, ` +
+      `${failed.length} could not be reached (${who}). This term's answer rests on the answered half only.`,
+  ];
 }
 
 /**
@@ -232,21 +291,29 @@ function lookupLogLines(results) {
  * account owner is the one who decides whether 12 is the right number.
  *
  * @param {{volume: string, limit: number}} header
- * @param {{targets: Array<Object>, skipped: Array<Object>, notResearchable: Array<Object>, entries: Array<Object>}} body
+ * @param {{targets: Array<Object>, skipped: Array<Object>, notResearchable: Array<Object>, entries: Array<Object>, modelCalls: number}} body
  *   The volume's accumulated lists. On the chapter-by-chapter route each item carries a `chapter`, and the
  *   file names it, because a reader of the log needs to know which chapter's reading produced an answer.
+ *   `modelCalls` is how many reading calls this volume actually paid, which is not the same number as
+ *   the terms it put through the lookup.
  * @returns {string} The file content, ending in a newline.
  */
 function renderResearchLog(header, body) {
   const where = (item) => (item.chapter ? ` _(chapter ${item.chapter})_` : "");
+  const unanswered = body.entries.filter((entry) => entry.unanswered);
   const out = [
     `# Research Notes — Volume ${header.volume}`,
     "",
     `_Written by the research pass itself: what it looked up, what the lookup returned, what the reading call said about it, and what the bound refused to pay for. No agent writes this file._`,
     "",
     `_Asked: ${body.targets.length} research turn(s). Skipped by the bound: ${body.skipped.length}. ` +
-      `Not researchable: ${body.notResearchable.length}. The bound is ${header.limit} research turns per ` +
+      `Not researchable: ${body.notResearchable.length}. Could not ask: ${unanswered.length}. ` +
+      `The bound is ${header.limit} research turns per ` +
       `volume, and it is a constant in \`glossary/researchable.js\`, not a setting._`,
+    "",
+    `_Asked here means "put through the lookup". A reading call is only spent on a term the lookup could` +
+      ` actually read, so this volume paid ${body.modelCalls} reading call(s) for ${body.targets.length} looked-up term(s);` +
+      ` the ${unanswered.length} term(s) under "Could not ask" cost nothing and are asked again next pass._`,
     "",
     `## Asked (${body.targets.length})`,
     "",
@@ -255,13 +322,34 @@ function renderResearchLog(header, body) {
     out.push(`### ${entry.term}${entry.section ? ` — ${entry.section}` : ""}${where(entry)}`);
     out.push(`- why asked: ${entry.because}`);
     out.push(...entry.lookup);
-    if (entry.filed) {
+    out.push(...(entry.coverage || []));
+    if (entry.unanswered) {
+      out.push(`- filed: NO — the reference was never reached, so nothing was filed and nothing was claimed.`);
+      out.push(`- this term is **unanswered**, not "nothing matched": it is looked up again on the next pass.`);
+    } else if (entry.filed) {
       out.push(`- filed: ${entry.found ? "yes" : "nothing matched"} — ${entry.note}`);
       if (entry.page) out.push(`- source: ${[entry.lang, entry.url].filter(Boolean).join(", ")}`);
     } else {
       out.push(`- filed: NO — ${entry.because}`);
     }
     out.push("");
+  }
+
+  out.push(`## Could not ask (${unanswered.length})`, "");
+  if (unanswered.length) {
+    out.push(
+      `_The reference could not be reached for every lookup of these terms — rejected, timed out, or the_ ` +
+        `_lookup circuit had already opened. **No note was filed for any of them**, because "nobody managed_ ` +
+        `_to ask" is not the same fact as "somebody asked and the reference had nothing", and a note filed_ ` +
+        `_here would be printed in the published glossary and inherited by every later volume._`,
+      ""
+    );
+    for (const entry of unanswered) {
+      out.push(`- ${entry.term}${entry.section ? ` (${entry.section})` : ""}${where(entry)} — ${entry.whyUnanswered || entry.because}`);
+    }
+    out.push("");
+  } else {
+    out.push("_None: every lookup this volume attempted reached the reference._", "");
   }
 
   out.push(`## Skipped by the bound (${body.skipped.length})`, "");
@@ -306,7 +394,7 @@ function renderResearchLog(header, body) {
  *   it. `only` narrows the candidates to the rows one chapter just filed, so a chapter does not pay a
  *   second time for a term an earlier chapter of the same volume already looked up. `chapter` is a label
  *   for the log.
- * @returns {Promise<{ran: boolean, asked: number, filed: number, refused: number, notFound: number, skipped: Array<Object>, notResearchable: number, limit: number, capped: boolean, turnsLeft: number, entries: Array<Object>}>}
+ * @returns {Promise<{ran: boolean, asked: number, filed: number, refused: number, notFound: number, unanswered: number, modelCalls: number, skipped: Array<Object>, notResearchable: number, limit: number, capped: boolean, turnsLeft: number, entries: Array<Object>}>}
  * @throws {Error} Only when the record is not open — a volume with no record has no rows to classify, and
  *   silently skipping that is how a stage reports research it never did.
  */
@@ -315,7 +403,7 @@ async function researchVolumeTerms(ctx, { lookup = defaultWikiLookup, only = nul
   const volume = values.INSTALLMENT_NUMBER;
   if (!researchEnabled) {
     console.log(`Volume ${volume}: research is off (RESEARCH_ENABLED=false) — no lookup, no reading call, no notes file.`);
-    return { ran: false, asked: 0, filed: 0, refused: 0, notFound: 0, skipped: [], notResearchable: 0, limit: RESEARCH_MAX_TERMS_PER_VOLUME, capped: false, turnsLeft: RESEARCH_MAX_TERMS_PER_VOLUME, entries: [] };
+    return { ran: false, asked: 0, filed: 0, refused: 0, notFound: 0, unanswered: 0, modelCalls: 0, skipped: [], notResearchable: 0, limit: RESEARCH_MAX_TERMS_PER_VOLUME, capped: false, turnsLeft: RESEARCH_MAX_TERMS_PER_VOLUME, entries: [] };
   }
   if (!ctx.refStore) {
     throw new Error(
@@ -360,10 +448,13 @@ async function researchVolumeTerms(ctx, { lookup = defaultWikiLookup, only = nul
   let filed = 0;
   let refused = 0;
   let notFound = 0;
+  let unanswered = 0;
+  let modelCalls = 0;
   let turnsLeft = limit;
 
   for (const row of targets) {
     const hit = byTerm.get(row.term) || { term: row.term, results: [], found: false };
+    const state = lookupStatusOf(hit.results);
     const usable = (hit.results || []).filter((result) => result.title || result.extract);
     const entry = {
       term: row.term,
@@ -371,6 +462,9 @@ async function researchVolumeTerms(ctx, { lookup = defaultWikiLookup, only = nul
       chapter,
       because: row.because,
       lookup: lookupLogLines(hit.results),
+      coverage: lookupCoverageLines(state),
+      lookupStatus: state.status,
+      unanswered: false,
       found: false,
       note: "",
       page: "",
@@ -379,9 +473,37 @@ async function researchVolumeTerms(ctx, { lookup = defaultWikiLookup, only = nul
       filed: false,
     };
 
+    if (state.status === LOOKUP_FAILED) {
+      // **The honesty rule.** Every lookup for this term was rejected, timed out, or was never sent
+      // because the lookup circuit had opened. Nothing is filed: "nobody managed to ask" is not the
+      // fact "somebody asked and the reference had nothing", and a note filed here would be printed
+      // into the published glossary and inherited by every later volume. The term is named in the log
+      // as unanswered, and because no row exists for it the next pass looks it up again — the same rule
+      // `glossary/settlement/records.js` runs for a reading call that never brought back a usable
+      // decision (gotcha 145) and the same reason `glossary/extract.js` returns `failed: true` rather
+      // than `[]` (gotcha 138).
+      const why = state.failedLanguages
+        .map((f) => `${f.lang}${f.httpStatus ? ` (status ${f.httpStatus})` : ""}`)
+        .join(", ");
+      entry.unanswered = true;
+      entry.whyUnanswered = `the reference could not be reached for every lookup (${why || "no lookup was attempted"})`;
+      entry.because = `${entry.whyUnanswered} — no note was filed, so this term is asked again on the next pass`;
+      unanswered += 1;
+      entries.push(entry);
+      continue;
+    }
+
     if (usable.length === 0) {
-      // No page matched, and no model call is spent pretending otherwise. The answer is still filed,
-      // because "somebody looked and found nothing" is a fact the next volume is allowed to know.
+      if (state.status === LOOKUP_OK) {
+        // The lookup layer said "there is a page" and handed nothing to read. That is the layer
+        // contradicting itself, and the honest response is not a model call paid to stare at an empty
+        // list — it is the "nothing there" note, plus a log line naming the contradiction.
+        entry.coverage = entry.coverage.concat([
+          "- lookup coverage: the lookup reported a page and handed nothing to read — treated as \"nothing there\", and no reading call was spent.",
+        ]);
+      }
+      // The reference answered and it has nothing. That is a fact, it is filed, and the next volume is
+      // allowed to know it. No model call is spent pretending otherwise.
       const answer = {
         term: row.term,
         found: false,
@@ -413,6 +535,7 @@ async function researchVolumeTerms(ctx, { lookup = defaultWikiLookup, only = nul
       label: `glossary-research-${volume}-${row.term.slice(0, 20)}`,
     });
     turnsLeft -= 1;
+    modelCalls += 1;
 
     let answer;
     try {
@@ -445,6 +568,7 @@ async function researchVolumeTerms(ctx, { lookup = defaultWikiLookup, only = nul
   }
 
   ctx.researchTurnsLeft = Math.max(0, turnsLeft);
+  ctx.researchLog.modelCalls = (ctx.researchLog.modelCalls || 0) + modelCalls;
   for (const entry of entries) ctx.researchLog.entries.push(entry);
   const log = renderResearchLog(
     { volume, limit: RESEARCH_MAX_TERMS_PER_VOLUME },
@@ -453,20 +577,32 @@ async function researchVolumeTerms(ctx, { lookup = defaultWikiLookup, only = nul
       skipped: ctx.researchLog.skipped,
       notResearchable: ctx.researchLog.notResearchable,
       entries: ctx.researchLog.entries,
+      modelCalls: ctx.researchLog.modelCalls,
     }
   );
   await fs.writeFile(ctx.researchNotesFile, log, "utf8");
 
   console.log(
     `Volume ${volume}: research filed ${filed} note(s) onto the volume's record ` +
-      `(${notFound} of them "nothing matched"), ${refused} refused, no agent turn.`
+      `(${notFound} of them "nothing matched"), ${refused} refused, ${unanswered} unanswered ` +
+      `(the reference could not be reached — nothing filed, asked again next pass), ${modelCalls} reading call(s), no agent turn.`
   );
+  if (unanswered) {
+    console.warn(
+      `Volume ${volume}: ${unanswered} researchable row(s) could not be asked — the reference was ` +
+        "unreachable for every one of their lookups. No note was filed for them, so the published " +
+        "glossary says nothing about them rather than claiming the reference has nothing. They are " +
+        'named in glossary-research.md under "Could not ask", and the next pass looks them up again.'
+    );
+  }
   return {
     ran: true,
     asked: targets.length,
     filed,
     refused,
     notFound,
+    unanswered,
+    modelCalls,
     skipped,
     notResearchable: notResearchable.length,
     limit: RESEARCH_MAX_TERMS_PER_VOLUME,
@@ -482,6 +618,7 @@ module.exports = {
   researchResponseFormat,
   parseResearchAnswer,
   lookupLogLines,
+  lookupCoverageLines,
   renderResearchLog,
   researchVolumeTerms,
   defaultWikiLookup,

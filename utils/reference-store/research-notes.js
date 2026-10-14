@@ -23,6 +23,11 @@
  *   3. **Asking is recorded even when nothing was found.** `found = 0` is a row, not a hole. "Nobody
  *      looked" and "somebody looked and Wikipedia has nothing" have to be distinguishable, which is the
  *      same reason `attribution_answers` keeps `unknown`.
+ *   4. **A lookup that was refused files no row at all** (AGENTS.md gotcha 147). A `found = 0` row means
+ *      *the reference answered and it had nothing*; **the absence of a row** means *nobody managed to
+ *      ask*. Filing a note for a term the reference rejected is how a 429 became a published sentence in
+ *      `glossary.md` and inherited by every later volume, and this door is where that would have been
+ *      written — so the research pass does not come here for those terms.
  *
  * One row per (asking volume, term), because that is the unit the bound spends: one research turn per
  * term per volume. Re-running the same volume over the same text replaces its own answer rather than
