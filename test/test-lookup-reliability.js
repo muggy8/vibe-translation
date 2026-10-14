@@ -103,11 +103,12 @@ function same(a, b, message) {
 /**
  * Stand a local HTTP server where Wikipedia stands.
  *
- * `research.js` builds `https://<lang>.wikipedia.org/w/api.php?...` URLs. The shim below rewrites only
+ * `research/wiki.js` builds `https://<lang>.wikipedia.org/w/api.php?...` URLs. The shim below rewrites only
  * those hosts to the stub, preserving the path and the query, and records what each request asked for —
  * which is what lets a scenario assert `maxlag=5` and count attempts instead of trusting a comment.
- * Nothing else about the request path changes: the real `fetchWithTimeout`, the real status handling, the
- * real retry loop and the real breaker all run.
+ * Nothing else about the request path changes: the real `fetchWithTimeout` (in `research/circuit.js`), the
+ * real status handling, the real retry loop and the real breaker all run, and the patch lands on the
+ * global `fetch` the moved module calls — which is the proof the split did not break the stub.
  *
  * @param {Function} responder - `(record, n) => { status, headers, body }` for the n-th request.
  * @returns {Promise<{requests: Array<Object>, stop: Function}>} The recorded requests and the shutdown.
@@ -949,8 +950,11 @@ async function scenarioTheHalfOpenProbeClosesTheCircuit() {
 // ─── Scenario 10 — the probes run out ─────────────────────────────────────────
 
 /**
- * A failed probe leaves the circuit open and re-arms the window; three failed probes end the breaker's
- * patience for the rest of the run, so an unreachable reference cannot cost one request per minute.
+ * A failed probe leaves the circuit open and re-arms the window; `LOOKUP_CIRCUIT_MAX_PROBES` failed
+ * probes end the breaker's patience for the rest of the run, so an unreachable reference cannot cost one
+ * request per minute. Every number in this scenario is read off the constant, so re-pinning the budget
+ * re-pins the scenario — which is the point: a scenario that hard-coded three would silently keep
+ * asserting three after the bound moved.
  *
  * @returns {Promise<void>}
  */
@@ -1113,12 +1117,12 @@ function scenarioTheBoundsHaveNoKnob() {
     "console.log(JSON.stringify([r.LOOKUP_MAX_RETRIES, r.LOOKUP_BACKOFF_BASE_MS, r.LOOKUP_RETRY_AFTER_MAX_MS, r.LOOKUP_CIRCUIT_OPEN_AFTER, r.LOOKUP_CIRCUIT_PROBE_AFTER_MS, r.LOOKUP_CIRCUIT_MAX_PROBES, r.WIKI_MAXLAG]));";
   const run = spawnSync(process.execPath, ["-e", script], { cwd: ROOT, env: { ...process.env, ...env }, encoding: "utf8" });
   const values = JSON.parse(String(run.stdout).trim());
-  same(values, [2, 1000, 30000, 5, 60000, 3, 5], `a process that set ${names.join(" / ")}=999 got ${JSON.stringify(values)}`);
+  same(values, [2, 1000, 30000, 5, 60000, 10, 5], `a process that set ${names.join(" / ")}=999 got ${JSON.stringify(values)}`);
 
   const layer = require("./module-layer").readModuleLayer(ROOT, "research.js");
   for (const name of ["LOOKUP_MAX_RETRIES", "LOOKUP_BACKOFF_BASE_MS", "LOOKUP_RETRY_AFTER_MAX_MS", "LOOKUP_CIRCUIT_OPEN_AFTER", "LOOKUP_CIRCUIT_PROBE_AFTER_MS", "LOOKUP_CIRCUIT_MAX_PROBES", "WIKI_MAXLAG"]) {
     const declaration = layer.match(new RegExp(`const ${name} = (\\d+);`));
-    ok(!!declaration, `${name} is not a literal constant in research.js`);
+    ok(!!declaration, `${name} is not a literal constant in research.js's layer`);
     ok(!new RegExp(`process\\.env\\.${name}`).test(layer), `${name} is read out of the environment`);
   }
   ok(!/process\.env\.RESEARCH_MAX_RETRIES|process\.env\.RESEARCH_CIRCUIT/.test(layer), "the lookup layer grew a retry or circuit knob");
@@ -1126,13 +1130,16 @@ function scenarioTheBoundsHaveNoKnob() {
   same(research.LOOKUP_MAX_RETRIES, 2, "the retry bound moved");
   same(research.LOOKUP_CIRCUIT_OPEN_AFTER, 5, "the circuit bound moved");
   same(research.LOOKUP_CIRCUIT_PROBE_AFTER_MS, 60000, "the probe window moved");
-  same(research.LOOKUP_CIRCUIT_MAX_PROBES, 3, "the probe budget moved");
+  same(research.LOOKUP_CIRCUIT_MAX_PROBES, 10, "the probe budget moved");
   same(research.LOOKUP_RETRY_AFTER_MAX_MS, 30000, "the Retry-After cap moved");
   same(research.WIKI_MAXLAG, 5, "maxlag moved");
 
-  // **The clock is a test seam, not a door.** No file outside `test/` and `research.js` itself may name
-  // it: a stage that could move the clock could make the cooldown elapse whenever it liked, which is a
-  // guard the guarded party controls (AGENTS.md §4.3, gotcha 70).
+  // **The clock is a test seam, not a door.** No **stage** may name it: a stage that could move the
+  // clock could make the cooldown elapse whenever it liked, which is a guard the guarded party controls
+  // (AGENTS.md §4.3, gotcha 70). `research.js` is now a face over `research/`, so the seam is *defined*
+  // inside the module's own layer and re-exported by the face; the layer is therefore skipped by the
+  // walk, and the two assertions below are what keep that skip from becoming a blind spot — the seam is
+  // defined exactly once in the layer, and nothing inside the layer calls it.
   const skip = new Set(["node_modules", ".git", "plan", "test", ".dry-run", ".run", "epub_source"]);
   const seamCallers = [];
   (function walk(dir) {
@@ -1142,12 +1149,23 @@ function scenarioTheBoundsHaveNoKnob() {
       if (entry.isDirectory()) walk(abs);
       else if (entry.name.endsWith(".js")) {
         const rel = path.relative(ROOT, abs);
-        if (rel === "research.js") continue;
+        if (rel === "research.js" || rel.startsWith(`research${path.sep}`)) continue;
         if (/setLookupClockForTests|resetLookupClockForTests/.test(fs.readFileSync(abs, "utf8"))) seamCallers.push(rel);
       }
     }
   })(ROOT);
   same(seamCallers, [], `the lookup clock seam is reached from ${seamCallers.join(", ")} — it exists for the offline suites and for nothing else`);
+
+  for (const name of ["setLookupClockForTests", "resetLookupClockForTests"]) {
+    // `setLookupClockForTests` is a substring of `resetLookupClockForTests`, so the bare name would
+    // count the reset as a call of the setter. The lookbehind is the whole trick; without it this check
+    // reports a call that does not exist (gotcha 67: a check that fires on a coincidence is not a check).
+    const callPattern = new RegExp(`(?<!re)${name}\\s*\\(`, "g");
+    const defined = (layer.match(new RegExp(`function ${name}\\s*\\(`, "g")) || []).length;
+    const called = (layer.match(callPattern) || []).length - defined;
+    same(defined, 1, `${name} is defined ${defined} time(s) across research.js's layer — the seam must have exactly one definition`);
+    same(called, 0, `${name} is called from inside the lookup layer — the cooldown it installs must not be reachable from the code it gates`);
+  }
 
   // And the seam refuses a value that would quietly disable the cooldown.
   let seamThrew = null;
