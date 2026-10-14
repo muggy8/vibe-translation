@@ -53,6 +53,27 @@ function renderPostMortemMarkdown(report) {
     lines.push("");
   }
 
+  // What the step itself reported, volume by volume (utils/postmortem/channel.js). Printed before the
+  // findings because it answers the question the findings list cannot: which volumes did this step actually
+  // talk about. A volume with no record is named as silent, not as damaged — every volume already on disk
+  // and every --dry-run is in that class, and calling it damage would retroactively break healthy books.
+  if (report.channel) {
+    const c = report.channel;
+    const silent = c.silentVolumes.length ? ` (${c.silentVolumes.join(", ")})` : "";
+    lines.push(
+      `> **Step findings:** ${c.reported} of ${c.volumes} volume(s) reported through the step-findings channel ` +
+        `— ${c.findings} finding(s) counted, with the level taken from the table, not from the step. ` +
+        `${c.silent} volume(s) reported nothing${silent}; a volume the step never spoke about is not a damaged volume.`
+    );
+    for (const s of c.stale) {
+      lines.push(`> - volume ${s.volume}: a stale channel record was **not** counted — ${s.reason}`);
+    }
+    for (const r of c.refused) {
+      lines.push(`> - a channel finding was refused: ${r}`);
+    }
+    lines.push("");
+  }
+
   if (report.findings.length === 0) {
     lines.push("Every file this step is expected to leave is present and has the shape it should.");
     lines.push("");
@@ -99,6 +120,7 @@ async function writePostMortemReport(report, outDir) {
         ok: report.ok,
         error: report.error,
         halt: report.halt,
+        channel: report.channel,
         counts: report.counts,
         findings: report.findings,
         writtenAt: new Date().toISOString(),

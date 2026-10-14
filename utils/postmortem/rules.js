@@ -139,6 +139,22 @@ function matchesShape(content, shape) {
 // ─── Finding helpers ──────────────────────────────────────────────────────────
 
 /**
+ * The sentence a finding carries when its kind has no row in the level table.
+ *
+ * Its own function because `utils/postmortem/channel.js` rebuilds a stored finding through `finding()` and
+ * has to recognise this exact text to avoid appending it twice — a finding that travelled through the
+ * channel would otherwise print the same disclaimer twice, and a message that reads wrong is a message
+ * people stop reading.
+ *
+ * @param {string} kind
+ * @returns {string} The note, with its leading space, or "" when the kind IS declared.
+ */
+function undeclaredLevelNote(kind) {
+  if (FINDING_LEVELS[kind]) return "";
+  return ` [level undeclared for kind "${kind}" — reported at MINOR, which is the safe default and not a judgement about this finding]`;
+}
+
+/**
  * Build one finding.
  *
  * The level is looked up here, at the moment the finding is built, so it travels with the finding into
@@ -171,9 +187,7 @@ function finding(severity, kind, step, volume, file, message) {
     step,
     volume,
     file,
-    message: declared
-      ? message
-      : `${message} [level undeclared for kind "${kind}" — reported at MINOR, which is the safe default and not a judgement about this finding]`,
+    message: `${message}${undeclaredLevelNote(kind)}`,
   };
 }
 
@@ -197,4 +211,4 @@ function seriesArtifactPath(fileName, seriesDir) {
   return seriesArtifactFile(fileName, legacyKeys[fileName] || "", seriesDir);
 }
 
-module.exports = { hasTableShape, hasProseShape, proseParagraphs, matchesShape, finding, seriesArtifactPath };
+module.exports = { hasTableShape, hasProseShape, proseParagraphs, matchesShape, finding, undeclaredLevelNote, seriesArtifactPath };

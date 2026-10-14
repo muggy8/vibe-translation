@@ -21,7 +21,7 @@ const { validateRequiredEnv } = require("../configs/shared");
 const { fileExists, inlineReferenceMessage } = require("../utils/fs");
 const { loadGlossaryDisputes } = require("../utils/disputes");
 const { runVolumeWithModeFallback } = require("../utils/qa-loop");
-const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifacts, volumeAlreadyAccepted, runVolumeSeries } = require("../utils/series-run");
+const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifacts, volumeAlreadyAccepted, runVolumeSeries, reportVolumeFindings } = require("../utils/series-run");
 const {
   resolveSourceBundle,
   decideProcessingMode,
@@ -195,27 +195,50 @@ async function processGlossaryVolume({ folderName, index }, run) {
   ctx.refStore = attempt.opened.store;
   ctx.storeCarried = attempt.opened.carried;
 
-  await runVolumeWithModeFallback({
-    label: `Volume ${volume.installmentNumber}`,
-    ctx,
-    volumeDir,
-    run: async () => {
-      await runVolumeAgent(ctx);
-      // Deterministic term-coverage audit of the finished glossary (no AI) — also the per-volume
-      // "terms used here" index for the translation stage.
-      await writeGlossaryCoverageReport(ctx);
-    },
-    attemptFiles: [
-      OUTPUT_FILE,
-      NEW_TERMS_FILE,
-      RESEARCH_FILE,
-      VALIDATION_FILE,
-      "glossary-validation-rolling-state.json",
-      "glossary-coverage.md",
-      "glossary-coverage.json",
-    ],
-    attemptGlob: /^glossary-.*\.md$/,
-  });
+  try {
+    await runVolumeWithModeFallback({
+      label: `Volume ${volume.installmentNumber}`,
+      ctx,
+      volumeDir,
+      run: async () => {
+        await runVolumeAgent(ctx);
+        // Deterministic term-coverage audit of the finished glossary (no AI) — also the per-volume
+        // "terms used here" index for the translation stage.
+        await writeGlossaryCoverageReport(ctx);
+      },
+      attemptFiles: [
+        OUTPUT_FILE,
+        NEW_TERMS_FILE,
+        RESEARCH_FILE,
+        VALIDATION_FILE,
+        "glossary-validation-rolling-state.json",
+        "glossary-coverage.md",
+        "glossary-coverage.json",
+      ],
+      attemptGlob: /^glossary-.*\.md$/,
+    });
+  } finally {
+    // **The finding channel** (utils/series-run/findings.js → utils/postmortem/channel.js). This runs on
+    // the way out whatever the volume did — accepted, graded down, or thrown on the way there — because a
+    // read that never answered is a fact the stage learned even when the volume failed for that reason.
+    // `ctx.extractionFindings` is built by `glossary/store.js`'s audit from `ctx.extractionReads`, which
+    // BOTH routes fill: the whole-installment pass writes one entry, `glossary/chunked.js` appends one per
+    // chapter, and `runQaLoop` runs the audit for both. So this one call site wires both routes.
+    //
+    // It is skipped when the reading pass never ran: an empty record written by a volume that never read
+    // anything would overwrite the record an earlier pass left, which is how a hole gets erased by a run
+    // that never looked at the book.
+    if (Array.isArray(ctx.extractionReads) && ctx.extractionReads.length > 0) {
+      await reportVolumeFindings({
+        step: "glossary",
+        volumeEntry: volume,
+        volumeDir,
+        bundle,
+        findings: ctx.extractionFindings || [],
+        dryRun,
+      });
+    }
+  }
 
   // The glossary stage seals the volume at the end of its own work on it, and the character-voice
   // stage seals it again at the end of its work (see glossary/store.js's header for why the seal is

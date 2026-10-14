@@ -28,9 +28,9 @@
  *   7. batching is per (kind, step), so one kind spread over seventeen volumes is one investigation
  *      per step, not seventeen;
  *   8. `chapter-extraction-never-answered` — a term-list read that never answered — is MAJOR damage,
- *      the stage really emits it, and the post-mortem does **not** see it yet: the channel from a
- *      stage's own finding into the disk assessment does not exist, and that is pinned rather than
- *      assumed;
+ *      the stage really emits it, and the post-mortem now has a route to it: the step-findings channel
+ *      (`utils/postmortem/channel.js`, gotcha 138). What is pinned here is the OTHER half of that route —
+ *      a volume the step wrote no record for contributes nothing, and a clean fixture stays clean.
  *   9. no environment variable gates any of it.
  *
  * Fixtures only. Nothing here reads the real 17 volumes, the reference store, or the endpoint.
@@ -588,19 +588,20 @@ async function testSeventeenVolumesOneKind() {
  * back with no list at all (a refused answer shape, or an answer the parser could not read, after both
  * paid reads).
  *
- * Two things are pinned here, and the second is the uncomfortable one.
+ * Two things are pinned here.
  *
  *   1. **The level.** MAJOR, and it reaches the triage's damage decision: the glossary is copied
  *      forward, so a chapter nobody read is missing from every later volume's glossary too. That is the
  *      same shape as `chapter-without-draft`, which is why it sits next to it in the table.
- *   2. **The channel it does not have yet.** The post-mortem assesses a finished step **from the disk**
- *      (`utils/postmortem/run.js` → `volume.js` / `file.js`). A finding a stage builds in its own
- *      process and puts in its own report is not on that disk, so this kind reaches the grader and the
- *      volume's report and NOT the halt gate or the triage. That is asserted here rather than left in a
- *      comment, because a finding kind whose routing a test proves, with nothing saying where it
- *      actually arrives, is exactly the kind of finding that looks like a guard and is not one. Closing
- *      the gap needs a declared sidecar in `utils/artifacts/preproduction.js` or a finding channel in
- *      `utils/postmortem/volume.js`; both are outside the slice that added the kind.
+ *   2. **The route it now has.** The post-mortem assesses a finished step **from the disk**, and the
+ *      step-findings channel (`utils/postmortem/channel.js`) is the half of that disk a stage can write to
+ *      while it is still running: `glossary/task.js` hands `ctx.extractionFindings` to
+ *      `utils/series-run/findings.js` at the end of every volume it read, and `runPostMortem` reads the
+ *      record back while assessing that volume. What this fixture proves is the boundary of that route: a
+ *      volume the step wrote NO record for contributes no finding, because absence is silence and not
+ *      damage — every volume already on disk and every `--dry-run` is in that class. The channel's own
+ *      behaviour (a record that reaches the assessment, a record that is stale, a level a caller cannot
+ *      choose) is pinned in `test/test-finding-channel.js`.
  *
  * @returns {Promise<void>}
  */
@@ -621,22 +622,23 @@ async function testAChapterNobodyReadIsDamage() {
     `glossary/store.js must emit "${kind}" — a level row for a kind nothing emits is decoration`
   );
 
-  // And the honest half: a fixture whose glossary step finished cleanly produces no such finding from
-  // the post-mortem, because the post-mortem reads the disk and the stage's finding is not on it.
+  // The boundary of the channel: this fixture's glossary step never wrote a step-findings record, so the
+  // assessment of it finds nothing. Absence is silence, not damage — which is what keeps every volume
+  // already on disk (and every --dry-run) from being retroactively damaged by a channel they never used.
   const f = await fx.completeSeries("read-hole", FIXTURE_ROOT);
   const { runPostMortem } = require("../utils/postmortem");
   const report = await runPostMortem({ step: "glossary", seriesDir: f.dir });
   same(
     report.findings.filter((x) => x.kind === kind).map((x) => x.volume),
     [],
-    `the disk assessment does not emit ${kind} today — the stage's own finding has no route into the post-mortem, and this assertion is what stops anyone claiming it does`
+    `a volume with no step-findings record emits no ${kind} — the channel reports what a step said, it does not invent what it might have said`
   );
   ok(
     report.findings.length === 0,
     `the fixture's glossary step is clean, so the assessment finds nothing (got: ${report.findings.map((x) => x.kind).join(", ") || "none"})`
   );
 
-  console.log(`  ${kind}: MAJOR, damage, emitted by the stage — and not yet routed through the post-mortem, pinned`);
+  console.log(`  ${kind}: MAJOR, damage, emitted by the stage, and a volume the step never reported about stays clean`);
 }
 
 // ─── 8. No environment knob, and the routing is data ──────────────────────────

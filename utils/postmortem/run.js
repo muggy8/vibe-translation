@@ -14,6 +14,7 @@ const { finding } = require("./rules");
 const { assessVolume } = require("./volume");
 const { assessSeries } = require("./series");
 const { applyVolumeHalt } = require("./halt");
+const { readVolumeChannel, summarizeChannelReads } = require("./channel");
 const { renderPostMortemMarkdown, postMortemDir } = require("./render");
 const {
   assessRunScope,
@@ -143,10 +144,20 @@ async function runPostMortem({ step, seriesDir, manifest, volumeArg, claims }) {
   }
 
   let checked = 0;
+  // What the step itself reported about each volume, read back from the run's records
+  // (utils/postmortem/channel.js). It is asked in the assessment rather than inside `assessVolume`,
+  // because it is not a question about the volume FOLDER — it is a question about what this step said,
+  // and the run's records are not in the corpus. Absence is recorded, never turned into a finding.
+  /** @type {import("./channel").ChannelRead[]} */
+  const channelReads = [];
   if (spec.perVolume) {
+    const runDir = postMortemDir();
     for (const volumeEntry of volumeEntries) {
       const volumeFindings = await assessVolume({ spec, step, seriesDir, volumeEntry, ctx });
       findings.push(...volumeFindings);
+      const channel = await readVolumeChannel({ runDir, step, seriesDir, volumeEntry });
+      findings.push(...channel.findings);
+      channelReads.push(channel);
       checked += spec.volume.length;
     }
   }
@@ -187,6 +198,10 @@ async function runPostMortem({ step, seriesDir, manifest, volumeArg, claims }) {
     counts,
     markdown: "",
   };
+  // Only a step that walks volumes has volumes to report about, so only those assessments carry the line.
+  // It is not a finding and it is not counted as an expectation checked: it is the assessment saying out
+  // loud which volumes it asked the step about and what came back.
+  if (channelReads.length) report.channel = summarizeChannelReads(channelReads);
   // A step that stopped at a volume boundary on purpose is not a step whose every remaining book is
   // broken. The halt record is what tells the two apart, and it has to be folded in BEFORE the
   // Markdown is rendered — otherwise the report a human reads says "14 missing required files" about

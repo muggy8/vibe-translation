@@ -481,16 +481,18 @@ async function renderGlossaryArtifact(ctx, { moveAside = true } = {}) {
  * those facts reach the gate without inventing a second gate.
  *
  * Each read that never produced a list also becomes a finding (`chapter-extraction-never-answered`, HIGH,
- * declared MAJOR in the level table). **What that finding does and does not reach, stated plainly:** it is
- * in the report the grader reads, it is on the console, and it is on `ctx.extractionFindings` for the
- * stage's caller. It is NOT in the delivery layer's triage or the volume-halt gate, because the post-mortem
- * assesses a finished step from the disk (`utils/postmortem/run.js` → `volume.js` / `file.js`) and nothing
- * on a stage's own finding list is on the disk. Closing that needs a new declared sidecar in
- * `utils/artifacts/preproduction.js` or a finding channel in `utils/postmortem/volume.js` — both outside
- * this slice's allowed edits, and both an owner's call. See `/tmp/opencode/json-schema-questions.md`.
- * A refused revision is reported the same way and for the same reason: named in the report, on the console,
- * and NOT turned into a finding kind, because a kind the delivery layer cannot reach is a promise rather
- * than a guard (gotcha 138).
+ * declared MAJOR in the level table). **What that finding reaches, stated plainly.** It is in the report the
+ * grader reads, it is on the console, it is on `ctx.extractionFindings`, and — since the finding channel was
+ * built — `glossary/task.js` hands that list to `utils/series-run/findings.js` at the end of every volume it
+ * read, which writes it into the run's records (`utils/postmortem/channel.js`). The post-mortem then reads it
+ * back while assessing this volume (`utils/postmortem/run.js` → `channel.js`), so the finding is a finding:
+ * routed by its level through the resume triage, able to halt the volume walk at the volume boundary
+ * (`utils/postmortem/halt.js`), recorded in the ledger, and printed in the step's own report. The level is
+ * the table's, never this stage's: the channel stores severity, kind, file and message and looks the level
+ * up again when it reads the record back.
+ * A refused revision is still named in the report and on the console and is still NOT a finding kind, because
+ * a kind the delivery layer cannot reach is a promise rather than a guard (gotcha 138) — and adding a kind is
+ * a row in `utils/postmortem/levels.js`, which is the account owner's decision.
  *
  * @param {{ values: Object, refStore: Object|null, glossaryOutputFile: string, storeTermRows: Object|null, storeRevisions?: Object|null, extractionReads?: Array<Object> }} ctx
  * @param {{ refused?: Array<Object> }} [opts] - The filings this volume refused, so the report names them

@@ -30,6 +30,10 @@
  *       The questions about those records agreeing with EACH OTHER — a patch naming a
  *       ticket that does not exist, a lock left by a process that is gone — are asked
  *       by utils/delivery-audit.js, which sits on top of this layer rather than inside it.
+ *   11. what the step itself reported while it was running, read back from the run's records
+ *       (utils/postmortem/channel.js) and merged into that volume's findings. This is the only way a finding
+ *       a stage built inside its own process reaches the triage or the volume-halt gate; a volume the step
+ *       said nothing about is named silent, never damaged (gotcha 138).
  *
  * What it deliberately does NOT do: decide whether an artifact is GOOD. That is
  * the scored gates' job, and moving it here would put a second, weaker version
@@ -43,7 +47,9 @@
  * levels.js (the level every finding kind is declared at — data in a closed path), file.js (one file,
  * one verdict), volume.js (one volume folder against what its step owed), series.js (the series-root
  * copies and the audit's verdict), scope.js (the run folder, where the delivery layer's records and a
- * step's own reports live), run.js (the assessment itself), render.js (the report a human reads). This
+ * step's own reports live), halt.js (which stages pause at the volume boundary, and what a pause records),
+ * channel.js (what a step reported about a volume while it was still running), run.js (the assessment
+ * itself), render.js (the report a human reads). This
  * file is the public surface, and the two shapes the delivery layer names in its JSDoc.
  *
  * @module utils/postmortem
@@ -91,11 +97,16 @@
  *   Set when the step stopped at a volume boundary on purpose (utils/postmortem/halt.js). It names the
  *   volume it stopped after, the volumes it never attempted, and how many `missing-*` findings that
  *   accounts for — which is what tells a deliberate halt apart from a step that broke on every book.
+ * @property {import("./postmortem/channel").ChannelSummary} [channel]
+ *   Set for a step that walks volumes: what the step's own step-findings records said about each of them
+ *   (utils/postmortem/channel.js) — how many volumes reported, how many reported nothing, which records
+ *   were stale and therefore not counted, and how many findings the channel contributed to this report.
  */
 
 const rules = require("./postmortem/rules");
 const levels = require("./postmortem/levels");
 const halt = require("./postmortem/halt");
+const channel = require("./postmortem/channel");
 const volume = require("./postmortem/volume");
 const series = require("./postmortem/series");
 const scope = require("./postmortem/scope");
@@ -114,6 +125,7 @@ module.exports = {
   matchesShape: rules.matchesShape,
   readConsistencyVerdict: series.readConsistencyVerdict,
   finding: rules.finding,
+  undeclaredLevelNote: rules.undeclaredLevelNote,
   LEVELS: levels.LEVELS,
   FINDING_LEVELS: levels.FINDING_LEVELS,
   FINDING_LEVEL_ROWS: levels.FINDING_LEVEL_ROWS,
@@ -131,6 +143,12 @@ module.exports = {
   readVolumeHalt: halt.readVolumeHalt,
   clearVolumeHalt: halt.clearVolumeHalt,
   applyVolumeHalt: halt.applyVolumeHalt,
+  CHANNEL_RECORD_SCHEMA: channel.CHANNEL_RECORD_SCHEMA,
+  channelRecordPath: channel.channelRecordPath,
+  writeChannelRecord: channel.writeChannelRecord,
+  readChannelRecord: channel.readChannelRecord,
+  readVolumeChannel: channel.readVolumeChannel,
+  summarizeChannelReads: channel.summarizeChannelReads,
   assessRunScope: scope.assessRunScope,
   countRunExpectations: scope.countRunExpectations,
   declaresRunScope: scope.declaresRunScope,
