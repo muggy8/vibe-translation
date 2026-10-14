@@ -82,9 +82,9 @@ removed** — this slice did not edit `AGENTS.md`.
 (`utils/disputes.js:33-34`, written by `verify-translate/task.js:281` `collectGlossaryDisputes`).
 The translator reads that queue and marks the term provisional in the prompt
 (`utils/translate/references.js:250-251`), and `glossary/task.js:343` prints a pointer to it.
-**Nothing resolves it.** In the reference store, `challengeFact` (`utils/reference-store/facts.js:719`)
+**Nothing resolves it.** In the reference store, `challengeFact` (`utils/reference-store/facts/challenge.js`)
 is called from exactly one place outside tests — `utils/reference-store/attribution.js:677` — and
-`resolveChallenge` (`utils/reference-store/facts.js:888`) has **no caller outside tests at all**:
+`resolveChallenge` (`utils/reference-store/facts/challenge.js`) has **no caller outside tests at all**:
 no command, no stage. A dispute opened by `npm run attribute-voice` cannot be closed through any
 door a person can type.
 
@@ -280,7 +280,7 @@ tokens**. Twenty-seven candidates at that measured mean is **~107,000 tokens for
   (`utils/reference-store/glossary-adapter.js:841-852`) — a foresight answer about a book that has
   not been read yet has no such quote, so it is refused by design. The store's challenge door,
   `challengeFact` with `supersede` defaulting to false
-  (`utils/reference-store/facts.js:705-712`), leaves the published claim in force but marks it
+  (`utils/reference-store/facts/challenge.js`), leaves the published claim in force but marks it
   **`disputed`**, which changes the prompt of every chapter that uses the term
   (`utils/translate/references.js:295`). Marking a confirmed rendering disputed because of a guess is
   the guard doing damage. Which door the answer goes through is question 3 in §9, and it is the

@@ -15,7 +15,7 @@ newest row of every supersede chain, wherever in the series it was filed — thr
 `utils/translate/settled-glossary.js`, so a rendering volume 11 settled reaches volume 1's chapters
 and the superseded rendering is offered to no prompt anywhere (→ gotcha 143). **The other is open:**
 the disputes queue the verify stage writes is read by the translator and by the glossary's log and
-**resolved by nothing** — `resolveChallenge` (`utils/reference-store/facts.js:888`) has no caller
+**resolved by nothing** — `resolveChallenge` (`utils/reference-store/facts/challenge.js`) has no caller
 outside tests.
 
 ## The file map — the translation stage
