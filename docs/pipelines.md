@@ -7,7 +7,8 @@ Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md
 
 ## 3.4. The order of these pipelines is a gate, not a convention
 
-Since 2026-10-13 the order is declared data in `utils/prereqs.js` and enforced by a door on every
+Since 2026-10-13 the order is declared data in `utils/prereqs/table.js` (behind the `utils/prereqs.js`
+cover) and enforced by a door on every
 gulp task, before the task's own code is reached:
 
 - `extract` needs `discover`.
