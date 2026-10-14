@@ -380,10 +380,18 @@ are this plan.
 
 ## 10. Open decisions for the account owner
 
-1. **Is the declaration written by a model at intake, or proposed by a model and confirmed by a
-   person?** A declaration shapes 133 chapters. A person confirming it costs one read of a short table.
+1. ~~Is the declaration written by a model at intake, or proposed by a model and confirmed by a
+   person?~~ **Answered 2026-10-14: the intake writes it, and nobody confirms it.** The account owner's
+   reason is that the pipeline is meant to run unattended once started, and the axes are derived from
+   the source language the intake already works out, so the inference is low-risk. **What that answer
+   makes load-bearing:** the four computable guards in §4.3 are no longer a backstop behind a human
+   review, they are the only review. In particular guard 3 — *an axis that produces no evidenced claim
+   in a volume is reported* — is the signal that a wrong declaration was made, and its level in the
+   seriousness table (§10.2) is now the decision that decides whether a bad declaration stops the run
+   or is printed and walked past.
 2. **Does an axis that no volume ever answers stop the run or warn?** It is a new kind in the seriousness
-   table either way; the level is the decision.
+   table either way; the level is the decision. **This is now the live one**, because §10.1 removed the
+   human review that would otherwise have caught a bad declaration.
 3. **When is a register decision settled** — once per series after the last volume (the glossary's
    shape), or at the end of each volume? Per-volume means the translator's instructions can change
    between books; per-series means the early books are translated against unsettled guidance.
