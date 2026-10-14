@@ -449,7 +449,11 @@ pass's own findings now reach the post-mortem, the ledger, the triage and the pa
 3. ~~When is a register decision settled~~ — **Answered 2026-10-14: per volume.** The reasoning and the
    four mechanical consequences are in §6, including the one thing this plan must *not* copy from the
    glossary.
-4. **Is a confirmation a row, or nothing?** §5. The recommendation is a row.
+4. ~~Is a confirmation a row, or nothing?~~ **Answered 2026-10-14: a light confirmation row.** The
+   reasoning is §5's — "still holds" should be an observation rather than an assumption — and the full
+   claim row was rejected because it copies the same sentence once per volume and makes the coverage
+   rules count one fact repeatedly. **Cost accepted:** a schema version bump, and a new row kind that is
+   *not* a claim, so the renderers must keep excluding it from the bullets they publish.
 5. **Does the declaration carry the point-of-view markers too**, or is that a separate declaration? They
    are language-specific for the same reason the pronouns are, and they are currently in the prompt.
 6. **Does the second-person axis get a relationship in the record** — *who* is addressed this way — or is
