@@ -11,6 +11,10 @@ Two decisions were taken before this plan was written, and they are the plan's p
    schema, not from a real voice extraction — there is none on disk. Slice 0 is the cheapest thing
    that can be done, and the first real run is deliberately placed *after* slice 2 so that the run
    exercises the declared shape rather than the Japanese one.
+3. **A register decision is made per volume, not once per series.** A character's voice changes as the
+   story develops, and accuracy means conveying what they are like *at that moment*; the claim's validity
+   span is what keeps the record correct when a later volume invalidates an earlier answer. This is the
+   point where the voice stage deliberately does **not** follow the glossary (§5, §6, §9).
 
 ---
 
@@ -271,6 +275,16 @@ not a claim that somebody is wrong; it is a claim that stopped holding. The voic
 the glossary has: file a new row that names the row it replaces, owned by the volume whose own text
 carries the change, with its own quote — and the old row survives, unchanged, as the arc.
 
+**And for voice, a replaced claim is not a wrong claim.** This is where the voice record must *not*
+follow the glossary. For a term, the newest rendering is the law: a thing has one name and a translator
+of book 3 should use the name book 17 settled on. For a character, the replaced claim was **true during
+its span** — it is the record of how they spoke *then*, and it is what makes the change visible as
+development rather than as a contradiction. Closing `applies_to_volume` is therefore not bookkeeping on
+top of the voice stage; it is the thing that lets a per-book answer be correct. The query that means
+"what holds as of volume N" already exists (`utils/reference-store/queries.js:61`:
+`applies_to_volume IS NULL OR applies_to_volume >= ?`); what is missing is any stage that ever fills the
+column in.
+
 **Confirming needs a decision the owner has to make.** A confirmation carries no new claim body, so
 storing one as a claim duplicates the body six times across a series. The options:
 
@@ -295,20 +309,54 @@ a slightly larger answer, which is the cheaper of the two currencies here.
 `character-voice.md` today renders bullets per character. Under this plan it renders three things per
 character:
 
-1. **How they speak now** — the current claim for each declared axis, which is what a translator of a
-   later chapter actually needs, and which `currentClaimSql` already knows how to select.
+1. **How they speak in this volume** — the claim that holds *as of this volume* for each declared axis,
+   which is what a translator of this book needs, and which the span query in §5 already answers.
 2. **How they got there** — the superseded rows, dated to the volume that established them and the
    volume that replaced them. The glossary already prints this shape as `Earlier rendering:`.
 3. **The decision** — for each axis, what the translation renders that value as. This is the thing a
    translator must be able to rely on, and it is the thing that does not exist today in any structured
    form.
 
-**The open problem in this section:** a decision derived from a render is only stable if the claims
-under it are settled. A claim that flickers — confirmed in book 4, contradicted in book 5, re-confirmed
-in book 6 — would change the translator's instructions between chapters. The glossary solved the same
-problem with a settlement pass that runs once, after the last volume, and holds. Whether the voice
-reference gets the same shape (settle once per series, then hold) or a per-volume settle is an owner
-decision, §10.3.
+**When the decision is made: per volume.** Answered 2026-10-14 by the account owner, and the reason is
+the plan's premise: a character's voice changes as the story develops, and accuracy means conveying what
+they are like **at that moment**, which the `applies_from` / `applies_to` span exists to make correct
+even when a later volume invalidates the answer.
+
+That choice is already half-implemented, on the consumer side. `utils/translate/references.js:96-103`
+hands the translator **that volume's own** `character-voice.md` and `pov-map.md`, read out of the volume
+folder. Only the glossary half of that same function was switched to the settled record. So the thing a
+translator actually receives is already per-book; what is missing is the machinery that makes it
+period-correct rather than "everything observed, as of whenever it happened to be rendered".
+
+Four things follow mechanically:
+
+1. **A decision is a dated row, owned by the volume that made it** — not a series-level fact. Its span
+   begins at the volume it was made for and closes when a later volume replaces it.
+2. **Each volume's artifact is rendered from that volume's own record**, which is a snapshot ending at
+   that volume (volume 3's record holds volumes 1–3 and nothing later). That is what makes a book-3
+   answer a book-3 answer, and it is already how the per-volume records work.
+3. **The decision is made at the volume boundary**, after every chapter of that volume has been read.
+   Chapters feed observations; the boundary decides. This is what stops a claim that flickers between
+   chapters from changing a translator's instructions mid-book — the problem this section was open about
+   is answered by *where* the decision is taken, not by delaying it.
+4. **A later volume never rewrites an earlier volume's file.** The freeze gate already refuses that once
+   a translation stands on it, and `npm run release-translation` is the only way past.
+
+**The risk this accepts, and the guard for it.** A change that is really extraction noise — one over-read
+line in book 4 — will be rendered faithfully as character development. Two computable checks, no model
+judgement:
+
+- **A reversal is reported, not honoured silently.** A claim replaced, and that replacement replaced by
+  something equivalent, is the shape noise makes and development does not.
+- **A change resting on one quote is weaker than one resting on five**, and the record already stores
+  each claim's evidence, so the render can say how solid the change is instead of presenting every
+  change as equally real.
+
+**What must not be copied from the glossary.** `utils/translate/settled-glossary.js` deliberately reads
+the *highest-numbered* volume's record, because a term should have one name across the whole series. The
+voice reference must come from **the volume being translated**. Applying the settled-record door to voice
+would hand a translator of book 3 the answers book 17 had not discovered yet, and would quietly delete
+the arc this plan exists to preserve.
 
 ---
 
@@ -369,6 +417,10 @@ are this plan.
   decision has been reversed by convenience.
 - **Not a second opinion on a published claim.** A development is filed as a replacement with evidence,
   not as a dispute. `disputed` is for disagreement, and the record already says so.
+- **Not newest-wins.** The glossary's rule is that the latest volume's rendering is the law for the whole
+  series, and that is right for a term's name. Applied to a character it would erase the arc and hand a
+  translator of book 3 answers book 17 had not discovered yet. The voice record answers *"what holds as
+  of this volume"*, and §5 is where that answer lives.
 - **Not an edit.** No sealed row is edited, moved or deleted, ever. This is the rule the whole store is
   built on.
 - **Not a bigger prompt.** The direction of every slice in this plan is to make what the chapters are
@@ -392,9 +444,9 @@ are this plan.
 2. **Does an axis that no volume ever answers stop the run or warn?** It is a new kind in the seriousness
    table either way; the level is the decision. **This is now the live one**, because §10.1 removed the
    human review that would otherwise have caught a bad declaration.
-3. **When is a register decision settled** — once per series after the last volume (the glossary's
-   shape), or at the end of each volume? Per-volume means the translator's instructions can change
-   between books; per-series means the early books are translated against unsettled guidance.
+3. ~~When is a register decision settled~~ — **Answered 2026-10-14: per volume.** The reasoning and the
+   four mechanical consequences are in §6, including the one thing this plan must *not* copy from the
+   glossary.
 4. **Is a confirmation a row, or nothing?** §5. The recommendation is a row.
 5. **Does the declaration carry the point-of-view markers too**, or is that a separate declaration? They
    are language-specific for the same reason the pronouns are, and they are currently in the prompt.
