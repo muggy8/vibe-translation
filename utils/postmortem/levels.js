@@ -66,7 +66,7 @@ const LEVELS = ["STOP", "MAJOR", "MINOR", "NOTE"];
 /**
  * Every finding kind this repository emits, with its level.
  *
- * 67 rows: 65 kinds built by `finding()` plus `missing-required` / `missing-expected`, which
+ * 70 rows: 68 kinds built by `finding()` plus `missing-required` / `missing-expected`, which
  * ./file.js builds from the expectation's own `level`. `test/test-finding-levels.js` enumerates the
  * kinds from the source text and fails if this table and that list ever differ.
  *
@@ -180,6 +180,11 @@ const FINDING_LEVEL_ROWS = [
     kind: "chapter-extraction-never-answered",
     level: "MAJOR",
     why: "a read this volume's glossary was built from produced no term list at all, so the terms it was owed are missing from this volume and from every later volume's copy-forward.",
+  },
+  {
+    kind: "voice-chapter-never-answered",
+    level: "MAJOR",
+    why: "a chapter this volume's character-voice reference was read from answered nothing on either paid read, so the record every later volume's reference is copied from holds nothing for that chapter.",
   },
   {
     kind: "accepted-without-acceptance",
@@ -392,6 +397,11 @@ const FINDING_LEVEL_ROWS = [
     kind: "ruby-harvest-missing",
     level: "MINOR",
     why: "one volume's pronunciation-guide cache is absent, so a later \"how is this word read?\" question has no answer for that volume.",
+  },
+  {
+    kind: "voice-chapter-kept-cut-off",
+    level: "MINOR",
+    why: "the chapter's answer stopped before its closing bracket and whatever it had not written yet is missing from the record — real damage, but the one real volume this repository read needed a second paid read on 2 of its 7 chapters and a MAJOR here would pause a 17-volume run over something routine.",
   },
 
   // ─── NOTE — a measurement, or a leftover that is doing its job ─────────────────

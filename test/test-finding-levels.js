@@ -206,8 +206,8 @@ const emitted = [...KINDS.keys()].sort();
 
 same(
   emitted.length,
-  68,
-  `the repository emits 68 finding kinds (66 through finding() plus missing-required / missing-expected); found ${emitted.length}`
+  70,
+  `the repository emits 70 finding kinds (68 through finding() plus missing-required / missing-expected); found ${emitted.length}`
 );
 same(
   declared,
@@ -236,6 +236,14 @@ same(
 for (const kind of ["wrong-shape", "chapter-without-draft", "accepted-without-acceptance", "audit-verdict-missing"]) {
   same(FINDING_LEVELS[kind].level, "MAJOR", `${kind} is the defect this plan exists for — it must be MAJOR`);
 }
+
+// The two kinds the character-voice reading pass reports through the finding channel
+// (`character-voice/findings.js`, register plan slice 0). Their levels are the slice's decision, so they
+// are pinned here rather than left to whatever the row says today: a MAJOR that quietly became a MINOR
+// would stop halting the volume walk, and a MINOR that quietly became a MAJOR would pause a 17-volume run
+// over a chapter that came back half an answer.
+same(FINDING_LEVELS["voice-chapter-never-answered"].level, "MAJOR", "a voice chapter that never answered is the sibling of the glossary's — every later volume is copied from the record it left a hole in");
+same(FINDING_LEVELS["voice-chapter-kept-cut-off"].level, "MINOR", "a voice chapter kept although it came back cut off is investigated, not a pause: the real volume this repository read needed a second paid read on 2 of its 7 chapters");
 
 // ─── 2. The level is on the finding ────────────────────────────────────────────
 

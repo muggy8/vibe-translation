@@ -23,7 +23,7 @@ require("../types");
 const { transformUserPrompt, writePromptDump } = require("../utils/prompt");
 const { validateRequiredEnv } = require("../configs/shared");
 const { resolveSourceBundle, chapterSegmentNote } = require("../utils/source");
-const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifacts, volumeAlreadyAccepted, publishLatestToSeriesRoot, runVolumeSeries } = require("../utils/series-run");
+const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifacts, volumeAlreadyAccepted, publishLatestToSeriesRoot, runVolumeSeries, reportVolumeFindings } = require("../utils/series-run");
 
 const { acceptanceSystemPromptFile, acceptanceUserPromptTemplateFile, extractSystemPromptFile, extractUserPromptTemplateFile, seriesDir } = require("./config");
 const { openVoiceRecord, fileVoiceExtraction, sealVoiceRecord } = require("./store");
@@ -220,7 +220,33 @@ async function processVoiceVolume({ folderName, index }, run) {
     );
   }
 
-  await runAssembledVolume(ctx);
+  // **The finding channel** (character-voice/findings.js → utils/series-run/findings.js →
+  // utils/postmortem/channel.js). This runs on the way out whatever the volume did — accepted, graded
+  // down, or thrown on the way there — because a chapter that never answered is a fact the stage learned
+  // even when the volume failed for that reason, and the assessment of this volume is what turns it into
+  // a finding the triage can act on.
+  //
+  // It is skipped when the reading pass never ran. The glossary stage's guard is "the read list is not
+  // empty"; that length is the wrong fact here, because `readVolumeChapters` returns the chapters it
+  // KEPT, and a pass that refused on its very first chapter kept none — so a length check would erase the
+  // one finding that pass earned. The rule the channel's own header states is "report when the reading
+  // pass ran, stay silent when it did not", and `ctx.readingPassRan` is that rule, not a proxy for it.
+  // A volume skipped by the idempotency check, a `--dry-run`, and a volume refused before the pass started
+  // all write nothing, which leaves the record an earlier pass left standing.
+  try {
+    await runAssembledVolume(ctx);
+  } finally {
+    if (ctx.readingPassRan) {
+      await reportVolumeFindings({
+        step: "character-voice",
+        volumeEntry: volume,
+        volumeDir,
+        bundle,
+        findings: ctx.readingFindings || [],
+        dryRun,
+      });
+    }
+  }
 
   // Sealing is the last act of a volume whose pre-production finished (review 05 §3.2: code seals,
   // at the end of that volume's own pre-production). A volume that threw on the way here is left

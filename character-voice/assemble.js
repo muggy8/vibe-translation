@@ -49,6 +49,7 @@ require("../types"); // JSDoc type definitions
 const rs = require("../utils/reference-store");
 const { ACCEPTANCE_PASSING_SCORE } = require("../configs/shared");
 const { assertVoiceCarryForward } = require("./carry-forward");
+const findings = require("./findings");
 const { fileVoiceExtraction, auditVoiceArtifact } = require("./store");
 const { runQaLoop } = require("./qa");
 const reading = require("./reading");
@@ -191,10 +192,23 @@ async function runAssembledVolume(ctx) {
     force: Boolean(ctx.force),
     log: console.log,
   });
+  // **The reading pass ran.** Whatever it brought back, this volume now knows how it was read, and the
+  // findings about that are built here — before anything else in this function can throw — because a
+  // chapter that never answered is a fact the stage learned even when the volume failed for that reason.
+  // `character-voice/task.js` hands them to the finding channel in a `finally`. (gotcha 138)
+  ctx.readingPassRan = true;
+  ctx.readingChapters = read.chapters;
+  ctx.readingRefusal = read.refusal;
+  ctx.readingFindings = findings.readingFindings({
+    chapters: read.chapters,
+    refusal: read.refusal,
+    volume: values.INSTALLMENT_NUMBER,
+  });
+  for (const found of ctx.readingFindings) console.error(`Volume ${values.INSTALLMENT_NUMBER}: ${found.severity} ${found.kind}: ${found.message}`);
+
   if (!read.ok) {
     throw new Error(`Volume ${values.INSTALLMENT_NUMBER}: ${read.refusal.rule} — ${read.refusal.because} (fix: ${read.refusal.fix})`);
   }
-  ctx.readingChapters = read.chapters;
   ctx.readingReport = reading.readingReport(read.chapters, { volume: values.INSTALLMENT_NUMBER });
 
   const entries = reading.consolidateExtraction(read.chapters);
