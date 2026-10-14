@@ -68,6 +68,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const fx = require("./fixture-series");
+const { readModuleLayer } = require("./module-layer");
 const fz = require("../utils/prereqs/freeze");
 const prereqs = require("../utils/prereqs");
 const { specForStep } = require("../utils/artifacts");
@@ -513,8 +514,11 @@ scenario("no flag, no run policy, no ledger entry and no setting reaches the gat
   const freezeKnobs = knobs.filter((name) => /FREEZE|RELEASE|UNFREEZE|THAW/i.test(name));
   same(freezeKnobs, [], `a check you can switch off is not a check (AGENTS.md §4 rule 3). configs/ defines: ${knobs.join(", ")}`);
 
-  const source = fs.readFileSync(path.join(ROOT, "utils", "prereqs", "freeze.js"), "utf8");
-  same(source.match(/process\.env\.[A-Z_]+/g) || [], [], "the freeze module reads no environment variable at all");
+  // The whole freeze MODULE, not just the cover: `utils/prereqs/freeze.js` is a thin cover over the
+  // folder named after it, and a scan of the cover alone is a check that can never report (gotcha 67).
+  const source = readModuleLayer(ROOT, "utils/prereqs/freeze.js");
+  const envReads = source.match(/process\.env\.[A-Z_]+/g) || [];
+  same(envReads, [], `the freeze module — the cover and every file in utils/prereqs/freeze/ — reads no environment variable at all${envReads.length ? `; found ${envReads.join(", ")}` : ""}`);
 });
 
 /**
