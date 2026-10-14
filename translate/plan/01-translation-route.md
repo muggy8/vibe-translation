@@ -65,10 +65,10 @@ never called from the glossary route", and `AGENTS.md`'s glossary row still says
 was closed on 2026-10-13 by item 7 of `glossary/plan/01-glossary-route.md` (recorded there as
 "**Built 2026-10-13**", and in gotcha 139). The door is live: `fileGlossaryRevisions`
 (`glossary/store.js:326`, called from `glossary/task.js:461` and `glossary/chunked.js:85`) →
-`importGlossaryRevisions` (`utils/reference-store/glossary-adapter.js:918`) → `fileGlossaryRevision`,
+`importGlossaryRevisions` (`utils/reference-store/glossary-adapter/revision.js`) → `fileGlossaryRevision`,
 which inserts a replacement row with `supersedes: current.id` and marks the old row superseded in one
-transaction (`glossary-adapter.js:854-892`), and **refuses** any revision whose quote is not a line of
-this volume's own source text (`glossary-adapter.js:841-852`, rule `revision-quote-not-in-source`).
+transaction (`glossary-adapter/revision.js`), and **refuses** any revision whose quote is not a line of
+this volume's own source text (`glossary-adapter/revision.js`, rule `revision-quote-not-in-source`).
 The offline loop proves it end to end: *"revisions: 1 filed and 1 refused end to end; volume 02's
 record holds 2 row(s) for the revised term, its published glossary prints the new rendering and names
 the one it replaced."*
@@ -277,7 +277,7 @@ tokens**. Twenty-seven candidates at that measured mean is **~107,000 tokens for
 - Its answer is a **proposal filed in the record**, never a rewrite of a published row. **Neither
   existing door fits a guess, and that is the design problem.** The glossary's own revision door
   requires a quote that is a line of this volume's source text
-  (`utils/reference-store/glossary-adapter.js:841-852`) — a foresight answer about a book that has
+  (`utils/reference-store/glossary-adapter/revision.js`) — a foresight answer about a book that has
   not been read yet has no such quote, so it is refused by design. The store's challenge door,
   `challengeFact` with `supersede` defaulting to false
   (`utils/reference-store/facts/challenge.js`), leaves the published claim in force but marks it

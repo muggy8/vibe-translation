@@ -484,7 +484,7 @@ by the translator and by the glossary's log and **resolved by nothing** — `res
 caller outside tests. Across all 17 glossaries the previous run produced, **2 of 555 distinct terms
 changed rendering**. The door that lets a later volume replace an earlier volume's rendering **does
 exist and works** (`fileGlossaryRevisions`, `glossary/store.js:326` →
-`utils/reference-store/glossary-adapter.js:841-892`, gated on a quote from this volume's own book);
+`utils/reference-store/glossary-adapter/revision.js`, gated on a quote from this volume's own book);
 what the plan still finds missing is the **backward** half — nothing names the already-written
 chapters a revision invalidates, which is slice 2's term→chapter index.
 
