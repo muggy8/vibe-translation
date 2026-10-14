@@ -396,10 +396,10 @@ ever reads a research cap out of `process.env`. A guard the role can switch off 
 
 **And there is no knob for how the lookup behaves when the reference refuses.** `LOOKUP_MAX_RETRIES = 2`,
 `LOOKUP_BACKOFF_BASE_MS = 1000`, `LOOKUP_RETRY_AFTER_MAX_MS = 30000`, `LOOKUP_CIRCUIT_OPEN_AFTER = 5`,
-`LOOKUP_CIRCUIT_PROBE_AFTER_MS = 60000`, `LOOKUP_CIRCUIT_MAX_PROBES = 3` and `WIKI_MAXLAG = 5` are constants
-in `research.js`, and a check that a run can switch off is not a check (AGENTS.md §4.3). The breaker is
+`LOOKUP_CIRCUIT_PROBE_AFTER_MS = 60000`, `LOOKUP_CIRCUIT_MAX_PROBES = 10` and `WIKI_MAXLAG = 5` are literals
+in `research/bounds.js`, and a check that a run can switch off is not a check (AGENTS.md §4.3). The breaker is
 **half-open**: after the window the next lookup the stage was already going to make goes out as one
-no-retry probe, and three failed probes end it for the run — but the window is *compared*, never slept
+no-retry probe, and ten failed probes end it for the run — but the window is *compared*, never slept
 through, so no setting can make a run sit in it. The clock the cooldown reads is a **test seam**
 (`setLookupClockForTests` / `resetLookupClockForTests`), and the suite pins that no stage module names it
 and no `process.env` name containing `CLOCK` or `PROBE` is read by the lookup layer. The settings in the
