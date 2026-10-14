@@ -20,16 +20,24 @@
  *      carrying the HTTP status.
  *   2. **A bounded, polite retry.** At most 2 retries, exponential backoff, `Retry-After` honoured and
  *      capped, retried on 429 and 5xx, NOT retried on any other 4xx.
- *   3. **A run-level circuit breaker.** Five consecutive gave-up requests stop the layer querying for
- *      the rest of the run, out loud. A success resets the count.
+ *   3. **A run-level circuit breaker, half-open.** Five consecutive gave-up requests stop the layer
+ *      querying, out loud. A success resets the count. While it is open a request that arrives before
+ *      `LOOKUP_CIRCUIT_PROBE_AFTER_MS` has elapsed is refused with no request and no wait; the first one
+ *      that arrives after it is sent as a **probe** — one request, no retries, and a lookup the stage was
+ *      already going to make. A probe that reaches the reference closes the circuit and prints how long
+ *      it was open and how many terms the open window cost; a probe that fails re-arms the window, and
+ *      `LOOKUP_CIRCUIT_MAX_PROBES` failed probes give up for the rest of the run. **The cooldown is
+ *      measured, never slept through.**
  *   4. **`maxlag=5` on both Wikipedia calls** — the politeness parameter the API documents.
  *   5. **The honesty fix.** A term whose every lookup failed files **nothing**, is named in the log as
  *      unanswered, costs no model call, and **is looked up again on the next pass**. A genuine
  *      "nothing there" still files its note. A partial failure is visible in the log.
  *   6. **The published glossary prints no failure as an answer**, and the two cases stay distinguishable
  *      in the log and in the record.
- *   7. **No knob.** The retry bound, the backoff cap and the breaker are constants; a process that tries
- *      to raise them in the environment gets the same numbers.
+ *   7. **No knob.** The retry bound, the backoff cap, the breaker, the probe window and the probe budget
+ *      are constants; a process that tries to raise them in the environment gets the same numbers. The
+ *      clock the cooldown is measured against is a **test seam** no stage and no environment variable
+ *      reaches, and that is asserted too.
  *
  * Zero model calls and zero requests to Wikipedia: every lookup is answered by a local stub HTTP server,
  * and every fixture names its own series folder (AGENTS.md rule 8, gotcha 69, gotcha 143). The lookup
@@ -210,7 +218,7 @@ async function scenarioTheThreeStates() {
     ok(emptyText.includes("the reference answered and had nothing"), "a genuine empty answer is not described as one");
     ok(rejectedText !== emptyText, "a failed lookup and an empty lookup format identically");
 
-    console.log("lookup 1 / 8: ok / no-results / failed are three different answers, and the HTTP status rides along");
+    console.log("lookup 1 / 11: ok / no-results / failed are three different answers, and the HTTP status rides along");
   } finally {
     research.resetLookupCircuit();
     await stub.stop();
@@ -282,7 +290,7 @@ async function scenarioTheRetry() {
     same(notJson.note.noResultLanguages, [], 'an unreadable body is reported as "the reference had nothing"');
     ok(/not JSON/.test(notJson.note.results[0].error || ""), `the failure does not say what it was: ${notJson.note.results[0].error}`);
 
-    console.log(`lookup 2 / 8: retried 429 and 5xx (${1 + research.LOOKUP_MAX_RETRIES} requests at most), never a 400 or a 404, and an unreadable 200 is a failure not an empty answer`);
+    console.log(`lookup 2 / 11: retried 429 and 5xx (${1 + research.LOOKUP_MAX_RETRIES} requests at most), never a 400 or a 404, and an unreadable 200 is a failure not an empty answer`);
   } finally {
     research.resetLookupCircuit();
     await stub.stop();
@@ -331,7 +339,7 @@ async function scenarioRetryAfter() {
     ok(!!waited, "the retry was not said out loud");
     ok(/retrying in 1000 ms/.test(waited || ""), `the retry did not wait the second the server asked for: ${waited}`);
     ok(/honouring the server's Retry-After/.test(waited || ""), `the retry does not say it honoured the header: ${waited}`);
-    console.log("lookup 3 / 8: Retry-After is honoured on the wire, capped at 30 s, and the fallback doubles from 1 s");
+    console.log("lookup 3 / 11: Retry-After is honoured on the wire, capped at 30 s, and the fallback doubles from 1 s");
   } finally {
     research.resetLookupCircuit();
     await stub.stop();
@@ -383,12 +391,19 @@ async function scenarioTheCircuitBreaker() {
 
     // The reset door is the only way back, and a fresh run starts clean.
     research.resetLookupCircuit();
-    same(research.circuitState(), { failures: 0, open: false, openedAfter: 0, openedAt: null, lastError: null }, "resetLookupCircuit did not reset the circuit");
+    same(
+      research.circuitState(),
+      {
+        failures: 0, open: false, gaveUp: false, openedAfter: 0, openedAt: null, openedAtMs: 0,
+        probes: 0, probing: false, refusedRequests: 0, unansweredTerms: 0, lastError: null,
+      },
+      "resetLookupCircuit did not reset the circuit"
+    );
     const recovered = await research.researchTerms([{ term: "answered-again" }]);
     ok(recovered[0].status === research.LOOKUP_OK, "the layer cannot query again after a reset");
     same(research.circuitState().failures, 0, "an answered lookup left a failure counted");
 
-    console.log(`lookup 4 / 8: the circuit opens after ${research.LOOKUP_CIRCUIT_OPEN_AFTER} consecutive gave-up request(s), sends 0 more, and a success resets it`);
+    console.log(`lookup 4 / 11: the circuit opens after ${research.LOOKUP_CIRCUIT_OPEN_AFTER} consecutive gave-up request(s), sends 0 more inside its window, and a success resets it`);
   } finally {
     research.resetLookupCircuit();
     await stub.stop();
@@ -453,7 +468,7 @@ async function scenarioMaxlagAndPrimitives() {
     const extractOut = await tools.wiki_extract.execute({ title: "rejected-page", lang: "ja" });
     ok(/extract error/.test(extractOut), `the wiki_extract tool does not report the failure to the model: ${extractOut}`);
 
-    console.log(`lookup 5 / 8: maxlag=${research.WIKI_MAXLAG} on both calls; wikiSearch / wikiExtract / createWikiTools keep their contract and gain the retry underneath`);
+    console.log(`lookup 5 / 11: maxlag=${research.WIKI_MAXLAG} on both calls; wikiSearch / wikiExtract / createWikiTools keep their contract and gain the retry underneath`);
   } finally {
     research.resetLookupCircuit();
     await stub.stop();
@@ -780,7 +795,7 @@ async function scenarioAFailedLookupFilesNothing() {
   ok(log2.includes("## Could not ask (0)"), "the second pass's log still counts the term it has now asked");
   ok(log2.includes("every lookup this volume attempted reached the reference"), "the second pass's log does not say the reference was reachable");
 
-  console.log("lookup 6 / 8: a rejected lookup files nothing and is asked again next pass; a genuine \"nothing there\" still files its note");
+  console.log("lookup 6 / 11: a rejected lookup files nothing and is asked again next pass; a genuine \"nothing there\" still files its note");
 }
 
 // ─── Scenario 7 — a genuine empty answer, and a partial one ───────────────────
@@ -833,40 +848,319 @@ async function scenarioEmptyAndPartialStayApart() {
   ]);
   ok(failedLines.some((line) => line.includes("COULD NOT ASK") && line.includes("status 503")), `the lookup lines do not name the state: ${failedLines.join(" | ")}`);
 
-  console.log("lookup 7 / 8: \"nothing there\" and \"could not ask\" and \"half the reference answered\" are three different published facts");
+  console.log("lookup 7 / 11: \"nothing there\" and \"could not ask\" and \"half the reference answered\" are three different published facts");
+}
+
+// ─── Scenario 9 — the half-open window ────────────────────────────────────────
+
+/**
+ * The breaker is half-open, not permanent: a refused lookup costs no request and no wait, the cooldown
+ * is measured rather than slept through, and the lookup the run was already going to make goes out as
+ * a probe once the window has elapsed. If it reaches the reference the circuit closes and says how long
+ * it was open and how many terms it left unanswered.
+ *
+ * @returns {Promise<void>}
+ */
+async function scenarioTheHalfOpenProbeClosesTheCircuit() {
+  research.resetLookupCircuit();
+  let rejecting = true;
+  const stub = await startStub((record) => {
+    if (record.list === "search") {
+      if (rejecting) return { status: 429, headers: { "Retry-After": "0" }, body: {} };
+      return { status: 200, body: searchBody(record.srsearch) };
+    }
+    return { status: 200, body: extractBody(`${record.titles} is a real thing.`) };
+  });
+
+  /** The clock the breaker measures against. **A test seam** — scenario 8 pins that nothing else can move it. */
+  let fakeNow = 1_000_000;
+  research.setLookupClockForTests(() => fakeNow);
+
+  try {
+    // Open it: three rejected terms is six gave-up requests, and the bound is five.
+    await captureConsole(() =>
+      research.researchTerms([{ term: "rejected-1" }, { term: "rejected-2" }, { term: "rejected-3" }])
+    );
+    const opened = research.circuitState();
+    ok(opened.open && !opened.gaveUp, "the circuit did not open on five consecutive gave-up request(s)");
+    same(opened.probes, 0, "opening the circuit spent a probe request");
+    same(opened.refusedRequests, 1, `${opened.refusedRequests} request(s) were refused while opening the circuit; the fifth failure opened it mid-term`);
+    same(opened.unansweredTerms, 1, `${opened.unansweredTerms} term(s) counted as left unanswered by the open circuit; only the term the circuit refused counts`);
+
+    // Inside the window: refused, instantly, with no request on the wire.
+    const before = stub.requests.length;
+    const refusedFrom = Date.now();
+    const refused = await research.researchTerms([{ term: "rejected-4" }, { term: "rejected-5" }]);
+    const refusedIn = Date.now() - refusedFrom;
+    same(stub.requests.length, before, `the circuit was open inside its window and the layer sent ${stub.requests.length - before} request(s)`);
+    ok(refusedIn < 1000, `refusing two terms took ${refusedIn} ms — a refusal must be instant; a cooldown that waits turns a rate limit into a stall`);
+    ok(refused.every((note) => note.status === research.LOOKUP_FAILED && note.found === false), "a term refused by the open circuit is not reported as failed");
+    ok(refused.every((note) => note.results.every((r) => r.circuitOpen === true)), "a refused term does not say the refusal came from the circuit");
+    same(research.circuitState().refusedRequests, 5, `${research.circuitState().refusedRequests} refused request(s) counted`);
+    same(research.circuitState().unansweredTerms, 3, `${research.circuitState().unansweredTerms} term(s) counted as unanswered by the open circuit`);
+
+    // One millisecond short of the window: still refused, still no request.
+    fakeNow += research.LOOKUP_CIRCUIT_PROBE_AFTER_MS - 1;
+    const near = stub.requests.length;
+    await research.researchTerms([{ term: "rejected-6" }]);
+    same(stub.requests.length, near, "a lookup arrived 1 ms before the window elapsed and was sent anyway");
+
+    // The window elapses. Nothing waited for it: the clock moved, and the next lookup goes out as a probe.
+    fakeNow += 1;
+    rejecting = false; // the reference recovered, which is what a 20-second blip is
+    const probeFrom = Date.now();
+    const probeRun = await captureConsole(() => research.researchTerms([{ term: "after-the-window" }]));
+    const probeIn = Date.now() - probeFrom;
+    ok(probeIn < 10_000, `the lookup that crossed the window took ${probeIn} ms — the layer must compare elapsed time, never sleep through the cooldown`);
+
+    const sent = stub.requests.filter((r) => r.list === "search" && r.srsearch === "after-the-window");
+    same(sent.length, 2, `the term behind the window cost ${sent.length} search request(s); one per language, once the probe closed the circuit`);
+    same(sent.filter((r) => r.lang === "ja").length, 1, "the probe was retried — a probe is one request, no retries");
+    ok(probeRun.warnings.some((line) => line.includes("half-open") && /probe 1 of/.test(line)), "the probe was not said out loud");
+    const closed = probeRun.logs.find((line) => line.includes("Lookup circuit CLOSED"));
+    ok(!!closed, "the circuit closed silently — a run that lost notes has to say it lost them");
+    ok(closed.includes(`${research.LOOKUP_CIRCUIT_PROBE_AFTER_MS} ms`), `the close does not say how long the circuit was open: ${closed}`);
+    ok(closed.includes("7 lookup request(s) were refused"), `the close does not count the refused requests: ${closed}`);
+    ok(closed.includes("4 term(s) went unanswered"), `the close does not count the terms the window cost: ${closed}`);
+    ok(probeRun.warnings.some((line) => line.includes("No request was waited for")), "the probe does not say it was not waited for");
+
+    const afterClose = research.circuitState();
+    ok(!afterClose.open && !afterClose.gaveUp, "the circuit is still open after a probe reached the reference");
+    same(afterClose.failures, 0, "a probe that reached the reference left failures counted");
+    same(afterClose.probes, 0, "the probe budget did not reset with the circuit");
+    same(afterClose.unansweredTerms, 0, "the unanswered count carried into the closed circuit");
+
+    // And later lookups behave normally again: the full retry budget is back.
+    rejecting = true;
+    const from = stub.requests.length;
+    await research.researchTerms([{ term: "closed-again" }]);
+    const jaSearches = stub.requests.slice(from).filter((r) => r.list === "search" && r.lang === "ja").length;
+    same(jaSearches, 1 + research.LOOKUP_MAX_RETRIES, `a lookup after the close cost ${jaSearches} request(s); the retry budget is ${1 + research.LOOKUP_MAX_RETRIES}`);
+    ok(!research.circuitState().open, "the circuit reopened on fewer than five consecutive failures");
+
+    console.log(`lookup 9 / 11: a refusal costs 0 requests and 0 ms, the window is measured not slept, and probe 1 of ${research.LOOKUP_CIRCUIT_MAX_PROBES} closing the circuit prints what the open window cost`);
+  } finally {
+    research.resetLookupClockForTests();
+    research.resetLookupCircuit();
+    await stub.stop();
+  }
+}
+
+// ─── Scenario 10 — the probes run out ─────────────────────────────────────────
+
+/**
+ * A failed probe leaves the circuit open and re-arms the window; three failed probes end the breaker's
+ * patience for the rest of the run, so an unreachable reference cannot cost one request per minute.
+ *
+ * @returns {Promise<void>}
+ */
+async function scenarioTheProbesRunOut() {
+  research.resetLookupCircuit();
+  const stub = await startStub((record) => {
+    if (record.list === "search") return { status: 429, headers: { "Retry-After": "0" }, body: {} };
+    return { status: 200, body: extractBody("an extract") };
+  });
+  let fakeNow = 2_000_000;
+  research.setLookupClockForTests(() => fakeNow);
+
+  try {
+    await research.researchTerms([{ term: "rejected-1" }, { term: "rejected-2" }, { term: "rejected-3" }]);
+    const openedAt = research.circuitState().openedAtMs;
+    ok(research.circuitState().open, "the circuit did not open, so this scenario proves nothing");
+
+    for (let probe = 1; probe <= research.LOOKUP_CIRCUIT_MAX_PROBES; probe++) {
+      fakeNow = openedAt + probe * research.LOOKUP_CIRCUIT_PROBE_AFTER_MS;
+      const from = stub.requests.length;
+      const captured = await captureConsole(() => research.researchTerms([{ term: `probe-${probe}` }]));
+      const searches = stub.requests.slice(from).filter((r) => r.list === "search");
+      same(searches.length, 1, `probe ${probe} cost ${searches.length} search request(s) — a probe is one request, no retries`);
+      ok(captured.warnings.some((line) => line.includes(`probe ${probe} of ${research.LOOKUP_CIRCUIT_MAX_PROBES}`)), `probe ${probe} was not said out loud`);
+      const state = research.circuitState();
+      same(state.probes, probe, `probe ${probe} was not counted`);
+      if (probe < research.LOOKUP_CIRCUIT_MAX_PROBES) {
+        ok(state.open && !state.gaveUp, `the circuit closed on a failed probe (probe ${probe})`);
+        ok(captured.warnings.some((line) => line.includes("was rejected") && line.includes("the window starts again")), `the failed probe does not say the window starts again: ${captured.warnings.join(" | ")}`);
+        // The rest of the same term's lookups are refused again, immediately: the window was re-armed.
+        same(state.openedAtMs, fakeNow, `a failed probe did not re-arm the window (openedAtMs ${state.openedAtMs}, now ${fakeNow})`);
+        const afterProbe = stub.requests.length;
+        await research.researchTerms([{ term: `after-failed-probe-${probe}` }]);
+        same(stub.requests.length, afterProbe, "the layer kept sending requests after a probe failed");
+      }
+    }
+
+    const given = research.circuitState();
+    ok(given.open, "the circuit closed when the probes ran out — an unreachable reference is not reachable");
+    ok(given.gaveUp, "the breaker did not say it has given up for the rest of the run");
+    same(given.probes, research.LOOKUP_CIRCUIT_MAX_PROBES, `${given.probes} probe(s) were paid for; the bound is ${research.LOOKUP_CIRCUIT_MAX_PROBES}`);
+
+    // Half an hour later: still open, and still not one more request.
+    fakeNow += 30 * 60_000;
+    const held = stub.requests.length;
+    const heldFrom = Date.now();
+    const still = await research.researchTerms([{ term: "half-an-hour-later-1" }, { term: "half-an-hour-later-2" }]);
+    const heldIn = Date.now() - heldFrom;
+    same(stub.requests.length, held, `the probes ran out and the layer sent ${stub.requests.length - held} further request(s)`);
+    ok(heldIn < 1000, `refusing after the probes ran out took ${heldIn} ms`);
+    ok(still.every((note) => note.status === research.LOOKUP_FAILED && note.results.every((r) => r.circuitOpen === true)), "a term behind a given-up circuit is not reported as refused by the circuit");
+
+    const totalProbes = stub.requests.filter((r) => String(r.srsearch).startsWith("probe-")).length;
+    same(totalProbes, research.LOOKUP_CIRCUIT_MAX_PROBES, `the run paid for ${totalProbes} probe request(s); the bound is ${research.LOOKUP_CIRCUIT_MAX_PROBES}`);
+
+    console.log(`lookup 10 / 11: a failed probe re-arms the window, ${research.LOOKUP_CIRCUIT_MAX_PROBES} failed probes give up out loud, and 30 minutes later the layer still sends 0 requests`);
+  } finally {
+    research.resetLookupClockForTests();
+    research.resetLookupCircuit();
+    await stub.stop();
+  }
+}
+
+// ─── Scenario 11 — the stage side of the open window ──────────────────────────
+
+/**
+ * The account owner's reason for the half-open window, end to end through the stage's own door: a
+ * blip during volume 1 used to cost this volume every research note it would have written. The terms
+ * the open window refused are still filed as nothing, still named under "Could not ask", still cost no
+ * model call, and are still looked up again on the next pass — where the probe reaches the reference
+ * and all three notes get written.
+ *
+ * @returns {Promise<void>}
+ */
+async function scenarioTheOpenWindowCostsNotesAndTheProbeGetsThemBack() {
+  const { ctx } = openFixture("lookup-11");
+  // A third researchable row, so this volume's own lookups are enough to trip the breaker.
+  glossaryStore.fileGlossaryTermRows(ctx, [
+    { term: "橋", rendering: "the bridge", note: "Real crossing outside the school.", type: "concept", section: "Real-World References", query: "橋" },
+  ]);
+
+  research.resetLookupCircuit();
+  let rejecting = true;
+  const stub = await startStub((record) => {
+    if (record.list === "search") {
+      if (rejecting) return { status: 429, headers: { "Retry-After": "0" }, body: {} };
+      return { status: 200, body: searchBody(record.srsearch) };
+    }
+    return { status: 200, body: extractBody(`${record.titles} is a real thing.`) };
+  });
+  let fakeNow = 3_000_000;
+  research.setLookupClockForTests(() => fakeNow);
+
+  try {
+    // Pass 1: the reference is refusing, and the breaker shuts for this volume's whole research pass.
+    const sink1 = { calls: [] };
+    const pass1 = await withStubbedModel(fakeResearchModel(sink1), () =>
+      captureConsole(() => researchVolumeTerms(ctx))
+    );
+    const result1 = pass1.result;
+    const log1 = fs.readFileSync(ctx.researchNotesFile, "utf8");
+
+    ok(research.circuitState().open, "the circuit did not open on this volume's lookups");
+    same(result1.asked, 3, `${result1.asked} term(s) were put through the lookup`);
+    same(result1.unanswered, 3, `${result1.unanswered} term(s) reported unanswered; every lookup was refused or rejected`);
+    same(result1.filed, 0, `${result1.filed} note(s) filed; a term the reference never answered may not be filed`);
+    same(result1.notFound, 0, "a refused lookup was counted as \"nothing matched\"");
+    same(sink1.calls.length, 0, `${sink1.calls.length} model call(s) spent; a term nobody managed to ask costs none`);
+    same(researchNotesInRecord(ctx.refStore, { volume: 1 }), [], "the record holds research notes for terms the reference never answered");
+
+    ok(log1.includes("## Could not ask (3)"), `the log has no "Could not ask (3)" section: ${log1.slice(0, 400)}`);
+    for (const term of ["黒板", "芥川龍之介", "橋"]) {
+      ok(log1.includes(`- ${term} (Real-World References)`), `the log does not name ${term} as a term it could not ask`);
+      ok(!/No reference page matched "[^"]*"/.test(log1), `the log still prints "nothing matched" for a term the reference never answered: ${term}`);
+    }
+    ok(log1.includes("asked again on the next pass"), "the log does not say the terms are asked again");
+
+    // Pass 2: the blip has cleared, the window has elapsed, and the pass asks the same three terms.
+    ctx.researchLog = null;
+    ctx.researchTurnsLeft = RESEARCH_MAX_TERMS_PER_VOLUME;
+    rejecting = false;
+    fakeNow += research.LOOKUP_CIRCUIT_PROBE_AFTER_MS;
+    const sink2 = { calls: [] };
+    const pass2 = await withStubbedModel(fakeResearchModel(sink2), () =>
+      captureConsole(() => researchVolumeTerms(ctx))
+    );
+    const log2 = fs.readFileSync(ctx.researchNotesFile, "utf8");
+
+    ok(!research.circuitState().open, "the probe did not close the circuit, so the volume is still shut out");
+    same(pass2.result.unanswered, 0, `${pass2.result.unanswered} term(s) still unanswered after the reference recovered`);
+    same(pass2.result.filed, 3, `the second pass filed ${pass2.result.filed} note(s); the probe was supposed to get all three back`);
+    const notes = researchNotesInRecord(ctx.refStore, { volume: 1 });
+    same(notes.map((note) => note.term).sort(), ["橋", "芥川龍之介", "黒板"].sort(), "the notes the open window cost were not written on the next pass");
+    ok(log2.includes("## Could not ask (0)"), "the second pass's log still counts the terms it has now asked");
+    ok(log2.includes("every lookup this volume attempted reached the reference"), "the second pass's log does not say the reference was reachable");
+    ok(pass2.logs.some((line) => line.includes("Lookup circuit CLOSED")), "the stage's own pass did not print that the circuit closed");
+
+    console.log("lookup 11 / 11: an open window files nothing and names every term it cost; the next pass asks them and the probe gets the notes back");
+  } finally {
+    research.resetLookupClockForTests();
+    research.resetLookupCircuit();
+    await stub.stop();
+  }
 }
 
 // ─── Scenario 8 — no knob ─────────────────────────────────────────────────────
 
 /**
  * The reliability bounds are constants. A process that tries to raise them in the environment gets the
- * same numbers, and nothing in the lookup layer reads them out of `process.env`.
+ * same numbers, nothing in the lookup layer reads them out of `process.env`, and the clock seam the
+ * cooldown is tested through is a seam no stage can reach.
  *
  * @returns {void}
  */
 function scenarioTheBoundsHaveNoKnob() {
-  const names = ["LOOKUP_MAX_RETRIES", "LOOKUP_BACKOFF_BASE_MS", "LOOKUP_RETRY_AFTER_MAX_MS", "LOOKUP_CIRCUIT_OPEN_AFTER", "WIKI_MAXLAG", "RESEARCH_MAX_RETRIES", "RESEARCH_RETRY_AFTER_MAX_MS", "RESEARCH_CIRCUIT", "RESEARCH_CIRCUIT_OPEN_AFTER", "WIKI_MAXLAG"];
+  const names = ["LOOKUP_MAX_RETRIES", "LOOKUP_BACKOFF_BASE_MS", "LOOKUP_RETRY_AFTER_MAX_MS", "LOOKUP_CIRCUIT_OPEN_AFTER", "LOOKUP_CIRCUIT_PROBE_AFTER_MS", "LOOKUP_CIRCUIT_MAX_PROBES", "WIKI_MAXLAG", "RESEARCH_MAX_RETRIES", "RESEARCH_RETRY_AFTER_MAX_MS", "RESEARCH_CIRCUIT", "RESEARCH_CIRCUIT_OPEN_AFTER", "RESEARCH_CIRCUIT_PROBE_AFTER_MS", "RESEARCH_CIRCUIT_MAX_PROBES", "LOOKUP_CLOCK", "RESEARCH_LOOKUP_CLOCK", "LOOKUP_CIRCUIT_CLOCK_MS", "WIKI_MAXLAG"];
   const env = Object.fromEntries(names.map((name) => [name, "999"]));
   const script =
     "const r = require('./research');" +
-    "console.log(JSON.stringify([r.LOOKUP_MAX_RETRIES, r.LOOKUP_BACKOFF_BASE_MS, r.LOOKUP_RETRY_AFTER_MAX_MS, r.LOOKUP_CIRCUIT_OPEN_AFTER, r.WIKI_MAXLAG]));";
+    "console.log(JSON.stringify([r.LOOKUP_MAX_RETRIES, r.LOOKUP_BACKOFF_BASE_MS, r.LOOKUP_RETRY_AFTER_MAX_MS, r.LOOKUP_CIRCUIT_OPEN_AFTER, r.LOOKUP_CIRCUIT_PROBE_AFTER_MS, r.LOOKUP_CIRCUIT_MAX_PROBES, r.WIKI_MAXLAG]));";
   const run = spawnSync(process.execPath, ["-e", script], { cwd: ROOT, env: { ...process.env, ...env }, encoding: "utf8" });
   const values = JSON.parse(String(run.stdout).trim());
-  same(values, [2, 1000, 30000, 5, 5], `a process that set ${names.join(" / ")}=999 got ${JSON.stringify(values)}`);
+  same(values, [2, 1000, 30000, 5, 60000, 3, 5], `a process that set ${names.join(" / ")}=999 got ${JSON.stringify(values)}`);
 
   const layer = require("./module-layer").readModuleLayer(ROOT, "research.js");
-  for (const name of ["LOOKUP_MAX_RETRIES", "LOOKUP_BACKOFF_BASE_MS", "LOOKUP_RETRY_AFTER_MAX_MS", "LOOKUP_CIRCUIT_OPEN_AFTER", "WIKI_MAXLAG"]) {
+  for (const name of ["LOOKUP_MAX_RETRIES", "LOOKUP_BACKOFF_BASE_MS", "LOOKUP_RETRY_AFTER_MAX_MS", "LOOKUP_CIRCUIT_OPEN_AFTER", "LOOKUP_CIRCUIT_PROBE_AFTER_MS", "LOOKUP_CIRCUIT_MAX_PROBES", "WIKI_MAXLAG"]) {
     const declaration = layer.match(new RegExp(`const ${name} = (\\d+);`));
     ok(!!declaration, `${name} is not a literal constant in research.js`);
     ok(!new RegExp(`process\\.env\\.${name}`).test(layer), `${name} is read out of the environment`);
   }
   ok(!/process\.env\.RESEARCH_MAX_RETRIES|process\.env\.RESEARCH_CIRCUIT/.test(layer), "the lookup layer grew a retry or circuit knob");
+  ok(!/process\.env\.[A-Z0-9_]*(CLOCK|PROBE)[A-Z0-9_]*/.test(layer), "the cooldown grew a clock or probe knob in the environment");
   same(research.LOOKUP_MAX_RETRIES, 2, "the retry bound moved");
   same(research.LOOKUP_CIRCUIT_OPEN_AFTER, 5, "the circuit bound moved");
+  same(research.LOOKUP_CIRCUIT_PROBE_AFTER_MS, 60000, "the probe window moved");
+  same(research.LOOKUP_CIRCUIT_MAX_PROBES, 3, "the probe budget moved");
   same(research.LOOKUP_RETRY_AFTER_MAX_MS, 30000, "the Retry-After cap moved");
   same(research.WIKI_MAXLAG, 5, "maxlag moved");
 
-  console.log("lookup 8: the retry bound, the backoff cap, the circuit bound and maxlag are constants — no environment knob reaches them");
+  // **The clock is a test seam, not a door.** No file outside `test/` and `research.js` itself may name
+  // it: a stage that could move the clock could make the cooldown elapse whenever it liked, which is a
+  // guard the guarded party controls (AGENTS.md §4.3, gotcha 70).
+  const skip = new Set(["node_modules", ".git", "plan", "test", ".dry-run", ".run", "epub_source"]);
+  const seamCallers = [];
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (skip.has(entry.name)) continue;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(abs);
+      else if (entry.name.endsWith(".js")) {
+        const rel = path.relative(ROOT, abs);
+        if (rel === "research.js") continue;
+        if (/setLookupClockForTests|resetLookupClockForTests/.test(fs.readFileSync(abs, "utf8"))) seamCallers.push(rel);
+      }
+    }
+  })(ROOT);
+  same(seamCallers, [], `the lookup clock seam is reached from ${seamCallers.join(", ")} — it exists for the offline suites and for nothing else`);
+
+  // And the seam refuses a value that would quietly disable the cooldown.
+  let seamThrew = null;
+  try {
+    research.setLookupClockForTests(60000);
+  } catch (err) {
+    seamThrew = err;
+  }
+  ok(seamThrew instanceof Error, "the clock seam accepted a non-function — a seam that accepts anything can be handed a value that turns the cooldown off");
+  ok(/test seam/.test(String(seamThrew && seamThrew.message)), `the seam does not say what it is: ${seamThrew && seamThrew.message}`);
+  research.resetLookupClockForTests();
+
+  console.log("lookup 8 / 11: the retry bound, the backoff cap, both circuit bounds and maxlag are constants, and the clock seam is reachable from no stage and from no environment variable");
 }
 
 // ─── Run ──────────────────────────────────────────────────────────────────────
@@ -883,6 +1177,9 @@ async function main() {
   await scenarioMaxlagAndPrimitives();
   await scenarioAFailedLookupFilesNothing();
   await scenarioEmptyAndPartialStayApart();
+  await scenarioTheHalfOpenProbeClosesTheCircuit();
+  await scenarioTheProbesRunOut();
+  await scenarioTheOpenWindowCostsNotesAndTheProbeGetsThemBack();
   scenarioTheBoundsHaveNoKnob();
   console.log(`\ntest-lookup-reliability: ${checks} checks passed`);
 }

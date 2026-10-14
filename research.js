@@ -22,9 +22,19 @@
  *                     status rides along in `httpStatus`).
  *
  * A request that is rejected is retried, politely and a bounded number of times, and a lookup
- * layer that keeps being rejected stops asking for the rest of the run rather than spending
- * the remaining requests getting rejected again. Both bounds are constants with no environment
+ * layer that keeps being rejected stops asking rather than spending the remaining requests getting
+ * rejected again. The breaker is **half-open, not permanent**: after `LOOKUP_CIRCUIT_PROBE_AFTER_MS`
+ * the next lookup the stage was already going to make is sent as a probe, and if it reaches the
+ * reference the circuit closes and the run carries on. Wikipedia's own overload rejection — which
+ * this layer deliberately invites by sending `maxlag` — typically clears in seconds, so a permanent
+ * breaker would let a 20-second blip cost a 17-volume run every note it would have written. The
+ * probe is bounded too: one request, no retries, at most `LOOKUP_CIRCUIT_MAX_PROBES` of them, after
+ * which the circuit stays open for the rest of the run. All bounds are constants with no environment
  * knob (AGENTS.md §4.3), and the retry waits honour `Retry-After` when the server sends one.
+ *
+ * **The cooldown never sleeps.** The layer compares elapsed time and either refuses a request
+ * instantly (no network call, no wait) or lets it through; nothing waits for the window to elapse.
+ * The politeness sleep (`delayMs()`) and the retry backoff are the only waits in this module.
  *
  * @example
  * const { researchTerms, formatResearchNotes } = require("./research");
@@ -130,6 +140,34 @@ const LOOKUP_RETRY_AFTER_MAX_MS = 30000;
 const LOOKUP_CIRCUIT_OPEN_AFTER = 5;
 
 /**
+ * How long the breaker stays shut before it is allowed to ask once again.
+ *
+ * The breaker is half-open, not permanent. While it is open, a request that arrives before this
+ * window has elapsed is refused cheaply (no network call, no wait); a request that arrives after it
+ * has elapsed is sent as a **probe**. The window is measured, never slept through — the layer
+ * compares elapsed time and decides, so a cooldown cannot turn a rate limit into a stall.
+ *
+ * 60 s against the two measured facts this bound sits between: the real volume 01 run's 429 blip
+ * cleared on its own (3 rejected lookups out of the volume's lookups, and everything else answered),
+ * while a run that never recovers is bounded by {@link LOOKUP_CIRCUIT_MAX_PROBES} below, so the
+ * worst case this constant can cost is three requests, not one request per minute for five hours.
+ *
+ * @type {number}
+ */
+const LOOKUP_CIRCUIT_PROBE_AFTER_MS = 60000;
+
+/**
+ * How many probes the breaker is allowed to pay for before it gives up for the rest of the run.
+ *
+ * Without this the half-open window is a leak: an unreachable reference would cost one request every
+ * minute for the whole run. Three is enough to tell "Wikipedia is having a bad minute" from "the
+ * reference is not there", and it is the number that makes the half-open window safe to have.
+ *
+ * @type {number}
+ */
+const LOOKUP_CIRCUIT_MAX_PROBES = 3;
+
+/**
  * The `maxlag` the Wikipedia API is asked to enforce on our own behalf.
  *
  * Wikipedia's documented politeness parameter: the server refuses the request (with a 429 and a
@@ -216,37 +254,152 @@ function retryDelayMs(attempt, retryAfter = null, nowMs = Date.now()) {
   return Math.min(LOOKUP_BACKOFF_BASE_MS * 2 ** (n - 1), LOOKUP_RETRY_AFTER_MAX_MS);
 }
 
-// ─── The run-level circuit breaker ───────────────────────────────────────────
+// ─── The run-level circuit breaker (half-open) ───────────────────────────────
 
 /**
  * The breaker's state. Module-level on purpose: `research.js` is required once per process, and a
  * glossary step walks all 17 volumes inside one process, so "the rest of the run" is exactly the
  * lifetime of this object.
  *
- * @type {{failures: number, open: boolean, openedAfter: number, openedAt: string|null, lastError: string|null}}
+ * @typedef {Object} LookupCircuitState
+ * @property {number} failures - Consecutive lookup requests that gave up. A success resets it.
+ * @property {boolean} open - Whether the breaker is refusing requests.
+ * @property {boolean} gaveUp - Set when the probes ran out: open for the rest of the run, with no window.
+ * @property {number} openedAfter - How many consecutive failures opened it.
+ * @property {string|null} openedAt - When it opened (or last re-armed), as an ISO string.
+ * @property {number} openedAtMs - The same instant on the clock the window is measured against.
+ * @property {number} probes - Probe requests already paid for since it opened.
+ * @property {boolean} probing - Whether a probe is in flight right now (only one ever is).
+ * @property {number} refusedRequests - Lookup requests refused while it was open.
+ * @property {number} unansweredTerms - Terms left unanswered because their every lookup was refused.
+ * @property {string|null} lastError - The last reason a request gave up.
  */
+
+/** @type {LookupCircuitState} */
 const lookupCircuit = {
   failures: 0,
   open: false,
+  gaveUp: false,
   openedAfter: 0,
   openedAt: null,
+  openedAtMs: 0,
+  probes: 0,
+  probing: false,
+  refusedRequests: 0,
+  unansweredTerms: 0,
   lastError: null,
 };
 
 /**
- * The breaker, read.
+ * The clock the breaker measures its cooldown against.
  *
- * @returns {{failures: number, open: boolean, openedAfter: number, openedAt: string|null, lastError: string|null}} A copy, so a caller cannot write it.
+ * **A test seam, and nothing else.** It exists because a suite cannot sit for 60 s to prove a
+ * cooldown works, and a cooldown that cannot be tested is a cooldown that is only described. It is
+ * `null` in every real run: no stage, no stage module, and no command in this repository sets it —
+ * the same standing `resetLookupCircuit` has, and pinned by `test/test-lookup-reliability.js`
+ * scenario 11. It is not read out of the environment either: there is no knob that changes how long
+ * the breaker stays shut (AGENTS.md §4.3, gotcha 70).
+ *
+ * @type {(() => number)|null}
+ */
+let lookupClockForTests = null;
+
+/**
+ * "Now", in milliseconds, on the clock the breaker uses.
+ * @returns {number}
+ */
+function lookupNowMs() {
+  return lookupClockForTests === null ? Date.now() : lookupClockForTests();
+}
+
+/**
+ * Install a stand-in clock for the breaker's cooldown.
+ *
+ * **A test seam. No stage calls this** — the only callers in this repository are the offline suites.
+ * It changes no bound: the window and the probe budget stay the constants they are.
+ *
+ * @param {() => number} clock - A function returning "now" in milliseconds.
+ * @returns {void}
+ * @throws {Error} When the argument is not a function — a seam that accepts anything is a seam that
+ *   can be handed a value that quietly disables the cooldown.
+ */
+function setLookupClockForTests(clock) {
+  if (typeof clock !== "function") {
+    throw new Error("setLookupClockForTests expects a function returning milliseconds (it is a test seam, not a setting).");
+  }
+  lookupClockForTests = clock;
+}
+
+/**
+ * Put the clock back to the wall clock. **A test seam; no stage calls this.**
+ * @returns {void}
+ */
+function resetLookupClockForTests() {
+  lookupClockForTests = null;
+}
+
+/**
+ * The breaker, read.
+ * @returns {LookupCircuitState} A copy, so a caller cannot write it.
  */
 function circuitState() {
   return { ...lookupCircuit };
 }
 
 /**
- * Record one lookup request that gave up, and open the breaker when that is the fifth in a row.
+ * Decide whether the request about to be sent is the breaker's probe.
  *
- * Says so out loud exactly once: the point of the breaker is that a run stops spending requests,
- * and a run that stops silently is a run that looks like it found nothing.
+ * The whole half-open decision, and it never waits: the window has elapsed or it has not. A probe is
+ * **a lookup the stage was already going to make** — this function does not invent a request, it
+ * decides whether to let through one that is already here. At most one probe is in flight at a time.
+ *
+ * @returns {boolean} True when the caller's request is the probe; false when it must be refused.
+ */
+function admitProbe() {
+  if (lookupCircuit.gaveUp || lookupCircuit.probing) return false;
+  if (lookupCircuit.probes >= LOOKUP_CIRCUIT_MAX_PROBES) return false;
+  const elapsed = lookupNowMs() - lookupCircuit.openedAtMs;
+  if (elapsed < LOOKUP_CIRCUIT_PROBE_AFTER_MS) return false;
+  lookupCircuit.probing = true;
+  lookupCircuit.probes += 1;
+  console.warn(
+    `[research] Lookup circuit half-open: ${elapsed} ms have passed since it opened, so the next lookup ` +
+      `this run was already going to make is sent as probe ${lookupCircuit.probes} of ` +
+      `${LOOKUP_CIRCUIT_MAX_PROBES} — one request, no retries. No request was waited for.`
+  );
+  return true;
+}
+
+/**
+ * Open the breaker, and say so out loud exactly once.
+ *
+ * @param {number} nowMs - The instant it opens, on the clock the window is measured against.
+ * @returns {void}
+ */
+function openCircuit(nowMs) {
+  lookupCircuit.open = true;
+  lookupCircuit.gaveUp = false;
+  lookupCircuit.openedAfter = lookupCircuit.failures;
+  lookupCircuit.openedAt = new Date(nowMs).toISOString();
+  lookupCircuit.openedAtMs = nowMs;
+  lookupCircuit.probes = 0;
+  lookupCircuit.probing = false;
+  lookupCircuit.refusedRequests = 0;
+  lookupCircuit.unansweredTerms = 0;
+  console.error(
+    `[research] Lookup circuit OPEN after ${lookupCircuit.openedAfter} consecutive failed lookup ` +
+      `request(s): ${lookupCircuit.lastError}. No further lookups will be attempted while it is open — ` +
+      `every term behind it is reported as "the reference could not be reached", not as "nothing ` +
+      `matched", and nothing is filed for it. One probe request is allowed after ` +
+      `${LOOKUP_CIRCUIT_PROBE_AFTER_MS} ms, at most ${LOOKUP_CIRCUIT_MAX_PROBES} probes in total.`
+  );
+}
+
+/**
+ * Record one lookup request that gave up.
+ *
+ * Three cases, and the one that matters is the middle one: a **failed probe** leaves the circuit open
+ * and re-arms the window, and the third one closes the probe budget for the run.
  *
  * @param {string} reason - The last error message, for the record and the log.
  * @returns {void}
@@ -254,25 +407,84 @@ function circuitState() {
 function noteLookupFailure(reason) {
   lookupCircuit.failures += 1;
   lookupCircuit.lastError = String(reason || lookupCircuit.lastError || "");
-  if (lookupCircuit.open || lookupCircuit.failures < LOOKUP_CIRCUIT_OPEN_AFTER) return;
-  lookupCircuit.open = true;
-  lookupCircuit.openedAfter = lookupCircuit.failures;
-  lookupCircuit.openedAt = new Date().toISOString();
-  console.error(
-    `[research] Lookup circuit OPEN after ${lookupCircuit.openedAfter} consecutive failed lookup ` +
-      `request(s): ${lookupCircuit.lastError}. No further lookups will be attempted for the rest of ` +
-      `this run — every remaining term is reported as "the reference could not be reached", not as ` +
-      `"nothing matched", and nothing is filed for it.`
-  );
+  if (lookupCircuit.open) {
+    // The only request that can reach here while the circuit is open is the probe. A refused request
+    // never sends anything and never calls this.
+    if (!lookupCircuit.probing) return;
+    lookupCircuit.probing = false;
+    if (lookupCircuit.probes >= LOOKUP_CIRCUIT_MAX_PROBES) {
+      lookupCircuit.gaveUp = true;
+      console.error(
+        `[research] Lookup circuit GAVE UP for the rest of this run: ${lookupCircuit.probes} probe ` +
+          `request(s) in a row were rejected (${lookupCircuit.lastError}). No further lookups will be ` +
+          `attempted. While it was open ${lookupCircuit.refusedRequests} lookup request(s) were refused ` +
+          `and ${lookupCircuit.unansweredTerms} term(s) went unanswered — each is reported as unanswered, ` +
+          `nothing is filed for it, and the next pass asks it again.`
+      );
+      return;
+    }
+    const nowMs = lookupNowMs();
+    lookupCircuit.openedAt = new Date(nowMs).toISOString();
+    lookupCircuit.openedAtMs = nowMs;
+    console.warn(
+      `[research] Lookup circuit probe ${lookupCircuit.probes} of ${LOOKUP_CIRCUIT_MAX_PROBES} was ` +
+        `rejected (${lookupCircuit.lastError}). The circuit stays open and the window starts again: the ` +
+        `next probe is allowed after ${LOOKUP_CIRCUIT_PROBE_AFTER_MS} ms.`
+    );
+    return;
+  }
+  if (lookupCircuit.failures < LOOKUP_CIRCUIT_OPEN_AFTER) return;
+  openCircuit(lookupNowMs());
 }
 
 /**
  * Record one lookup request that got an answer, which is what closes the breaker's count.
- *
  * @returns {void}
  */
 function noteLookupSuccess() {
   lookupCircuit.failures = 0;
+}
+
+/**
+ * A probe reached the reference: close the breaker, and print what the open window cost.
+ *
+ * The terms that went unanswered while it was open are **not** undone by the close — they filed
+ * nothing and stay unanswered, which is what makes the next pass ask them again. The number is
+ * printed so a run that lost notes says how many it lost.
+ *
+ * @returns {void}
+ */
+function closeCircuitAfterProbe() {
+  const openForMs = Math.max(0, lookupNowMs() - lookupCircuit.openedAtMs);
+  console.log(
+    `[research] Lookup circuit CLOSED: probe ${lookupCircuit.probes} of ${LOOKUP_CIRCUIT_MAX_PROBES} ` +
+      `reached the reference. It had been open ${openForMs} ms; ${lookupCircuit.refusedRequests} lookup ` +
+      `request(s) were refused and ${lookupCircuit.unansweredTerms} term(s) went unanswered while it was ` +
+      `— nothing was filed for any of them, and the next pass asks them again. The failure count is ` +
+      `reset and lookups continue.`
+  );
+  lookupCircuit.open = false;
+  lookupCircuit.gaveUp = false;
+  lookupCircuit.failures = 0;
+  lookupCircuit.openedAfter = 0;
+  lookupCircuit.openedAt = null;
+  lookupCircuit.openedAtMs = 0;
+  lookupCircuit.probes = 0;
+  lookupCircuit.probing = false;
+  lookupCircuit.refusedRequests = 0;
+  lookupCircuit.unansweredTerms = 0;
+}
+
+/**
+ * Count one term whose every lookup was refused by the open breaker.
+ *
+ * Counted at the term level rather than the request level, because "how many notes did this run lose
+ * while the circuit was open" is a question about terms, and one term costs several refused requests.
+ *
+ * @returns {void}
+ */
+function noteTermUnansweredByCircuit() {
+  lookupCircuit.unansweredTerms += 1;
 }
 
 /**
@@ -288,8 +500,14 @@ function noteLookupSuccess() {
 function resetLookupCircuit() {
   lookupCircuit.failures = 0;
   lookupCircuit.open = false;
+  lookupCircuit.gaveUp = false;
   lookupCircuit.openedAfter = 0;
   lookupCircuit.openedAt = null;
+  lookupCircuit.openedAtMs = 0;
+  lookupCircuit.probes = 0;
+  lookupCircuit.probing = false;
+  lookupCircuit.refusedRequests = 0;
+  lookupCircuit.unansweredTerms = 0;
   lookupCircuit.lastError = null;
 }
 
@@ -301,7 +519,8 @@ function resetLookupCircuit() {
  */
 function circuitOpenError() {
   const err = new Error(
-    `Lookup circuit is open (${lookupCircuit.openedAfter} consecutive failed lookup request(s)); ` +
+    `Lookup circuit is open (${lookupCircuit.openedAfter} consecutive failed lookup request(s), ` +
+      `${lookupCircuit.probes} probe(s) tried${lookupCircuit.gaveUp ? ", the probes ran out" : ""}); ` +
       `no request was sent.`
   );
   err.circuitOpen = true;
@@ -338,65 +557,86 @@ async function fetchWithTimeout(url, options = {}) {
  * Both Wikipedia calls and nothing else go through here, so the retry policy cannot be half-applied.
  * Throws when the request gives up; the thrown error carries `httpStatus` and `attempts`.
  *
+ * When the breaker is open the request is refused **immediately** — no network call, no wait for the
+ * cooldown. The one exception is the probe: the request already in hand is let through, once, with
+ * its retries switched off (one request, no retries), because the probe is a lookup the stage was
+ * already going to make and the layer does not invent a request to test the reference with.
+ *
  * @param {string} url - The URL to request.
  * @param {string} label - What to call this request in the retry warning (e.g. "Wikipedia search (ja)").
  * @param {Object<string,string>} [headers] - Extra headers.
  * @returns {Promise<{response: Response, attempts: number}>} The successful response and how many requests it cost.
- * @throws {Error} When the breaker is open, or when the request gave up after its retries.
+ * @throws {Error} When the breaker is open and this is not its probe, or when the request gave up after its retries.
  */
 async function requestLookup(url, label, headers = {}) {
-  if (lookupCircuit.open) throw circuitOpenError();
+  let probe = false;
+  if (lookupCircuit.open) {
+    probe = admitProbe();
+    if (!probe) {
+      lookupCircuit.refusedRequests += 1;
+      throw circuitOpenError();
+    }
+  }
+  // A probe is one request. Retrying a probe is how a cooldown becomes a burst.
+  const maxAttempts = probe ? 1 : 1 + LOOKUP_MAX_RETRIES;
 
   const sent = { "User-Agent": userAgent(), ...headers };
   let attempt = 0;
-  for (;;) {
-    attempt += 1;
-    let response = null;
-    let transportError = null;
-    try {
-      response = await fetchWithTimeout(url, { headers: sent });
-    } catch (err) {
-      transportError = err;
-    }
-
-    if (!transportError && response.ok) {
-      noteLookupSuccess();
-      return { response, attempts: attempt };
-    }
-
-    const status = transportError ? null : response.status;
-    const reason = transportError
-      ? transportError.message
-      : `${label} failed with status ${status}`;
-    // A rejected body still has to be released, or the connection it arrived on is never given back.
-    if (!transportError) {
+  try {
+    for (;;) {
+      attempt += 1;
+      let response = null;
+      let transportError = null;
       try {
-        await response.body?.cancel();
-      } catch {
-        /* the body is already gone */
+        response = await fetchWithTimeout(url, { headers: sent });
+      } catch (err) {
+        transportError = err;
       }
-    }
-    // A transport failure is worth another try; a rejected status is only worth another try when the
-    // server said "not right now".
-    const retryable = transportError ? true : isRetryableStatus(status);
 
-    if (retryable && attempt <= LOOKUP_MAX_RETRIES) {
-      const retryAfter = transportError ? null : response.headers.get("retry-after");
-      const wait = retryDelayMs(attempt, retryAfter);
-      console.warn(
-        `[research] ${reason} — retrying in ${wait} ms (retry ${attempt} of ${LOOKUP_MAX_RETRIES}` +
-          `${parseRetryAfterMs(retryAfter) !== null ? ", honouring the server's Retry-After" : ""}).`
-      );
-      await sleep(wait);
-      continue;
-    }
+      if (!transportError && response.ok) {
+        if (probe) closeCircuitAfterProbe();
+        noteLookupSuccess();
+        return { response, attempts: attempt };
+      }
 
-    noteLookupFailure(reason);
-    const err = new Error(`${reason} after ${attempt} request(s)`);
-    err.httpStatus = status;
-    err.attempts = attempt;
-    err.circuitOpen = false;
-    throw err;
+      const status = transportError ? null : response.status;
+      const reason = transportError
+        ? transportError.message
+        : `${label} failed with status ${status}`;
+      // A rejected body still has to be released, or the connection it arrived on is never given back.
+      if (!transportError) {
+        try {
+          await response.body?.cancel();
+        } catch {
+          /* the body is already gone */
+        }
+      }
+      // A transport failure is worth another try; a rejected status is only worth another try when the
+      // server said "not right now".
+      const retryable = transportError ? true : isRetryableStatus(status);
+
+      if (retryable && attempt < maxAttempts) {
+        const retryAfter = transportError ? null : response.headers.get("retry-after");
+        const wait = retryDelayMs(attempt, retryAfter);
+        console.warn(
+          `[research] ${reason} — retrying in ${wait} ms (retry ${attempt} of ${LOOKUP_MAX_RETRIES}` +
+            `${parseRetryAfterMs(retryAfter) !== null ? ", honouring the server's Retry-After" : ""}).`
+        );
+        await sleep(wait);
+        continue;
+      }
+
+      noteLookupFailure(reason);
+      const err = new Error(`${reason} after ${attempt} request(s)`);
+      err.httpStatus = status;
+      err.attempts = attempt;
+      err.circuitOpen = false;
+      err.probe = probe;
+      throw err;
+    }
+  } finally {
+    // A probe is in flight for exactly one request, whatever way that request ended.
+    if (probe) lookupCircuit.probing = false;
   }
 }
 
@@ -751,6 +991,13 @@ async function researchTerms(terms) {
       ...(await researchSearchApi(q)),
     ];
     const state = lookupStatusOf(results);
+    // A term the breaker refused every lookup for is a note this run did not write. Counted here, at
+    // the term level, so the moment the circuit closes can say how many notes the open window cost —
+    // and nothing else about these terms changes: they file nothing, are named under "Could not ask",
+    // and are asked again next pass.
+    if (state.status === LOOKUP_FAILED && results.some((entry) => entry.circuitOpen === true)) {
+      noteTermUnansweredByCircuit();
+    }
     notes.push({
       term,
       query: q,
@@ -824,6 +1071,8 @@ module.exports = {
   LOOKUP_BACKOFF_BASE_MS,
   LOOKUP_RETRY_AFTER_MAX_MS,
   LOOKUP_CIRCUIT_OPEN_AFTER,
+  LOOKUP_CIRCUIT_PROBE_AFTER_MS,
+  LOOKUP_CIRCUIT_MAX_PROBES,
   WIKI_MAXLAG,
   isRetryableStatus,
   parseRetryAfterMs,
@@ -833,6 +1082,11 @@ module.exports = {
   noteLookupFailure,
   noteLookupSuccess,
   resetLookupCircuit,
+  // **Test seams.** No stage, no stage module and no command in this repository calls these two;
+  // scenario 11 of `test/test-lookup-reliability.js` pins that, and pins that no environment variable
+  // reaches them or the two probe bounds.
+  setLookupClockForTests,
+  resetLookupClockForTests,
   // Fine-grained primitives used by the agent-mode wiki tools (harness.js).
   wikiSearch,
   wikiExtract,
