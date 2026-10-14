@@ -245,6 +245,48 @@ place on the same finding, which is what "the same assessment would stop it in t
 Volume 01's glossary outputs are byte-identical across the whole exercise and the staged book survives
 (Tier C).
 
+**A step can now report what it learned while it was running** (`utils/postmortem/channel.js`,
+`utils/series-run/findings.js`, gotcha 146). The assessment asks a finished step a question it could only
+ever ask of the disk: *did the files land, in the shape they were promised?* A fact a stage discovered
+inside its own process — a term-list read that never produced a list, a chapter whose answer never closed —
+was on the console, in the report the grader reads, and on a field of the stage's own context object that
+nothing read. It never reached the triage, never reached the volume-boundary gate, and a MAJOR finding
+behaved like a sentence. The live case: run `2026-10-13T12-45-22-158Z` paid **73,330 tokens** for volume 01
+chapter 5, filed **0** terms, and that step's ledger entry recorded **0 HIGH / 0 MEDIUM / 0 LOW**.
+
+The pipe is two pieces. A step calls `reportVolumeFindings({ step, volumeEntry, volumeDir, bundle,
+findings })` at the end of its work on one volume; it writes
+`<run records>/step-findings/<step>-<volume>.json` (schema 1) through `postMortemDir()` resolved at **call**
+time. `runPostMortem` reads that record back while assessing the same volume, so the finding is a finding:
+routed by its level, able to halt the walk, recorded in the ledger, printed in the step's own report. The
+shared loop already ran that assessment per volume; this is the missing input to it, not a new gate.
+
+Four rules keep it from becoming a way for a step to grade itself:
+
+| rule | what it means |
+|---|---|
+| **the level is never the caller's** | the record stores severity, kind, file and message — four fields, nothing else. The level is looked up from `utils/postmortem/levels.js` at **read** time through the same `finding()` every disk finding goes through. A stage that sends `level: "STOP"` arrives MAJOR; a kind the table does not know arrives MINOR **and says so, once**. |
+| **absence is named, not punished** | no record for a volume is not a finding. The report says "N volume(s) reported nothing (01, 02, …)". Every volume already on disk and every `--dry-run` is in that class, so the channel cannot retroactively damage a healthy book. Measured on the real corpus: **17 volumes, 0 reported, 0 findings contributed, volume 01 still 0 findings**. |
+| **a record that does not describe this book is stale** | the record carries the source file it read and that file's sha256 — the same recorded fact the idempotency skip-check compares. The assessment re-reads the file and re-hashes it. Different content, or the file is gone, or the record carries no identity → named **stale**, findings **not** counted. No timestamp is compared anywhere (gotcha 114's rule: compare recorded history, not a clock). |
+| **it is not a switch** | no environment variable in either file, and a step that never uses the channel simply has no record — which the absence rule reads as silence, not as compliance. |
+
+Measured end to end (`test/test-finding-channel.js`, 147 checks, the scripted server, 0 real model calls):
+a glossary term-list read answered prose twice in volume 02 of a three-volume fixture. Volume 01 paid 4
+calls, volume 02 paid **5** — one extra paid read, the retry — and volume 03 paid **0 and was never
+attempted**. The halt record's trigger is `MAJOR chapter-extraction-never-answered`, the after-step report
+names the finding **once**, the ledger records it against volume 02, and the triage plans
+`wipe-and-cascade` from volume 02. The resumed pass pays **4 for volume 02 and 4 for volume 03 and nothing
+for volume 01**, the channel record for volume 02 now holds `[]`, and the step's post-mortem is clean. The
+same plant on the chapter-by-chapter route halts in the same place naming `part-01`, with **one** finding
+for the volume rather than one per chapter. The cost of the read itself: **0.007 ms per volume** when the
+book is unchanged from a tiny fixture, **0.275 ms** when it is 450 KB — that is the sha256 — so a full
+17-volume after-step assessment gains under 5 ms and no model call.
+
+**The door is open and un-wired everywhere except the glossary.** The character-voice stage's cut-off
+chapters (`character-voice/reading.js`'s `readingReport`) are the next candidate and are not carried
+through the channel yet: naming them needs a new finding kind, which moves the level table and the routing
+test, and that is the account owner's call.
+
 **The gate's first act on real material was a halt on a false positive, and that is worth keeping in
 the record.** Its first run through the offline pipeline loop stopped the `translate` stage after
 volume 1 on a `wrong-shape` MAJOR: `translation.md` had no Markdown heading and no table. It was not
