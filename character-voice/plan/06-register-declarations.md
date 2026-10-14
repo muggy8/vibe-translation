@@ -442,18 +442,26 @@ Each slice states what it has to prove. None of them runs the real corpus.
 | # | Slice | What it must prove |
 |---|---|---|
 | **0** | **BUILT 2026-10-14.** Wire the voice reading pass into the finding channel, and add the kind for a chapter that never answered. | Done: `character-voice/findings.js` builds `voice-chapter-never-answered` (HIGH / **MAJOR**) and `voice-chapter-kept-cut-off` (MEDIUM / **MINOR**) from the chapter record the reading pass already wrote, and `character-voice/task.js` hands them to `reportVolumeFindings` in a `finally`. **0 model calls, 0 new settings, every call baseline unmoved** (82 / 17 and 28 / 6 in the offline loops, 0 on the second pass in both). The kind count moved **68 → 70** and `test/test-finding-levels.js` 478 → 492 checks; `test/test-voice-reading-findings.js` (160 checks) proves it end to end through the real runner: the assessment names it at the table's level, the ledger counts it, the triage routes it as damage and resumes at the damaged volume, the never-attempted volume costs nothing, and a volume whose reading pass never ran writes no record. **What it did not get:** the volume-boundary halt record does not fire for this kind, because the gate assesses a volume only after that volume's work returns and this stage throws — gotcha 149, and `/tmp/opencode/voice-findings-slice0-questions.md`. |
-| **1** | The voice read pass stops being shown a document and is shown a **query result** instead: the known register facts for the characters this chapter actually contains, read out of the record, refusing structurally when there is no readable record. | Two numbers, both measured with 0 model calls. **Correctness:** a superseded claim stops reaching the chapter's prompt. **Size:** the bytes each chapter is shown go *down* against what the stage does today, measured across the 17-volume curve in §2.6 — this slice is not allowed to make a prompt bigger. |
-| **2** | The declaration exists: intake writes it, `intake/validate.js` checks its shape, the voice stage reads it, and the extraction's answer shape takes its value sets from it instead of from the prompt's enumerations. | A series declared with one axis and a series declared with six both run. A value outside the declared set is refused at filing and named. 0 model calls for the proof. |
-| **3** | The prompt stops naming a language. The declaration's text is appended in code, the way `AGENT_TOOLS_NOTE` appends mode text today (AGENTS.md rule 6). | The prompt audit's own rules still pass, and the planted-language check reports a Japanese name left in a prompt file. |
-| **4** | Claims are filed **against an axis**, and the four collapse in §2.3 is undone. | A query answers "how formal is this character" without also returning their vocabulary. The coverage rules still count what they count today. |
-| **5** | The voice revision door: file a replacement, mark the old row `superseded`, close its span. | A planted development in a fixture volume changes what the render calls current, and the old row survives byte-identical. Reuses `markSuperseded`; adds no new verb. |
-| **6** | Confirmation gets a home, and "still holds" becomes an observation. | A second pass over the same fixture reports confirmations rather than new claims, and pays 0 calls for chapters it already read. |
-| **7** | The render: current / arc / decision. | Compared against the rendered artifact that exists today, **before** anything is removed — the guard gotcha 120 records, which the author route's removal skipped. |
-| **8** | The other six Japanese-named prompt files. | A separate program. Listed here so it is not forgotten, not scoped here. |
+| **1** | **The roster: is there a source that *states* who is who?** Measure first — how many of the 196 cast entries describe the same person, and which structured sources actually record the link (the per-volume ruby-guide file, the glossary's character rows, the extraction's own `character` names, `cast.aliases`, `cast_merges`). Build a link door **only for a link a source states**; report that none exists otherwise. | The duplication counted, per source, with 0 model calls. A link is filed only where a source asserts it — gotcha 117 already rejected a rule that guesses the owner, because a guess files claims under the wrong person. If no source states most of the links, **that is the finding**, and it changes what slices 2 and 9 can promise. |
+| **2** | The voice read pass stops being shown a document and is shown a **query result** instead: the known register facts for the characters this chapter actually contains, read out of the record, refusing structurally when there is no readable record. | Two numbers, both measured with 0 model calls. **Correctness:** a superseded claim stops reaching the chapter's prompt. **Size:** the bytes each chapter is shown go *down* against what the stage does today, measured across the 17-volume curve in §2.6 — this slice is not allowed to make a prompt bigger. |
+| **3** | The declaration exists: intake writes it, `intake/validate.js` checks its shape, the voice stage reads it, and the extraction's answer shape takes its value sets from it instead of from the prompt's enumerations. | A series declared with one axis and a series declared with six both run. A value outside the declared set is refused at filing and named. 0 model calls for the proof. |
+| **4** | The prompt stops naming a language. The declaration's text is appended in code, the way `AGENT_TOOLS_NOTE` appends mode text today (AGENTS.md rule 6). | The prompt audit's own rules still pass, and the planted-language check reports a Japanese name left in a prompt file. |
+| **5** | Claims are filed **against an axis**, and the four collapse in §2.3 is undone. | A query answers "how formal is this character" without also returning their vocabulary. The coverage rules still count what they count today. |
+| **6** | The voice revision door: file a replacement, mark the old row `superseded`, close its span. | A planted development in a fixture volume changes what the render calls current, and the old row survives byte-identical. Reuses `markSuperseded`; adds no new verb. |
+| **7** | Confirmation gets a home, and "still holds" becomes an observation. | A second pass over the same fixture reports confirmations rather than new claims, and pays 0 calls for chapters it already read. |
+| **8** | The render: current / arc / decision. | Compared against the rendered artifact that exists today, **before** anything is removed — the guard gotcha 120 records, which the author route's removal skipped. |
+| **9** | **The closing cast reconciliation**, once, after the last volume: 0 model calls, a query over the record, three buckets — *named and voiced*, *named and never seen*, *on the page and nothing recorded*. The per-volume mention guard drops from a per-book stop to a per-book note, and the decision moves here. | The three buckets separate correctly on a fixture that contains all three. The middle bucket is **published as a named absence**, not reported as a failure. The third bucket is investigated only when the character is not fungible, by the §10.7 rule — recurrence across volumes, or named inside another character's speech — and a fungible miss is recorded and the run continues. Measured against this corpus: 179 recurring, 17 single-mention (§2.10), and the guard stops buying investigations for the tail. |
+| **10** | The other six Japanese-named prompt files. | A separate program. Listed here so it is not forgotten, not scoped here. |
 
 **Slice 0 is independent of this plan's design, and it is BUILT** (2026-10-14) — the voice reading
 pass's own findings now reach the post-mortem, the ledger, the triage and the pause economics, at
-0 model calls. Slices 1–7 are this plan.
+0 model calls. Slices 1–9 are this plan.
+
+**Slice 1 was not in the plan when it was written.** §2.9 found that the roster double-counts people and
+that the door built to fold them reads a row the render route no longer writes. Every later slice asks
+the record a question about *a character* — which facts belong to this chapter, which claims a
+development replaced, whether this character was ever seen — and a roster that holds one person as two
+entries makes each of those questions answerable twice, with different answers. It goes first.
 
 ---
 
@@ -506,15 +514,14 @@ pass's own findings now reach the post-mortem, the ledger, the triage and the pa
 6. **Does the second-person axis get a relationship in the record** — *who* is addressed this way — or is
    it a per-character claim? The schema has `fact_characters` with roles (`subject`, `agent`, `patient`,
    `witness`) and it is not used for this today.
- 7. **How big a miss is worth an investigation.** Answered in principle 2026-10-14 by the account owner
-    with the criterion *"is this character fungible?"* — an interchangeable one-off is not worth a paid
-    investigation, a character the story turns on is, even if the audience only knows them by a nickname.
-    What is **not** yet decided is the computable stand-in for that word. Recurrence across volumes and
-    being talked about by other characters are measurable (§2.10); *narrative importance* is not, and a
-    model asked to judge importance is what §9 forbids. The proxy this corpus supports cleanly is
-    **2 or more volumes, or named inside another character's speech** — which sorts these 196 roster
-    entries into 179 recurring and 17 single-mention names with no judgement call. What the proxy gets
-    wrong is a character pivotal in exactly one volume and never mentioned again.
+ 7. ~~How big a miss is worth an investigation~~ — **Answered 2026-10-14: fungible = recorded, not
+    investigated; not fungible = investigated.** The computable stand-in the plan proposes is
+    **present in 2 or more volumes, or named inside another character's speech**; both are readable from
+    the record, and §2.10 shows this corpus splits 179 / 17 with no judgement call. **The known blind
+    spot, accepted rather than hidden:** a character pivotal in exactly one volume and never mentioned
+    again is classified fungible. The damage that misclassification does is bounded — the character is
+    still named in the reference either way, so the error costs an investigation not run, not a hole
+    hidden from the translator.
  8. **Does the roster get fixed before the coverage guard is asked to cover it?** §2.9 measured 196 cast
     rows, 0 alias declarations and 0 roster folds, with the glossary's own Notes saying that ジョーロ is
     如月雨露's nickname and ひまわり is 日向葵's. A guard that demands a voice entry per roster entry is
