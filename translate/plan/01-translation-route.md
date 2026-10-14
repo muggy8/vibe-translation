@@ -83,7 +83,7 @@ removed** — this slice did not edit `AGENTS.md`.
 The translator reads that queue and marks the term provisional in the prompt
 (`utils/translate/references.js:250-251`), and `glossary/task.js:343` prints a pointer to it.
 **Nothing resolves it.** In the reference store, `challengeFact` (`utils/reference-store/facts/challenge.js`)
-is called from exactly one place outside tests — `utils/reference-store/attribution.js:677` — and
+is called from exactly one place outside tests — `utils/reference-store/attribution/record-answer.js` — and
 `resolveChallenge` (`utils/reference-store/facts/challenge.js`) has **no caller outside tests at all**:
 no command, no stage. A dispute opened by `npm run attribute-voice` cannot be closed through any
 door a person can type.
