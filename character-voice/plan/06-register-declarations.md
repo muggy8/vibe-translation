@@ -1,0 +1,404 @@
+# Plan: a declared register system, and a voice record that ages
+
+**Status: PLAN — direction approved by the account owner 2026-10-14. Not implemented.**
+
+Two decisions were taken before this plan was written, and they are the plan's premises:
+
+1. **The register questions are declared per series, not listed in code.** The intake decides both
+   *what the questions are* and *what answers this language offers for them*, from the book. Adding a
+   language means adding a declaration, not editing the pipeline.
+2. **The plan is written before the stage is run.** The measurements below are from the code and the
+   schema, not from a real voice extraction — there is none on disk. Slice 0 is the cheapest thing
+   that can be done, and the first real run is deliberately placed *after* slice 2 so that the run
+   exercises the declared shape rather than the Japanese one.
+
+---
+
+## 1. The problem, in one paragraph
+
+The character-voice stage asks a fixed list of questions about a fixed language. Its prompt names
+Japanese speech levels, Japanese pronouns, Japanese regional varieties and Japanese page markers, and
+its answer shape closes those names into enumerations — so a Korean, Chinese, Spanish, French or
+German book would be forced to answer "which of these five Japanese politeness levels?" and to look
+for a `※` that its books never print. At the same time the record underneath it, which was designed
+to hold a claim that *stops being true* at a given volume, has no stage that ever closes a claim's
+span: a character whose speech changes in book 6 keeps book 1's description published as current
+forever, because the door that would replace it exists and is wired to the glossary only. Meanwhile the
+glossary has already solved the harder half of this — its record carries the accumulation so its read
+pass never has to hold it — and the voice stage has not, so its cost grows with everything already
+learned about the cast, 133 times over.
+
+---
+
+## 2. The evidence (measured 2026-10-14)
+
+### 2.1 The prompt is one language's list
+
+`system-prompts/character-voice-extract.md`, 112 lines:
+
+| Line | What it hard-codes |
+|---|---|
+| 1 | "a long-running **Japanese** light novel series" |
+| 10 | sentence endings as `〜だぜ`, `〜である`, `〜でござる`, `〜だにゃ` |
+| 11 | first person as 俺 / 私 / 僕 / あたし |
+| 12 | formality as 丁寧語 / 普通語 / 尊敬語 / 謙譲語 |
+| 15 | dialect as 関西弁, 九州弁 |
+| 24–30 | point-of-view markers as `※`, `☆`, `◇`, `◆`, `【】`, `（）`, `――` |
+| 44 | a Japanese passage as the worked example of the hardest thing to detect |
+
+**7 of the 23 files in `system-prompts/` name Japanese or Japanese text** (`character-voice-acceptance`,
+`character-voice-extract`, `style-guide-acceptance`, `style-guide-extract`, `style-guide`,
+`style-guide-validator`, `translation-target`). The voice stage is not the only one, but it is the one
+whose *answer shape* is closed around the language.
+
+### 2.2 The answer shape closes the language into enumerations
+
+Same file, the declared output:
+
+- `quirkType` — 7 values (line 66)
+- `formalityLevel` — `polite | plain | honorific | humble | mixed` (line 69)
+- `povCategory` — 5 values (line 78)
+- `narrationType` — 5 values (line 82)
+
+`formalityLevel` is the sharpest case: four of its five values are the names of *Japanese* politeness
+categories, and Korean speech levels, French *tu/vous*, Spanish *tú/usted/vos* and German *du/Sie* have
+no value to go in.
+
+### 2.3 Four of the seven kinds collapse into one, in the store
+
+`utils/reference-store/extraction-adapter.js:59-67` maps the prompt's kinds onto the record's aspects:
+
+| prompt kind | stored aspect |
+|---|---|
+| `sentenceEnding` | `register` |
+| `formality` | `register` |
+| `vocabulary` | `register` |
+| `dialect` | `register` |
+| `pronoun` | `pronoun` |
+| `catchphrase` | `catchphrase` |
+| `internalVoice` | `internal_voice` |
+
+Four different questions become one aspect. The record therefore cannot answer "how formal does this
+character speak" separately from "which words does this character use" — which are exactly the two
+things a translator needs to be told separately. Anything the prompt did not list is filed as
+`unclassified` (`:69`), which the integrity audit counts and reports.
+
+### 2.4 The time dimension exists in the schema and is used by nobody
+
+`utils/reference-store/schema.js:216-238` gives every claim:
+
+```
+established_volume    INTEGER NOT NULL
+applies_from_volume   INTEGER NOT NULL
+applies_to_volume     INTEGER            -- NULL = still holds
+status                'active' | 'superseded' | 'disputed' | 'retracted'
+supersedes            TEXT REFERENCES facts(id)
+formality             TEXT
+```
+
+`character-voice/plan/03-database-backed-references.md:103` is where the design intent was written.
+What the measurement found is that the intent was never wired:
+
+- **No stage ever fills `applies_to_volume`.** It is written by `facts/insert.js:148` as `null` when
+  absent and carried unchanged by `facts/amend.js:84`. The only prose about it is a repair hint in
+  `facts/validate.js:48`: *"leave `applies_to_volume` null while the fact still holds."* Nothing ever
+  decides that a fact stopped holding.
+- **The door that marks a row replaced is called from one place in the whole repository**:
+  `utils/reference-store/glossary-adapter/revision.js:149`. The voice side has no caller.
+- **The read that means "the record's current claim" already works** — `currentClaimSql`
+  (`utils/reference-store/facts/challenge.js:185`) excludes retracted rows, rows a live row supersedes,
+  and rows with an unresolved dispute. It is shared by all three renderers. So the machinery for
+  "what is true now" exists; nothing files the row that would make it change.
+- `supersede.js`'s own header already states the distinction this plan depends on: `disputed` is the
+  mark for *a claim somebody disagrees with*, `superseded` is the mark for *a claim a later volume
+  replaced*. A character development is the second thing, and today it can only be filed as the first.
+
+### 2.5 The confirm-or-contradict question is already being asked, with nowhere to answer
+
+`system-prompts/character-voice-extract.md:49` tells the model: *"If a character's quirks are identical
+to what's already in the previous reference, note them as 'unchanged' rather than duplicating."* The
+model is asked to report confirmation and gets no destination for it. Nothing in the record distinguishes
+"we looked at book 5 and this still holds" from "we never looked again".
+
+### 2.6 The glossary stopped showing the model its accumulated reference. The voice stage did not.
+
+This is the largest structural difference between the two stages, and it is the one that decides how
+much of the glossary's shape can be copied.
+
+| | the glossary's read pass | the voice read pass |
+|---|---|---|
+| what the model is shown | **the chapter, and nothing else** | the chapter **plus the previous volume's published reference** |
+| where the accumulation lives | in the record | in a markdown file handed to every call |
+| measured | `glossary/extract.js` and `glossary/store.js` contain no `inlineReferenceMessage`, no `previousGlossary`, no `stateFile` | `character-voice/reading.js:369` passes `ctx.previousVoiceRefFile` to **every** chapter's call; `:442` says so outright — "the reference every chapter is shown" |
+
+The glossary's *older* routes still inline it (`glossary/task.js:584`, `glossary/chunked.js:139`), but the
+read pass that replaced them does not: **the record carries the accumulation, so the model never has to
+hold it.** That is why the real 17-volume glossary run reported **zero** reference truncations — a grep
+for the door's own notice (`[context] inlining … truncated`) across every run recorded in
+`<SERIES_LOCATION>/.run/logs` returns nothing.
+
+The voice stage has the door and it is firing. Both stages use the same limits — a 64 KB threshold and a
+200-unit cap (`character-voice/config.js:34,36`; `glossary/config.js:49,57`) — and the voice picker keeps
+whole `### ` character sections ranked against the chapter (`character-voice/stages.js:100-109`). Against
+the only growth curve this repository has, the real per-volume glossary files:
+
+```
+volume 01    37,540 bytes     volume 07  208,959 bytes     volume 13  310,575 bytes
+volume 02    75,766 bytes     volume 08  222,090 bytes     volume 14  320,444 bytes
+volume 03   109,053 bytes     volume 09  241,927 bytes     volume 15  329,308 bytes
+volume 04   136,413 bytes     volume 10  251,947 bytes     volume 16  340,818 bytes
+volume 05   161,452 bytes     volume 11  276,323 bytes     volume 17  358,233 bytes
+volume 06   184,192 bytes     volume 12  294,863 bytes
+```
+
+**9.5× growth, and the 64 KB line is crossed at volume 02.** Sixteen of seventeen volumes would be cut
+down if they were shown. The voice reference is not smaller than the glossary: `AGENTS.md` records
+volume 02's published voice reference at **583 bullets** against that volume's **124 glossary rows**, and
+the record holds no voice claims for any volume today, so no voice file exists to measure directly. The
+same curve therefore arrives sooner for voice, not later — and it arrives **133 times**, once per chapter,
+rather than 17 times.
+
+### 2.7 What the pronoun problem is currently solved with
+
+- `cast_alias` — a **name-matching** device — is used to declare that 僕 and 俺 belong to 如月雨露,
+  read out of the glossary's own Characters row (gotcha 117). It makes the roster fold fire, and it is
+  the only reason a bare pronoun does not become its own roster entry.
+- `formality` — a free-text string copied from the model's own `formalityLevel`
+  (`extraction-adapter.js:169`).
+
+Neither is a **decision**. "This character's self-reference is rendered as *I*, flat and blunt" is a
+choice that must hold still across 133 chapters, and today it exists only as prose in a markdown file a
+translator reads. Second-person address is captured as one `pronoun` claim with no relationship attached
+to it — the record has no way to say *who* is being addressed that way.
+
+### 2.8 Cost anchors for what a change touches
+
+| | measured |
+|---|---|
+| one volume's reading pass, real volume 02 | 1,657,482 tokens, 14 calls, 7 chapters |
+| the removed author route, real volume 01 | 166,370,184 tokens, 25 agent turns |
+| the whole glossary series, 17 volumes | 13,851,146 tokens, 299 calls |
+| the series' chapters | 133 |
+
+The reading pass is the only thing in the voice stage that costs anything, so a change that rides inside
+the chapter call costs nothing extra; a change that adds a call per chapter costs 133 calls.
+
+---
+
+## 3. What this plan must not rebuild
+
+The copy-forward model transfers to voice better than it looks, because the glossary does not copy a
+document and edit it. It copies forward **unmodified**, and a change is a **new row filed beside the old
+one**; the published file is a *rendering* of the record, not an edited artifact. That is the shape a
+character's development needs: a book-1 voice is not wrong in book 9, it is **dated**.
+
+So these stay exactly as they are: the chapter-by-chapter read, the two-paid-read budget, the answer
+envelope, the evidence rule (a quote must actually be in the book), the deterministic audit, the grade,
+the seal, the copy-forward, the quarantine, and "a sealed row is never edited".
+
+---
+
+## 4. The design: a register declaration, per series
+
+### 4.1 Where it lives
+
+`translation-target.json`, which `npx gulp discover` already writes and `intake/validate.js:54` already
+requires to carry `seriesName`, `sourceLanguage` and `targetLanguage` — and whose discovery confidence
+(`intake/validate.js:231`) already covers "the order, the name, or **the language**". The intake is
+already the step that works out what this series is; the register declaration is the same act, taken one
+step further.
+
+### 4.2 What code knows, and what the series declares
+
+**Code knows the shape of a question and nothing about any language.** A declared axis is:
+
+```
+id            a stable name for this axis in this series
+asks          the question, in plain language, answerable from the book
+values        the forms THIS language prints for it — an open list, from the book
+scope         whether the answer is per character, or per (character, addressee) pair
+renders       what the translation renders each value as — the decision, per value
+evidence      the forms the intake actually saw, and where
+```
+
+There is **no axis list in code**. Not a Japanese list, not a universal list of four concepts, not a
+fallback. A series that distinguishes one axis declares one axis; a series that distinguishes six
+declares six. The pipeline's job is to ask each declared question of each chapter and to file the
+answers, not to know what the questions should have been.
+
+### 4.3 The guards that make a bad declaration visible instead of silent
+
+A declaration chosen by a model is a decision that shapes 133 chapters, and nothing pins the questions.
+That is the risk the owner's choice accepts, and these are the guards that keep it honest. All four are
+computable without a model.
+
+1. **Every claim must quote the book.** The existing evidence rule already refuses a claim whose quote
+   the source does not print. It applies to register claims unchanged.
+2. **A value outside the declared set is refused at filing**, and named. A model that invents a
+   politeness level this book does not use produces a refusal, not a row.
+3. **An axis that produces no evidenced claim in a volume is reported.** If a declared axis is answered
+   zero times across a whole volume, that is a finding — the axis is unanswerable as declared, and the
+   honest reading is that the declaration is wrong, not that the book is silent. A new kind in the
+   seriousness table, which moves the pinned count from 68.
+4. **An axis answered for a character with no presence in this volume is reported** — the same question
+   the attribution pass already asks (gotcha 121), reused rather than re-invented.
+
+### 4.4 What this replaces
+
+- `formalityLevel`'s five-value enumeration becomes a value drawn from the series' own declared set.
+- `quirkType`'s seven fixed kinds stop being the record's aspect vocabulary. The aspect comes from the
+  axis the claim was filed against.
+- `cast_alias` goes back to being only what it is — a name-spelling device. Pronoun ownership stops
+  being smuggled through name matching, because a register claim answers "who uses which self-reference"
+  directly.
+- The point-of-view markers move from the prompt's list into the declaration, because `※` is a
+  convention of this language's publishing, not a universal one.
+
+---
+
+## 5. The time dimension: confirming, contradicting, replacing
+
+Three separate acts, and the record already has a name for two of them.
+
+| Act | What it means | What the record does |
+|---|---|---|
+| **confirm** | this volume's text shows the same thing again | new — needs a home |
+| **contradict** | this volume's text shows something different | file a new row, mark the old one `superseded`, close its span |
+| **dispute** | somebody thinks the published claim is wrong | `challenge_fact` → `disputed` — already built, already used by the attribution pass |
+
+**Replacing is not disputing.** `supersede.js`'s header says this outright. A character development is
+not a claim that somebody is wrong; it is a claim that stopped holding. The voice stage needs the door
+the glossary has: file a new row that names the row it replaces, owned by the volume whose own text
+carries the change, with its own quote — and the old row survives, unchanged, as the arc.
+
+**Confirming needs a decision the owner has to make.** A confirmation carries no new claim body, so
+storing one as a claim duplicates the body six times across a series. The options:
+
+- **A lightweight row** in its own table — "volume 5, axis X, character Y, confirmed" — so the render can
+  say *confirmed in volumes 1–6* without six copies of the same sentence. Costs a schema version bump.
+- **Nothing** — leave `applies_to_volume` null and let "still holds" stay an assumption. Costs no schema
+  change and is exactly the state that produced §2.4.
+- **A claim row each time** — evidence-backed and dated, but it inflates the artifact and makes the
+  coverage rules count the same fact repeatedly.
+
+Recommendation: the lightweight row. The whole point of this plan is that "still holds" should be an
+observation rather than an assumption, and the second option is the assumption.
+
+**Where the answer comes from for free:** the chapter call already sees the previous reference and is
+already asked to say "unchanged" (§2.5). Giving that answer a destination costs no extra call — it costs
+a slightly larger answer, which is the cheaper of the two currencies here.
+
+---
+
+## 6. The render: now, the arc, and the decision
+
+`character-voice.md` today renders bullets per character. Under this plan it renders three things per
+character:
+
+1. **How they speak now** — the current claim for each declared axis, which is what a translator of a
+   later chapter actually needs, and which `currentClaimSql` already knows how to select.
+2. **How they got there** — the superseded rows, dated to the volume that established them and the
+   volume that replaced them. The glossary already prints this shape as `Earlier rendering:`.
+3. **The decision** — for each axis, what the translation renders that value as. This is the thing a
+   translator must be able to rely on, and it is the thing that does not exist today in any structured
+   form.
+
+**The open problem in this section:** a decision derived from a render is only stable if the claims
+under it are settled. A claim that flickers — confirmed in book 4, contradicted in book 5, re-confirmed
+in book 6 — would change the translator's instructions between chapters. The glossary solved the same
+problem with a settlement pass that runs once, after the last volume, and holds. Whether the voice
+reference gets the same shape (settle once per series, then hold) or a per-volume settle is an owner
+decision, §10.3.
+
+---
+
+## 7. The wiring gap that has to close first
+
+The voice read pass is shown a **document** — the previous volume's published `character-voice.md` — and
+it is shown it 133 times. The glossary stopped doing this: its record carries the accumulation, and the
+model sees only the chapter it is reading.
+
+This is not only a cost problem. It is a correctness problem for everything §5 is about:
+
+- A chapter cannot be asked *"does this confirm or contradict what we already know?"* while being shown a
+  document that may still assert what the record has already replaced. The file is a render; the record
+  is the truth; today the model is shown the render.
+- The reference the chapters are shown is cut to 200 character sections ranked by a word-match against
+  the chapter (`character-voice/stages.js:100-109`). From volume 02 onward that is a **lossy view chosen
+  by string overlap**, and a character who speaks in this chapter under a spelling the matcher cannot see
+  is a character whose known register is not shown to the call that could have confirmed it.
+- The translation stage had the same shape of defect and it was closed: `utils/translate/settled-glossary.js`
+  reads the settled record, and a series with no readable record **refuses structurally rather than
+  falling back to the markdown**. The voice read pass has no equivalent.
+
+**The direction is not "show it a bigger file".** It is the glossary's direction: ask the record *which
+known register facts belong to the characters this chapter actually contains*, hand the call that answer,
+and let the record carry everything else. That is smaller than what the stage does today, it is the shape
+that makes confirm-or-contradict answerable, and it is the same door the translation stage already walks
+through.
+
+---
+
+## 8. Slices, in order
+
+Each slice states what it has to prove. None of them runs the real corpus.
+
+| # | Slice | What it must prove |
+|---|---|---|
+| **0** | Wire the voice reading pass into the finding channel, and add the kind for a chapter that never answered. | Already scoped. No model spend. The offline rehearsal already runs this stage end to end, so it is provable offline. The pinned kind count moves from 68 and the level table is a protected file — the change is verified by the conductor, not on report. |
+| **1** | The voice read pass stops being shown a document and is shown a **query result** instead: the known register facts for the characters this chapter actually contains, read out of the record, refusing structurally when there is no readable record. | Two numbers, both measured with 0 model calls. **Correctness:** a superseded claim stops reaching the chapter's prompt. **Size:** the bytes each chapter is shown go *down* against what the stage does today, measured across the 17-volume curve in §2.6 — this slice is not allowed to make a prompt bigger. |
+| **2** | The declaration exists: intake writes it, `intake/validate.js` checks its shape, the voice stage reads it, and the extraction's answer shape takes its value sets from it instead of from the prompt's enumerations. | A series declared with one axis and a series declared with six both run. A value outside the declared set is refused at filing and named. 0 model calls for the proof. |
+| **3** | The prompt stops naming a language. The declaration's text is appended in code, the way `AGENT_TOOLS_NOTE` appends mode text today (AGENTS.md rule 6). | The prompt audit's own rules still pass, and the planted-language check reports a Japanese name left in a prompt file. |
+| **4** | Claims are filed **against an axis**, and the four collapse in §2.3 is undone. | A query answers "how formal is this character" without also returning their vocabulary. The coverage rules still count what they count today. |
+| **5** | The voice revision door: file a replacement, mark the old row `superseded`, close its span. | A planted development in a fixture volume changes what the render calls current, and the old row survives byte-identical. Reuses `markSuperseded`; adds no new verb. |
+| **6** | Confirmation gets a home, and "still holds" becomes an observation. | A second pass over the same fixture reports confirmations rather than new claims, and pays 0 calls for chapters it already read. |
+| **7** | The render: current / arc / decision. | Compared against the rendered artifact that exists today, **before** anything is removed — the guard gotcha 120 records, which the author route's removal skipped. |
+| **8** | The other six Japanese-named prompt files. | A separate program. Listed here so it is not forgotten, not scoped here. |
+
+**Slice 0 is independent of this plan's design** and is the next thing to build regardless. Slices 1–7
+are this plan.
+
+---
+
+## 9. What this must never become
+
+- **Not a model grading a declaration.** Whether a declared axis produced evidenced claims, whether a
+  value is in the declared set, whether a character is present in the volume — all computable for free.
+  A model asked to judge them is the mistake the extraction plan names outright.
+- **Not a language list in code.** The moment a Japanese axis table appears in a `.js` file, the owner's
+  decision has been reversed by convenience.
+- **Not a second opinion on a published claim.** A development is filed as a replacement with evidence,
+  not as a dispute. `disputed` is for disagreement, and the record already says so.
+- **Not an edit.** No sealed row is edited, moved or deleted, ever. This is the rule the whole store is
+  built on.
+- **Not a bigger prompt.** The direction of every slice in this plan is to make what the chapters are
+  shown *smaller and more relevant*, because the growth curve in §2.6 says the current shape is already
+  being cut down on 16 of 17 volumes. A slice that makes the prompt larger has to arrive with a
+  measurement that says why.
+
+---
+
+## 10. Open decisions for the account owner
+
+1. **Is the declaration written by a model at intake, or proposed by a model and confirmed by a
+   person?** A declaration shapes 133 chapters. A person confirming it costs one read of a short table.
+2. **Does an axis that no volume ever answers stop the run or warn?** It is a new kind in the seriousness
+   table either way; the level is the decision.
+3. **When is a register decision settled** — once per series after the last volume (the glossary's
+   shape), or at the end of each volume? Per-volume means the translator's instructions can change
+   between books; per-series means the early books are translated against unsettled guidance.
+4. **Is a confirmation a row, or nothing?** §5. The recommendation is a row.
+5. **Does the declaration carry the point-of-view markers too**, or is that a separate declaration? They
+   are language-specific for the same reason the pronouns are, and they are currently in the prompt.
+6. **Does the second-person axis get a relationship in the record** — *who* is addressed this way — or is
+   it a per-character claim? The schema has `fact_characters` with roles (`subject`, `agent`, `patient`,
+   `witness`) and it is not used for this today.
+
+---
+
+## 11. What this plan does not decide
+
+Whether the style guide and the translation prompts should read the same declaration (§8 slice 8 lists
+the files, not the answer). Whether a register axis can be revised mid-series by a person, or only by a
+later volume's evidence. Whether the acceptance grader's rubric changes when the artifact's sections
+change — it grades three files today, and a new section shape is a change to what it is grading.
