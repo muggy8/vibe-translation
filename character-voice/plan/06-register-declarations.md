@@ -1,7 +1,7 @@
 # Plan: a declared register system, and a voice record that ages
 
 **Status: PLAN — direction approved by the account owner 2026-10-14. Slice 0 is BUILT (2026-10-14);
-slices 1–7 are not implemented.**
+slice 1 is MEASURED (2026-10-14, no door built — see §2.11); slices 2–7 are not implemented.**
 
 Two decisions were taken before this plan was written, and they are the plan's premises:
 
@@ -234,6 +234,71 @@ appears in  8 volumes:   6              appears in 15 volumes: 19
 that appear once, in one volume, in one chapter. No judgement call is needed to separate them here.
 Whether that holds for a series with a one-volume pivotal character is the open question §10.7 records.
 
+### 2.11 What actually states a link, measured per source (slice 1, 2026-10-14)
+
+Slice 1 asked the question §2.9 leaves open — *is there a source that states which of these entries
+are the same person?* — and measured every candidate. 0 model calls, run against **copies** of the
+17 records (`/tmp/opencode/roster-survey.js`, output `/tmp/opencode/roster-survey-output.txt`; the
+prose shapes measured separately by `/tmp/opencode/roster-shape-audit.js`).
+
+**Where the 196 entries come from: all 196 are glossary Characters rows.** The distinct terms across
+the 17 published `## Characters` tables are 196, and every cast key is one of them. The roster *is*
+that table, copied into `cast` by `importGlossary` — so every name the glossary model noticed is a
+roster entry, and a character the glossary described under two names is two entries by construction.
+
+| Source | Shape of the data | Links it **states** | Entries covered |
+|---|---|---|---|
+| `cast.aliases` | structured | **0** | 0 |
+| `cast_merges` | structured | **0** | 0 |
+| `cast_presence_match.name` | structured | **0** — 196 distinct (key, name) pairs, and every matched name is the key itself | 0 |
+| `facts.extracted_as`, `character-voice*.md` on disk | structured / file | **0** — no voice run has produced a row yet | 0 |
+| `document_prose`, `attribution_answers` | structured | **0** | 0 |
+| **`<base>-ruby-guides.json`** | **structured — the book's own markup** | **13 pairs** (20 guide rows across the 17 volumes) | **24 of 196 (12%)** |
+| the glossary's Characters rows, in the **markdown** | a table cell of **model-written prose** | **56 pairs** (644 of 1,309 rows that name another key state a link; 665 only mention one) | 88 of 196 |
+| the same rows, already inside the **record** (`facts`, `section='Characters'`) | the same prose, stored | **56 pairs** (703 of 2,037 row-copies) | 88 of 196 |
+
+Union: **59 stated pairs → 35 groups → 91 entries, 56 of them duplicates of another entry; 105
+entries no source links at all.** The largest group is 6 entries for one person (パンジー / 三色院菫子
+/ 虹彩寺菫 / ビオラ / 董子 / 三色院董子); the pair §2.9 names, 如月雨露 / ジョーロ, is stated **only**
+by glossary prose, not by the book's markup.
+
+**The one structured source is the ruby-guide file, and it does not answer the question a merge
+needs.** It states *that* an annotated word is called by another name — 三色院菫子 → パンジー (18
+annotations), 日向葵 → ひまわり, 秋野桜 → コスモス, 羽立桧菜 → あすなろ — but it does not state *which
+of the two roster entries is the character*. Taking the markup's own direction (the annotated word
+survives, the reading folds into it) would merge **パンジー, a 17-volume entry, into 虹彩寺菫, a
+4-volume one**, because volumes 15–16 print 虹彩寺菫 with the reading パンジー 406 times. `castAlias`
+requires a survivor and a reason; the source supplies neither. It also misses 大賀太陽 → サンちゃん
+outright, because the ruby is spelled サンちやん and the roster spells サンちゃん (2 rows).
+
+**And the prose rule was measured before it was trusted.** The obvious shape — *`<K>'s nickname`* —
+fires **49 times on 5 pairs, and all 5 pairs are wrong**: "アネモネ's nickname for 芝" produced
+しばにゃん ↔ アネモネ, because the possessive names the character who **coined** the nickname, not
+the character it describes. That shape is dropped. The seven shapes that survived produce 56 pairs
+with no wrong pair found in the list — **and one of the 56 is a pair a rule that read its own
+sentence would have refused**: ミスターＴ ↔ サンちゃん, filed seven times (volumes 11–17) from the line
+*"The T comes from his given name 太陽 (Taiyō), **not** from his nickname サンちゃん."* The identity is
+true — both are 大賀太陽, and the survey's own group list puts them together — but the sentence states
+it by **denying** the derivation a link-shape would be looking for. So the surviving 56 are a list a
+person has to read, not a list a rule can be trusted to produce. This is gotcha 117's rule confirmed
+from the other side: a rule that reads a naming sentence can be 100% wrong while looking exactly as
+narrow as the ones that work, and it can also be 100% right for a reason the sentence does not state.
+
+**Two facts that decide what slices 2 and 9 can promise.** First, **no fact in any of the 17 records
+is keyed to a cast entry** — 22,469 rows, 0 of them with a `key`. Slice 2's "which known register
+facts belong to the characters this chapter contains" currently has nothing to return, and slice 9's
+coverage guard currently has nothing to measure coverage against. Second, the extraction's answer
+shape has one field, `"character"`, and `resolveExtractionName` **creates a cast entry for any name
+it cannot resolve** — so the stage that produces the duplication is the stage that has no field in
+which to state the link.
+
+**What slice 1 did not build, and why.** No door. The only source that states links without being
+model-written prose covers 12% of the roster and cannot say which entry survives a merge; the source
+that covers 45% of it is prose, and the measurement above shows a prose shape failing completely
+while looking sound. Filing a wrong merge is the one operation in `utils/reference-store/` that makes
+a character's claims vanish from a query. The four decisions that would have to be taken first are
+written in `/tmp/opencode/roster-slice1-questions.md`.
+
 ---
 
 ## 3. What this plan must not rebuild
@@ -442,7 +507,7 @@ Each slice states what it has to prove. None of them runs the real corpus.
 | # | Slice | What it must prove |
 |---|---|---|
 | **0** | **BUILT 2026-10-14.** Wire the voice reading pass into the finding channel, and add the kind for a chapter that never answered. | Done: `character-voice/findings.js` builds `voice-chapter-never-answered` (HIGH / **MAJOR**) and `voice-chapter-kept-cut-off` (MEDIUM / **MINOR**) from the chapter record the reading pass already wrote, and `character-voice/task.js` hands them to `reportVolumeFindings` in a `finally`. **0 model calls, 0 new settings, every call baseline unmoved** (82 / 17 and 28 / 6 in the offline loops, 0 on the second pass in both). The kind count moved **68 → 70** and `test/test-finding-levels.js` 478 → 492 checks; `test/test-voice-reading-findings.js` (160 checks) proves it end to end through the real runner: the assessment names it at the table's level, the ledger counts it, the triage routes it as damage and resumes at the damaged volume, the never-attempted volume costs nothing, and a volume whose reading pass never ran writes no record. **What it did not get:** the volume-boundary halt record does not fire for this kind, because the gate assesses a volume only after that volume's work returns and this stage throws — gotcha 149, and `/tmp/opencode/voice-findings-slice0-questions.md`. |
-| **1** | **The roster: is there a source that *states* who is who?** Measure first — how many of the 196 cast entries describe the same person, and which structured sources actually record the link (the per-volume ruby-guide file, the glossary's character rows, the extraction's own `character` names, `cast.aliases`, `cast_merges`). Build a link door **only for a link a source states**; report that none exists otherwise. | The duplication counted, per source, with 0 model calls. A link is filed only where a source asserts it — gotcha 117 already rejected a rule that guesses the owner, because a guess files claims under the wrong person. If no source states most of the links, **that is the finding**, and it changes what slices 2 and 9 can promise. |
+| **1** | **MEASURED 2026-10-14; no door built, and the measurement is the answer.** The roster: is there a source that *states* who is who? | **Done, as a measurement.** The roster is the glossary's Characters table — **all 196** cast keys are one of the 196 distinct terms those tables publish. Structured sources state **nothing**: `cast.aliases` 0, `cast_merges` 0, `cast_presence_match.name` 0 (every matched name is the key itself), `extracted_as` 0, no voice file on disk. The **only** structured source that states a link is `<base>-ruby-guides.json`: **13 pairs, 24 of 196 entries (12%)** — and it states the link without stating *which entry is the character*, so its own direction would fold パンジー (17 volumes) into 虹彩寺菫 (4 volumes). The glossary's Characters rows state **56 pairs / 88 entries**, in the file **and already inside the record**, but that is model-written prose, and the obvious shape for reading it — `<K>'s nickname` — was measured at **49 hits, 5 pairs, 5 of 5 wrong** and dropped. Union: 59 pairs, 35 groups, 56 duplicate entries, **105 entries no source links**. Also measured: **0 of the 22,469 facts in the 17 records is keyed to a cast entry**, so slices 2 and 9 have nothing to query yet. **No door, no new setting, no new finding kind, 0 model calls, no corpus file touched.** The four decisions a door needs first are in `/tmp/opencode/roster-slice1-questions.md`. |
 | **2** | The voice read pass stops being shown a document and is shown a **query result** instead: the known register facts for the characters this chapter actually contains, read out of the record, refusing structurally when there is no readable record. | Two numbers, both measured with 0 model calls. **Correctness:** a superseded claim stops reaching the chapter's prompt. **Size:** the bytes each chapter is shown go *down* against what the stage does today, measured across the 17-volume curve in §2.6 — this slice is not allowed to make a prompt bigger. |
 | **3** | The declaration exists: intake writes it, `intake/validate.js` checks its shape, the voice stage reads it, and the extraction's answer shape takes its value sets from it instead of from the prompt's enumerations. | A series declared with one axis and a series declared with six both run. A value outside the declared set is refused at filing and named. 0 model calls for the proof. |
 | **4** | The prompt stops naming a language. The declaration's text is appended in code, the way `AGENT_TOOLS_NOTE` appends mode text today (AGENTS.md rule 6). | The prompt audit's own rules still pass, and the planted-language check reports a Japanese name left in a prompt file. |
@@ -462,6 +527,12 @@ that the door built to fold them reads a row the render route no longer writes. 
 the record a question about *a character* — which facts belong to this chapter, which claims a
 development replaced, whether this character was ever seen — and a roster that holds one person as two
 entries makes each of those questions answerable twice, with different answers. It goes first.
+
+**Slice 1 ran 2026-10-14, and its answer is the one the plan allowed for: no source states most of
+these links in a form a door can file.** The numbers are §2.11. What slices 2 and 9 inherit from it is
+recorded there too — most sharply that **no fact in any of the 17 records is keyed to a cast entry
+today**, so slice 2's query has nothing to return and slice 9's guard has nothing to measure against
+until the voice stage runs.
 
 ---
 
@@ -528,6 +599,14 @@ entries makes each of those questions answerable twice, with different answers. 
     demanding one per nickname, and the door built to fold them (`importGlossary` reading the glossary's
     pronoun row) reads a row the render route no longer writes. Fixing the roster is a prerequisite for
     the coverage question meaning anything, and it is not in this plan's slice list yet.
+    **Measured 2026-10-14 by slice 1 (§2.11): the guard would indeed ask for a voice entry per
+    nickname** — 35 groups hold 91 entries, 56 of them duplicates of another entry, and 105 entries
+    are linked by nothing at all. **What is still the owner's decision is how to close it.** The only
+    source that states links without being model-written prose covers 12% of the roster and does not
+    say which entry a merge should keep; the source that covers 45% of it is prose, and the
+    narrowest-looking shape for reading it was measured at 5 pairs, all 5 wrong. The options, and
+    what each costs, are in `/tmp/opencode/roster-slice1-questions.md`. Slice 9 should be written so
+    a nickname is a separate question from the person until one of those options is taken.
 
 ---
 
