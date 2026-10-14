@@ -282,10 +282,21 @@ for the volume rather than one per chapter. The cost of the read itself: **0.007
 book is unchanged from a tiny fixture, **0.275 ms** when it is 450 KB — that is the sha256 — so a full
 17-volume after-step assessment gains under 5 ms and no model call.
 
-**The door is open and un-wired everywhere except the glossary.** The character-voice stage's cut-off
-chapters (`character-voice/reading.js`'s `readingReport`) are the next candidate and are not carried
-through the channel yet: naming them needs a new finding kind, which moves the level table and the routing
-test, and that is the account owner's call.
+**Two doors use it today, and the rest of the stage list does not.** The glossary's read pass (both
+routes, one call site in a `finally`) and — since 2026-10-14 — the character-voice reading pass:
+`character-voice/findings.js` turns the chapter record `reading.js` already built into
+`voice-chapter-never-answered` (HIGH / MAJOR) and `voice-chapter-kept-cut-off` (MEDIUM / MINOR), and
+`character-voice/task.js` hands them over in a `finally` guarded by `ctx.readingPassRan` rather than by
+"the list is not empty", because `readVolumeChapters` returns only the chapters it KEPT and a pass that
+refused on its first chapter kept none. Measured (`test/test-voice-reading-findings.js`, 160 checks, 0
+real model calls): the assessment names the MAJOR once, the ledger counts it, the triage routes it as
+damage and resumes at volume 02, the failed pass pays 5 + 3 + **0** calls for books 01 / 02 / 03, the
+resumed pass pays **0** for the accepted book, and the kept-cut-off chapter is a MINOR that leaves the
+step clean and the walk un-halted. **What that door does not do is write a halt record**: the gate
+assesses a volume only after that volume's own work returns, and this stage throws instead, so the volume
+whose chapter failed is never assessed. The pause arrives as a failed step. Closing that means publishing
+a volume with a named hole, which seals it — an owner's decision, not a wiring fix (gotcha 149). The
+style guide, the wiki and the translation stages still report nothing through the channel.
 
 **The gate's first act on real material was a halt on a false positive, and that is worth keeping in
 the record.** Its first run through the offline pipeline loop stopped the `translate` stage after

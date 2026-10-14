@@ -1,6 +1,7 @@
 # Plan: a declared register system, and a voice record that ages
 
-**Status: PLAN — direction approved by the account owner 2026-10-14. Not implemented.**
+**Status: PLAN — direction approved by the account owner 2026-10-14. Slice 0 is BUILT (2026-10-14);
+slices 1–7 are not implemented.**
 
 Two decisions were taken before this plan was written, and they are the plan's premises:
 
@@ -393,7 +394,7 @@ Each slice states what it has to prove. None of them runs the real corpus.
 
 | # | Slice | What it must prove |
 |---|---|---|
-| **0** | Wire the voice reading pass into the finding channel, and add the kind for a chapter that never answered. | Already scoped. No model spend. The offline rehearsal already runs this stage end to end, so it is provable offline. The pinned kind count moves from 68 and the level table is a protected file — the change is verified by the conductor, not on report. |
+| **0** | **BUILT 2026-10-14.** Wire the voice reading pass into the finding channel, and add the kind for a chapter that never answered. | Done: `character-voice/findings.js` builds `voice-chapter-never-answered` (HIGH / **MAJOR**) and `voice-chapter-kept-cut-off` (MEDIUM / **MINOR**) from the chapter record the reading pass already wrote, and `character-voice/task.js` hands them to `reportVolumeFindings` in a `finally`. **0 model calls, 0 new settings, every call baseline unmoved** (82 / 17 and 28 / 6 in the offline loops, 0 on the second pass in both). The kind count moved **68 → 70** and `test/test-finding-levels.js` 478 → 492 checks; `test/test-voice-reading-findings.js` (160 checks) proves it end to end through the real runner: the assessment names it at the table's level, the ledger counts it, the triage routes it as damage and resumes at the damaged volume, the never-attempted volume costs nothing, and a volume whose reading pass never ran writes no record. **What it did not get:** the volume-boundary halt record does not fire for this kind, because the gate assesses a volume only after that volume's work returns and this stage throws — gotcha 149, and `/tmp/opencode/voice-findings-slice0-questions.md`. |
 | **1** | The voice read pass stops being shown a document and is shown a **query result** instead: the known register facts for the characters this chapter actually contains, read out of the record, refusing structurally when there is no readable record. | Two numbers, both measured with 0 model calls. **Correctness:** a superseded claim stops reaching the chapter's prompt. **Size:** the bytes each chapter is shown go *down* against what the stage does today, measured across the 17-volume curve in §2.6 — this slice is not allowed to make a prompt bigger. |
 | **2** | The declaration exists: intake writes it, `intake/validate.js` checks its shape, the voice stage reads it, and the extraction's answer shape takes its value sets from it instead of from the prompt's enumerations. | A series declared with one axis and a series declared with six both run. A value outside the declared set is refused at filing and named. 0 model calls for the proof. |
 | **3** | The prompt stops naming a language. The declaration's text is appended in code, the way `AGENT_TOOLS_NOTE` appends mode text today (AGENTS.md rule 6). | The prompt audit's own rules still pass, and the planted-language check reports a Japanese name left in a prompt file. |
@@ -403,8 +404,9 @@ Each slice states what it has to prove. None of them runs the real corpus.
 | **7** | The render: current / arc / decision. | Compared against the rendered artifact that exists today, **before** anything is removed — the guard gotcha 120 records, which the author route's removal skipped. |
 | **8** | The other six Japanese-named prompt files. | A separate program. Listed here so it is not forgotten, not scoped here. |
 
-**Slice 0 is independent of this plan's design** and is the next thing to build regardless. Slices 1–7
-are this plan.
+**Slice 0 is independent of this plan's design, and it is BUILT** (2026-10-14) — the voice reading
+pass's own findings now reach the post-mortem, the ledger, the triage and the pause economics, at
+0 model calls. Slices 1–7 are this plan.
 
 ---
 

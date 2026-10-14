@@ -240,7 +240,10 @@ Per volume, in order — each volume's reference builds on the previous one's:
    read for the same text is not paid for twice. An answer whose array never reached its closing bracket is
    half an answer: it is named and re-read once at `EXTRACTION_RETRY_THINKING_LEVEL`, and a chapter still
    cut off after both paid reads is kept and printed as **INCOMPLETE** in the log, in
-   `character-voice-reading.md`, and in the report the grader reads. Each chapter after the first is shown
+   `character-voice-reading.md`, and in the report the grader reads — and, since 2026-10-14, carried to the
+   delivery layer through the finding channel as `voice-chapter-kept-cut-off` (MEDIUM / **MINOR**), while a
+   chapter whose two paid reads produced nothing is `voice-chapter-never-answered` (HIGH / **MAJOR**):
+   `character-voice/findings.js`, gotcha 149. Each chapter after the first is shown
    `buildAlreadyExtractedNote` — which characters and which claim kinds its earlier chapters produced, not
    the claim text — so "extract only what this chapter adds" is an instruction the extractor can follow.
 3. **File what was found** (`fileVoiceExtraction`): the claims land in the record as `extract`-stage
