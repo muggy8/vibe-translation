@@ -659,18 +659,27 @@ nothing:
   survives inside the longer** — 偽物 / 偽者, 我侭 / 我儘, 太股 / 太腿, 貴方 / 貴女, 振動 / 震動. Measured:
   **25 of the 79 unselected groups.** Printed the way a dictionary prints *color* / *colour*: both spellings,
   both counts, no verdict.
-- **Concentration anomalies.** Two written forms under one guided reading, both multi-character, one far more
-  common, and the rare one **landed overwhelmingly in one volume or one chapter**. 董子: 92 occurrences,
-  **75 of them in volume 17 chapter 6**, plus 三色院董子 twice in chapter 5, against 菫子 646 times across 11
-  volumes. 菫 is U+83AB and 董 is U+8451. That is a bad file, not a name, and the shape that says so is the
-  concentration, not the frequency.
+- **Inconsistent guidance.** The author guides **one written form two different ways**, or prints **one reading
+  over two spellings in one place**. The measured real case is in the harvest already: 三色院董子 guided
+  さんしよくいん**すみれ**こ and さんしよくいん**すれみ**こ in the same chapter — a reading whose moras are
+  transposed, **1 row in 10,005**. It is reportable because the author's own two answers disagree, not because
+  a count looks odd.
+
+**Concentration is not the signal, and this plan said it was.** §2.11(b) originally published 董子 — 92
+occurrences, **75 of them in volume 17 chapter 6**, against 菫子 646 across 11 volumes, 菫 U+83AB / 董 U+8451 —
+as "a bad file, not a name". **That diagnosis is withdrawn** (gotcha 168): the same harvest guides 董子 as
+すみれこ **76 times in chapters 5 and 6** of that volume, chapter 6 is 第六章 俺とお前の始まり (a flashback),
+volume 17's published Characters table already holds 董子 and 三色院董子 with its own note saying the spelling
+is what the flashback uses, it is guided 3 times in volume 15 and 10 in volume 16, and in that volume's own text
+董子 is printed 79 times against 菫子's **7**. A pronunciation guide is an authorial act, so a name concentrated
+in one chapter is what **an arc set under another name** looks like in a count. A detector built on concentration
+would have reported a real name as a source error and missed the transposed reading beside it.
 
 **What the rule must not be.** "One form at least 10× more common than the other under the same reading"
 selects **132 candidate pairs** on this corpus and most of them are single-mora guides — 込 / 子 / 木 all
-read こ, 尽 / 着 / 吐 all read つ. Frequency alone is not a detector; the pair has to be multi-character on
-both sides **and** concentrated somewhere specific, and 如雨露 (1–2 per volume across 8 volumes, against
-如月雨露 281 times across 16) has to come back **silent**, because a name written short in every book is not
-a corrupted chapter.
+read こ, 尽 / 着 / 吐 all read つ. Frequency alone is not a detector, and neither is uneven spread: 如雨露
+(1–2 per volume across 8 volumes, against 如月雨露 281 times across 16) has to come back **silent**, because a
+name written short in every book is not a corrupted chapter, and neither is 董子.
 
 **And the near-miss names are not typos.** §2.11 shows サンちやん, チエリー and ジヨーロ appear **0 times**
 in the extracted text: they are ruby readings, and the roster's spellings are body text. The store already
