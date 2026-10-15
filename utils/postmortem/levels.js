@@ -257,11 +257,6 @@ const FINDING_LEVEL_ROWS = [
     why: "the reference covers fewer characters than the roster, and importing it faithfully reproduces the damage in every later volume.",
   },
   {
-    kind: "reference-voice-mention-not-covered",
-    level: "MAJOR",
-    why: "a character the book keeps mentioning has no entry, and the gap carries into every later volume's copy.",
-  },
-  {
     kind: "reference-narrator-counted-as-a-character",
     level: "MAJOR",
     why: "the roster counts the narration as a person, so the coverage rule asks every later volume to cover the narration.",
@@ -405,6 +400,23 @@ const FINDING_LEVEL_ROWS = [
   },
 
   // ─── NOTE — a measurement, or a leftover that is doing its job ─────────────────
+  {
+    // Demoted from MAJOR by plan 06 slice 9 (2026-10-15). The old `why` claimed this gap "carries into
+    // every later volume's copy", which is true of the roster and was never the decision being made: the
+    // decision was *whether a character nobody wrote about is worth stopping a 17-volume run for*, and on
+    // this corpus the guard fired on names a shop clerk drops once. The carrying-forward is still caught —
+    // `reference-voice-covers-fewer-characters` (MAJOR, untouched) stops a reference that lost a character
+    // the volume's own text puts on a page and the extraction noticed. What is left here is the tail, and
+    // the tail is now decided once, at the end of the series, by the closing cast reconciliation.
+    kind: "reference-voice-mention-not-covered",
+    level: "NOTE",
+    why:
+      "the reference says nothing about a character this volume's text names, and the per-book stop is no " +
+      "longer this finding's job: the name is printed per book in the volume's validation report the grader " +
+      "reads, and the decision — is this character interchangeable? — is taken once for the whole series by " +
+      "the closing cast reconciliation (character-voice/reconcile.js), which names every one of them. The " +
+      "half that does carry forward is still a stop: reference-voice-covers-fewer-characters.",
+  },
   {
     kind: "quarantine-present",
     level: "NOTE",

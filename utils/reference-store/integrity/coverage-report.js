@@ -6,6 +6,13 @@
  * the HIGH group is the stop, the MEDIUM group is the price of softening that stop and is
  * printed in full. The line it quotes is the constant in `coverage.js`, not a copy of it.
  *
+ * **The two groups are not two levels.** Since plan 06 slice 9 (2026-10-15) the MEDIUM group is a
+ * `NOTE` in `utils/postmortem/levels.js`: it names every character this volume's text puts on a page and
+ * the reference says nothing about, and it stops nothing. "Is this character worth an investigation?" is
+ * not a per-book question — it is taken once, after the last volume, by the closing cast reconciliation
+ * (`character-voice/reconcile.js`), which asks it over the settled record. The HIGH group is unchanged
+ * and remains a stop.
+ *
  * @module utils/reference-store/integrity/coverage-report
  */
 
@@ -71,7 +78,11 @@ function coverageFindings(ctx, uncovered, upTo, step, volume) {
           `this volume's text, so this is reported and not blocked: ${mentions.map((row) => `${row.key} — ${row.why}`).join("; ")}. ` +
           `The line is ${COVERAGE_SIGNIFICANCE_CHAPTERS} chapters or one claim from the extraction. If either ` +
           "signal is wrong for one of these names — a main character the book happens to name once — the fix is " +
-          "to give them an entry, not to move the line."
+          "to give them an entry, not to move the line. " +
+          "This is a per-book note: the level table calls it NOTE (plan 06 slice 9), so it pauses nothing. " +
+          "Whether any of these names is worth an investigation is decided once, after the last volume, by " +
+          "the closing cast reconciliation (character-voice/reconcile.js), which re-asks the whole roster " +
+          "over the settled record and prints every one of them either way."
       )
     );
   }

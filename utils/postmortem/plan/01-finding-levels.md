@@ -460,6 +460,24 @@ escalation, so it does not lock the loose behaviour in.
   `missing-required` for artifacts that do not exist yet. §9.1's question ("how many MAJOR findings does a
   real run produce?") is still unanswered, and this number does not answer it.
 
+**One level has moved since this plan shipped (2026-10-15), and it moved down.**
+`reference-voice-mention-not-covered` — the reference store's per-book "this volume names a character
+the reference says nothing about, and neither significance signal holds" — went **MAJOR → NOTE**. It is
+the first demotion the table has had, and the reason is not that the finding stopped mattering: it is
+that the question it raises (*is this name one the story keeps, or one it drops?*) cannot be answered
+inside one volume, and the per-book level was buying an investigation the run could not answer. The
+decision now lives in the closing cast reconciliation (plan 06 slice 9, `character-voice/reconcile.js`),
+which asks the same question over the whole series and splits the answer by how many volumes' own text
+prints the name. The **hard** half of the same guard, `reference-voice-covers-fewer-characters`, is
+untouched at MAJOR: a character this volume's text measures as significant and the reference omits is
+still cumulative damage every later volume inherits. Measured end to end through the real gate
+(`test/test-cast-reconciliation.js` scenario 5): the demoted kind walks 3 of 3 volumes, writes no halt
+record, and the triage routes it as a note; the untouched one still halts after volume 02 with volume 03
+unattempted and routes as damage. The table is now **STOP 18 · MAJOR 30 · MINOR 16 · NOTE 6** over the
+same **70** kinds, and `test/test-finding-levels.js` (492 checks) needed no change — the kind is emitted
+at MEDIUM, so it is in neither the "a STOP kind must be emitted at HIGH" list nor the damage-kind ratchet.
+§9.1's question is unaffected: this is one kind leaving MAJOR, not evidence about how many arrive there.
+
 ---
 
 ## 9. Open questions

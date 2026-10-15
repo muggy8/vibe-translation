@@ -30,6 +30,7 @@ const { acceptanceSystemPromptFile, acceptanceUserPromptTemplateFile, extractSys
 const { openVoiceRecord, fileVoiceExtraction, sealVoiceRecord } = require("./store");
 const { runAssembledVolume } = require("./assemble");
 const { buildExtractSystemPrompt } = require("./prompts");
+const { reconcileCastRun } = require("./reconcile");
 
 /** The character-voice stage's own file names inside a volume folder. */
 const VOICE_FILE = "character-voice.md";
@@ -166,13 +167,38 @@ async function characterVoice() {
   const cascade = { regeneratedAny: false, regeneratedFrom: null };
   const extractSystemPrompt = buildExtractSystemPrompt(prompts.extractSystemPrompt, registerDeclaration);
   const run = { folders, volumeByFolder, runSettings, prompts, extractSystemPrompt, dryRun, force, cascade, registerDeclaration };
+  /**
+   * Volumes this walk did not finish.
+   *
+   * Collected by re-throwing, so `ON_VOLUME_ERROR=skip` still does its job and `runVolumeSeries` still
+   * counts them — this is only a note the closing act reads. The reconciliation reconciles the cast the
+   * whole series produced; a walk that left a volume broken did not produce one, and the half-built
+   * record of the volume that broke is the highest-numbered record on disk, which is exactly what
+   * `settledGlossaryRecord` would have asked. Reconciling that would report a cast the run never built.
+   *
+   * @type {string[]}
+   */
+  const unfinishedVolumes = [];
   await runVolumeSeries("character-voice", {
     volumes,
     folders,
     volumeByFolder,
-    processVolume: (folderName, index) => processVoiceVolume({ folderName, index }, run),
-    afterVolumes: () =>
-      publishLatestToSeriesRoot({
+    processVolume: async (folderName, index) => {
+      try {
+        return await processVoiceVolume({ folderName, index }, run);
+      } catch (err) {
+        unfinishedVolumes.push(folderName);
+        throw err;
+      }
+    },
+    // Publish the newest snapshot at the series root, then close the run with the cast reconciliation: the
+    // one question the per-book coverage guard cannot answer — is a character the reference never wrote
+    // about worth stopping for? — is decided once here, over the settled record, at 0 model calls. It runs
+    // after the publish on purpose: the publish is the artifact the stage owes, and a reconciliation that
+    // refuses (no readable record, no presence measurement) must not be able to leave the series root
+    // holding a stale copy it never even got as far as auditing.
+    afterVolumes: async () => {
+      await publishLatestToSeriesRoot({
         seriesDir,
         folders,
         fileName: VOICE_FILE,
@@ -180,7 +206,9 @@ async function characterVoice() {
         label: "character voice reference",
         volumeArg,
         dryRun,
-      }),
+      });
+      await reconcileCastRun({ seriesDir, folders, volumeByFolder, volumeArg, dryRun, unfinishedVolumes });
+    },
   });
 }
 
