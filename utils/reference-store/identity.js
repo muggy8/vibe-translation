@@ -20,6 +20,16 @@
  * is the guard that keeps that from drifting. A wrong link is therefore a wrong *group*, never a lost
  * sentence.
  *
+ * WHERE ITS TWO SOURCES COME FROM (plan 07 slice 2, 2026-10-15). The book's markup reaches this layer as
+ * the record's **own written-form rows**, grouped through `written-forms/rows.js`'s `candidateGroupsInRecord`
+ * and filtered by `written-forms/shapes.js`'s `identityBearingGroups` — plan 07 §2.9's roster-or-reading
+ * rule, measured at 18 of the 97 candidate groups with zero false positives. The door no longer opens a
+ * volume folder to read `<base>-ruby-guides.json`; `written-forms/file.js` is the only door in this store
+ * that reads a harvest file, and the require runs one way (`identity/` → `written-forms/`). The second
+ * source is unchanged: the record's published Characters rows, read through the pinned eight-shape table
+ * in `identity/shapes.js`, with the one shape measured wrong (`<K>'s nickname`, 5 pairs, all 5 wrong) kept
+ * in the table marked excluded.
+ *
  * @module utils/reference-store/identity
  */
 

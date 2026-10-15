@@ -14,11 +14,34 @@
  * record, and the narrowest-looking rule for reading the prose that states most of these links was
  * measured producing **5 pairs, all 5 wrong**.
  *
+ * ## Where the guide half reads from, since plan 07 slice 2
+ *
+ * It used to open the volume folder and read `<base>-ruby-guides.json`. **It does not read files any
+ * more.** The forms it groups are the record's own written-form rows, reached through
+ * `written-forms/rows.js`'s `candidateGroupsInRecord` — the shipped grouping read, not a second grouping
+ * implementation — and the question "which of those groups states a character" is answered by
+ * `written-forms/shapes.js`'s `identityBearingGroups`, plan 07 §2.9's rule, measured at 18 of the 97
+ * candidate groups with zero false positives. The door therefore reads **the record it is filing into**
+ * and nothing else: it cannot open a volume folder, it cannot open a later volume's book, and the forms
+ * it groups are the ones copy-forward carried to it. `written-forms/file.js` is the only door in this
+ * store that reads a harvest file, and the direction of the require is one-way — `identity/` reaches
+ * `written-forms/`, never the reverse (`test/test-written-forms.js` pins that the written-forms layer
+ * requires nothing under `identity/`).
+ *
+ * **Which groups produce links, and which produce a named limit.** §2.9's rule selects the group; the
+ * link table's `a` / `b` are foreign keys to `cast(key)` with `PRAGMA foreign_keys` ON, so a link can
+ * only join two names the record publishes. A selected group whose roster holds exactly one name —
+ * すみれこ ← 菫子 / 董子, なでしこ ← 撫子 / 赤井撫子, サンちやん, ツバキ, ミント on the real corpus — is
+ * reported in `guideUnlinkedGroups` with the reason, and files nothing. Making those fileable means
+ * putting a name the glossary never entered into the roster, which changes what every later volume's
+ * coverage guard counts; that is a decision, and it is written up in
+ * `/tmp/opencode/plan07-slice2-questions.md` rather than taken here.
+ *
  * **No seal guard, and that is deliberate.** `castAlias` refuses to merge on a sealed record because a
  * merge re-points rows that record already published. Filing a link re-points nothing: the published
  * artifacts are rendered by doors that do not read these tables. So a link can be filed into a record
  * that is sealed without rewriting anything the seal protects. (Which act files it, and when, is the open
- * decision in `/tmp/opencode/identity-table-questions.md`; nothing in a run calls this door yet.)
+ * decision plan 07 §6.3 and plan 06 §10.9; nothing in a run calls this door yet.)
  *
  * **A link is withdrawn, never deleted.** `withdrawn_at` / `withdrawn_reason`, the same shape
  * `cast.merged_into` and `challenges.outcome` use. "Removable" and "traceable to its source" are both
@@ -29,7 +52,9 @@
 
 const { refusal } = require("../refusals");
 const { IDENTITY_LINK_SOURCES } = require("../schema");
-const { readRubyGuideHarvests, rubyGuideStatedLinks, characterRowsInRecord, characterRowStatedLinks } = require("./sources");
+const { candidateGroupsInRecord, writtenFormsInRecord } = require("../written-forms/rows");
+const { splitGroupsByRoster } = require("../written-forms/shapes");
+const { guideLinksFromGroups, guideNearMisses, guideSoloRosterPairs, characterRowsInRecord, characterRowStatedLinks } = require("./sources");
 require("../../../types"); // JSDoc type definitions
 
 /**
@@ -48,9 +73,10 @@ const MIN_LINK_WITHDRAWAL_REASON_CHARS = 20;
 /**
  * The roster this record holds, as a set.
  *
- * A link is only filed between entries **this record** holds. That is what "references the other
- * entries" means here, and it is also what keeps the ruby guide's unanswered question — which of the two
- * names is the character — out of the record: the door never needs the answer, because it files a group.
+ * A link is only filed between entries **this record** holds — the link table's `a` / `b` are foreign keys
+ * to `cast(key)` and `PRAGMA foreign_keys` is ON, so this is not only a rule, it is what the schema allows.
+ * It is also what keeps the guide's unanswered question — which of the names is the character — out of the
+ * record: the door never needs the answer, because it files a group.
  *
  * @param {{db: Object}} ctx
  * @returns {Set<string>}
@@ -138,41 +164,60 @@ function absorbIdentity(ctx, survivor, absorbed, reason) {
 }
 
 /**
- * File every link this volume's sources state.
+ * File every link this record's sources state.
  *
  * Two sources, both read as they are, neither of them a guess:
  *
- *   1. the extraction's pronunciation-guide harvest — the book's own markup;
+ *   1. the record's own written-form rows, folded into candidate groups by the shipped read
+ *      (`written-forms/rows.js`'s `candidateGroupsInRecord`) and filtered by plan 07 §2.9's roster-or-reading
+ *      rule (`written-forms/shapes.js`'s `identityBearingGroups`, reached here through `splitGroupsByRoster`)
+ *      — the book's own markup, transcribed by the door that files it;
  *   2. the record's own published Characters rows, read through the pinned shape table in `shapes.js`.
  *
  * A link whose two names are already in different identities **joins those identities** (see
  * `absorbIdentity`). A link already filed by the same source in the same volume is counted, not
- * duplicated, which is what makes a second pass over the same volume cost nothing.
+ * duplicated, which is what makes a second pass over the same record cost nothing.
+ *
+ * **It reads the record, not the books.** The grouping is bounded at the volume being filed, so it can
+ * only ever see that volume's rows and the ones copy-forward carried to it — the same no-forward rule
+ * `written-forms/file.js` enforces at filing, enforced here at reading. Asking this door for a volume
+ * later than the record's own is refused before anything is read.
  *
  * @param {Object} ctx - The store context.
  * @param {Object} [opts]
  * @param {number} [opts.volume] - The volume whose sources are being read. Defaults to this store's volume.
- * @param {Array<{file: string, rows: Array<Object>}>} [opts.harvests] - Pre-read ruby-guide harvests. Defaults to reading this volume's folder.
- * @returns {{ok: boolean, volume: number, identitiesCreated: number, identitiesAbsorbed: number, linksFiled: number, linksAlreadyFiled: number, linksWithdrawn: number, rubyGuideRows: number, rubyGuideLinks: number, rubyGuideNearMisses: Array<Object>, characterRows: number, characterRowLinks: number, proseShapesExcluded: Array<Object>, identities: Array<Object>, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, volume: number, identitiesCreated: number, identitiesAbsorbed: number, linksFiled: number, linksAlreadyFiled: number, linksWithdrawn: number, guideRows: number, guideCandidateGroups: number, guideIdentityBearingGroups: number, guideIdentityBearingRows: number, guideIdentityBearingOccurrences: number, guideUnselectedGroups: number, guideLinks: number, guideNamesLinked: number, guideUnlinkedGroups: Array<Object>, guideNearMisses: Array<Object>, guideAmbiguousReadings: Array<Object>, guideSoloPairs: Array<Object>, characterRows: number, characterRowLinks: number, proseShapesExcluded: Array<Object>, identities: Array<Object>, refusal: ReferenceRefusal|null}}
  */
-function fileIdentityLinks(ctx, { volume, harvests } = {}) {
+function fileIdentityLinks(ctx, { volume } = {}) {
   const vol = Number(volume === undefined ? ctx.volume : volume);
+  const empty = {
+    identitiesCreated: 0,
+    identitiesAbsorbed: 0,
+    linksFiled: 0,
+    linksAlreadyFiled: 0,
+    linksWithdrawn: 0,
+    guideRows: 0,
+    guideCandidateGroups: 0,
+    guideIdentityBearingGroups: 0,
+    guideIdentityBearingRows: 0,
+    guideIdentityBearingOccurrences: 0,
+    guideUnselectedGroups: 0,
+    guideLinks: 0,
+    guideNamesLinked: 0,
+    guideUnlinkedGroups: [],
+    guideNearMisses: [],
+    guideAmbiguousReadings: [],
+    guideSoloPairs: [],
+    characterRows: 0,
+    characterRowLinks: 0,
+    proseShapesExcluded: [],
+    identities: [],
+  };
   if (!Number.isInteger(vol) || vol < 1) {
     return {
       ok: false,
       volume: vol,
-      identitiesCreated: 0,
-      identitiesAbsorbed: 0,
-      linksFiled: 0,
-      linksAlreadyFiled: 0,
-      linksWithdrawn: 0,
-      rubyGuideRows: 0,
-      rubyGuideLinks: 0,
-      rubyGuideNearMisses: [],
-      characterRows: 0,
-      characterRowLinks: 0,
-      proseShapesExcluded: [],
-      identities: [],
+      ...empty,
       refusal: refusal({
         verb: "file_identity_links",
         rule: "identity-volume-undecided",
@@ -181,16 +226,50 @@ function fileIdentityLinks(ctx, { volume, harvests } = {}) {
       }),
     };
   }
+  // The no-forward rule, asked before anything is read. The guide half groups the written forms this record
+  // carries, and a record carries its own volume and the volumes before it (plan 07 §4.4). A volume later
+  // than the record's own has not been read by it, so its forms are not here to group.
+  if (Number.isInteger(ctx.volume) && vol > Number(ctx.volume)) {
+    return {
+      ok: false,
+      volume: vol,
+      ...empty,
+      refusal: refusal({
+        verb: "file_identity_links",
+        rule: "identity-cannot-look-forward",
+        because:
+          `this record is volume ${ctx.volume}, and volume ${vol}'s book has not been read by it. The guide half of this door ` +
+          "groups the written forms this record carries, and a record carries its own volume and the ones before it " +
+          "(plan 07 §4.4): filing a link from a later volume's forms would change what an earlier volume already published.",
+        fix: `open the record for volume ${vol} and file its links there, or ask this record for a volume up to ${ctx.volume}.`,
+        detail: { recordVolume: Number(ctx.volume), askedVolume: vol },
+      }),
+    };
+  }
 
   const castKeys = castKeysInRecord(ctx);
-  const read = harvests === undefined ? readRubyGuideHarvests(ctx.volumeDir, vol) : { files: harvests, error: null };
-  const ruby = rubyGuideStatedLinks(read.files, castKeys, vol);
+
+  // ── The guide half: the record's own written forms, grouped by the shipped read. ─────────────────
+  const built = candidateGroupsInRecord(ctx, { upToVolume: vol });
+  const split = splitGroupsByRoster(built.groups, castKeys);
+  const guide = guideLinksFromGroups(split.identityBearing, castKeys);
+  // Near misses are asked over EVERY candidate group, not only the selected ones: ジヨーロ is not selected
+  // by §2.9's rule and plan 07 §2.9 still names it. Reporting costs nothing and filing does.
+  const misses = guideNearMisses(built.groups, castKeys);
+  // The shape §2.9's group rule structurally cannot see: one written form guided into another roster name.
+  // Reported, never filed — widening the candidate set is plan 07 §2.2's decision, not this door's.
+  const soloPairs = guideSoloRosterPairs(
+    writtenFormsInRecord(ctx).filter((row) => Number(row.volume) <= vol),
+    castKeys,
+    new Set(built.groups.map((group) => group.reading))
+  );
+
   const rows = characterRowsInRecord(ctx);
   const prose = characterRowStatedLinks(rows, castKeys);
 
   /** @type {Array<{a: string, b: string, statedBy: string, statedByVolume: number, sourceFile: string, reason: string}>} */
   const candidates = [];
-  for (const link of ruby.links) {
+  for (const link of guide.links) {
     candidates.push({
       a: link.a,
       b: link.b,
@@ -292,10 +371,18 @@ function fileIdentityLinks(ctx, { volume, harvests } = {}) {
     linksFiled,
     linksAlreadyFiled,
     linksWithdrawn: ctx.db.prepare("SELECT COUNT(*) AS n FROM cast_identity_links WHERE withdrawn_at IS NOT NULL").get().n,
-    rubyGuideRows: ruby.rows,
-    rubyGuideLinks: ruby.links.length,
-    rubyGuideNearMisses: ruby.nearMisses,
-    rubyGuideError: read.error || null,
+    guideRows: built.totals.harvestRows,
+    guideCandidateGroups: built.totals.candidateGroups,
+    guideIdentityBearingGroups: split.totals.identityBearing,
+    guideIdentityBearingRows: split.totals.identityBearingRows,
+    guideIdentityBearingOccurrences: split.totals.identityBearingOccurrences,
+    guideUnselectedGroups: split.totals.unselected,
+    guideLinks: guide.links.length,
+    guideNamesLinked: guide.namesLinked,
+    guideUnlinkedGroups: guide.unlinkedGroups,
+    guideNearMisses: misses.nearMisses,
+    guideAmbiguousReadings: misses.ambiguous,
+    guideSoloPairs: soloPairs,
     characterRows: rows.length,
     characterRowLinks: prose.links.length,
     proseShapesExcluded: prose.excluded,

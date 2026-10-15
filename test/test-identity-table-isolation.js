@@ -25,6 +25,12 @@
  * The second half is what stops the first from being satisfied by a rename: a module could reach the
  * tables through a helper with an unrelated name, and only the A/B would notice.
  *
+ * **Plan 07 slice 2 (2026-10-15) changed what the linked arm is built from.** The identity door no longer
+ * reads `<base>-ruby-guides.json` out of the volume folder; it groups the record's own written-form rows.
+ * So both arms now file the same harvest into the same table, and the written-form table itself is one of
+ * the tables the A/B compares. The only thing that still differs between the arms is whether
+ * `fileIdentityLinks` ran.
+ *
  * Fixtures only, under `/tmp/opencode/series-fixtures`. Nothing here reads the real 17 volumes or any file
  * under the series folder, and nothing here reaches a model (AGENTS.md rule 8, gotcha 69).
  *
@@ -46,6 +52,8 @@ const { povClaimsInRecord, renderPovMap } = require("../utils/reference-store/po
 const { resolveExtractionName } = require("../utils/reference-store/name-resolution");
 const { recordCastPresence } = require("../utils/reference-store/presence");
 const { integrityFindings } = require("../utils/reference-store/integrity");
+const { fileVolumeWrittenForms } = require("../utils/reference-store/written-forms");
+const { RUBY_GUIDE_FILE_SUFFIX } = require("../utils/source/ruby-guides");
 
 const { fixtureStoreSeries, assertInsideFixture, EXTRACTION_01 } = require("./fixture-reference-store");
 
@@ -124,16 +132,18 @@ const IDENTITY_NAMES = [
   "identityCoverageSummary",
   "IDENTITY_PROSE_SHAPES",
   "IDENTITY_LINK_SOURCES",
-  "RUBY_GUIDE_HARVEST_SUFFIX",
   "statedLinksInProse",
-  "readRubyGuideHarvests",
-  "rubyGuideStatedLinks",
   "characterRowsInRecord",
   "characterRowStatedLinks",
   "castKeysInRecord",
   "liveIdentitiesOf",
   "recountIdentity",
   "foldSmallKana",
+  "SMALL_KANA_TO_FULL",
+  "guideNamesInGroup",
+  "guideLinksFromGroups",
+  "guideNearMisses",
+  "guideSoloRosterPairs",
   "MIN_LINK_WITHDRAWAL_REASON_CHARS",
 ];
 
@@ -164,31 +174,41 @@ const PROTECTED_MODULES = [
 /**
  * The pronunciation-guide harvest both arms' volume folders hold.
  *
- * Written in BOTH arms on purpose: the file sitting in the folder is not the difference between them.
- * The only difference is whether the door ran. 三色院菫子 → パンジー is the book's own markup stating a
- * link; 如月雨露 → 存在しない名 is the case that must file nothing because the reading is not on the roster.
+ * Written in BOTH arms, and **filed into both records**, on purpose: the markup sitting in the folder and
+ * the written-form rows it produces are not the difference between them. The only difference is whether the
+ * identity door ran. Two groups, one on each side of plan 07 §2.9:
+ *
+ *   - パンジー ← 三色院菫子 / 虹彩寺菫 — selected (a roster form AND the roster's own reading), and both
+ *     names are published, so it files a link;
+ *   - 存在しない名 ← 如月雨露 / 玄武 — selected (a roster form), but the record publishes exactly one of the
+ *     two names, so it files nothing and is named as the limit.
  */
 const HARVEST = {
   schema: 2,
   whatThisIs: "fixture harvest for the isolation suite",
   generatedBy: "test/test-identity-table-isolation.js",
   sourceFile: "test_story(1).epub",
-  totals: { guides: 2, rows: 2 },
   guides: [
     { word: "三色院菫子", reading: "パンジー", count: 18, readingScript: "katakana", chapters: ["ch1"], annotated: [{ base: "三色院菫子", reading: "パンジー" }] },
+    { word: "虹彩寺菫", reading: "パンジー", count: 406, readingScript: "katakana", chapters: ["ch1"], annotated: [{ base: "虹彩寺菫", reading: "パンジー" }] },
     { word: "如月雨露", reading: "存在しない名", count: 4, readingScript: "katakana", chapters: ["ch0"], annotated: [{ base: "如月雨露", reading: "存在しない名" }] },
+    { word: "玄武", reading: "存在しない名", count: 1, readingScript: "katakana", chapters: ["ch2"], annotated: [{ base: "玄武", reading: "存在しない名" }] },
   ],
 };
 
 /**
  * Build one fixture store, identically in both arms.
  *
+ * Both arms write the harvest file AND file its rows into the record. That is the point of slice 2: the
+ * identity door no longer reads the folder, so the written-form rows are part of the shared starting
+ * state, and the only thing that differs between the arms is whether `fileIdentityLinks` ran.
+ *
  * @param {string} label - The fixture label, so the two arms cannot collide.
- * @returns {{store: Object, seriesDir: string}}
+ * @returns {Promise<{store: Object, seriesDir: string, forms: Object}>}
  */
-function buildStore(label) {
+async function buildStore(label) {
   const fx = fixtureStoreSeries(label);
-  fs.writeFileSync(path.join(fx.volumes[0].dir, `test_story(1)${rs.RUBY_GUIDE_HARVEST_SUFFIX}`), JSON.stringify(HARVEST, null, 2) + "\n", "utf8");
+  fs.writeFileSync(path.join(fx.volumes[0].dir, `test_story(1)${RUBY_GUIDE_FILE_SUFFIX}`), JSON.stringify(HARVEST, null, 2) + "\n", "utf8");
   const store = rs.openReferenceStore({ volume: 1, folder: "Test Story(01)", seriesDir: fx.dir, stage: "merge" });
   assertInsideFixture(store.file, fx.dir);
   store.registerVolume({ volume: 1, folder: "Test Story(01)", title: "Test Story" });
@@ -196,7 +216,9 @@ function buildStore(label) {
   assert.ok(registered.ok, `the fixture chapters should register: ${registered.error}`);
   const imported = importGlossary(store, GLOSSARY);
   assert.ok(imported.castRegistered >= 6, `the fixture glossary should register its Characters rows: ${JSON.stringify(imported.refused.map((r) => r.row.term))}`);
-  return { store, seriesDir: fx.dir };
+  const forms = await fileVolumeWrittenForms(store, {});
+  assert.ok(forms.ok && forms.rowsFiled === HARVEST.guides.length, `both arms file the same written-form rows: ${forms.refusal && forms.refusal.because}`);
+  return { store, seriesDir: fx.dir, forms };
 }
 
 /**
@@ -301,6 +323,12 @@ function everythingButIdentity(store) {
       !/require\((["'])[^"']*\/?identity(\/|["'])/.test(layer),
       `${file} must not require the identity layer — ${why}`
     );
+    // Plan 07 slice 2 moved the guide half off the file system. A module that reached the harvest file
+    // directly would reach the same markup the identity door reads, through a door nothing compares.
+    ok(
+      !/ruby-guides|RUBY_GUIDE_FILE_SUFFIX|readRubyGuide/.test(layer),
+      `${file} must not read the pronunciation-guide harvest itself — ${why}, and the record's written-form rows are the only door onto that markup`
+    );
   }
   ok(files === PROTECTED_MODULES.length, `every protected module was scanned (${files}/${PROTECTED_MODULES.length})`);
   console.log(`  1. source scan: ${files} module layers, ${IDENTITY_NAMES.length} identity names, 0 mentions, 0 requires`);
@@ -308,8 +336,9 @@ function everythingButIdentity(store) {
 
 // ─── 2. the two arms: identical until the door runs, and identical after it ────
 
-const linked = buildStore("isolation-linked");
-const plain = buildStore("isolation-plain");
+async function main() {
+const linked = await buildStore("isolation-linked");
+const plain = await buildStore("isolation-plain");
 
 try {
   const beforeLinked = everythingButIdentity(linked.store);
@@ -319,9 +348,12 @@ try {
 
   const filed = linked.store.fileIdentityLinks();
   ok(filed.ok && filed.linksFiled > 0, `the linked arm files its stated links: ${filed.linksFiled}`);
-  same([filed.rubyGuideLinks, filed.characterRowLinks], [1, 2], "and both sources contributed: the book's markup and the record's own rows");
+  same([filed.guideLinks, filed.characterRowLinks], [1, 2], "and both sources contributed: the record's written-form rows and the record's own rows");
+  same([filed.guideRows, filed.guideCandidateGroups, filed.guideIdentityBearingGroups, filed.guideUnselectedGroups], [4, 2, 2, 0], "both arms hold the same four written-form rows, and §2.9 selects both of the two groups they describe");
+  same(filed.guideUnlinkedGroups.map((u) => u.reading), ["存在しない名"], "the selected group holding one published name is named, not filed");
   ok(linked.store.castIdentities().length > 0, "and the identity table is not empty — the comparison is not vacuous");
-  same(plain.store.castIdentities(), [], "while the other arm still has none");
+  same(plain.store.castIdentities(), [], "while the other arm, holding the same written-form rows, still has none");
+  same(plain.store.castIdentityLinks(), [], "and no link either: the door never ran there");
 
   const afterLinked = everythingButIdentity(linked.store);
   sameDigest(afterLinked, beforeLinked, "filing every link changed nothing outside the two identity tables");
@@ -456,4 +488,10 @@ try {
   }
 }
 
-console.log(`identity isolation: ${checks} checks, 0 model calls.`);
+  console.log(`identity isolation: ${checks} checks, 0 model calls.`);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
