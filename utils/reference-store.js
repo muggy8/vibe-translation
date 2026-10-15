@@ -45,6 +45,7 @@ const __evidence = require("./reference-store/evidence");
 const __cast = require("./reference-store/cast");
 const __facts = require("./reference-store/facts");
 const __queries = require("./reference-store/queries");
+const __chapterFacts = require("./reference-store/chapter-facts");
 const __integrity = require("./reference-store/integrity");
 const __prose = require("./reference-store/document-prose");
 const __presence = require("./reference-store/presence");
@@ -78,6 +79,7 @@ module.exports = {
   ...__cast,
   ...__facts,
   ...__queries,
+  ...__chapterFacts,
   ...__integrity,
   ...__prose,
   ...__presence,

@@ -24,6 +24,17 @@
  * what this file does, and it is not behind a flag: `scanTopLevelObjects` reports whether the array
  * closed, and an answer that did not close is retried.
  *
+ * ## What each chapter is shown as already known (plan 06 slice 2, 2026-10-14)
+ *
+ * A chapter's call is shown the **query result** `character-voice/known-facts.js` builds from this
+ * volume's open record — the record's current claims for the characters this chapter's own text names —
+ * and not the previous volume's published `character-voice.md`. Two things changed with that, and both
+ * are guards rather than tidy-ups: this pass **refuses** when no record is open (`no-reference-record`,
+ * no fallback to a markdown file), and a chapter the record names nobody in is **named** — in the log,
+ * on the chapter record, and in `readingReport`, which the acceptance grader reads. Before this, a
+ * missing previous reference meant every chapter of the volume was read with no accumulated knowledge
+ * and nothing anywhere said so.
+ *
  * ## The retry's reasoning level
  *
  * `EXTRACTION_RETRY_THINKING_LEVEL` is a constant, not an environment knob. The first attempt runs at
@@ -54,6 +65,7 @@ require("../types"); // JSDoc type definitions
 
 const { runExtract, parseVoiceQuirks } = require("./stages");
 const { buildAlreadyExtractedNote } = require("./prompts");
+const { knownFactsForChapter } = require("./known-facts");
 // The endpoint's own tags on the two ways a call can fail without answering (AGENTS.md gotcha 55: never
 // string-match a server's error text — these are the classes `configs/shared/failures.js` puts on them).
 const { isStructuredOutputError, isTooBigForOnePassError } = require("../configs/shared");
@@ -358,15 +370,18 @@ function parseExtractionAnswer(output) {
  * @param {{id: string, file: string}} params.segment
  * @param {number} params.si - Zero-based position in reading order.
  * @param {string} params.extraNote - What this chapter is told about what has already been extracted.
+ * @param {string} [params.knownBlock] - The already-known block this chapter is shown: the query result
+ *   `character-voice/known-facts.js` built from the volume's open record. Built once per chapter by
+ *   `readVolumeChapters` and handed to both paid reads, because the record does not change during a pass.
  * @param {string|null} [params.thinkingLevel] - The reasoning level for this attempt, or null for the run's own.
  * @param {(line: string) => void} params.log
  * @returns {Promise<{ok: boolean, entries: Array<Object>, lost: Array<Object>, cutOff: boolean, recovered: boolean, error: string|null, failure: {kind: string, because: string}|null, raw: string, thinkingLevel: string|null}>}
  */
-async function readOneChapter({ ctx, segment, si, extraNote, thinkingLevel = null, log }) {
+async function readOneChapter({ ctx, segment, si, extraNote, knownBlock = "", thinkingLevel = null, log }) {
   let output = "";
   try {
     output = await runExtract(ctx, segment, si, {
-      stateFile: ctx.previousVoiceRefFile,
+      knownBlock,
       extraNote,
       thinkingLevel,
     });
@@ -439,7 +454,10 @@ function attemptLog(read) {
  *      hole in it is not a notebook.
  *
  * @param {Object} params
- * @param {Object} params.ctx - The extraction ctx; `previousVoiceRefFile` is the reference every chapter is shown.
+ * @param {Object} params.ctx - The extraction ctx. `refStore` is the volume's open reference record, and
+ *   it is what every chapter's "what is already known" is read out of. `previousVoiceRefFile` is no
+ *   longer shown to a chapter (plan 06 slice 2); it is still what the carry-forward guard compares this
+ *   volume's render against.
  * @param {Array<{id: string, file: string}>} params.segments - The volume's chapters, in reading order.
  * @param {string} params.volumeDir
  * @param {string|number} params.installmentNumber
@@ -449,6 +467,26 @@ function attemptLog(read) {
  * @returns {Promise<{ok: boolean, chapters: Array<Object>, refusal: Object|null}>}
  */
 async function readVolumeChapters({ ctx, segments, volumeDir, installmentNumber, force = false, onlyChapters = null, log = console.log }) {
+  // **The record is not optional** (plan 06 slice 2). The reference every chapter used to be shown was a
+  // file, and a missing file meant a silent nothing: no refusal, no log line, no finding, and a chapter
+  // read with no accumulated knowledge looked exactly like a chapter read with an empty one. The record
+  // is where the earlier volumes' claims are carried forward, so a pass without one is refused here, at
+  // the one door both the stage and `extract-voice.js` read through, and there is no fallback to a
+  // markdown file behind it.
+  if (!ctx || !ctx.refStore) {
+    return {
+      ok: false,
+      chapters: [],
+      refusal: {
+        rule: "no-reference-record",
+        because:
+          `volume ${installmentNumber} has no reference record open, and this route reads a volume against what that record already knows. ` +
+          "Without it every chapter would be asked \"what is new here?\" with nothing beside the question to answer \"compared to what?\".",
+        fix: "open the volume's record first — `openVoiceRecord` (the stage and extract-voice.js both do). There is no fallback to the previous volume's character-voice.md.",
+      },
+    };
+  }
+
   const wanted = Array.isArray(onlyChapters) && onlyChapters.length ? new Set(onlyChapters) : null;
   if (wanted) {
     const known = new Set(segments.map((s) => s.id));
@@ -488,6 +526,9 @@ async function readVolumeChapters({ ctx, segments, volumeDir, installmentNumber,
           incomplete: false,
           attempts: partial.attemptsLog || [],
           lostClaims: 0,
+          // Never asked, so never shown anything: `null` is "not measured", not "measured and empty".
+          knownCharacters: null,
+          knownClaims: null,
         });
         continue;
       }
@@ -504,6 +545,8 @@ async function readVolumeChapters({ ctx, segments, volumeDir, installmentNumber,
           incomplete: true,
           attempts: partial.attemptsLog || [],
           lostClaims: 0,
+          knownCharacters: null,
+          knownClaims: null,
         });
         continue;
       }
@@ -519,9 +562,32 @@ async function readVolumeChapters({ ctx, segments, volumeDir, installmentNumber,
         entries: done.flatMap((c) => c.entries),
       });
 
+    // **What this chapter is shown as already known**: the record's current claims for the characters
+    // this chapter's own text names. Built once per chapter and handed to both paid reads, because the
+    // record does not change during a reading pass (the claims this volume produces are filed after it).
+    // A chapter the record names nobody in is named out loud here rather than shown a silent nothing —
+    // that silence is the defect plan 06 §7 names.
+    const known = knownFactsForChapter(ctx, segment);
+    if (!known.ok) {
+      return {
+        ok: false,
+        chapters,
+        refusal: {
+          rule: known.refusal.rule,
+          because: `chapter ${segment.id}: ${known.refusal.because}`,
+          fix: known.refusal.fix,
+        },
+      };
+    }
+    if (known.namedCount === 0) {
+      log(`  chapter ${segment.id}: the record names NOBODY in this chapter's text (${known.rosterTotal} roster entr(ies) carried) — it is read with no prior knowledge of any character.`);
+    } else {
+      log(`  chapter ${segment.id}: shown ${known.claimsShown} current claim(s) about ${known.namedCount} of ${known.rosterTotal} roster entr(ies) this chapter names (${known.bytes} characters).`);
+    }
+
     /** @type {Array<Object>} */
     const attempts = [];
-    const first = await readOneChapter({ ctx, segment, si, extraNote: buildNote(chapters), log });
+    const first = await readOneChapter({ ctx, segment, si, extraNote: buildNote(chapters), knownBlock: known.block, log });
     attempts.push(attemptLog(first));
     // A read that failed for a reason a re-ask cannot fix — the answer hit the output cap, or the call
     // itself failed — stops the pass, exactly as it did before this file learned about answer shapes.
@@ -569,7 +635,7 @@ async function readVolumeChapters({ ctx, segments, volumeDir, installmentNumber,
       else if (first.entries.length === 0) log(`  chapter ${segment.id}: the answer yielded no claims at all — re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
       else if (first.cutOff) log(`  chapter ${segment.id}: a cut-off answer is half an answer. Re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
       else log(`  chapter ${segment.id}: ${first.lost.length} claim(s) could not be read out of a closed array. Re-reading it at ${EXTRACTION_RETRY_THINKING_LEVEL}.`);
-      const second = await readOneChapter({ ctx, segment, si, extraNote: buildNote(chapters), thinkingLevel: EXTRACTION_RETRY_THINKING_LEVEL, log });
+      const second = await readOneChapter({ ctx, segment, si, extraNote: buildNote(chapters), knownBlock: known.block, thinkingLevel: EXTRACTION_RETRY_THINKING_LEVEL, log });
       retried = true;
       attempts.push(attemptLog(second));
       if (second.ok) {
@@ -616,6 +682,9 @@ async function readVolumeChapters({ ctx, segments, volumeDir, installmentNumber,
       retried,
       attempts,
       lostClaims: best.lost.length,
+      knownCharacters: known.namedCount,
+      knownClaims: known.claimsShown,
+      knownBytes: known.bytes,
     });
   }
 
@@ -658,22 +727,29 @@ function readingReport(chapters, { volume }) {
       reads: attempts.length,
       incomplete: Boolean(chapter.incomplete || chapter.cutOff),
       levels: levels || (chapter.reused ? "reused from a complete partial" : "—"),
+      // Carried through so the "shown nothing" count below can see it. `undefined` (a chapter from a pass
+      // that predates this field, or one whose partial was reused) is normalised to `null`: not measured.
+      knownCharacters: chapter.knownCharacters === undefined ? null : chapter.knownCharacters,
     };
   });
   const incomplete = rows.filter((r) => r.incomplete);
   const retried = rows.filter((r) => r.reads > 1);
-  if (!incomplete.length && !retried.length) return "";
+  // `null` means the chapter was never asked (its partial was reused), so it is not a chapter that was
+  // read with nothing known. Only a measured zero counts.
+  const nothingKnown = rows.filter((r) => r.knownCharacters === 0);
+  if (!incomplete.length && !retried.length && !nothingKnown.length) return "";
 
   const out = [
     "## How this volume was read",
     "",
     `_Every chapter of this volume was read on its own. A chapter whose answer never reached its closing bracket was cut off — half an answer, with the rest unwritten — and was re-read once at the retry level named in its row below. ${incomplete.length ? "The chapters still cut off after both paid reads are named below." : "No chapter was still cut off after its re-read."}_`,
     "",
-    "| chapter | claims kept | paid reads | how it was read |",
-    "| --- | --- | --- | --- |",
+    "| chapter | claims kept | paid reads | shown as already known | how it was read |",
+    "| --- | --- | --- | --- | --- |",
   ];
   for (const row of rows) {
-    out.push(`| ${row.id} | ${row.claims} | ${row.reads}${row.reused ? " (reused — paid for in an earlier pass)" : ""} | ${row.levels}${row.incomplete ? " — **INCOMPLETE**" : ""} |`);
+    const shown = row.knownCharacters === null ? "not measured (reused)" : `${row.knownCharacters} character(s)`;
+    out.push(`| ${row.id} | ${row.claims} | ${row.reads}${row.reused ? " (reused — paid for in an earlier pass)" : ""} | ${shown} | ${row.levels}${row.incomplete ? " — **INCOMPLETE**" : ""} |`);
   }
   out.push("");
   if (incomplete.length) {
@@ -685,6 +761,15 @@ function readingReport(chapters, { volume }) {
     out.push(`All ${rows.length} chapter(s) came back whole.`);
   }
   out.push("");
+  if (nothingKnown.length) {
+    out.push(
+      `**${nothingKnown.length} of ${rows.length} chapter(s) were read with nothing known about anybody in them**: ` +
+        `${nothingKnown.map((r) => r.id).join(", ")}. This volume's reference record carries a roster, and none of it is named in those ` +
+        `chapters' own text by the same rule the record's audit matches names with. Those chapters were asked what is new with no ` +
+        `"here is what we already know" beside the question. That is a fact about the chapter and the roster's spellings, not about the record being empty.`
+    );
+    out.push("");
+  }
   return out.join("\n");
 }
 

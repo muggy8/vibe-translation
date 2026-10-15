@@ -10,9 +10,9 @@
  *
  * The boundaries:
  *
- *   - one call per chapter, in reading order, and the previous volume's reference shown to **every**
- *     chapter (the route has no in-progress document to show, and the difference is asserted on the
- *     messages, not assumed);
+ *   - one call per chapter, in reading order, and each chapter shown the **record query** built from
+ *     this volume's open reference record — never a `character-voice` markdown file (plan 06 slice 2;
+ *     the difference is asserted on the messages, not assumed);
  *   - it writes the notebook and the record and never the artifact: no `character-voice.md`, no
  *     `pov-map.md`, and the record is closed without being sealed;
  *   - it opens the volume's record through the pipeline's own door, so the previous volume's sealed
@@ -49,6 +49,7 @@ const harness = require("../harness");
 const rs = require("../utils/reference-store");
 const { resolveSourceBundle } = require("../utils/source");
 const ev = require("../extract-voice");
+const { KNOWN_FACTS_HEADING } = require("../character-voice/known-facts");
 const { GLOSSARY_01, VOICE_01, FIXTURES_ROOT } = require("./fixture-reference-store");
 
 /**
@@ -366,10 +367,10 @@ function filesIn(volumeDir) {
 // ─── The reading pass ─────────────────────────────────────────────────────────
 
 /**
- * One call per chapter, in reading order, and every chapter is shown the previous volume's
- * reference — because in this route that is the only cumulative reference that exists.
+ * One call per chapter, in reading order, and every chapter is shown the **record query** built from
+ * this volume's open reference record — never a markdown reference file (plan 06 slice 2, 2026-10-14).
  */
-async function scenarioOneCallPerChapterWithThePreviousReference() {
+async function scenarioOneCallPerChapterWithTheRecordQuery() {
   const series = fixtureReadingSeries("reading-per-chapter");
   await sealVolumeOne(series);
 
@@ -389,12 +390,12 @@ async function scenarioOneCallPerChapterWithThePreviousReference() {
   for (const call of series.calls) {
     const shown = call.messages.filter((m) => m && typeof m.text === "string" && m.text.startsWith("File: ")).map((m) => m.text);
     assert.ok(
-      shown.some((t) => t.startsWith("File: character-voice-previous.md")),
-      `chapter ${call.label}: the previous volume's reference is the cumulative material it is shown`
+      !shown.some((t) => t.startsWith("File: character-voice-")),
+      `chapter ${call.label}: no character-voice document is inlined into a chapter call any more`
     );
     assert.ok(
-      !shown.some((t) => t.startsWith("File: character-voice-current.md")),
-      `chapter ${call.label}: there is no in-progress document in this route, and none is invented`
+      call.messages.some((m) => m && typeof m.text === "string" && m.text.startsWith(KNOWN_FACTS_HEADING)),
+      `chapter ${call.label}: it is shown the record query block, which is where the earlier volumes' claims reach it now`
     );
   }
 
@@ -433,7 +434,7 @@ async function scenarioOneCallPerChapterWithThePreviousReference() {
     store.close();
   }
 
-  console.log("extract-voice: one call per chapter, the previous volume's reference shown to all of them, the artifact left unwritten");
+  console.log("extract-voice: one call per chapter, the record's own claims about this chapter's cast shown to all of them, the artifact left unwritten");
 }
 
 
@@ -865,7 +866,7 @@ function scenarioItIsNotPartOfARun() {
 
 
 (async () => {
-  await scenarioOneCallPerChapterWithThePreviousReference();
+  await scenarioOneCallPerChapterWithTheRecordQuery();
   await scenarioResumeCostsNothing();
   await scenarioAChangedChapterIsReReadAlone();
   await scenarioASealedVolumeIsRefused();

@@ -40,6 +40,7 @@ const { readRegisterDeclaration } = require("./register/declaration");
 const facts = require("./facts");
 const cast = require("./cast");
 const queries = require("./queries");
+const chapterFacts = require("./chapter-facts");
 const integrity = require("./integrity");
 const documentProse = require("./document-prose");
 const presence = require("./presence");
@@ -319,6 +320,12 @@ function openReferenceStore({ volume, folder, seriesDir, stage = "merge", create
   ctx.speakerPassage = (opts) => attribution.speakerPassage(ctx, opts);
   ctx.attributionAnswers = (upTo) => attribution.attributionAnswers(ctx, upTo);
   ctx.recordAttributionAnswer = (proposal) => attribution.recordAttributionAnswer(ctx, proposal);
+
+  // The chapter-scoped read (plan 06 slice 2): the record's current claims for the characters one
+  // chapter's own text names. Read-only, and it files nothing — it cannot change who a claim lands
+  // under, which is the guarantee `test/test-identity-table-isolation.js` pins for the identity doors.
+  ctx.chapterKnownFacts = (opts) => chapterFacts.chapterKnownFacts(ctx, opts);
+  ctx.castNamedInChapterText = (chapterText, opts) => chapterFacts.castNamedInChapterText(ctx, chapterText, opts);
 
   ctx.factsFor = (query) => queries.factsFor(ctx, query);
   ctx.factsForChapter = (query) => queries.factsForChapter(ctx, query);

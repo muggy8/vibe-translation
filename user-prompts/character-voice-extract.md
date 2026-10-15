@@ -10,7 +10,7 @@
 Read the following materials **in full** before extracting anything:
 
 1. **The source text of volume {{INSTALLMENT_NUMBER}}** — the only source you will receive for this volume. The **single source of truth** for which characters, speech quirks, and POV patterns appear in volume {{INSTALLMENT_NUMBER}}.
-2. **The previous character voice reference** (`character-voice-previous.md`) — the quirks and POV info already collected from earlier volumes. *(Absent for the first volume.)*
+2. **What this record already knows about the characters in this chapter** — the claims this series' reference record **currently** stands behind about the characters this chapter's own text names, established by the volumes before this one. It is a query over the record, not a copy of an earlier file: a claim a later volume replaced is not in it. *(A first volume's record carries none, and a chapter that names nobody the record can see is told exactly that.)*
 
 ## Task
 

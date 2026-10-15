@@ -36,6 +36,7 @@ const __config = require("./character-voice/config");
 const __carry_forward = require("./character-voice/carry-forward");
 const __reference_index = require("./character-voice/reference-index");
 const __prompts = require("./character-voice/prompts");
+const __known_facts = require("./character-voice/known-facts");
 const __stages = require("./character-voice/stages");
 const __qa = require("./character-voice/qa");
 const __task = require("./character-voice/task");
@@ -45,6 +46,7 @@ module.exports = {
   ...__carry_forward,
   ...__reference_index,
   ...__prompts,
+  ...__known_facts,
   ...__stages,
   ...__qa,
   ...__task,

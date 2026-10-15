@@ -35,6 +35,20 @@ const VOICE_REF_TRUNCATION_THRESHOLD = 64 * 1024;
 
 const VOICE_REF_TRUNCATION_MAX_ENTRIES = 200;
 
+/**
+ * How much of a voice reference one call may be shown, in **characters**.
+ *
+ * Added by plan 06 slice 2 (2026-10-14) because the two limits above could not bound anything: the
+ * picker's cap is a section count, a cumulative voice reference renders one `### ` section per roster
+ * entry, and this series' roster is 196 entries — so a 351,771-byte reference came back from
+ * `truncateVoiceRef` at 351,771 bytes with `dropped: 0` and `truncated: false`. A character budget is
+ * the shape `utils/translate/references.js` has always used for exactly this reason.
+ *
+ * It is the same order as `character-voice/known-facts.js`'s block ceiling, so the layer has one answer
+ * to "how much of a voice reference reaches a prompt". No environment knob (AGENTS.md rule 3).
+ */
+const VOICE_REF_TRUNCATION_MAX_CHARS = 24 * 1024;
+
 
 module.exports = {
   clientDir,
@@ -45,4 +59,5 @@ module.exports = {
   acceptanceUserPromptTemplateFile,
   VOICE_REF_TRUNCATION_THRESHOLD,
   VOICE_REF_TRUNCATION_MAX_ENTRIES,
+  VOICE_REF_TRUNCATION_MAX_CHARS,
 };

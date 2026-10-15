@@ -92,6 +92,7 @@ const { assertDoorAllowed } = require("./utils/prereqs/freeze");
 const { resolveSourceBundle, chapterSegmentNote } = require("./utils/source");
 const rs = require("./utils/reference-store");
 const { buildAlreadyExtractedNote, buildExtractSystemPrompt } = require("./character-voice/prompts");
+const { KNOWN_FACTS_HEADING } = require("./character-voice/known-facts");
 const { openVoiceRecord, fileVoiceExtraction, describeVoiceRefusals } = require("./character-voice/store");
 const reading = require("./character-voice/reading");
 const { extractSystemPromptFile, extractUserPromptTemplateFile } = require("./character-voice/config");
@@ -271,6 +272,16 @@ async function runExtractPass({ seriesDir, volumeArg, dryRun = false, force = fa
     const sections = [
       { title: "One-shot — extraction system prompt", prompt: ctx.extractSystemPrompt },
       { title: "One-shot — extraction user prompt", prompt: ctx.extractPrompt },
+      {
+        title: "What a live run would also send (NOT included in this preview)",
+        prompt:
+          "Every chapter call is also shown a block built from this volume's **reference record**: the " +
+          "record's current claims about the characters this chapter's own text names, as of volume " +
+          `${installmentNumber} (${KNOWN_FACTS_HEADING}).\n` +
+          "It is absent here on purpose — a --dry-run opens no record, and the block is a query over that " +
+          "record rather than a file that could be read off disk. A live run with no record open is refused " +
+          "(`no-reference-record`) before it makes a single call.",
+      },
     ];
     // The preview has to show what a live run would actually send, and a live run's note is built
     // from the partials already on disk. Reading them here costs nothing and keeps the preview from
@@ -304,6 +315,7 @@ async function runExtractPass({ seriesDir, volumeArg, dryRun = false, force = fa
     }
     const dumpFile = await writePromptDump("extract-voice", installmentNumber, "one-shot", sections);
     log(`\n  --dry-run: prompts dumped to ${dumpFile} — no model call, nothing written to the volume folder.`);
+    log("  each live chapter call is also shown the record query block described above; this preview does not carry it, because a --dry-run opens no record and the block is a query, not a file.");
     return { ok: true, refusal: null, volume: String(installmentNumber), folder: folderName, chapters: [], entries: 0, refusedClaims: [], incompleteChapters: [], record: null, extractionFile: null, dryRun: true };
   }
 

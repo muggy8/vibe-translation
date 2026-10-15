@@ -1,25 +1,29 @@
 /**
  * The extraction stage: one one-shot call per chapter (source → the quirk/POV JSON array), plus the
- * two pure helpers that call needs — the parser for the answer, and the relevance-ordered truncation
- * of the cumulative reference the extractor is shown.
+ * parser for that answer and the truncation helper the cumulative stages share.
  *
  * The compile turn that used to sit here (an author agent writing `character-voice.md` and
  * `pov-map.md`) went with the author route. The stage's one route renders both artifacts from the
- * volume's reference record, so nothing in this file hands a document to a model.
+ * volume's reference record, so nothing in this file hands a document to a model — and since plan 06
+ * slice 2 neither does the chapter call: what it is shown as "already known" is the `knownBlock`
+ * `character-voice/known-facts.js` built out of the volume's record, not the previous volume's
+ * `character-voice.md`.
  *
  * Part of the character-voice.js layer (split out of the original single file).
  */
 
 require("dotenv").config();
-const fs = require("fs").promises;
 const path = require("path");
 require("../types");
 const harness = require("../harness");
-const { inlineReferenceMessage } = require("../utils/fs");
 const { selectSectionsByRelevance } = require("../utils/prompt");
 const { chapterSegmentNote } = require("../utils/source");
 
-const { VOICE_REF_TRUNCATION_MAX_ENTRIES, VOICE_REF_TRUNCATION_THRESHOLD } = require("./config");
+const {
+  VOICE_REF_TRUNCATION_MAX_ENTRIES,
+  VOICE_REF_TRUNCATION_MAX_CHARS,
+  VOICE_REF_TRUNCATION_THRESHOLD,
+} = require("./config");
 
 /**
  * Run the extraction stage: one-shot call to extract voice quirks and POV info from one chapter.
@@ -30,16 +34,17 @@ const { VOICE_REF_TRUNCATION_MAX_ENTRIES, VOICE_REF_TRUNCATION_THRESHOLD } = req
  * @param {CharacterVoiceVolumeCtx} ctx
  * @param {SourceSegment} seg - The chapter being extracted.
  * @param {number} si - Zero-based position in reading order.
- * @param {{stateFile?: string|null, extraNote?: string|null, thinkingLevel?: string|null}} [opts]
- *   What this pass is shown as the cumulative reference, what else it is told, and at what reasoning
- *   level it runs.
+ * @param {{knownBlock?: string|null, extraNote?: string|null, thinkingLevel?: string|null}} [opts]
+ *   What this pass is shown as already known, what else it is told, and at what reasoning level it runs.
  *
- *   `stateFile`, when the key is present (a path, or `null` for "show nothing"), replaces the stage's
- *   chain. The stage shows every chapter the **previous volume's** published reference: nothing in this
- *   route writes `character-voice.md` until the record is rendered, and handing chapter 4 a file the
- *   previous chapter did not write would be handing it a file that does not exist. `extract-voice.js`
- *   passes the same thing for the same reason. The name the reference is given follows the file, not
- *   the chapter number, so a pass is not labelled as a document it is not.
+ *   `knownBlock` is the **query result** `character-voice/known-facts.js` built from this volume's open
+ *   reference record: the record's current claims for the characters this chapter's own text names. It
+ *   replaced the inlined previous volume's `character-voice.md`. The reason is a measurement, not a
+ *   preference — the document path could not be bounded (a 196-section / 351,771-byte reference came back
+ *   from `truncateVoiceRef` unchanged, because the picker's cap is a section count and 196 ≤ 200), and a
+ *   render is not the truth: the file on disk still asserts what the record has since replaced. A pass
+ *   with no record is refused by `character-voice/reading.js` before it reaches this function, so there
+ *   is no "no reference" branch here that pretends the call is the same call.
  *
  *   `extraNote` is appended after the chapter segment note. It exists because that note asserts "the
  *   cumulative reference material already covers the chapters before it", which is only true of a pass
@@ -57,20 +62,7 @@ async function runExtract(ctx, seg, si, opts = {}) {
   const thinking = opts.thinkingLevel ? { thinkingLevel: opts.thinkingLevel } : {};
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: running voice/POV extraction for chapter ${seg.id}...`);
   const messages = [{ file: path.join(ctx.volumeDir, seg.file), name: seg.file }];
-  const stateFile = Object.prototype.hasOwnProperty.call(opts, "stateFile") ? opts.stateFile : ctx.previousVoiceRefFile;
-  if (stateFile) {
-    // Inlined (not readFile) — so the cumulative reference is bounded here.
-    // Relevance-ordered: the characters this chapter actually contains are
-    // shown even when they were introduced in volume 1 (see truncateVoiceRef).
-    const chapterSource = await fs.readFile(path.join(ctx.volumeDir, seg.file), "utf8");
-    messages.push(
-      await inlineReferenceMessage(
-        stateFile,
-        stateFile === ctx.previousVoiceRefFile ? "character-voice-previous.md" : "character-voice-current.md",
-        { truncate: (raw) => truncateVoiceRef(raw, chapterSource) }
-      )
-    );
-  }
+  if (opts.knownBlock) messages.push({ text: opts.knownBlock });
   messages.push({ text: ctx.extractPrompt }, { text: chapterSegmentNote(ctx.bundle, seg, si) });
   if (opts.extraNote) messages.push({ text: opts.extraNote });
   return harness.runOneShot({
@@ -93,6 +85,16 @@ async function runExtract(ctx, seg, si, opts = {}) {
  * being processed is kept, whatever position they hold in the file (see selectSectionsByRelevance in
  * utils/prompt.js).
  *
+ * **It is no longer on the voice read path** (plan 06 slice 2, 2026-10-14): a chapter's call is shown
+ * the query result `character-voice/known-facts.js` builds from the volume's record, not this document.
+ * It stays exported and tested because it is still the window a cumulative voice reference would be
+ * shown through, and because deleting a guard because nothing calls it today is not this slice's call.
+ * What was fixed here is the bound itself: the cap was a **section count** (200) and this series' roster
+ * is 196 entries, one section each, so the picker ran and returned the document whole — measured
+ * 2026-10-14 at 351,771 bytes in → 351,771 bytes out, `kept=196 dropped=0 truncated=false`. It now packs
+ * whole sections into a character budget as well, which is the shape `utils/translate/references.js` has
+ * always used.
+ *
  * @param {string} content - The full character voice reference content.
  * @param {string} [sourceText] - The volume/chapter source text, used to rank sections.
  * @returns {string}
@@ -104,6 +106,7 @@ function truncateVoiceRef(content, sourceText) {
     headingRe: /^### /m,
     sourceText,
     maxUnits: VOICE_REF_TRUNCATION_MAX_ENTRIES,
+    maxChars: VOICE_REF_TRUNCATION_MAX_CHARS,
     unitLabel: "character section(s)",
   });
   return picked.content;
