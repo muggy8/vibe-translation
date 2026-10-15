@@ -198,7 +198,9 @@ survives for them, and the reason the aspect names were left alone. It is **not 
 06 §4.3 guards 3 and 4 would need require new kinds in the level table, which stays at 70. **The price is the
 grader's prompt** — the section is ~1.5 KB and `character-voice-validation.md` is one of the files the acceptance
 grade reads, so the offline loop's largest `acceptance` prompt moved 10,418 → 12,057 characters (main loop) and
-11,231 → 12,870 (chunked loop), with every call count unmoved (82 / 28, 0 on the second pass in both). →
+11,231 → 12,870 (chunked loop), with every call count unmoved (82 / 28, 0 on the second pass in both).
+**Re-measured 2026-10-15 at 12,103 / 12,916** — the drift from the figures above predates plan 07 slice 2b, which
+changed no prompt. →
 `utils/reference-store/register/answers.js`, `utils/reference-store/validation/report-axes.js`,
 `test/test-axis-answers.js`, gotcha 156.
 

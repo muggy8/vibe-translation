@@ -4,16 +4,22 @@
 §2b. Slice 0 is BUILT (2026-10-15)** — the reader `utils/source/guide-groups.js`, its fixture suite
 `test/test-guide-groups.js` (94 checks), and the re-measurement `test/measure-guide-groups.js` (0 model
 calls). **Slice 1 is BUILT (2026-10-15)** — `utils/reference-store/written-forms/` behind its cover, schema
-12, `test/test-written-forms.js` (**210 checks**) in `npm test`, `test/measure-written-forms.js` beside it.
+12, `test/test-written-forms.js` (**211 checks**) in `npm test`, `test/measure-written-forms.js` beside it.
 **Slice 2 is BUILT (2026-10-15)** — the identity door reads the record's own written-form rows through
 `candidateGroupsInRecord`, §2.9's roster-or-reading rule replaces the rule that required both sides to be
 roster names, and the fold table gained the one missing entry; `test/test-identity-table.js` (**166 checks**)
 and `test/test-identity-table-isolation.js` (**547 checks**) in `npm test`, `test/measure-identities.js`
-beside it. **§2 is that re-measurement, and it corrects three numbers the plan was written with** (§2.2, §2.3,
-§2.7), **then two more the correction itself got wrong** (§2.11), **and then the acceptance line slice 1 was
-dispatched against, which turned out to ask for two mutually exclusive things** (§2.13). Slices 2b and
-3–7 are not built. **§6.7 is answered (2026-10-15): the door files every harvested row that passes the two row
-guards and the group question is answered by query**, which slice 1 now does, and **slice 2 is built on it**.
+beside it. **Slice 2b is BUILT (2026-10-15)** — two deterministic reports in the written-forms layer
+(`written-forms/reports/`), 0 model calls, filing nothing, `test/test-source-quality-reports.js`
+(**179 checks**) in `npm test` and `test/measure-source-quality.js` beside it; the anomaly class narrowed to
+the one discriminator that fires on the real defect and on nothing else, because the shape this plan first
+named fires **309 times** and four of those are the spelling §2.11(b) withdrew. **§2 is that re-measurement,
+and it corrects three numbers the plan was written with** (§2.2, §2.3, §2.7), **then two more the correction
+itself got wrong** (§2.11), **then the acceptance line slice 1 was dispatched against, which turned out to ask
+for two mutually exclusive things** (§2.13), **and then the shape slice 2b was dispatched against, which turned
+out to contradict §2.11(b)** (§4.9). Slices 3–7 are not built. **§6.7 is answered (2026-10-15): the door files
+every harvested row that passes the two row guards and the group question is answered by query**, which slice 1
+now does, and **slice 2 is built on it**.
 
 This plan supersedes parts of `06-register-declarations.md` and says so plainly where. Plan 06 built
 the record machinery — declarations, per-question answers, the revision door, confirmations, the closing
@@ -648,9 +654,9 @@ that accounts for the possibility of typos and grammatical errors being in the s
 doesn't, it should be added somehow."* **It does not.** The only two places the word "typo" appears in this
 repository's instructions are a 🟢 nitpick in the wiki validator's severity ladder and one example in the
 consistency audit's severity rules, and both are about the artifacts this pipeline writes, not about the
-book it reads. `findRenderingVariants` scans the **translation's** spellings. So today, a volume whose file
-prints a character's name wrong 75 times in one chapter, and a series that writes 偽物 both ways, reach the
-translator with nothing said about either.
+book it reads. `findRenderingVariants` scans the **translation's** spellings. So today, a book that guides one
+name two different ways in the same chapter, and a series that writes 偽物 both ways, reach the translator with
+nothing said about either.
 
 Two deterministic reports, both built from rows the record and the extraction already hold, both filing
 nothing:
@@ -659,11 +665,20 @@ nothing:
   survives inside the longer** — 偽物 / 偽者, 我侭 / 我儘, 太股 / 太腿, 貴方 / 貴女, 振動 / 震動. Measured:
   **25 of the 79 unselected groups.** Printed the way a dictionary prints *color* / *colour*: both spellings,
   both counts, no verdict.
-- **Inconsistent guidance.** The author guides **one written form two different ways**, or prints **one reading
-  over two spellings in one place**. The measured real case is in the harvest already: 三色院董子 guided
-  さんしよくいん**すみれ**こ and さんしよくいん**すれみ**こ in the same chapter — a reading whose moras are
-  transposed, **1 row in 10,005**. It is reportable because the author's own two answers disagree, not because
-  a count looks odd.
+- **Inconsistent guidance.** The author guides **one written form two or more different ways in the same
+  chapter**, where the two readings are **the same characters in a different order**. The real case is in the
+  harvest already: 三色院董子 guided さんしよくいん**すみれ**こ and さんしよくいん**すれみ**こ in the same
+  chapter — a reading whose moras are transposed, **1 row in 10,005**, and **1 defect across all 17 books**.
+  It is reportable because the author's own two answers disagree, not because a count looks odd.
+
+**The wider shape this section first named is not a defect class, and the measurement is what said so.** The
+plan asked for a second shape — "one guided reading printed over two written forms in one place". Run over the
+corpus (slice 2b, 0 model calls) it fires **309 times**, and **it fires on 董子 four times**: volume 16
+chapters 3, 4, 5 and 5.1 print すみれこ over 菫子 ×57 and 董子 ×10, which is the spelling §2.11(b) withdrew as
+a defect. Sorted, those 309 are **195** rows the group guards refuse, **14** the identity door already files,
+**56** the variant-spelling report already prints, and **44** the sound-alikes §2.10 measured as **not errors**.
+**Nothing in that shape is a defect the other doors do not already describe**, so the anomaly class is the
+transposition and the wider numbers are printed as counts, not as findings.
 
 **Concentration is not the signal, and this plan said it was.** §2.11(b) originally published 董子 — 92
 occurrences, **75 of them in volume 17 chapter 6**, against 菫子 646 across 11 volumes, 菫 U+83AB / 董 U+8451 —
@@ -694,36 +709,11 @@ gotcha 121 is about exactly what happens when a spelling rule is allowed to deci
 | # | Slice | Acceptance line |
 |---|---|---|
 | **0** | **BUILT 2026-10-15 — the corrected guide measurement.** `utils/source/guide-groups.js` reads a harvest and produces candidate groups; `test/test-guide-groups.js` (94 checks, fixtures only) pins the rule; `test/measure-guide-groups.js` re-runs every number in §2 over the live corpus with 0 model calls and writes nothing. | **Met, and three of the plan's own numbers moved.** §2.1–§2.3 are reproduced by a script that reads only the guide files, 0 model calls, and a test fails if the *rule* moves. The corrections: the "24 readings over more than one written form" is **14** (24 counted volume-and-form pairs), the パンジー group spans **10** volumes not 12, and 三色院菫子 → パンジー is **18 occurrences series-wide, 16 of them in volume 15**. Plan 06 §2.11's retired conclusion is named as retired, not deleted. |
-| **1** | **BUILT 2026-10-15 — written forms become recorded facts, and no claim about anyone.** `utils/reference-store/written-forms/` (`shapes.js` 302, `rows.js` 301, `file.js` 368) behind a `written-forms.js` cover (77, 22 exports, 0 name clashes with a sibling layer), re-exported from the store barrel (369 → 391 exports). Schema **11 → 12**: `written_forms`, one row per `(volume, form, reading)`, insert-only, out of `UPDATABLE_FIELDS`, in `COUNTED_TABLES` (19 → 20) so copy-forward carries it. `test/test-written-forms.js` (10 scenarios / **166** checks, fixtures only) is in `npm test`; `test/measure-written-forms.js` (427 lines) is not. | **Built, and the plan's own acceptance line turned out to be unmeetable as written — see §2.13.** What is measured: the door files **240 rows** across the 17 volumes (**57** groups regrouped, **3,196** occurrences), a second pass over volume 17's copy files **0** and reports 13 already filed, the roster rule run against a copy of volume 17's 196-entry roster selects **18 groups / 134 rows / 1,402 occurrences** and leaves **79 / 500 / 7,332**, and the 25 / 54 split reproduces exactly (**25 variants / 166 rows / 1,561 occurrences**, **54 sound-alikes / 334 rows / 5,771**, **0 false positives** — it calls 美味/上手, 披露/疲労 and 俺/脇役 nothing). **No stage calls the door** (2 callers, both tests); **nothing else reads `written_forms`** (only the migration and those two tests); the identity layer is not required by it; the 17 corpus digests and 17 + 17 sidecars are unchanged and **0 `written_forms` rows exist in the corpus**. Every call baseline unmoved (82 / 17 and 28 / 6, 0 on the second pass in both, prompt audit 23 / 0), no new finding kind (70), no new freeze door (12), no new setting, no new command, 0 model calls. What moved: `test/test-identity-table-isolation.js` **496 → 499** (it counts tables off `sqlite_master`), and three tests that hard-coded schema 11 now pin 12. **§6.7 is answered (2026-10-15): the filing scope widens to
-every harvested row that passes the two *row* guards (≈8,910 rows) and the group question is answered by query**,
-so the 240-row / 57-group numbers above are the narrow scope this slice first built, not the scope it ends with. |
-| **2** | **BUILT 2026-10-15 — identities carry the forms, with the roster-or-reading rule.** Two forms guided to the same reading join one identity, **for the 18 groups §2.9 selects**. Statements only — no claim ever moves. The small-kana fold stays a **reporting** rule (gotcha 121), gets the one missing table entry so チェリー / チエリー resolves. **The instruction that 董子 is "reported as an anomaly, never as a link" is withdrawn** — §2.11(b) was measured again and the diagnosis was wrong, so the
-すみれこ spellings are a true link the rule must not be made to exclude. | On a copy of volume 17's record:
-パンジー's group contains the forms in §2.3 and is reachable from a query. `cast_merges` stays 0. A planted
-claim stays under the form that filed it. **The rule must not require one form to be unknown** — §2.9 shows
-that half throws away さんしよくいんすみれこ and つきみ. All three near misses are named, including
-チェリー / チエリー. The 18 groups arrive **in full** through the cumulative record (§2.13), which is what
-the owner's scope answer bought. |
-| **2 — verdict (measured 2026-10-15, `test/measure-identities.js`, 0 model calls, copies only)** | The door
-now reads the record's own `written_forms` rows through `candidateGroupsInRecord`; it no longer opens a volume
-folder and no longer knows the harvest file's name. The guide half states **every unordered pair** of the names
-one selected group holds that the roster publishes, dated to the **later** of the two names' first volumes
-(月見 guided つきみ in volume 4, 草見月 in volume 11 → volume 11 is the book that completed the pair).
-**§2.9 reproduces exactly:** 97 groups / 222 forms / 634 rows / 8,734 occurrences, of which **18 identity-bearing
-/ 134 rows / 1,402 occurrences**, **79 left out, 0 false positives**. The door files **71 links from 87 stated
-pairs** (15 from the record's written forms, 72 from published Characters rows, 16 already filed), creates 35
-identities, absorbs 1; a second pass files **0** and reports 75 already filed. Roster shape: 196 entries →
-**34 identities, 88 linked, 54 duplicates, 108 unlinked, largest group 6** (plan 06 §8 predicted 35 / 91 / 56 /
-105 / 6 — same shape, one group different). Old rule vs new: **11 of the old 13 pairs kept, 4 only the new rule
-finds** (三色院菫子 / 虹彩寺菫, 三色院菫子 / 三色院董子, 桜原桃 / 桜桃, 月見 / 草見月), **2 dropped** and named.
-`cast_merges` **0** in all 17 copies; 0 identity rows exist in the corpus. **Two things the acceptance line asked
-for and the store's own shape refuses**, both written up rather than worked around: a link is a foreign key to
-`cast(key)`, so **5 of the 18 selected groups hold exactly one published name and file nothing** (すみれこ ←
-菫子 ×371 / 董子, なでしこ ← 撫子 ×105 / 赤井撫子, サンちやん, ツバキ, ミント ← 薄荷 / 自分の彼氏) — they are
-named in `guideUnlinkedGroups`; and a guide over a **single** written form is never a candidate group, so
-リリス / 炭印嵐 and アネモネ / 牡丹一華 are named in `guideSoloRosterPairs` and filed nowhere. Both are §6.8 and
-§6.9 below. |
-| **2b** | **The source book is allowed to be wrong, and saying so is a door.** Two deterministic reports built from rows the record already holds: **variant spellings** — the 25 groups §2.10 measures, printed the way a dictionary prints *color* / *colour* — and **inconsistent guidance**: one written form guided two different ways, or one reading printed over two spellings in one place (三色院董子 guided さんしよくいん**すみれ**こ and さんしよくいん**すれみ**こ in the same chapter). Filed nowhere, declared nowhere, 0 model calls. **Concentration alone is not the signal** — §2.11(b) shows a form the author guides 76 times in one flashback chapter is a name, not a defect, and a detector built on uneven frequency would report it as one. | The variant report reproduces the 25 groups and names both spellings with their counts. The anomaly report finds the transposed reading and **does not** find 董子 (guided, flashback, already on the roster) or 如雨露 (spread 1–2 per volume across 8 volumes, a name written short). The 54 sound-alike groups are named as a class and **not** reported as errors. A planted fixture of each shape fires, and a fixture of the wrong shape stays silent — including 込 / 子 / 木, which the naive "10× more common" rule wrongly flags. |
+| **1** | **BUILT 2026-10-15 — written forms become recorded facts, and no claim about anyone.** `utils/reference-store/written-forms/` (`shapes.js` 302, `rows.js` 301, `file.js` 368) behind a `written-forms.js` cover (77, 22 exports, 0 name clashes with a sibling layer), re-exported from the store barrel (369 → 391 exports). Schema **11 → 12**: `written_forms`, one row per `(volume, form, reading)`, insert-only, out of `UPDATABLE_FIELDS`, in `COUNTED_TABLES` (19 → 20) so copy-forward carries it. `test/test-written-forms.js` (10 scenarios / **166** checks, fixtures only) is in `npm test`; `test/measure-written-forms.js` (427 lines) is not. | **Built, and the plan's own acceptance line turned out to be unmeetable as written — see §2.13.** What is measured: the door files **240 rows** across the 17 volumes (**57** groups regrouped, **3,196** occurrences), a second pass over volume 17's copy files **0** and reports 13 already filed, the roster rule run against a copy of volume 17's 196-entry roster selects **18 groups / 134 rows / 1,402 occurrences** and leaves **79 / 500 / 7,332**, and the 25 / 54 split reproduces exactly (**25 variants / 166 rows / 1,561 occurrences**, **54 sound-alikes / 334 rows / 5,771**, **0 false positives** — it calls 美味/上手, 披露/疲労 and 俺/脇役 nothing). **No stage calls the door** (2 callers, both tests); **nothing else reads `written_forms`** (only the migration and those two tests); the identity layer is not required by it; the 17 corpus digests and 17 + 17 sidecars are unchanged and **0 `written_forms` rows exist in the corpus**. Every call baseline unmoved (82 / 17 and 28 / 6, 0 on the second pass in both, prompt audit 23 / 0), no new finding kind (70), no new freeze door (12), no new setting, no new command, 0 model calls. What moved: `test/test-identity-table-isolation.js` **496 → 499** (it counts tables off `sqlite_master`), and three tests that hard-coded schema 11 now pin 12. **§6.7 is answered (2026-10-15): the filing scope widens to every harvested row that passes the two *row* guards (≈8,910 rows) and the group question is answered by query**, so the 240-row / 57-group numbers above are the narrow scope this slice first built, not the scope it ends with. |
+| **2** | **BUILT 2026-10-15 — identities carry the forms, with the roster-or-reading rule.** Two forms guided to the same reading join one identity, **for the 18 groups §2.9 selects**. Statements only — no claim ever moves. The small-kana fold stays a **reporting** rule (gotcha 121), gets the one missing table entry so チェリー / チエリー resolves. **The instruction that 董子 is "reported as an anomaly, never as a link" is withdrawn** — §2.11(b) was measured again and the diagnosis was wrong, so the すみれこ spellings are a true link the rule must not be made to exclude. | On a copy of volume 17's record: パンジー's group contains the forms in §2.3 and is reachable from a query. `cast_merges` stays 0. A planted claim stays under the form that filed it. **The rule must not require one form to be unknown** — §2.9 shows that half throws away さんしよくいんすみれこ and つきみ. All three near misses are named, including チェリー / チエリー. The 18 groups arrive **in full** through the cumulative record (§2.13), which is what the owner's scope answer bought. |
+| **2 — verdict** | **Met, and two things the store's own shape refuses** (measured 2026-10-15, `test/measure-identities.js`, 0 model calls, copies only). | The door now reads the record's own `written_forms` rows through `candidateGroupsInRecord`; it no longer opens a volume folder and no longer knows the harvest file's name. The guide half states **every unordered pair** of the names one selected group holds that the roster publishes, dated to the **later** of the two names' first volumes (月見 guided つきみ in volume 4, 草見月 in volume 11 → volume 11 is the book that completed the pair). **§2.9 reproduces exactly:** 97 groups / 222 forms / 634 rows / 8,734 occurrences, of which **18 identity-bearing / 134 rows / 1,402 occurrences**, **79 left out, 0 false positives**. The door files **71 links from 87 stated pairs** (15 from the record's written forms, 72 from published Characters rows, 16 already filed), creates 35 identities, absorbs 1; a second pass files **0** and reports 75 already filed. Roster shape: 196 entries → **34 identities, 88 linked, 54 duplicates, 108 unlinked, largest group 6** (plan 06 §8 predicted 35 / 91 / 56 / 105 / 6 — same shape, one group different). Old rule vs new: **11 of the old 13 pairs kept, 4 only the new rule finds** (三色院菫子 / 虹彩寺菫, 三色院菫子 / 三色院董子, 桜原桃 / 桜桃, 月見 / 草見月), **2 dropped** and named. `cast_merges` **0** in all 17 copies; 0 identity rows exist in the corpus. **Two things the acceptance line asked for and the store's own shape refuses**, both written up rather than worked around: a link is a foreign key to `cast(key)`, so **5 of the 18 selected groups hold exactly one published name and file nothing** (すみれこ ← 菫子 ×371 / 董子, なでしこ ← 撫子 ×105 / 赤井撫子, サンちやん, ツバキ, ミント ← 薄荷 / 自分の彼氏) — they are named in `guideUnlinkedGroups`; and a guide over a **single** written form is never a candidate group, so リリス / 炭印嵐 and アネモネ / 牡丹一華 are named in `guideSoloRosterPairs` and filed nowhere. Both are §6.8 and §6.9 below. |
+| **2b** | **BUILT 2026-10-15 — the source book is allowed to be wrong, and saying so is a door.** Two deterministic reports built from rows the record already holds: **variant spellings** — the 25 groups §2.10 measures, printed the way a dictionary prints *color* / *colour* — and **inconsistent guidance**: one written form guided two different ways, or one reading printed over two spellings in one place (三色院董子 guided さんしよくいん**すみれ**こ and さんしよくいん**すれみ**こ in the same chapter). Filed nowhere, declared nowhere, 0 model calls. **Concentration alone is not the signal** — §2.11(b) shows a form the author guides 76 times in one flashback chapter is a name, not a defect, and a detector built on uneven frequency would report it as one. | The variant report reproduces the 25 groups and names both spellings with their counts. The anomaly report finds the transposed reading and **does not** find 董子 (guided, flashback, already on the roster) or 如雨露 (spread 1–2 per volume across 8 volumes, a name written short). The 54 sound-alike groups are named as a class and **not** reported as errors. A planted fixture of each shape fires, and a fixture of the wrong shape stays silent — including 込 / 子 / 木, which the naive "10× more common" rule wrongly flags. |
+| **2b — verdict** | **Met, and the acceptance line itself was wrong** (measured 2026-10-15, `test/measure-source-quality.js`, 0 model calls, copies only). | Two report doors in the written-forms layer (`reports/collisions.js` 448, `reports/records.js` 484, `reports/variant.js` 194, `reports/guidance.js` 250) behind the existing cover (95 → 145 lines, 23 → 46 exports, store barrel 391 → 417). **The variant report reproduces §2.10 exactly:** 97 groups → 18 the roster selects, 79 it cannot see → **25 spelling variants / 166 rows / 1,561 occurrences** and **54 sound-alikes / 334 rows / 5,771**, gap 0. **The acceptance line and the shape as written cannot both hold**, and this is the slice's finding: shape (b) — one guided reading printed over two written forms in one chapter — **fires on 董子 four times** (volume 16 ch3 / ch4 / ch5 / ch5.1: すみれこ over 菫子 ×57 and 董子 ×10), which is the spelling §2.11(b) withdrew as a defect. Measured widths: **215** loose (volume, form) pairs, **244** same-chapter form collisions (142 pairs, 71 forms), **309** same-chapter reading collisions (181 pairs, 81 readings), sorted 195 not-a-candidate-group + 14 identity-bearing + 56 spelling-variant + 44 sound-alike = 309. **The anomaly class is therefore narrowed to the one discriminator that fires on the plan's real defect and on nothing else: the same characters in a different order.** It names **1 defect** across the 17 books — volume 17 ch5, 三色院董子 guided さんしよくいんすみれこ and さんしよくいんすれみこ — and **0** on the mirror shape. 董子 is named exactly **0** times as a defect (its 4 すみれこ collisions are counted and land in the identity bucket); 如雨露 appears in **0** collisions of any shape; 嫌 guided いや/きら/ぎら is counted and called nothing. The rejected 10× rule, run against the same rows, flags **39 collisions over 31 readings** and finds **0 of the 1 defect** — it compares spellings, and the defect is one spelling read two ways. Idempotent: a second pass writes **byte-identical** files; **no row written anywhere** (`cast_merges` 0, both identity tables 0, challenges 0), 0 `written_forms` rows in the corpus, all 17 digests and 34 sidecars unchanged. **Unwired: 0 callers outside the layer.** `test/test-source-quality-reports.js` (10 scenarios, **179 checks**) is in `npm test`; `test/test-written-forms.js` **210 → 211** (it now names the one door outside the layer allowed to ask the grouping question). **Two things the measurement says that the plan did not know:** the 25 variant groups are **not** all one word spelled two ways — **16 of the 25 are decided by a single shared character out of two**, and three name different things (小原 ×2 / 小腹 ×1 across three books; 凍気 / 闘気, two in-world terms in volume 5; **三上 / 魅上**, both in volume 16, one character apart) — and 三上 and 魅上 are **both real and distinct in that volume's own published glossary** (the voice actress 三上枝織, and 魅上照 from another series), so publishing "also written 魅上" beside 三上 would be the note inventing a spelling. §6.4 cannot be answered from the count of 25. And **§6.5 now has its number: a class of one.** |
 | **3** | **The relations table.** Schema 12, the columns in §4.3, the two non-negotiable rules, and a door that files a relation and closes a span *with its reason*. | A planted development closes an earlier span in the later volume's copy and leaves the earlier volume's snapshot byte-identical. A span closed without a reason is refused. A row's content columns never change after filing — asserted column by column. |
 | **4** | **The extraction contract.** A relation is a kind in the chapter call that already runs — no extra call — with the §4.4 certainty ladder and `withheld` / `narration` as legal answers. | Pass 1 files relations, pass 2 over the same fixture pays 0 calls. A planted "the name in the quote is the addressee" case comes back `addressee-risk`, not `measured`. A chapter that names nobody files nothing and is named, not punished. |
 | **5** | **Normalise, teach, then show.** Ruby stripping before quote comparison; the markdown parsers taught; only then the annotated view, built from **§2.12's second row** — the renames plus a guide the author applies every single time and the series uses at most twice. | The wrong order is proven to be the wrong order: a test shows a parser meeting un-taught markup glues a line onto a published claim's body, and shows the taught parser not doing so. The annotated view adds the §2.12 set (4,808 forms / 6,739 occurrences, +192,251 characters measured) and nothing else, and a quote copied out of an annotated chapter still verifies against the guide-free stored text. |
@@ -772,18 +762,28 @@ Still open:
 3. **Whether the identity door runs per volume or once per series.** Plan 06 §10.9 asked this and left it.
    This plan's recommendation: once per series, as the glossary step's last act, beside the terminology
    settlement — a query, no model calls, its own records, not declared artifacts.
-4. **Whether the variant-spelling note reaches the published glossary or only the run's reports.** Slice 2b
-   builds the report. Putting "also written 偽者" into a term's row changes 17 published files, and the
-   freeze gate refuses that once a translation stands on them — today none does.
+4. **Whether the variant-spelling note reaches the published glossary or only the run's reports.** Slice 2b is
+   built and writes **the run's reports only**. Putting "also written 偽者" into a term's row changes 17
+   published files, and the freeze gate refuses that once a translation stands on them — today none does.
+   **The measurement makes the caution concrete** (§5's slice-2b verdict): **16 of the 25 groups are decided by
+   a single shared character out of two**, and three of them name different things — 小原 ×2 / 小腹 ×1 across
+   three books, 凍気 / 闘気 as two in-world terms in volume 5, and **三上 / 魅上**, both in volume 16, one
+   character apart. That last pair is **already in that volume's published glossary as two separate entries**:
+   三上さん is the voice actress who played あすなろ (likely 三上枝織), and 魅上 is a reference to a character
+   from another series. So a note reading "also written 魅上" beside 三上 would be the pipeline inventing a
+   spelling the author never mixed up. **Recommendation: keep it in the run's reports**, and only revisit if a
+   rule is built that can tell 貴方/貴女 from 三上/魅上 — which is a name-identity question, not a string one.
 5. **Whether a source-quality anomaly is allowed to stop a run.** The example this item was written with — 董子,
    75 occurrences in one chapter — turned out to be a name the author guides 76 times (§2.11(b)), so it is not a
-   defect and this decision has lost its only real case. What is left is the transposed reading: 三色院董子 guided
-   さんしよくいんすみれこ and さんしよくいんすれみこ in the same chapter, **1 row in 10,005**. Nothing today reports
-   it and nothing today could have. Whether an inconsistent guide is a NOTE, a MINOR to investigate, or a MEDIUM the
-   extraction step prints is a decision about the level table, and the level table is a banned patch path — so it is
-   asked, not made. It is worth asking **after** slice 2b has run over the real corpus and printed how many of these
-   there actually are, because a level for a class of one is a different decision from a level for a class of two
-   hundred.
+   defect and this decision has lost its only real case. **Slice 2b has now run over the real corpus and printed
+   the number this item asked for: the anomaly class is one.** One transposed reading in 10,005 harvest rows
+   (三色院董子 guided さんしよくいんすみれこ and さんしよくいんすれみこ in the same chapter), **0** on the wider
+   shape once its 309 collisions are sorted, and **0** false positives across 17 books. The wider counts are in
+   `source-inconsistent-guidance.json` so the question can be re-asked against the same rows. Nothing today
+   reports the transposition and nothing today could have. Whether an inconsistent guide is a NOTE, a MINOR to
+   investigate, or a MEDIUM the extraction step prints is a decision about the level table, and the level table
+   is a banned patch path — so it is asked, not made. **A level for a class of one is a different decision from a
+   level for a class of two hundred, and it is now a class of one.**
 6. **Whether the phrase glosses reach the translator, and as what.** §2.12's rare end is full of the author
    writing a *meaning* over a whole string (達の戦いはこれからだ → 強制終了, あちら側の皆様 → 読者,
    アリーヴェデルチ → さよなら). The chosen rule catches them, but they are not pronunciation, and showing

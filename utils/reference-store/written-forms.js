@@ -1,8 +1,8 @@
 /**
  * utils/reference-store/written-forms.js — the barrel for "this book printed this word, guided with this
- * reading" (plan 07 slice 1).
+ * reading" (plan 07 slice 1), and the two reports that read those rows back (plan 07 slice 2b).
  *
- * Three files, one public surface, in the shape AGENTS.md §3 requires:
+ * Four files and one nested folder, one public surface, in the shape AGENTS.md §3 requires:
  *
  *   - `written-forms/shapes.js` — the **pure half**: which candidate groups a given roster calls
  *     identity-bearing (plan 07 §2.9's rule, measured at 18 of 97 groups with zero false positives), and
@@ -15,6 +15,23 @@
  *   - `written-forms/file.js` — the **door**: read one volume's own pronunciation-guide harvest and file
  *     every harvested row that passes the two **row** guards, whatever group it would or would not have
  *     joined; the same file runs the shipped fold alongside, for the report only.
+ *   - `written-forms/reports/` — the two **source-quality reports** (plan 07 slice 2b): `collisions.js`
+ *     builds the two chapter-scoped shapes and the one discriminator, `variant.js` and `guidance.js` are
+ *     the two doors, and `records.js` is where they may write and where they are refused. A submodule that
+ *     outgrew itself splitting the same way, inside its own folder.
+ *
+ * ## What the two reports are, in one line each
+ *
+ * **Variant spellings** — the 25 groups plan 07 §2.10 measures, printed the way a dictionary prints *color*
+ * / *colour*: both spellings, both counts, no verdict. **Inconsistent guidance** — the author's own two
+ * pronunciation notes disagreeing in one place, of which the report calls exactly one shape a defect: two
+ * guided strings made of the same characters in a different order (三色院董子 guided さんしよくいん**すみれ**こ
+ * and さんしよくいん**すれみ**こ in volume 17 chapter 5). Everything else it counts and sorts, because plan 07
+ * §2.11(b) measured that a name the author guides 76 times in one chapter is a name, not a defect.
+ *
+ * Neither report is wired: **no stage, step, command or door calls either one**, and `test/test-written-forms.js`
+ * greps the tree to prove it. Neither files a row, marks anything, adds a finding kind, adds a level, adds a
+ * freeze door, declares an artifact, or writes a published file.
  *
  * ## What this layer is, in one line
  *
@@ -54,7 +71,8 @@
  * while the shape is still being argued, and it is why **no stage calls the door**.
  *
  * It is a **guard** layer: it lives inside `utils/reference-store/`, which is already a banned patch path
- * for the dev team, and all three files stay inside that folder.
+ * for the dev team, and every file of it — `shapes.js`, `rows.js`, `file.js` and the whole nested
+ * `reports/` folder — stays inside that folder.
  *
  * @module utils/reference-store/written-forms
  */
@@ -62,6 +80,10 @@
 const shapes = require("./written-forms/shapes");
 const rows = require("./written-forms/rows");
 const file = require("./written-forms/file");
+const collisions = require("./written-forms/reports/collisions");
+const variantReport = require("./written-forms/reports/variant");
+const guidanceReport = require("./written-forms/reports/guidance");
+const reportRecords = require("./written-forms/reports/records");
 
 module.exports = {
   // The pure half: the roster's answer, and the spelling-shape report.
@@ -92,4 +114,32 @@ module.exports = {
   scriptOfGroup: file.scriptOfGroup,
   eligibleWrittenFormRows: file.eligibleWrittenFormRows,
   fileVolumeWrittenForms: file.fileVolumeWrittenForms,
+
+  // The two chapter shapes, and the one discriminator (plan 07 slice 2b). Pure: no store, no write, no model.
+  NAIVE_FREQUENCY_FACTOR: collisions.NAIVE_FREQUENCY_FACTOR,
+  TRANSPOSITION_RULE_NOTE: collisions.TRANSPOSITION_RULE_NOTE,
+  sameCharactersDifferentOrder: collisions.sameCharactersDifferentOrder,
+  findTransposedPair: collisions.findTransposedPair,
+  collisionsForFormsByChapter: collisions.collisionsForFormsByChapter,
+  collisionsForReadingsByChapter: collisions.collisionsForReadingsByChapter,
+  transposedCollisions: collisions.transposedCollisions,
+  collisionTotals: collisions.collisionTotals,
+  formsCarryingMoreThanOneReading: collisions.formsCarryingMoreThanOneReading,
+  // The rule this layer measured and REJECTED, exported so it can be re-measured. No door calls it.
+  naiveFrequencyCandidates: collisions.naiveFrequencyCandidates,
+
+  // The two source-quality reports: queries, refusals, and two files each. Nothing is filed.
+  variantSpellingReport: variantReport.variantSpellingReport,
+  inconsistentGuidanceReport: guidanceReport.inconsistentGuidanceReport,
+  bucketOfReadingCollision: guidanceReport.bucketOfReadingCollision,
+  REJECTED_FREQUENCY_RULE: guidanceReport.REJECTED_FREQUENCY_RULE,
+  SOURCE_QUALITY_RECORD_SCHEMA: reportRecords.SOURCE_QUALITY_RECORD_SCHEMA,
+  SOURCE_QUALITY_MAX_LISTED: reportRecords.SOURCE_QUALITY_MAX_LISTED,
+  VARIANT_REPORT_FILES: reportRecords.VARIANT_REPORT_FILES,
+  GUIDANCE_REPORT_FILES: reportRecords.GUIDANCE_REPORT_FILES,
+  sourceQualityReportScope: reportRecords.sourceQualityReportScope,
+  renderVariantSpellingLog: reportRecords.renderVariantSpellingLog,
+  renderGuidanceLog: reportRecords.renderGuidanceLog,
+  describeVariantSpellingReport: reportRecords.describeVariantSpellingReport,
+  describeGuidanceReport: reportRecords.describeGuidanceReport,
 };

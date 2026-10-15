@@ -48,9 +48,12 @@
  *      rather than repaired.
  *   11. **what this slice did not add**: no finding kind, no setting, no command, no freeze door, no declared
  *      artifact, no verb on the store's handle, **no stage that calls the door**, and **nothing outside the
- *      layer that reads the table**. And the cover's whole export list is compared against the store's barrel,
- *      because the barrel is a spread and a name a submodule forgets disappears from it silently (gotcha 151)
- *      — the widened door added one name, `eligibleWrittenFormRows`.
+ *      layer that reads the table**. The one door outside the layer that asks the **grouping** question is
+ *      pinned by name — `utils/reference-store/identity/file.js`, slice 2's — because a scan that expects
+ *      zero callers after slice 2 wired one would be a scan that fails on correct code. And the cover's whole
+ *      export list is compared against the store's barrel, because the barrel is a spread and a name a
+ *      submodule forgets disappears from it silently (gotcha 151) — the widened door added one name,
+ *      `eligibleWrittenFormRows`, and slice 2b's reports added 23 more.
  *
  * The two row guards the door applies are pinned in scenario 2 beside the two group guards the fold still
  * applies to its own report, and the two tallies are asserted to agree field for field — the door's guards
@@ -823,6 +826,7 @@ function scenarioNothingAdded() {
   /** @type {string[]} */ const doorCallers = [];
   /** @type {string[]} */ const tableReaders = [];
   /** @type {string[]} */ const identityRequires = [];
+  /** @type {string[]} */ const groupQueryCallers = [];
 
   for (const file of files) {
     const text = fs.readFileSync(file, "utf8");
@@ -830,11 +834,13 @@ function scenarioNothingAdded() {
     if (/fileVolumeWrittenForms\s*\(/.test(text) && !insideLayer) doorCallers.push(path.relative(ROOT, file));
     if (/\bwritten_forms\b/.test(text) && !insideLayer && file !== schemaFile) tableReaders.push(path.relative(ROOT, file));
     if (/reference-store\/identity/.test(text) && file.startsWith(layerPrefix)) identityRequires.push(path.relative(ROOT, file));
+    if (/candidateGroupsInRecord\s*\(/.test(text) && !insideLayer) groupQueryCallers.push(path.relative(ROOT, file));
   }
 
   same(doorCallers, [], "no stage, no step, no command and no door calls it: the only mentions outside the layer are the barrel's re-export, which never calls it");
   same(tableReaders, [], "and nothing outside the layer and the migration reads the table: no renderer, no audit rule, no presence matcher, no coverage rule, no chapter-facts query, no stage");
   same(identityRequires, [], "the layer requires nothing under `utils/reference-store/identity/`: the identity claim is slice 2's, and this slice does not reach it");
+  same(groupQueryCallers, [path.join("utils", "reference-store", "identity", "file.js")], "the only door outside this layer that asks the grouping question is slice 2's identity door — no stage, no report renderer, and no audit rule asks it");
 
   const coverText = fs.readFileSync(coverFile, "utf8");
   ok(/fileVolumeWrittenForms/.test(coverText) && /candidateGroupsInRecord/.test(coverText) && /identityBearingGroups/.test(coverText), "the cover re-exports the door, the read and the pure half");
@@ -853,7 +859,7 @@ function scenarioNothingAdded() {
   ok(/__writtenForms/.test(barrelText), "and the store's barrel re-exports the cover");
   same(RUBY_GUIDE_FILE_SUFFIX, "-ruby-guides.json", "the file name the door scans for is the name the extraction writes");
 
-  console.log("11. nothing added: 70 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 stage callers, 0 readers of the table");
+  console.log("11. nothing added: 70 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 stage callers, 0 readers of the table, 1 reader of the grouping question (the identity door)");
 }
 
 // ─── Run ──────────────────────────────────────────────────────────────────────
