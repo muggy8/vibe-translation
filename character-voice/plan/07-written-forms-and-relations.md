@@ -1,9 +1,11 @@
 # Plan 07: written forms, relations, and a voice record that never looks forward
 
-**Status: direction approved by the account owner 2026-10-15. Slice 0 is BUILT (2026-10-15)** — the
-reader `utils/source/guide-groups.js`, its fixture suite `test/test-guide-groups.js` (94 checks), and
-the re-measurement `test/measure-guide-groups.js` (0 model calls). **§2 below is that re-measurement,
-and it corrects three numbers the plan was written with** (§2.2, §2.3, §2.7). Slices 1–7 are not built.
+**Status: direction approved by the account owner 2026-10-15, and the owner's five answers are recorded in
+§2b. Slice 0 is BUILT (2026-10-15)** — the reader `utils/source/guide-groups.js`, its fixture suite
+`test/test-guide-groups.js` (94 checks), and the re-measurement `test/measure-guide-groups.js` (0 model
+calls). **§2 is that re-measurement, and it corrects three numbers the plan was written with** (§2.2, §2.3,
+§2.7) **and then two more the correction itself got wrong** (§2.11). Slices 1–7, including the new slice 2b
+the owner's answer opened, are not built.
 
 This plan supersedes parts of `06-register-declarations.md` and says so plainly where. Plan 06 built
 the record machinery — declarations, per-question answers, the revision door, confirmations, the closing
@@ -321,6 +323,130 @@ misses.
 homophone noise, with zero false positives on the real corpus, using only rows the record already holds
 and 0 model calls. Slices 1 and 2 are buildable. What they must not do is require one form to be unknown.
 
+### 2.10 The 79 unselected groups split cleanly — and the split is the owner's answer
+
+The account owner's answer to "what happens to the 79 groups no rule selects?" was not one of the options
+offered: *"I suspect this is something related to a typo the author or the publisher's editorial staff made…
+the 'same word different spelling' problem probably should be noted down like how 'color' and 'colour' are
+the same word… the glossary should definitely account for that."* That is a testable claim, so it was tested.
+
+Measured by **how much of the shorter written form survives inside the longer one** (longest common
+subsequence, over the closest pair in the group), the 79 split **25 / 54**:
+
+**One word spelled two ways — 25 groups.** 偽物 x11 / 偽者 x10 · 我侭 x77 / 我儘 x1 · 太股 x12 / 太腿 x1 ·
+潑溂 x8 / 潑剌 x2 · 叱咤激励 / 𠮟咤激励 · 呆然自失 / 茫然自失 · 可哀想 x8 / 可哀相 x2 · 煽情的 / 扇情的 ·
+貴婦人 x1 / 鬼婦人 x8 · 貴方達 x10 / 貴女達 x9 · 貴方様 x2 / 貴女様 x2 · 貴方 x535 / 貴女 x278 ·
+振動 x13 / 震動 x3 · 呆然 x19 / 茫然 x4 · 下賎 x3 / 下賤 x3 · 怒濤 x1 / 怒涛 x10 · 凍気 / 闘気 ·
+性実 / 誠実 · 小鹿 / 子鹿 · 巨乳美女 / 虚乳微女 · 魅上 / 三上 · 可愛 x499 / 可哀 x1 · 小原 x2 / 小腹 x1 ·
+凛々 / 凜々 · ねじ込む x3 / ねじ切れそう x1. **This is the color/colour class, and it is real.**
+
+**Different words that sound alike — 54 groups.** 美味 x113 / 上手 x104 / 旨 x2 · 披露 x26 / 疲労 x5 ·
+串 x132 / 駆使 x3 · 傾 x46 / 菓子 x33 · 挑 x42 / 井戸 x1 · 皆 x103 / 見慣 x1 · 卑怯 x20 / 秘境 x1 ·
+行為 x17 / 厚意 x3 · 選択 x6 / 洗濯 x1 · 紳士 x4 / 真摯 x1 · 蜘蛛 x2 / 曇 x4 · 大阪 x7 / 逢坂 x1 …
+**Nothing here is a typo.** They are ordinary homophones the author chose to gloss.
+
+The split is not perfect — 小原 (a surname) / 小腹 (lower belly) and 魅上 / 三上 land in the variant class
+and are arguable — but it separates 25 real spelling variants from 54 things that are not, with one
+deterministic, language-neutral computation: **how much of one written form is still there in the other.**
+
+### 2.11 Two things this plan said that are wrong, corrected before a slice builds on them
+
+**(a) サンちやん, チエリー and ジヨーロ are not spellings the book prints.** They are the author's **ruby
+readings**, and they appear **0 times** in the extracted text of all 17 volumes. The roster's spellings are
+body text: サンちゃん appears **81 times in volume 13** and チェリー **40 times in volume 16**. So the
+"three nicknames spelled one character apart" framing was wrong — the two spellings are not two printings of
+one name in the prose, they are **the same nickname written as body text in one place and as a reading over
+someone's head in another**, and the ruby version writes full-size kana where the body text writes small
+kana (ちや/ちゃ, ヨ/ョ, エ/ェ). That is a typographic convention, not a typo.
+
+**The store already has the rule, and already refuses to use it.** `foldSmallKana`
+(`utils/reference-store/identity/sources.js:91`) folds small kana onto the full-size form, and
+`rubyGuideStatedLinks` already files a **near miss** rather than a link when a reading is a roster name
+spelled differently. Measured against the three pairs:
+
+| pair | folded | resolved by the existing rule? |
+|---|---|---|
+| サンちやん / サンちゃん | both → サンちやん | **yes** |
+| ジヨーロ / ジョーロ | both → ジョーロ | **yes** |
+| チエリー / チェリー | unchanged | **no — the fold table has ェ→エ missing** |
+
+So the answer to the owner's question is not "widen the matching rule", which gotcha 121 refuses: it is
+**one entry added to a fold table that exists for exactly this purpose**, and the fold stays a reporting
+rule. Two of the three are already visible today; the third is one character of a table.
+
+**(b) 董子 is not a name and probably is not the author.** 菫子 is printed **646 times across 11 volumes**
+and 三色院菫子 **314 times across all 17**. 董子 appears **92 times, and 75 of those 92 are in volume 17
+chapter 6 alone**; 三色院董子 appears **twice, both in volume 17 chapter 5**. A difference that concentrated
+in one chapter of one file is the shape of a bad file, not a name change — and 菫 is U+83AB while 董 is
+U+8451, adjacent enough to be a conversion artifact. **This is a source-quality finding, not an identity
+link**, and slice 2 must not let a rule that groups "two forms guided to the same reading" file it as one.
+
+By contrast 如雨露 (11 times, spread 1–2 per volume across 8 volumes) against 如月雨露 (281 times across 16
+volumes) is thinly spread, which is the shape of a name written short, not of a corrupted chapter.
+
+**And the obvious typo detector is not one.** "One form at least 10× more common than another under the same
+reading" produces **132 candidate pairs** on this corpus, most of them single-mora guides — 込 x36 / 子 x2 /
+木 x1 all read こ, 尽 x35 / 着 x3 / 吐 x1 all read つ. Frequency asymmetry alone finds nothing; the pair has
+to be multi-character on both sides and concentrated somewhere specific.
+
+### 2.12 "Guides on rare kanji" has no computable meaning, and the closest one is not rare
+
+The owner's answer on the annotated view was *"the renames plus guides on rare kanji"*. **Nothing in the
+extraction says a kanji is rare**, and the nearest computable proxy turned out to select the commonest words
+in the language: the forms guided **every single time they appear in their own volume** number **6,341 of
+9,663**, and the top of that list is 貴方 → あなた (92×), 可愛 → かわい (52×), 友達 → ともだち (51×),
+恋人 → こいびと (37×), 一緒 → いつしよ (78×). The author glosses ordinary words out of habit.
+
+What the proxy *does* find, at the rare end, is something more interesting than pronunciation: **the author
+annotating a whole phrase with its meaning.** Always-guided and appearing at most twice, 4,606 forms, the
+longest of them:
+
+> 達の戦いはこれからだ → 強制終了 ("the battle is only beginning" glossed as "forced ending") ·
+> あちら側の皆様 → 読者 ("those on the other side" glossed as "the reader") ·
+> ＥＮＴＲＡＮＣＥ → 入り口 · アリーヴェデルチ → さよなら (Italian *ciao*, glossed as "goodbye") ·
+> ひふんへはべふ → じぶんで食べる · 犠牲になってくれる → 手をあげる ·
+> 不肖如月雨露 → ふしようきさらぎあまつゆ · 二拝二拍手一拝 → にはいにはくしゅいつぱい
+
+Those are not pronunciation help. They are the author writing a meaning over a string, and a translator who
+never sees them loses the joke.
+
+**What each view costs**, measured as added markup characters over the 2,450,316 characters of source text:
+
+| view | forms | guided occurrences | added characters |
+|---|---|---|---|
+| the renames only | 202 | 1,033 | **+31,630 (1.3%)** |
+| renames + always-guided and appearing ≤ 2 | 4,808 | 6,739 | **+192,251 (7.8%)** |
+| every always-guided form | 6,341 | 19,250 | +537,834 (22%) |
+| every guide the converter set aside | 9,663 | 45,429 | ≈ +1,181,154 (48%) |
+
+**This plan takes the second row** as the computable meaning of the owner's answer: the renames, plus a guide
+shown only where the author applies it **every single time** the word appears **and** the series uses that
+word no more than twice. It is language-neutral, it costs 7.8% more text, and it is the only row that
+catches the phrase glosses above. If the owner wants the third row instead, that is a bigger prompt and the
+same door.
+
+---
+
+## 2b. The account owner's answers, 2026-10-15
+
+Asked, answered, and binding on the slices below.
+
+| Question | The owner's answer |
+|---|---|
+| What should the two glossary columns be called? | **`Original` / `Translated`** |
+| How much pronunciation help should a model see? | **The renames plus guides on rare kanji** — made computable as §2.12's second row |
+| Are groups made only of descriptions and first-person pronouns (おれ, あなた, わたし, モブ) characters? | **Record the words, no character.** The record says the book prints 脇役 guided as 俺; it does not claim a person. |
+| What about names spelled one character apart? | **Treat them as typos by the author or the publisher's editorial staff, and account for typos and grammatical errors in the source material generally** — which §2.11 shows is the wrong diagnosis for these three and the right instinct for a class the pipeline has **no** handling for today |
+| What about the 79 groups no rule selects? | **Judge them case by case; note the same-word-different-spelling ones the way English notes *color* / *colour*; the glossary should account for that** — which §2.10 measures as 25 groups |
+
+**The new requirement this opens, and the measurement that shows it is real:** nothing in this pipeline
+accounts for a typo, a variant spelling or a grammatical error **in the source book**. The only places the
+word "typo" appears are the wiki validator's severity ladder (`jump-in-wiki-validator.md:91`, a 🟢 nitpick)
+and one example in the consistency audit's severity rules (`consistency-audit.md:81`), and both are about
+the artifacts, not the book. `findRenderingVariants` is about the **translation's** spellings. So a volume
+whose file prints a character's name wrong 75 times in one chapter, and a series that spells 偽物 both ways,
+currently reach the translator with nothing said about either. That is slice 2b.
+
 ---
 
 ## 3. What this replaces, and what it leaves alone
@@ -404,9 +530,18 @@ A model's self-reported percentage is a feeling with two decimal places. What th
 
 ### 4.5 The annotated view, not the annotated archive
 
-The model-facing view of a chapter re-emits HTML `<ruby>` for the §2.2 subset only — 192 rows series-wide,
-not 45,429 occurrences. The stored bundle is unchanged. Markdown has no ruby syntax; pandoc's extension is
-not standard; `<ruby>` is what the converter already parses on the way in, so the model needs no teaching.
+The model-facing view of a chapter re-emits HTML `<ruby>` for **§2.12's second row** — the renames, plus a
+guide the author applies **every single time** the word appears and the series uses **no more than twice**:
+4,808 forms, 6,739 occurrences, **+192,251 characters measured against 2,450,316 characters of source text
+(7.8%)**. Not 45,429 occurrences, which would cost 48%. The stored bundle is unchanged. Markdown has no ruby
+syntax; pandoc's extension is not standard; `<ruby>` is what the converter already parses on the way in, so
+the model needs no teaching.
+
+The rule is chosen because it is the only one in §2.12 that is both computable and worth paying for. "Rare"
+is not computable from this data — the forms guided every single time include 貴方 → あなた (92×),
+可愛 → かわい (52×) and 友達 → ともだち (51×), which are the commonest words in the language. What the
+rare end actually contains is the author writing a **meaning** over a whole string, and that is the part a
+translator loses.
 
 ### 4.6 Normalise before you compare, and teach the parsers first
 
@@ -418,10 +553,11 @@ not standard; `<ruby>` is what the converter already parses on the way in, so th
 
 ### 4.7 The glossary labels
 
-One door writes the heading; three readers drop it by position. Rename it, re-render the 17 published
-files from the record (0 model calls), and re-measure the render against what is on disk first — an
-earlier comparison found volume 01 identical but volumes 02 and 17 losing rows the evidence rule had
-refused, and that must be known before it happens, not discovered afterwards.
+`Original` / `Translated`, the owner's wording, decided 2026-10-15. One door writes the heading; three
+readers drop it by position. Rename it, re-render the 17 published files from the record (0 model calls),
+and re-measure the render against what is on disk first — an earlier comparison found volume 01 identical
+but volumes 02 and 17 losing rows the evidence rule had refused, and that must be known before it happens,
+not discovered afterwards.
 
 ### 4.8 Notes in the source language
 
@@ -430,6 +566,44 @@ the prompt asks for source-language notes, and the terminology-settlement agenda
 its agenda by reading **English phrasing** in notes ("revealed later", "turns out to be", future tense) —
 is re-taught, or it silently reports an empty agenda against a source-language glossary.
 
+### 4.9 The source book is allowed to be wrong
+
+The owner's answer on the near-miss names was "treat them as typos made by the author or the editing staff",
+and then the wider and more important half: *"not sure if the glossary step already has something in place
+that accounts for the possibility of typos and grammatical errors being in the source material, but if it
+doesn't, it should be added somehow."* **It does not.** The only two places the word "typo" appears in this
+repository's instructions are a 🟢 nitpick in the wiki validator's severity ladder and one example in the
+consistency audit's severity rules, and both are about the artifacts this pipeline writes, not about the
+book it reads. `findRenderingVariants` scans the **translation's** spellings. So today, a volume whose file
+prints a character's name wrong 75 times in one chapter, and a series that writes 偽物 both ways, reach the
+translator with nothing said about either.
+
+Two deterministic reports, both built from rows the record and the extraction already hold, both filing
+nothing:
+
+- **Variant spellings.** Two written forms under one guided reading where **at least half of the shorter one
+  survives inside the longer** — 偽物 / 偽者, 我侭 / 我儘, 太股 / 太腿, 貴方 / 貴女, 振動 / 震動. Measured:
+  **25 of the 79 unselected groups.** Printed the way a dictionary prints *color* / *colour*: both spellings,
+  both counts, no verdict.
+- **Concentration anomalies.** Two written forms under one guided reading, both multi-character, one far more
+  common, and the rare one **landed overwhelmingly in one volume or one chapter**. 董子: 92 occurrences,
+  **75 of them in volume 17 chapter 6**, plus 三色院董子 twice in chapter 5, against 菫子 646 times across 11
+  volumes. 菫 is U+83AB and 董 is U+8451. That is a bad file, not a name, and the shape that says so is the
+  concentration, not the frequency.
+
+**What the rule must not be.** "One form at least 10× more common than the other under the same reading"
+selects **132 candidate pairs** on this corpus and most of them are single-mora guides — 込 / 子 / 木 all
+read こ, 尽 / 着 / 吐 all read つ. Frequency alone is not a detector; the pair has to be multi-character on
+both sides **and** concentrated somewhere specific, and 如雨露 (1–2 per volume across 8 volumes, against
+如月雨露 281 times across 16) has to come back **silent**, because a name written short in every book is not
+a corrupted chapter.
+
+**And the near-miss names are not typos.** §2.11 shows サンちやん, チエリー and ジヨーロ appear **0 times**
+in the extracted text: they are ruby readings, and the roster's spellings are body text. The store already
+folds small kana (`foldSmallKana`) and already files those as near misses rather than links; it is missing
+one entry, ェ → エ, which is why チェリー / チエリー does not resolve. The fold stays a reporting rule —
+gotcha 121 is about exactly what happens when a spelling rule is allowed to decide a name match.
+
 ---
 
 ## 5. The slices, in build order
@@ -437,15 +611,18 @@ is re-taught, or it silently reports an empty agenda against a source-language g
 | # | Slice | Acceptance line |
 |---|---|---|
 | **0** | **BUILT 2026-10-15 — the corrected guide measurement.** `utils/source/guide-groups.js` reads a harvest and produces candidate groups; `test/test-guide-groups.js` (94 checks, fixtures only) pins the rule; `test/measure-guide-groups.js` re-runs every number in §2 over the live corpus with 0 model calls and writes nothing. | **Met, and three of the plan's own numbers moved.** §2.1–§2.3 are reproduced by a script that reads only the guide files, 0 model calls, and a test fails if the *rule* moves. The corrections: the "24 readings over more than one written form" is **14** (24 counted volume-and-form pairs), the パンジー group spans **10** volumes not 12, and 三色院菫子 → パンジー is **18 occurrences series-wide, 16 of them in volume 15**. Plan 06 §2.11's retired conclusion is named as retired, not deleted. |
-| **1** | **Written forms become recorded facts.** A door files each candidate guided form — form, reading, script, volumes, chapters, count — into the record. | Measured on copies of all 17 records: the filed set matches the **§2.2 candidate set** (97 groups / 222 forms / 634 rows), not the display subset. Every already-filed form is recognised on a second pass and files 0 new rows. No published artifact changes. No stage calls it yet. |
-| **2** | **Identities carry the forms, with the widened rule.** Two forms guided to the same reading join one identity, **for the groups §2.9's roster test selects** — 18 of the 97 — and the rest are recorded as candidates or not at all, which is the decision §6.5 asks. Statements only — no claim ever moves. | On a copy of volume 17's record: パンジー's group contains the forms in §2.3, and the group is reachable from a query. `cast_merges` stays 0. A planted claim stays under the form that filed it. **The rule must not require one form to be unknown** — §2.9 shows that half throws away さんしよくいんすみれこ and つきみ, which are real links between two roster names. |
+| **1** | **Written forms become recorded facts — for the 18 identity-bearing groups only.** A door files each guided written form in those groups — form, reading, script, volumes, chapters, count — into the record. The other 79 groups are **written into a report and filed nowhere**, split by §2.10's measurement into the 25 same-word-two-spellings and the 54 different-words-that-sound-alike. Filing is easy to extend and impossible to undo, so the reversible half is built first. | Measured on copies of all 17 records: the filed set matches §2.9's **18 groups / 134 harvest rows / 1,402 occurrences**, and nothing else is filed. Every already-filed form is recognised on a second pass and files 0 new rows. The report names the 25 and the 54 with their counts. No published artifact changes. No stage calls it yet. |
+| **2** | **Identities carry the forms, with the roster-or-reading rule.** Two forms guided to the same reading join one identity, **for the 18 groups §2.9 selects**. Statements only — no claim ever moves. The small-kana fold stays a **reporting** rule (gotcha 121), gets the one missing table entry so チェリー / チエリー resolves, and 董子 is reported as a **source-quality anomaly**, never as a link. | On a copy of volume 17's record: パンジー's group contains the forms in §2.3 and is reachable from a query. `cast_merges` stays 0. A planted claim stays under the form that filed it. **The rule must not require one form to be unknown** — §2.9 shows that half throws away さんしよくいんすみれこ and つきみ. All three near misses are named, including チェリー / チエリー. 董子's 92 occurrences land in the anomaly report and in no identity. |
+| **2b** | **The source book is allowed to be wrong, and saying so is a door.** Two deterministic reports built from rows the record already holds: **variant spellings** — the 25 groups §2.10 measures, printed the way a dictionary prints *color* / *colour* — and **concentration anomalies** — a written form that shares a guided reading with a far more common form, is multi-character on both sides, and appears overwhelmingly in one volume or one chapter (董子: 92 occurrences, 75 of them in volume 17 chapter 6). Filed nowhere, declared nowhere, 0 model calls. | The variant report reproduces the 25 groups and names both spellings with their counts. The anomaly report finds 董子 / 三色院董子 and **does not** find 如雨露 (spread 1–2 per volume across 8 volumes, which is a name written short, not a bad chapter). The 54 sound-alike groups are named as a class and **not** reported as errors. A planted fixture of each shape fires, and a fixture of the wrong shape stays silent — including 込 / 子 / 木, which the naive "10× more common" rule wrongly flags. |
 | **3** | **The relations table.** Schema 12, the columns in §4.3, the two non-negotiable rules, and a door that files a relation and closes a span *with its reason*. | A planted development closes an earlier span in the later volume's copy and leaves the earlier volume's snapshot byte-identical. A span closed without a reason is refused. A row's content columns never change after filing — asserted column by column. |
 | **4** | **The extraction contract.** A relation is a kind in the chapter call that already runs — no extra call — with the §4.4 certainty ladder and `withheld` / `narration` as legal answers. | Pass 1 files relations, pass 2 over the same fixture pays 0 calls. A planted "the name in the quote is the addressee" case comes back `addressee-risk`, not `measured`. A chapter that names nobody files nothing and is named, not punished. |
-| **5** | **Normalise, teach, then show.** Ruby stripping before quote comparison; the markdown parsers taught; only then the annotated view. | The wrong order is proven to be the wrong order: a test shows a parser meeting un-taught markup glues a line onto a published claim's body, and shows the taught parser not doing so. The annotated view adds the §2.2 subset and nothing else. |
-| **6** | **The glossary labels, and a render-only door.** Rename the heading, add the door that re-renders a published glossary from its record with 0 model calls, and re-render the 17 files. | The render is compared against what is on disk **before** anything is replaced, and every row that disappears is named with the rule that refused it. No sealed row is edited. The freeze gate is not asked to excuse anything. |
+| **5** | **Normalise, teach, then show.** Ruby stripping before quote comparison; the markdown parsers taught; only then the annotated view, built from **§2.12's second row** — the renames plus a guide the author applies every single time and the series uses at most twice. | The wrong order is proven to be the wrong order: a test shows a parser meeting un-taught markup glues a line onto a published claim's body, and shows the taught parser not doing so. The annotated view adds the §2.12 set (4,808 forms / 6,739 occurrences, +192,251 characters measured) and nothing else, and a quote copied out of an annotated chapter still verifies against the guide-free stored text. |
+| **6** | **The glossary labels, and a render-only door.** Rename the heading to **`Original` / `Translated`** (the owner's wording), add the door that re-renders a published glossary from its record with 0 model calls, and re-render the 17 files. | The render is compared against what is on disk **before** anything is replaced, and every row that disappears is named with the rule that refused it. No sealed row is edited. The freeze gate is not asked to excuse anything. |
 | **7** | **Source-language notes, and the re-taught agenda.** Built and pinned; not run for real. | A fixture glossary renders with source-language notes. The settlement agenda still finds its candidates against source-language notes — measured, not assumed. The paid run is explicitly not taken. |
 
-**Slice 0 is first because everything else reads its numbers.** Slice 5 is deliberately after 3 and 4 so
+**Slice 0 is first because everything else reads its numbers.** Slice 2b sits beside 2 because the same
+measurement feeds both, and because a rule that groups "two forms guided to the same reading" is exactly the
+rule that would file 董子 as a person if nothing named it first. Slice 5 is deliberately after 3 and 4 so
 the parsers are taught before any file can contain the markup. Slice 6 is the only slice that touches
 published files, and it is placed late so the measurement in §4.7 is done with the rest of the plan settled.
 
@@ -453,35 +630,34 @@ published files, and it is placed late so the measurement in §4.7 is done with 
 
 ## 6. Open decisions, for the account owner
 
-1. **The exact wording of the two glossary headings.** The plan uses *Source* and *Target*. Cosmetic,
-   reversible, one line — but it lands in 17 published files, so it should be said once.
-2. **Which certainty levels may trigger an investigation.** `addressee-risk` is the interesting one and it
+**Answered 2026-10-15 and no longer open:** the two glossary headings (**`Original` / `Translated`**); how
+far the annotated view goes (the renames plus the always-guided-and-rare set, §2.12); whether a group made
+only of descriptions and first-person pronouns is an identity link (**record the words, no character**);
+what to do with the 79 unselected groups (**note the 25 spelling variants, judge the 54 case by case, file
+nothing**); and how wide the roster match has to be (**not widened at all** — the three near misses are a
+small-kana fold the store already has and already reports, missing one table entry, §2.11).
+
+Still open:
+
+1. **Which certainty levels may trigger an investigation.** `addressee-risk` is the interesting one and it
    fires often; the run-wide investigation bound is 3, and one real investigation turn measured 7.2M tokens
    and 12 minutes. A bounded read-only reading pass measured 1 call and 10,530 tokens for a whole volume.
    The threshold is a decision about how much you want to pay to know who is speaking.
-3. **Whether `withheld` relations reach the translator.** They are a fact with instruction attached —
+2. **Whether `withheld` relations reach the translator.** They are a fact with instruction attached —
    *keep this unresolved* — but they live in a record the translator reads, and printing them is a
    decision about what the translator is told.
-4. **Whether the identity door runs per volume or once per series.** Plan 06 §10.9 asked this and left it.
+3. **Whether the identity door runs per volume or once per series.** Plan 06 §10.9 asked this and left it.
    This plan's recommendation: once per series, as the glossary step's last act, beside the terminology
    settlement — a query, no model calls, its own records, not declared artifacts.
-5. **How far the annotated view goes.** The §2.2 display subset is 192 rows. Whether ordinary hiragana
-   guides on rare kanji are also worth showing is a judgement about the model's reading, not a
-   measurement, and it changes the size of every chapter prompt. (The candidate set is 634 rows / 8,734
-   occurrences, so the display filter is what keeps the view small — that is the whole reason it exists.)
-6. **Whether a group whose forms are all descriptions or first-person pronouns is an identity link at
-   all.** おれ (← 俺 x3,820 / 脇役), あなた (← 貴方 x535 / 貴女 x278), あなたたち, あなたさま, わたし
-   (← 自分 / 他人 / 菫) and モブ (← 脇役 / 主人公) are 4,700 occurrences the roster test cannot see, and
-   the guide is plainly *doing something* in them — the author guides 脇役 ("supporting role") with the
-   same reading as 俺 ("I"). Filing them as identities, filing them as written forms with no identity,
-   or leaving them out is a decision about what the record asserts, and §2.9 cannot answer it.
-7. **How wide the roster match has to be.** ジヨーロ is one edit from the roster's ジョーロ, and its form
-   如雨露 is a truncation of 如月雨露; チエリー / チェリー and サンちやん / サンちゃん are the same shape.
-   An exact-match test misses all three. The store's name-matching rule is deliberately narrow (gotcha
-   121 refused to widen it from one scene's evidence), and widening it changes how every later volume
-   measures every character — which is the owner's call, not a slice's.
-8. **What happens to the 79 groups no rule selects.** 500 harvest rows and 7,332 occurrences of homophone
-   pairs and orthographic variants (太股 / 太腿, 偽物 / 偽者, 潑溂 / 潑剌, 我侭 / 我儘, 呆然 / 茫然). Some are
-   the *same word written two ways*, which a written-form layer arguably should know even when no person
-   is involved. Filing them, or naming them in a report and filing nothing, is a decision about how big
-   the written-form table gets.
+4. **Whether the variant-spelling note reaches the published glossary or only the run's reports.** Slice 2b
+   builds the report. Putting "also written 偽者" into a term's row changes 17 published files, and the
+   freeze gate refuses that once a translation stands on them — today none does.
+5. **Whether a source-quality anomaly is allowed to stop a run.** 董子 is 75 occurrences of a character's
+   name printed wrong in one chapter of one file. Nothing today reports it, and nothing today could have.
+   Whether that is a NOTE, a MINOR to investigate, or a MEDIUM the extraction step prints is a decision
+   about the level table, and the level table is a banned patch path — so it is asked, not made.
+6. **Whether the phrase glosses reach the translator, and as what.** §2.12's rare end is full of the author
+   writing a *meaning* over a whole string (達の戦いはこれからだ → 強制終了, あちら側の皆様 → 読者,
+   アリーヴェデルチ → さよなら). The chosen rule catches them, but they are not pronunciation, and showing
+   them as ruby is a different thing from showing a reading. Markup, note, or nothing, is worth deciding
+   before slice 5 is built.
