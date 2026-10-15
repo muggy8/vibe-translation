@@ -144,7 +144,12 @@ built the same day, did not undo the collapse** — four of the seven kinds stil
 `register`, because those aspect strings are what every published record's rows carry and what the door that
 stops a volume being filed twice matches on. The distinction rides on the axis instead, which is the next
 paragraph. → `test/test-voice-prompt-declaration.js`,
-`test/test-no-language-axis-list.js`.
+`test/test-no-language-axis-list.js`. **And plan 06 slice 10, built 2026-10-15, took the same framing out
+of the acceptance prompt's role sentence** — `character-voice-acceptance.md` line 1 no longer calls the work
+"a Japanese light novel series" — so no prompt in this repository now tells a model what language it is
+analysing; the language-detection rules in `translation-target.md` (which name languages because working
+them out is the intake's job) and the output-language line in `verify-translate.md` are the only language
+mentions left in a prompt, and both are pinned as legitimate in the guard's inventory.
 
 **And what a chapter is shown as already known is a query, not a document** (plan 06 slice 2, built 2026-10-14).
 The reading pass used to hand `ctx.previousVoiceRefFile` — the previous volume's published `character-voice.md` —
@@ -323,6 +328,19 @@ pauses a run at the volume boundary; the hard half, `reference-voice-covers-fewe
 | `style-guide/qa.js` | 131 | The QA loop's parts: validator agent, acceptance score, feedback pass patching HIGH → MEDIUM → LOW. |
 | `style-guide/chunked.js` | 175 | One volume chapter by chapter, with the carry-forward gate run between chapters. Its QA loop is the shared one (utils/qa-loop/chunked.js): this file supplies the three stage descriptions — what each agent is told, which files it owes, and the per-chapter carry-forward guard — and the loop itself (iterations, rolling window, consensus gates, the stalled-round check, ON_QA_LIMIT) is not repeated here. Its feedback round is the one stage this task does NOT describe: it hands the loop its existing `runFeedback` (./qa.js), because that pass is shared with the whole-installment loop and carries the carry-forward guard itself. |
 | `style-guide/task.js` | 324 | The gulp task and the per-volume decision, including the cumulative cascade. |
+
+**The style guide's four prompt files no longer name the language of the work** (plan 06 slice 10,
+built 2026-10-15). Each of `style-guide-extract.md`, `style-guide.md`, `style-guide-validator.md` and
+`style-guide-acceptance.md` opened with a role sentence calling this "a long-running **Japanese** light
+novel series"; each now says "a series being translated from the source language into the target
+language", which is what `character-voice-extract.md` has said since slice 4 and what the settings
+already know. **Only that sentence changed** — every category list, rubric line, scoring rule and
+output-format rule in those files is byte-identical, proven by line count and by the checksum of
+everything below line 1 — and no answer shape was touched: `styleResponseFormat()` in `amend.js` stays
+closed and every `response_format` is the one it was. The Japanese **examples** in the category lists
+stay; they are illustrations of a rule, not a claim about which language the book is in, and the guard
+that pins this counts what a mention is *for* rather than counting names. →
+`test/test-no-language-axis-list.js` scenario 4.
 
 ### `jump-in-wiki/` — the implementation of `jump-in-wiki.js` (58 lines of face)
 

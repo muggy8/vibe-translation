@@ -24,11 +24,16 @@
  *     `{ id: "…", … values: [ …` anywhere in a file. This one is language-agnostic and vocabulary
  *     -agnostic: it catches a "universal" axis list whose answers are words this guard has never
  *     heard, which is the hole detector 2 leaves.
- *   - **What it does NOT scan, and why that is written down:** the prompt files. `system-prompts/` and
- *     `user-prompts/` are where a language's names legitimately live today — six of them name Japanese —
- *     and removing the rest is plan 06 slice 10, a prompt program, not this scan. This suite pins how
- *     many of them do, so the debt has a number that can only go down, and scenario 4 runs the same
- *     detectors over the voice extraction prompt so a language name put back into it is caught.
+ *   - **What it scans with a different rule:** the prompt files. `system-prompts/` and `user-prompts/` are
+ *     prose addressed to a model, and a language name can legitimately live there — the intake's job
+ *     includes working out which language the book is in, and it cannot do that without naming the
+ *     candidates. So scenario 4 does not count how many prompt files name a language (that count was a
+ *     lie waiting to happen: it counted the intake's detection rule as if it were the defect). It reads
+ *     **every line in every prompt file that names a language**, puts each one in a named bucket by what
+ *     the mention is FOR, pins the whole inventory, and pins the framing bucket at **empty**. A prompt
+ *     that names the language of the work it is analysing — the defect plan 06 slice 4 removed from the
+ *     voice extraction prompt and slice 10 removed from five more — is a finding whether or not the file
+ *     has a right to name languages at all.
  *   - **The two named exemptions:** `QUIRK_TYPE_TO_ASPECT` and `QUIRK_TYPE_TO_VOICE_LABEL` map the
  *     extraction prompt's own quirk kinds (four of which are register-ish) onto the store's aspects. They
  *     are the collapse plan 06 §2.3 measured, and plan 06 slice 5 (2026-10-14) closed it **per claim, on
@@ -361,47 +366,291 @@ function scanSourceForAxisLists(file, source) {
   console.log("  7 keys each, 4 of them still collapsed into `register` (the fallback), the collapse reported by the read side from the same table, neither table holding a language");
 }
 
-// ─── 4. the prompt debt is named, counted, and can only shrink ────────────────
+// ─── 4. the prompt debt, measured as a distinction rather than a count ────────
 
-{
-  console.log("4. what this guard does NOT cover, with a number attached");
+/**
+ * The shape plan 06 slice 4 removed from the voice extraction prompt, and slice 10 removed from five
+ * more: a prompt naming **the language of the work it is analysing**, before the model has read a word of
+ * the book. `a Japanese light novel series` is the whole defect — it tells the model what to look for.
+ *
+ * Measured against all 43 prompt files before slice 10: it fires on **5** lines, and all 5 are the role
+ * sentence of a prompt (`character-voice-acceptance`, `style-guide-acceptance`, `style-guide-extract`,
+ * `style-guide`, `style-guide-validator`). It fires on **0** of the 7 language-naming lines that remain,
+ * which name a language as something to work out from the page or as the language being written. That
+ * zero-false-hit measurement is why this shape is pinned and the raw file count was not.
+ *
+ * The boundary, stated rather than hidden: it reads a language name attached to a noun for the work. A
+ * legitimate detection sentence written that way — "a Chinese book uses Han characters" — would trip it,
+ * and the guard would be wrong. That is deliberate: the wrong answer here is a human looking at one line
+ * and moving it into the pinned table, not a defect walking past.
+ *
+ * @type {RegExp}
+ */
+const FRAMING_SHAPE = new RegExp(
+  `\\b(?:${LANGUAGE_NAMES.map((l) => l.replace(/[.*+?^${}()/[\]\\]/g, "\\$&")).join("|")})` +
+    `\\s+(?:light[-\\s]+)?(?:novel|series|book|books|manga|manhwa|web\\s+novel|trilogy)\\b`,
+  "i"
+);
 
-  const promptDirs = ["system-prompts", "user-prompts"];
-  const promptFiles = [];
-  for (const dir of promptDirs) {
-    for (const name of fs.readdirSync(path.join(ROOT, dir)).sort()) {
-      if (name.endsWith(".md")) promptFiles.push(path.join(dir, name));
+/** The buckets a language mention in a prompt may be in. A mention in none of them is a finding. */
+const PROMPT_MENTION_BUCKETS = [
+  "names-the-work-being-analysed", // the defect: must stay empty
+  "works-out-the-source-language", // the intake's job: legitimate
+  "names-the-language-being-written", // the output language: legitimate today, named as debt
+];
+
+/**
+ * Every line in every prompt file that names a language, and what that mention is for. Pinned as an
+ * inventory rather than as a count: a new language-naming line anywhere in any prompt file fails this
+ * guard until somebody reads it and says which bucket it belongs in.
+ *
+ * Measured 2026-10-15, after plan 06 slice 10 took the five framing sentences out: 7 lines, 2 files.
+ *
+ * @type {Array<{file: string, line: string, bucket: string, because: string}>}
+ */
+const PROMPT_LANGUAGE_MENTIONS = [
+  {
+    file: "system-prompts/translation-target.md",
+    line: '"Book Three", a Japanese volume marker.',
+    bucket: "works-out-the-source-language",
+    because: "an example of a volume-number marker the intake may find in a file or folder name",
+  },
+  {
+    file: "system-prompts/translation-target.md",
+    line: "- kana (hiragana or katakana) present → Japanese;",
+    bucket: "works-out-the-source-language",
+    because: "a detection rule: script evidence → a language name",
+  },
+  {
+    file: "system-prompts/translation-target.md",
+    line: "- hangul present → Korean;",
+    bucket: "works-out-the-source-language",
+    because: "a detection rule, and the reason the rule is not a hard-wire: it names three candidates",
+  },
+  {
+    file: "system-prompts/translation-target.md",
+    line: "- Han characters with no kana and no hangul → Chinese;",
+    bucket: "works-out-the-source-language",
+    because: "a detection rule",
+  },
+  {
+    file: "system-prompts/translation-target.md",
+    line: 'language by name ("Japanese", "Korean"), not a code.',
+    bucket: "works-out-the-source-language",
+    because: "the answer format the intake's own language decision is written in",
+  },
+  {
+    file: "system-prompts/translation-target.md",
+    line: "- source-language characters are fine and preferred (Japanese folder names are",
+    bucket: "works-out-the-source-language",
+    because: "a folder-naming rule that gives one example; it does not say the series is Japanese",
+  },
+  {
+    file: "system-prompts/verify-translate.md",
+    line: "4. **Readability** — awkward, broken, or ambiguous English; leftover source-language text (stray kanji/kana that should have been translated); duplicated or garbled passages.",
+    bucket: "names-the-language-being-written",
+    because: "the target language is a setting (TRANSLATION_TARGET_LANGUAGE, default English) and this rubric line states it as a fact — named as debt, not fixed by this slice",
+  },
+];
+
+/**
+ * The five role sentences plan 06 slice 10 took out of the prompts. Kept here so the guard can plant each
+ * one back and prove the rewritten scan reports it — the whole point of rewriting the guard instead of
+ * lowering a number.
+ *
+ * @type {Array<{file: string, sentence: string}>}
+ */
+const SLICE10_FRAMING_SENTENCES = [
+  {
+    file: "system-prompts/character-voice-acceptance.md",
+    sentence: "You are a **Quality Gatekeeper** for a character voice and perspective reference for a Japanese light novel series.",
+  },
+  {
+    file: "system-prompts/style-guide-acceptance.md",
+    sentence: "You are a **Quality Gatekeeper** for a style guide for a Japanese light novel series.",
+  },
+  {
+    file: "system-prompts/style-guide-extract.md",
+    sentence: "You are a **Style Convention Analyst** for a long-running Japanese light novel series being translated from the source language.",
+  },
+  {
+    file: "system-prompts/style-guide.md",
+    sentence: "You are a **Style Guide Archivist** maintaining the canonical style guide for a Japanese light novel series being translated from the source language into the target language.",
+  },
+  {
+    file: "system-prompts/style-guide-validator.md",
+    sentence: "You are a **Style Guide Auditor** operating in **adversarial mode**. You validate the style guide for a Japanese light novel series being translated from the source language.",
+  },
+];
+
+/**
+ * The prompt files that print characters of one language's script in their examples, measured 2026-10-15.
+ * Named because "no prompt names a language" is not the same claim as "no prompt prints one": the voice
+ * extraction prompt meets the stronger version (slice 4), these six do not, and their examples are
+ * instructions — one of them mirrored by a closed answer schema — so they are not this slice's to change.
+ *
+ * @type {string[]}
+ */
+const PROMPT_FILES_PRINTING_CJK = [
+  "system-prompts/glossary-terms.md",
+  "system-prompts/style-guide-extract.md",
+  "system-prompts/style-guide-validator.md",
+  "system-prompts/style-guide.md",
+  "system-prompts/translation-target.md",
+  "user-prompts/translate.md",
+];
+
+/**
+ * Every language-naming line of one prompt file, with the framing shape already tested against it. Pure:
+ * it takes text, so a planted sentence can be scanned without writing a planted file.
+ *
+ * @param {string} file - Name to report.
+ * @param {string} text - The prompt's text.
+ * @returns {Array<{file: string, line: string, named: string[], framing: boolean}>}
+ */
+function promptLanguageMentions(file, text) {
+  const out = [];
+  text.split("\n").forEach((raw) => {
+    const line = raw.trim();
+    const named = LANGUAGE_NAMES.filter((l) => line.includes(l));
+    if (!named.length) return;
+    out.push({ file, line, named, framing: FRAMING_SHAPE.test(line) });
+  });
+  return out;
+}
+
+/**
+ * Compare a prompt file's language mentions against the pinned inventory. Two independent rules, and both
+ * have to hold: an unknown mention is a finding, and a mention whose framing shape contradicts the bucket
+ * it was filed under is a finding — so the table cannot file a framing claim as a detection rule.
+ *
+ * @param {Array<{file: string, line: string, framing: boolean}>} mentions
+ * @param {Array<{file: string, line: string, bucket: string}>} table
+ * @returns {Array<{detector: string, detail: string}>}
+ */
+function promptMentionFindings(mentions, table) {
+  const findings = [];
+  for (const m of mentions) {
+    const row = table.find((t) => t.file === m.file && t.line === m.line);
+    if (!row) {
+      findings.push({
+        detector: m.framing
+          ? "a-prompt-names-the-language-of-the-work-it-analyses"
+          : "language-mention-in-a-prompt-nobody-classified",
+        detail: `${m.file}: ${m.line.slice(0, 140)}`,
+      });
+      continue;
+    }
+    if (m.framing !== (row.bucket === "names-the-work-being-analysed")) {
+      findings.push({
+        detector: "a-framing-claim-was-filed-as-something-else",
+        detail: `${m.file} is filed as "${row.bucket}" but reads as the work's own language: ${m.line.slice(0, 140)}`,
+      });
     }
   }
-  const namingJapanese = promptFiles.filter((rel) => /japanese|日本語/i.test(fs.readFileSync(path.join(ROOT, rel), "utf8")));
+  return findings;
+}
 
+{
+  console.log("4. what each prompt file names a language FOR, pinned line by line");
+
+  const promptFiles = [];
+  for (const dir of ["system-prompts", "user-prompts"]) {
+    for (const name of fs.readdirSync(path.join(ROOT, dir)).sort()) {
+      if (name.endsWith(".md")) promptFiles.push(`${dir}/${name}`);
+    }
+  }
   ok(promptFiles.length >= 40, `${promptFiles.length} prompt files exist`);
-  // Pinned at exactly 6 since plan 06 slice 4 took the voice extraction prompt out of this list. It was 7.
-  // The number is pinned rather than capped because a cap lets a new Japanese-named prompt in silently,
-  // and the six that remain are the ones plan 06 slice 10 still has to do.
-  same(namingJapanese.length, 6,
-    `prompt files that name Japanese: ${namingJapanese.length} — 6 since slice 4 removed the voice extraction prompt; the rest are plan 06 slice 10`);
-  same(namingJapanese.includes("system-prompts/character-voice-extract.md"), false,
-    "the voice extraction prompt names Japanese again — slice 4 is what took it out, and the register questions " +
-      "are appended in code (character-voice/prompts.js), not written into the file");
-  ok(namingJapanese.includes("system-prompts/character-voice-acceptance.md"),
-    "the voice acceptance prompt still names Japanese — that is slice 10's, not slice 4's");
-  ok(namingJapanese.includes("system-prompts/translation-target.md"),
-    "the intake prompt names Japanese too — it is the file that asks the intake to decide the register questions from the book");
 
-  // The planted check, which is the half that makes the scan above more than a count: a language name put
-  // back into the voice prompt is caught by the same rule that catches one put into a `.js` file.
+  const mentions = [];
+  for (const rel of promptFiles) {
+    mentions.push(...promptLanguageMentions(rel, fs.readFileSync(path.join(ROOT, rel), "utf8")));
+  }
+
+  // 4a. the inventory: every mention is one a person has read and bucketed. The crisp check runs first and
+  // prints the offending line, so a planted framing sentence fails by naming itself rather than by dumping
+  // two inventories.
+  const mentionFindings = promptMentionFindings(mentions, PROMPT_LANGUAGE_MENTIONS);
+  if (mentionFindings.length) {
+    console.log(mentionFindings.map((f) => `  [${f.detector}] ${f.detail}`).join("\n"));
+  }
+  same(mentionFindings, [], "no prompt file names a language in a way nobody classified");
+  same(mentions.map((m) => `${m.file} :: ${m.line}`), PROMPT_LANGUAGE_MENTIONS.map((m) => `${m.file} :: ${m.line}`),
+    "every line in every prompt file that names a language is in the pinned inventory, and the inventory holds nothing else");
+
+  // 4b. the two lists the owner's rule turns on.
+  const framing = PROMPT_LANGUAGE_MENTIONS.filter((m) => m.bucket === "names-the-work-being-analysed");
+  same(framing, [],
+    "no prompt file names a language as the thing being analysed — the defect plan 06 slices 4 and 10 removed, pinned empty");
+  same(mentions.filter((m) => m.framing).map((m) => m.file), [],
+    "and the shape detector agrees with the inventory: 0 prompt lines read as naming the work's own language");
+
+  const detection = PROMPT_LANGUAGE_MENTIONS.filter((m) => m.bucket === "works-out-the-source-language");
+  same([...new Set(detection.map((m) => m.file))], ["system-prompts/translation-target.md"],
+    "the only prompt file that names a language as a property to detect is the intake's own — it decides the source language, and the register questions, from the book");
+  same(detection.length, 6, "the intake's language decision is 6 lines, and 6 lines is all of it");
+
+  const target = PROMPT_LANGUAGE_MENTIONS.filter((m) => m.bucket === "names-the-language-being-written");
+  same([...new Set(target.map((m) => m.file))], ["system-prompts/verify-translate.md"],
+    "one prompt names the OUTPUT language as a fact rather than reading it from the setting — named as debt, not this slice's to change");
+
+  // 4c. the five files slice 10 fixed now name no language at all, in any form.
+  for (const plant of SLICE10_FRAMING_SENTENCES) {
+    const text = fs.readFileSync(path.join(ROOT, plant.file), "utf8");
+    same(LANGUAGE_NAMES.filter((l) => text.includes(l)), [],
+      `${plant.file} names no language anywhere after slice 10`);
+  }
+
+  // 4d. the planted half: each removed sentence put back is reported, by both rules.
+  for (const plant of SLICE10_FRAMING_SENTENCES) {
+    const text = fs.readFileSync(path.join(ROOT, plant.file), "utf8");
+    const planted = promptLanguageMentions(plant.file, `${text}\n${plant.sentence}\n`);
+    const hit = planted.filter((m) => m.framing);
+    same(hit.length, 1, `the framing sentence put back into ${plant.file} was reported as naming the work's own language`);
+    same(promptMentionFindings(planted, PROMPT_LANGUAGE_MENTIONS).length, 1,
+      `and the inventory rule reported it too: ${plant.file}`);
+  }
+
+  // 4e. the boundary, in both directions. A detection rule is not the defect — but a new one still has to
+  // be read and bucketed, and a framing claim inside a file that legitimately names languages is still the
+  // defect. The lists are per line, not per file.
+  const intakeText = fs.readFileSync(path.join(ROOT, "system-prompts/translation-target.md"), "utf8");
+  const plantedDetection = promptLanguageMentions("system-prompts/glossary-terms.md",
+    `${fs.readFileSync(path.join(ROOT, "system-prompts/glossary-terms.md"), "utf8")}\n- hangul present → Korean;\n`);
+  same(plantedDetection.filter((m) => m.framing), [],
+    "a detection rule is NOT read as the defect: 'hangul present → Korean' names no work");
+  same(promptMentionFindings(plantedDetection, PROMPT_LANGUAGE_MENTIONS).length, 1,
+    "but a detection rule appearing somewhere new is still reported, because nobody has said that file may name a language");
+  const plantedFramingInIntake = promptLanguageMentions("system-prompts/translation-target.md",
+    `${intakeText}\nYou validate the style guide for a Japanese light novel series.\n`);
+  same(plantedFramingInIntake.filter((m) => m.framing).length, 1,
+    "and a framing claim inside the file that legitimately detects languages is still the defect — the buckets are per line");
+
+  // 4e. the voice extraction prompt: the stronger claim slice 4 made, still true.
   const voicePrompt = fs.readFileSync(path.join(ROOT, "system-prompts", "character-voice-extract.md"), "utf8");
   same(scanSourceForAxisLists("system-prompts/character-voice-extract.md", voicePrompt), [],
     "the voice extraction prompt trips the axis-list guard on its own text");
-  const planted = scanSourceForAxisLists("planted: a Japanese axis list put back into the voice prompt",
+  same(LANGUAGE_NAMES.filter((l) => voicePrompt.includes(l)), [],
+    "the voice extraction prompt names no language — slice 4, and the register questions are appended in code (character-voice/prompts.js), not written into the file");
+  const plantedVoice = scanSourceForAxisLists("planted: a Japanese axis list put back into the voice prompt",
     `${voicePrompt}\n\nAnswer the formality axis in Japanese: "丁寧語", "普通語", "尊敬語", "謙譲語".\n`);
-  ok(planted.some((f) => f.detector === "register-value-vocabulary"),
+  ok(plantedVoice.some((f) => f.detector === "register-value-vocabulary"),
     "the planted Japanese register vocabulary in the voice prompt was not reported");
-  ok(planted.some((f) => f.detector === "language-named-next-to-an-axis"),
+  ok(plantedVoice.some((f) => f.detector === "language-named-next-to-an-axis"),
     "a language named next to an axis word in the voice prompt was not reported");
 
-  console.log(`  ${namingJapanese.length}/${promptFiles.length} prompt files name Japanese; the .js scan does not cover them, and that is written down`);
+  // 4f. naming a language and printing one are different claims, and only the weaker one is clean today.
+  const CJK_SCRIPT = /[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]/;
+  const printing = promptFiles.filter((rel) => CJK_SCRIPT.test(fs.readFileSync(path.join(ROOT, rel), "utf8")));
+  same(printing, PROMPT_FILES_PRINTING_CJK,
+    "the prompt files that still print one language's script in their examples are these six, named — their examples are instructions, and one is mirrored by a closed answer schema, so they are not this guard's to delete");
+  same(PROMPT_FILES_PRINTING_CJK.includes("system-prompts/character-voice-extract.md"), false,
+    "the voice extraction prompt prints 0 characters of any CJK script — the stronger form slice 4 met");
+
+  console.log(`  ${promptFiles.length} prompt files: ${framing.length} name a language as the work, ` +
+    `${new Set(detection.map((m) => m.file)).size} names languages as things to detect (${detection.length} lines), ` +
+    `${new Set(target.map((m) => m.file)).size} names the output language, ` +
+    `${printing.length} still print one language's script in their examples`);
 }
 
 console.log(`\nno axis list in code: ${checks} checks, 0 model calls.`);
