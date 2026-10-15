@@ -447,8 +447,11 @@ async function scenarioEachStageSendsItsOwnShape() {
   };
   /** @type {Array<Object>} */
   const voiceCalls = [];
+  // `knownBlock` is the option name since plan 06 slice 2 (2026-10-14): what the chapter is shown as
+  // already known is the record query `character-voice/known-facts.js` builds, and this fixture has no
+  // record, so it is shown nothing. The old `stateFile` key is gone from `runExtract` entirely.
   await withStubbedModel(() => '{"entries": []}', voiceCalls, () =>
-    voiceStage.runExtract(voiceCtx, voiceCtx.bundle.segments[0], 0, { stateFile: null })
+    voiceStage.runExtract(voiceCtx, voiceCtx.bundle.segments[0], 0, { knownBlock: "" })
   );
   same(voiceCalls.length, 1, "the voice extraction made the wrong number of calls");
   same(JSON.stringify(voiceCalls[0].responseFormat), JSON.stringify(voiceResponseFormat()),
