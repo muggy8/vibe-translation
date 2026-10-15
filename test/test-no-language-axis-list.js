@@ -31,9 +31,12 @@
  *     detectors over the voice extraction prompt so a language name put back into it is caught.
  *   - **The two named exemptions:** `QUIRK_TYPE_TO_ASPECT` and `QUIRK_TYPE_TO_VOICE_LABEL` map the
  *     extraction prompt's own quirk kinds (four of which are register-ish) onto the store's aspects. They
- *     are the collapse plan 06 §2.3 measured, and slice 5 removes it. Until then they are exempt **by
- *     name and by key set**: a new key in either table is a failure, because a growing exemption is not
- *     an exemption.
+ *     are the collapse plan 06 §2.3 measured, and plan 06 slice 5 (2026-10-14) closed it **per claim, on
+ *     the axis a claim names, rather than by renaming the aspects** — because the rows sitting on
+ *     `register` are sealed and a sealed row is never re-labelled. So the exemption is permanent in shape
+ *     and exact in size: a new key in either table is a failure, because a growing exemption is not an
+ *     exemption, and the read side (`register/answers.js`) reports the collapse from this same table so
+ *     the audit's number cannot drift from the mapping's.
  *
  * Plain `assert`, no framework, CommonJS — like the rest of the project. 0 model calls, 0 writes.
  */
@@ -96,8 +99,8 @@ const REGISTER_VALUE_VOCABULARY = [
  * Language-agnostic and vocabulary-agnostic — this is the detector that catches a "universal" axis list
  * whose answers are words this guard has never heard of.
  *
- * Measured before it was pinned (against the 408 pipeline `.js` files it now scans): **0 hits on
- * legitimate material.** Two wider candidates were measured and dropped for firing on real files —
+ * Measured before it was pinned (against the pipeline `.js` files it scans — 412 today, 408 when this
+ * guard was pinned): **0 hits on legitimate material.** Two wider candidates were measured and dropped for firing on real files —
  * naming a language anywhere in a file that also mentions an axis and holds a list-shaped line fires
  * **4** times on legitimate code (`types.js`, `utils/reference-store/evidence.js`,
  * `utils/source/chapters.js`, `utils/source/extract.js` — all prose, no axis list), and any
@@ -300,34 +303,62 @@ function scanSourceForAxisLists(file, source) {
 
   const { QUIRK_TYPE_TO_ASPECT } = require("../utils/reference-store/extraction-adapter");
   const { QUIRK_TYPE_TO_VOICE_LABEL } = require("../utils/reference-store/rebuild");
+  const { FACT_ASPECTS } = require("../utils/reference-store/schema");
+  const { collapsedAspectAccount, aspectOfQuirkType } = require("../utils/reference-store/register");
 
-  // These are the mapping the extraction prompt's own quirk kinds need, and the collapse plan 06 §2.3
-  // measured: four of the seven land on the one aspect `register`. Slice 5 removes the collapse. Until it
-  // does, the exemption is exact: a new key is a new mapping nobody measured.
+  // The mapping the extraction prompt's own quirk kinds need. Plan 06 slice 5 (2026-10-14) closed §2.3's
+  // collapse **on the axis, not on these aspect names**, and that is why the four-into-one is still here
+  // and still pinned at four: the rows sitting on `register` are published, and a sealed row is never
+  // edited, moved or re-labelled. Renaming the aspect would be rewriting sealed rows, which this store
+  // forbids. What answers a question now is `facts.axis` / `facts.axis_value`, checked at filing against
+  // the series' own declaration; this table is the fallback for a claim that names no question.
   same(Object.keys(QUIRK_TYPE_TO_ASPECT).sort(), [
     "catchphrase", "dialect", "formality", "internalvoice", "pronoun", "sentenceending", "vocabulary",
   ], "QUIRK_TYPE_TO_ASPECT has exactly the seven keys the extraction prompt's quirkType list has");
-  same(QUIRK_TYPE_TO_ASPECT.formality, "register", "formality collapses into register (plan 06 §2.3)");
-  same(QUIRK_TYPE_TO_ASPECT.vocabulary, "register", "vocabulary collapses into register");
-  same(QUIRK_TYPE_TO_ASPECT.dialect, "register", "dialect collapses into register");
-  same(
-    Object.values(QUIRK_TYPE_TO_ASPECT).filter((aspect) => aspect === "register").length,
-    4,
-    "four of the seven kinds share one aspect — the record cannot answer \"how formal\" without also returning vocabulary, dialect and sentence ending"
-  );
   same(Object.keys(QUIRK_TYPE_TO_VOICE_LABEL).sort(), [
     "catchphrase", "dialect", "formality", "internalvoice", "pronoun", "sentenceending", "vocabulary",
   ], "QUIRK_TYPE_TO_VOICE_LABEL is the same seven, on the rebuild side");
+  same(QUIRK_TYPE_TO_ASPECT.formality, "register",
+    "formality still lands on `register`: the aspect is the fallback for a claim that names no axis, and renaming it would re-label sealed rows (plan 06 slice 5)");
+  same(QUIRK_TYPE_TO_ASPECT.vocabulary, "register",
+    "vocabulary still lands on the same aspect — so a claim that answers a declared question is answerable by that question, and one that names none is answerable only by this collapsed aspect");
+  same(QUIRK_TYPE_TO_ASPECT.dialect, "register", "dialect still lands on the same aspect");
+  same(
+    Object.values(QUIRK_TYPE_TO_ASPECT).filter((aspect) => aspect === "register").length,
+    4,
+    "four of the seven kinds still share one aspect — the collapse is closed per claim (by the axis a claim names), not by renaming the aspect, because a sealed row is never re-labelled"
+  );
+
+  // The table maps onto the store's closed aspect vocabulary and onto nothing else: it is not a list of
+  // questions, and a value that was an axis id would be the axis list the owner forbade, wearing a table.
+  const unmapped = Object.entries(QUIRK_TYPE_TO_ASPECT).filter(([, aspect]) => !FACT_ASPECTS.includes(aspect));
+  same(unmapped, [], "every value of the mapping is an aspect this store's vocabulary declares — the table maps kinds onto aspects, never onto questions");
+
+  // The read side reports the collapse, and it derives the number from this table rather than restating it,
+  // so the audit's number and the mapping cannot drift apart.
+  const collapse = collapsedAspectAccount();
+  same([collapse.aspect, collapse.kindsCollapsed, collapse.kinds],
+    ["register", 4, ["dialect", "formality", "sentenceending", "vocabulary"]],
+    "register/answers.js reports this same collapse, derived from this same table");
+  same(aspectOfQuirkType("formality").answersADeclaredQuestion, false,
+    "an aspect on its own answers no declared question — the pair `facts.axis` / `facts.axis_value` is what makes a claim answerable (plan 06 §2.3, slice 5)");
 
   // Neither table names a language or a language's forms: the exemption is about the prompt's field
-  // names, not about Japanese.
+  // names, not about Japanese. (One combined check per table instead of two: it refuses the same set of
+  // defects, and the freed checks went to the two assertions above.)
   for (const [name, table] of [["QUIRK_TYPE_TO_ASPECT", QUIRK_TYPE_TO_ASPECT], ["QUIRK_TYPE_TO_VOICE_LABEL", QUIRK_TYPE_TO_VOICE_LABEL]]) {
     const text = JSON.stringify(table);
-    same(LANGUAGE_NAMES.filter((l) => text.includes(l)), [], `${name} names no language`);
-    same(REGISTER_VALUE_VOCABULARY.filter((v) => text.includes(v)), [], `${name} holds no register answer values`);
+    same(
+      [
+        ...LANGUAGE_NAMES.filter((l) => text.includes(l)),
+        ...REGISTER_VALUE_VOCABULARY.filter((v) => text.includes(v)),
+      ],
+      [],
+      `${name} names no language and holds no register answer values`
+    );
   }
 
-  console.log("  7 keys each, 4 of them collapsed into `register`, neither table holding a language");
+  console.log("  7 keys each, 4 of them still collapsed into `register` (the fallback), the collapse reported by the read side from the same table, neither table holding a language");
 }
 
 // ─── 4. the prompt debt is named, counted, and can only shrink ────────────────

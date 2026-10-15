@@ -25,6 +25,7 @@ const { unsealedVolumes } = require("./sealing");
 const { COVERAGE_SIGNIFICANCE_CHAPTERS, coverageChapterTotal, uncoveredCharacters } = require("./coverage");
 const { coverageFindings } = require("./coverage-report");
 const { rebuiltDocuments } = require("./rebuilt");
+const { registerAxisInventory } = require("../register/answers");
 
 require("../../../types"); // JSDoc type definitions
 
@@ -44,7 +45,7 @@ const INTEGRITY_STEP = "reference-store";
  *   built as HIGH damage is how a check gets ignored. Copy-forward sets it to the volume it is about
  *   to copy, which is where the question has teeth. It is not a switch: no value turns the sealing
  *   check off for a volume the caller calls finished.
- * @returns {{ok: boolean, findings: PostMortemFinding[], counts: Object<string, number>, checked: number}}
+ * @returns {{ok: boolean, findings: PostMortemFinding[], counts: Object<string, number>, checked: number, coverageAsked: boolean, coverage: Object, axes: Object, rebuilt: Array<Object>}}
  */
 function integrityFindings(ctx, { volume = null, step = INTEGRITY_STEP, upTo, publishedVolume = null } = {}) {
   const findings = [];
@@ -227,6 +228,15 @@ function integrityFindings(ctx, { volume = null, step = INTEGRITY_STEP, upTo, pu
     );
   }
 
+  // Plan 06 slice 5 — what this record can actually answer, question by question. Asked as a **count**,
+  // not as a finding: the two questions that would make it a finding ("a declared axis nobody answered",
+  // "an axis answered for a character this volume does not contain") are §4.3 guards 3 and 4, and each one
+  // needs a new kind in the level table, which is a slice of its own (plan 06 §10.12). What is built here
+  // is the number, printed in the report the run already writes, so the gap between "the record holds 470
+  // claims" and "the record can answer 2 questions about them" is visible without anybody adding a check
+  // that stops a run for a thing the pipeline is correct to admit.
+  const axes = registerAxisInventory(ctx, { volume: limit });
+
   return {
     ok: !findings.some((f) => f.severity === "HIGH"),
     findings,
@@ -240,6 +250,7 @@ function integrityFindings(ctx, { volume = null, step = INTEGRITY_STEP, upTo, pu
       significanceChapters: COVERAGE_SIGNIFICANCE_CHAPTERS,
       rows: uncovered,
     },
+    axes,
     rebuilt: rebuiltDocs,
   };
 }

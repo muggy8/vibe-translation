@@ -54,6 +54,16 @@ require("../../types"); // JSDoc type definitions
  * the aspect the integrity audit counts and reports — an unmapped quirk type is unclassified by
  * definition, and saying so is the honest outcome (review 05 §2.3).
  *
+ * **Four of the seven kinds land on the one aspect `register`** — plan 06 §2.3 measured this, and it
+ * is left exactly as it is (plan 06 slice 5). The aspect is too coarse to tell "how formal is this
+ * character" apart from "which words does this character use", and the fix is NOT to rename these
+ * values: `facts` rows already published carry them, a sealed row is never edited, moved or
+ * re-labelled, and `extractionClaimAlreadyStored` below matches a claim on `(key, aspect, body)` — so
+ * changing an aspect string would both rewrite published history and make every existing record look
+ * like a volume being filed twice. The distinction rides on `facts.axis` / `facts.axis_value` instead,
+ * which a claim names at filing and nothing rewrites afterwards. `register/answers.js` is the door
+ * that reads the difference, and `validation/report-axes.js` prints how many claims it cannot.
+ *
  * @type {Object<string, string>}
  */
 const QUIRK_TYPE_TO_ASPECT = {
@@ -83,6 +93,13 @@ const EXTRACTION_VOICE_LABEL = "Quirk";
  * second pass files the same 223 claims a second time and the audit counts a volume's findings twice.
  * Matched on the claim's own words, normalized, because two different descriptions of the same
  * character are two claims and should both be here.
+ *
+ * **The match is on `(key, aspect, body)`, and it never looks at `axis`.** That is what keeps a re-run
+ * from doubling a volume (plan 06 slice 5 measured it: 4 rows stay 4 through the extraction door, 8
+ * stay 8 through the stage's own door), and it has a consequence worth stating where the code says it:
+ * re-reading a volume after the series declares its register questions does **not** put an axis on the
+ * rows already filed — the dedupe matches their words, refuses to file them again, and a published row
+ * is never re-labelled. The new answer arrives as a new row beside the old one, or not at all.
  *
  * @param {ReferenceStore} store
  * @param {{key: string|null, aspect: string, body: string}} claim

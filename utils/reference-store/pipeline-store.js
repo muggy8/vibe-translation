@@ -532,6 +532,10 @@ function renderVolumeAuditReport(audit, { title, file, volume, refused = [], scr
     glossary: audit.glossary || null,
     roster: audit.roster || null,
     attribution: audit.attribution || null,
+    // The register answer is about the character-voice record. A glossary audit runs over the same record
+    // and gets the same numbers, and printing a register section on the report that describes `glossary.md`
+    // would be a true sentence in the wrong document.
+    axes: document === "character-voice" ? audit.axes || null : null,
     refused,
     screened: screened.length ? screened : audit.screened || [],
     reopens: audit.reopens || [],
@@ -550,9 +554,12 @@ function renderVolumeAuditReport(audit, { title, file, volume, refused = [], scr
  * @param {string} opts.markdown - The artifact as it is on disk.
  * @param {Array<Object>} [opts.refused] - Rows the imports refused, for the report.
  * @param {string} [opts.step]
- * @returns {{findings: PostMortemFinding[], highFindings: PostMortemFinding[], markdown: string, counts: Object<string, number>, checked: number, coverageAsked: boolean, coverage: Object, presence: Object, unadopted: Array<Object>, unadoptedTerms: Array<Object>, absent: Array<Object>}}
+ * @param {"character-voice"|"glossary"} [opts.document] - Which artifact this audit describes. Defaults to
+ *   the one `opts.file` names. It decides which of the record's answers the report prints: the register
+ *   answer belongs to the character-voice artifact, and the two stages share one record.
+ * @returns {{findings: PostMortemFinding[], highFindings: PostMortemFinding[], markdown: string, counts: Object<string, number>, checked: number, coverageAsked: boolean, coverage: Object, axes: Object, presence: Object, unadopted: Array<Object>, unadoptedTerms: Array<Object>, absent: Array<Object>}}
  */
-function auditVolumeRecord(store, { title, file, markdown, refused = [], screened = [], step = VALIDATION_STEP }) {
+function auditVolumeRecord(store, { title, file, markdown, refused = [], screened = [], step = VALIDATION_STEP, document } = {}) {
   // Presence first: the coverage question is refined by it, and running the audit before the
   // measurement would answer the strict version of the question and report characters who are
   // simply not in the book.
@@ -586,6 +593,7 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], screene
     checked: audit.checked,
     coverageAsked: audit.coverageAsked,
     coverage: audit.coverage,
+    axes: audit.axes,
     unadopted,
     unadoptedTerms: terms,
     absent,
@@ -597,7 +605,17 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], screene
     rebuilt: audit.rebuilt || [],
   };
 
-  const report = renderVolumeAuditReport(computed, { title, file, volume: store.volume, refused, screened, reopens });
+  const artifactDocument =
+    document || (String(file).split("/").pop() === "character-voice.md" ? "character-voice" : "glossary");
+  const report = renderVolumeAuditReport(computed, {
+    title,
+    file,
+    volume: store.volume,
+    refused,
+    screened,
+    reopens,
+    document: artifactDocument,
+  });
 
   return {
     findings,
@@ -607,6 +625,7 @@ function auditVolumeRecord(store, { title, file, markdown, refused = [], screene
     checked: audit.checked,
     coverageAsked: audit.coverageAsked,
     coverage: audit.coverage,
+    axes: audit.axes,
     presence,
     unadopted,
     unadoptedTerms: terms,

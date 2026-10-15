@@ -53,6 +53,11 @@ const VOICE_SECTION = "Characters";
  * "Sentence endings", "Dialect" and "Vocabulary register" — three facets of one queryable
  * kind, and the reason the artifact's own wording is stored rather than inferred.
  *
+ * Four of these labels land on the one `register` aspect (plan 06 §2.3). For a claim that names a
+ * register axis the label is presentation only and the question is asked on `facts.axis`
+ * (`register/answers.js`); for a claim that names none the label is the **only** place the
+ * extractor's distinction still exists, which is why it is stored rather than derived from the aspect.
+ *
  * @type {Object<string, string>}
  */
 const VOICE_LABEL_TO_ASPECT = {

@@ -29,6 +29,11 @@ const REBUILT_VOICE_SECTION = "Characters";
  * distinction (sentence endings vs vocabulary vs formality vs dialect, all one `register` aspect)
  * survives the round trip because the label carries it.
  *
+ * Plan 06 slice 5 is why that matters more than it looks: the four kinds share one aspect, so for a
+ * claim that names no register axis the label is the **only** place the distinction is still written
+ * anywhere. `register/answers.js` reports those claims by label, and the volume's audit report prints
+ * them, so the collapse is a number in a report rather than a fact only a reader of this file knows.
+ *
  * @type {Object<string, string>}
  */
 const QUIRK_TYPE_TO_VOICE_LABEL = {

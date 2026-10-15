@@ -33,8 +33,9 @@
  * document with no addressable sections, prose the writer never finished), `headings.js` (the one heading
  * rule the shape check and the sampler have to agree on), `report.js` (the report itself: its header, the
  * `**Recommendation:**` rule, the findings grouped by severity and the "What was checked" table),
- * `report-record.js` / `report-gaps.js` / `report-attribution.js` (the report's narrative sections, each
- * printing the lines it printed before this file was split), `report-lines.js` (the formatting rules every
+ * `report-record.js` / `report-gaps.js` / `report-attribution.js` / `report-axes.js` (the report's narrative
+ * sections, each printing the lines it printed before this file was split, plus the register answer plan 06
+ * slice 5 added), `report-lines.js` (the formatting rules every
  * section shares and the two bounds that keep the report a size the run pays for) and `sample.js` (the
  * slice of the artifact the acceptance grader is shown, and what it does when a section is bigger than the
  * budget). This file is the public surface of the audit layer and the only thing another module should

@@ -12,8 +12,10 @@
  * would mean handing that file the whole call signature to produce one table row. The narrative sections
  * are printers — `report-record.js` (how the record came to be, whether it is sealed, what it refused,
  * its reopen history), `report-gaps.js` (who is not in the volume, who the reference does not cover, what
- * the extraction found that the document never took) and `report-attribution.js` (who is speaking the
- * words the claims quote) — and each one prints exactly the lines it printed before this file was split.
+ * the extraction found that the document never took), `report-axes.js` (which declared register questions
+ * this record can answer and how many of its claims answer none) and `report-attribution.js` (who is
+ * speaking the words the claims quote) — and each one prints exactly the lines it printed before this file
+ * was split.
  *
  * @module utils/reference-store/validation/report
  */
@@ -22,6 +24,7 @@ const { numberOr } = require("./report-lines");
 const { provenanceSection, refusedRowsSection, reopenSections, screenedSection, sealingSections } = require("./report-record");
 const { coverageSection, presenceSection, unadoptedClaimsSection, unadoptedTermsSection } = require("./report-gaps");
 const { attributionSection } = require("./report-attribution");
+const { axisAnswerTableRows, axisAnswerSection } = require("./report-axes");
 require("../../../types"); // JSDoc type definitions
 
 /**
@@ -73,6 +76,10 @@ require("../../../types"); // JSDoc type definitions
  *   own text does not measure it in — with the reading-aid probe's answer beside each one. Printed
  *   because "the reference says nothing about this character" and "the reference puts this person's words
  *   in the wrong mouth" are different defects, and only one of them was ever reportable.
+ * @param {Object|null} [report.axes] - `registerAxisInventory`'s answer for this record: which declared
+ *   register questions it can answer, claim by claim, and how many of its character-voice claims answer no
+ *   declared question at all (plan 06 slice 5). Printed whenever it was computed, including when the
+ *   answer is zero — the silence this slice exists to close was a silence about the majority of a record.
  * @returns {string} Markdown, ending in a newline.
  */
 function renderAuditReport({
@@ -96,6 +103,7 @@ function renderAuditReport({
   screened = [],
   reopens = [],
   attribution = null,
+  axes = null,
 }) {
   const out = [
     `# ${title} — deterministic audit (volume ${volume})`,
@@ -239,6 +247,7 @@ function renderAuditReport({
       } |`
     );
   }
+  out.push(...axisAnswerTableRows(axes));
   if (sealed) {
     out.push(
       `| is this volume's record sealed (published, immutable) | ${
@@ -257,6 +266,8 @@ function renderAuditReport({
   out.push(...attributionSection(attribution));
 
   out.push(...coverageSection(coverage));
+
+  out.push(...axisAnswerSection(axes));
 
   out.push(...unadoptedClaimsSection(unadopted));
 

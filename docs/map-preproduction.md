@@ -127,8 +127,11 @@ whose block is malformed or absent — an instruction to name none. No branch ho
 the answer shape stays **open** on purpose, because a closed value list in the pipeline is the axis list the
 account owner forbade. `formalityLevel` is out of the prompt and out of `VOICE_ENTRY_KEYS` (13 keys); the
 tolerant read of an old `formalityLevel` answer stays in the store, and the seven observation kinds stay,
-because they name *what kind of thing was noticed* rather than one language's forms — undoing the collapse
-that folds four of them into the one aspect `register` is slice 5, not this one. → `test/test-voice-prompt-declaration.js`,
+because they name *what kind of thing was noticed* rather than one language's forms. **And plan 06 slice 5,
+built the same day, did not undo the collapse** — four of the seven kinds still land on the one aspect
+`register`, because those aspect strings are what every published record's rows carry and what the door that
+stops a volume being filed twice matches on. The distinction rides on the axis instead, which is the next
+paragraph. → `test/test-voice-prompt-declaration.js`,
 `test/test-no-language-axis-list.js`.
 
 **And what a chapter is shown as already known is a query, not a document** (plan 06 slice 2, built 2026-10-14).
@@ -148,6 +151,36 @@ that bit. Two guards came with it, and they are guards rather than tidy-ups: a r
 chapter becomes **4,433 characters** for a chapter naming 3 roster entries, **15,676** for 12, **23,256** for 40 and
 **23,335** for all 196 (the ceiling), and **411** for a chapter naming nobody — a projected **46,785,543 → 1,785,126
 bytes** across a 133-chapter run. Call counts are unmoved. → `utils/reference-store/chapter-facts.js`, gotcha 155.
+
+**And a register question is now asked of the record, not of the aspect** (plan 06 slice 5, built 2026-10-14).
+The stage files a claim that names the question it answers (`facts.axis` / `facts.axis_value`), and reading those
+claims back is `utils/reference-store/register/answers.js`: `claimsAnsweringAxis` returns the claims answering
+**one** declared question, `axisAnswersForCharacter` returns one bucket per question for one character, and
+`registerAxisInventory` is the record's account of what it can answer at all. The acceptance line is a number,
+not a claim: on a fixture where one character carries a formality claim and a vocabulary claim — **two
+extraction kinds, both filed under the one `register` aspect** — asking `treatment` returns 1 claim and withholds
+the other, and `collapsedRegisterClaimsHeldBack` prints that withheld claim as the count of same-aspect rows the
+question did not return. **What the slice could not do is stated in the code and in the report:** the aspects were
+not renamed. `QUIRK_TYPE_TO_ASPECT` still folds four kinds into `register`, because the aspect strings are what
+every published record's rows already carry (a sealed row is never edited, moved or re-labelled) and what
+`extractionClaimAlreadyStored` matches a claim on, beside its key and its body — rename them and every existing
+record stops recognising its own claims and files its volume a second time. Measured before and after, on
+fixtures, 0 model calls: the extraction door files 4 rows and stays 4, the stage's own door files 8 and stays 8
+(4 adopted + 4 candidate copies), and the coverage answer is identical either way (0 uncovered, 0 HIGH, 0 MEDIUM,
+presence 3/3, 8 facts / 3 cast). The consequence nobody asked about is written down rather than hidden: **an axis
+never travels backwards**. Re-reading a volume after the series declares its questions files nothing new, so the
+rows already there keep `axis = NULL` — 4 axis-less rows stay 0 axis-bearing — and a new answer has to arrive as a
+new row beside the old one. That is why the audit report prints both halves: `integrity/audit.js` computes the
+inventory and returns it as data, `validation/report-axes.js` prints the two table rows and the section on the
+**character-voice** report only (the same record audited as `glossary.md` is not given a voice section), and the
+section names the claims no question can reach, the labels that are the only place the extractor's distinction
+survives for them, and the reason the aspect names were left alone. It is **not a finding**: the two findings plan
+06 §4.3 guards 3 and 4 would need require new kinds in the level table, which stays at 70. **The price is the
+grader's prompt** — the section is ~1.5 KB and `character-voice-validation.md` is one of the files the acceptance
+grade reads, so the offline loop's largest `acceptance` prompt moved 10,418 → 12,057 characters (main loop) and
+11,231 → 12,870 (chunked loop), with every call count unmoved (82 / 28, 0 on the second pass in both). →
+`utils/reference-store/register/answers.js`, `utils/reference-store/validation/report-axes.js`,
+`test/test-axis-answers.js`, gotcha 156.
 
 | File | Lines | What it owns |
 | --- | --- | --- |
