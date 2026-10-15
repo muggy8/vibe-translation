@@ -68,6 +68,7 @@ const __reopen = require("./reference-store/reopen");
 const __register = require("./reference-store/register");
 const __voiceRevision = require("./reference-store/voice-revision");
 const __confirmations = require("./reference-store/confirmations");
+const __writtenForms = require("./reference-store/written-forms");
 
 const __open = require("./reference-store/open");
 
@@ -104,5 +105,6 @@ module.exports = {
   ...__register,
   ...__voiceRevision,
   ...__confirmations,
+  ...__writtenForms,
   openReferenceStore: __open.openReferenceStore,
 };

@@ -186,7 +186,7 @@ const IDENTITY_LINK_SOURCES = ["ruby-guide", "glossary-character-row"];
 // ─── Version ──────────────────────────────────────────────────────────────────
 
 /** The schema this build of the code writes. */
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 /**
  * The migrations, oldest first. Version 1 is the whole design as built.
@@ -746,6 +746,82 @@ const MIGRATIONS = [
       `CREATE INDEX IF NOT EXISTS idx_claim_confirmations_volume ON claim_confirmations(seen_volume, fact_id)`,
     ],
   },
+  {
+    version: 12,
+    name: "plan 07 slice 1 — a written form the book printed becomes a recorded fact",
+    // WHY THIS TABLE EXISTS AT ALL.
+    //
+    // Since gotcha 123 fixed the guide-split defect, every volume's extraction writes
+    // `<base>-ruby-guides.json` beside its bundle: one row per (word, reading) pair the converter set
+    // aside, 10,005 rows and 45,429 occurrences across the 17 real books. **Nothing has ever read that
+    // file back.** Plan 07 §2 is the measurement of what is in it, and the interesting shape is one
+    // reading the author printed over two or more different written forms — 虹彩寺菫, 三色院菫子, 好きな女
+    // and 主人公 all guided パンジー. That is the author writing a description and naming it in the
+    // reading, and no name-matching rule over the extracted text can find it (plan 07 §2.3), because the
+    // reading is not in the text at all: the converter stripped it out and left only the word.
+    //
+    // So the reading has to be recorded, or the shape stays invisible forever. This table is the
+    // recording. It is deliberately **the harvest, transcribed**, not a judgement: a row says this volume
+    // printed this form, the author guided it with this reading, this many times, in these chapters.
+    //
+    // WHY IT ASSERTS NO PERSON.
+    //
+    // The account owner's rule (plan 07 §5's slice-1 row) is that slice 1 files **no identity**: the claim
+    // that two written forms are one character belongs to slice 2 and to `cast_identities`, and it covers
+    // 18 of the 97 candidate groups. The other 79 include ordinary homophones (美味 / 上手 → うま) and the
+    // pronoun-and-description groups the owner answered with "record the words, no character". A table
+    // that stored a person for those would be a table that decided the question slice 2 has not decided
+    // yet, and a wrong identity is the one thing in this store that can make a character's claims vanish
+    // from a query (gotcha 105). So there is no `identity` column, no `identity_bearing` flag, and no
+    // link to `cast`. The roster's answer is **reported** by the door (`shapes.js`'s
+    // `splitGroupsByRoster`) and filed nowhere, which is also what keeps the answer re-measurable against
+    // a different roster without re-filing anything.
+    //
+    // WHY THE KEY IS (VOLUME, FORM, READING) AND NOT (FORM, READING).
+    //
+    // A written form is dated by the book that printed it: 三色院菫子 is guided パンジー 18 times
+    // series-wide and 16 of them are in volume 15, which is a name changing **inside one book** — the
+    // shape `valid_from` / `valid_to` exist for in plan 07 §4.3. Collapsing the volume away would answer
+    // "how often does this series write this word this way" and make "which book wrote it" unanswerable,
+    // and it would make a second volume's pass overwrite the first one's count. Per-volume rows are also
+    // what the no-forward rule needs: a row is stamped with the book it was read out of, so a volume's
+    // record can only ever hold the forms of that volume and the ones copy-forward carried into it.
+    //
+    // WHY INSERT-ONLY, AND WHY THERE IS NO `updated_at`.
+    //
+    // A filed row's content columns never change, so the table is out of `UPDATABLE_FIELDS` (which belongs
+    // to `facts` and is the only update contract in this store) and has no `status`, no `row_version` and
+    // no `updated_at` — the same rule `claim_confirmations` and `cast_identity_links` follow. A column
+    // that is null in every row and read by no query is one more thing a reader has to ask about.
+    //
+    // WHY THE GROUP QUESTION IS NOT A COLUMN.
+    //
+    // "One reading over two or more written forms" is a question about a **set**, and the guards that
+    // decide it (`GUIDE_GROUP_MIN_FORMS`, `GUIDE_GROUP_MIN_FORM_CHARS` in `utils/source/guide-groups.js`)
+    // are arguable and carry a measured false negative — しば ← 芝 x416 / 縛 x10, where 芝 is a name the
+    // published roster already holds. Storing a group flag would freeze a judgement into the row that
+    // transcribes the markup, and would make the guard impossible to widen without rewriting published
+    // rows. The grouping is a **query** over these rows instead (`rows.js`'s `candidateGroupsInRecord`,
+    // which hands them back to the shipped fold), so the judgement can move and the transcription cannot.
+    up: [
+      `CREATE TABLE IF NOT EXISTS written_forms (
+         volume         INTEGER NOT NULL,
+         form           TEXT    NOT NULL,
+         reading        TEXT    NOT NULL,
+         reading_script TEXT    NOT NULL,
+         occurrences    INTEGER NOT NULL DEFAULT 0,
+         chapters       TEXT    NOT NULL DEFAULT '[]',
+         created_at     TEXT    NOT NULL,
+         PRIMARY KEY (volume, form, reading)
+       )`,
+
+      // The one query this table exists to serve, and the shape it arrives in: every form carrying one
+      // guided reading, in book order. That is the candidate-group fold, and it is the only read slice 2
+      // and the 25 / 54 report both need. The primary key already answers "this volume, this form, this
+      // reading", so it needs no second index.
+      `CREATE INDEX IF NOT EXISTS idx_written_forms_reading ON written_forms(reading, volume, form)`,
+    ],
+  },
 ];
 
 /**
@@ -777,6 +853,7 @@ const COUNTED_TABLES = [
   "cast_identities",
   "cast_identity_links",
   "claim_confirmations",
+  "written_forms",
 ];
 
 // ─── Applying it ──────────────────────────────────────────────────────────────

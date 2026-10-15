@@ -3,9 +3,12 @@
 **Status: direction approved by the account owner 2026-10-15, and the owner's five answers are recorded in
 §2b. Slice 0 is BUILT (2026-10-15)** — the reader `utils/source/guide-groups.js`, its fixture suite
 `test/test-guide-groups.js` (94 checks), and the re-measurement `test/measure-guide-groups.js` (0 model
-calls). **§2 is that re-measurement, and it corrects three numbers the plan was written with** (§2.2, §2.3,
-§2.7) **and then two more the correction itself got wrong** (§2.11). Slices 1–7, including the new slice 2b
-the owner's answer opened, are not built.
+calls). **Slice 1 is BUILT (2026-10-15)** — `utils/reference-store/written-forms/` behind its cover, schema
+12, `test/test-written-forms.js` (166 checks) in `npm test`, `test/measure-written-forms.js` beside it.
+**§2 is that re-measurement, and it corrects three numbers the plan was written with** (§2.2, §2.3, §2.7),
+**then two more the correction itself got wrong** (§2.11), **and then the acceptance line slice 1 was
+dispatched against, which turned out to ask for two mutually exclusive things** (§2.13). Slices 2, 2b and
+3–7 are not built, and **slice 2 is blocked on the owner's answer to §6.7**.
 
 This plan supersedes parts of `06-register-declarations.md` and says so plainly where. Plan 06 built
 the record machinery — declarations, per-question answers, the revision door, confirmations, the closing
@@ -425,6 +428,34 @@ word no more than twice. It is language-neutral, it costs 7.8% more text, and it
 catches the phrase glosses above. If the owner wants the third row instead, that is a bigger prompt and the
 same door.
 
+### 2.13 "Each volume files only its own harvest" and "the union is 97 groups" cannot both be true
+
+Slice 1 was built and measured, and the acceptance line written for it — including the wording I amended
+myself in commit `2c67ce2` — asks for two things that are mutually exclusive. Measured by
+`test/measure-written-forms.js` on copies of all 17 records, 0 model calls:
+
+| What the pass does | Groups | Rows | Occurrences |
+|---|---|---|---|
+| Each volume's harvest folded **alone**, a reading counted once per book | 115 | 240 | 3,196 |
+| What a no-forward door actually files, regrouped over the series | **57** | **240** | **3,196** |
+| All 17 harvests folded **together** — §2.2's number | **97** | **634** | **8,734** |
+
+**"One reading printed over two or more written forms" is a question about a set, and a set is not
+decomposable per volume.** The gap is 40 groups and 394 rows, and it is not scattered noise: of the 18
+identity-bearing groups, **three are never a candidate group in any single book** — ホース ← 葉月保雄
+(vols 7, 16) / 主人公 (5) / 好きな男 (4); ミント ← 薄荷 (7) / 自分の彼氏 (9); つきみ ← 月見 (4) / 草見月 (11)
+— because their second written form appears in a **later** volume. **Fourteen more are reached with a
+partial span** (すみれこ 13 volumes → 1, さんしよくいんすみれこ 17 → 1, パンジー 10 → 6, たんぽぽ 7 → 2,
+ひまわり 7 → 4, コスモス 7 → 3, チエリー 5 → 3, サンちやん 5 → 2, あすなろ 4 → 2, なでしこ 3 → 1, ビオラ
+3 → 2, ヒイラギ 2 → 1, ツバキ 2 → 1, プリムラ 2 → 1) and **one in full** (アイリス, whose whole span is one
+book). A cumulative fold — volume N folding harvests 1..N — is monotone 11 → 97 and reaches exactly
+97 / 634 / 18 / 134 / 1,402 at volume 17, but only by reading earlier books' harvest files.
+
+This is the same wall §2.9 hit from the other side, and it is worth stating as a principle: **an identity is
+a series-level thing, and a volume-level door can only ever see the part of it that one book printed.** It
+does not invalidate the design — the record is cumulative, so the rows a volume files travel forward — but
+it decides *who does the grouping*, and that is now an open decision (§6.7).
+
 ---
 
 ## 2b. The account owner's answers, 2026-10-15
@@ -611,7 +642,7 @@ gotcha 121 is about exactly what happens when a spelling rule is allowed to deci
 | # | Slice | Acceptance line |
 |---|---|---|
 | **0** | **BUILT 2026-10-15 — the corrected guide measurement.** `utils/source/guide-groups.js` reads a harvest and produces candidate groups; `test/test-guide-groups.js` (94 checks, fixtures only) pins the rule; `test/measure-guide-groups.js` re-runs every number in §2 over the live corpus with 0 model calls and writes nothing. | **Met, and three of the plan's own numbers moved.** §2.1–§2.3 are reproduced by a script that reads only the guide files, 0 model calls, and a test fails if the *rule* moves. The corrections: the "24 readings over more than one written form" is **14** (24 counted volume-and-form pairs), the パンジー group spans **10** volumes not 12, and 三色院菫子 → パンジー is **18 occurrences series-wide, 16 of them in volume 15**. Plan 06 §2.11's retired conclusion is named as retired, not deleted. |
-| **1** | **Written forms become recorded facts — every candidate group's forms, and no claim about anyone.** A door files each guided written form the extraction harvested — form, guided reading, the reading's script, the volume, the chapters, the count — for **all 97 candidate groups** (222 forms / 634 harvest rows / 8,734 occurrences). It files **no identity**: the roster-or-reading claim belongs to slice 2 and covers 18 groups. The 79 groups the roster rule cannot see are **reported**, split by §2.10 into the 25 same-word-two-spellings and the 54 different-words-that-sound-alike, with the six pronoun-and-description groups named as their own class. | Measured on **copies** of all 17 records: the union of the 17 per-volume passes is the **97 groups / 634 rows / 8,734 occurrences** §2.2 measures, and **18 groups / 134 rows / 1,402 occurrences** of those are what §2.9's roster rule selects. Each volume files only its own harvest, filtered by the roster that volume's own record already holds — **no volume looks forward**. A second pass over the same volume files 0 new rows. No renderer, audit rule, presence matcher, published artifact or existing query reads the new table in this slice, and no stage calls the door. |
+| **1** | **BUILT 2026-10-15 — written forms become recorded facts, and no claim about anyone.** `utils/reference-store/written-forms/` (`shapes.js` 302, `rows.js` 301, `file.js` 368) behind a `written-forms.js` cover (77, 22 exports, 0 name clashes with a sibling layer), re-exported from the store barrel (369 → 391 exports). Schema **11 → 12**: `written_forms`, one row per `(volume, form, reading)`, insert-only, out of `UPDATABLE_FIELDS`, in `COUNTED_TABLES` (19 → 20) so copy-forward carries it. `test/test-written-forms.js` (10 scenarios / **166** checks, fixtures only) is in `npm test`; `test/measure-written-forms.js` (427 lines) is not. | **Built, and the plan's own acceptance line turned out to be unmeetable as written — see §2.13.** What is measured: the door files **240 rows** across the 17 volumes (**57** groups regrouped, **3,196** occurrences), a second pass over volume 17's copy files **0** and reports 13 already filed, the roster rule run against a copy of volume 17's 196-entry roster selects **18 groups / 134 rows / 1,402 occurrences** and leaves **79 / 500 / 7,332**, and the 25 / 54 split reproduces exactly (**25 variants / 166 rows / 1,561 occurrences**, **54 sound-alikes / 334 rows / 5,771**, **0 false positives** — it calls 美味/上手, 披露/疲労 and 俺/脇役 nothing). **No stage calls the door** (2 callers, both tests); **nothing else reads `written_forms`** (only the migration and those two tests); the identity layer is not required by it; the 17 corpus digests and 17 + 17 sidecars are unchanged and **0 `written_forms` rows exist in the corpus**. Every call baseline unmoved (82 / 17 and 28 / 6, 0 on the second pass in both, prompt audit 23 / 0), no new finding kind (70), no new freeze door (12), no new setting, no new command, 0 model calls. What moved: `test/test-identity-table-isolation.js` **496 → 499** (it counts tables off `sqlite_master`), and three tests that hard-coded schema 11 now pin 12. |
 | **2** | **Identities carry the forms, with the roster-or-reading rule.** Two forms guided to the same reading join one identity, **for the 18 groups §2.9 selects**. Statements only — no claim ever moves. The small-kana fold stays a **reporting** rule (gotcha 121), gets the one missing table entry so チェリー / チエリー resolves, and 董子 is reported as a **source-quality anomaly**, never as a link. | On a copy of volume 17's record: パンジー's group contains the forms in §2.3 and is reachable from a query. `cast_merges` stays 0. A planted claim stays under the form that filed it. **The rule must not require one form to be unknown** — §2.9 shows that half throws away さんしよくいんすみれこ and つきみ. All three near misses are named, including チェリー / チエリー. 董子's 92 occurrences land in the anomaly report and in no identity. |
 | **2b** | **The source book is allowed to be wrong, and saying so is a door.** Two deterministic reports built from rows the record already holds: **variant spellings** — the 25 groups §2.10 measures, printed the way a dictionary prints *color* / *colour* — and **concentration anomalies** — a written form that shares a guided reading with a far more common form, is multi-character on both sides, and appears overwhelmingly in one volume or one chapter (董子: 92 occurrences, 75 of them in volume 17 chapter 6). Filed nowhere, declared nowhere, 0 model calls. | The variant report reproduces the 25 groups and names both spellings with their counts. The anomaly report finds 董子 / 三色院董子 and **does not** find 如雨露 (spread 1–2 per volume across 8 volumes, which is a name written short, not a bad chapter). The 54 sound-alike groups are named as a class and **not** reported as errors. A planted fixture of each shape fires, and a fixture of the wrong shape stays silent — including 込 / 子 / 木, which the naive "10× more common" rule wrongly flags. |
 | **3** | **The relations table.** Schema 12, the columns in §4.3, the two non-negotiable rules, and a door that files a relation and closes a span *with its reason*. | A planted development closes an earlier span in the later volume's copy and leaves the earlier volume's snapshot byte-identical. A span closed without a reason is refused. A row's content columns never change after filing — asserted column by column. |
@@ -674,3 +705,19 @@ Still open:
    アリーヴェデルチ → さよなら). The chosen rule catches them, but they are not pronunciation, and showing
    them as ruby is a different thing from showing a reading. Markup, note, or nothing, is worth deciding
    before slice 5 is built.
+7. **What the written-forms door files: one book's candidates, every guide row, or the whole series' fold.**
+   Slice 1 is built on the narrowest reading — each volume files its own harvest's candidate groups — and
+   §2.13 measures what that costs: **240 rows / 57 groups**, against the **634 rows / 97 groups** the
+   grouping rule finds when all 17 harvests are folded together, with **three of the 18 identity-bearing
+   groups never filed at all**. The three doors are: **(A)** volume N folds harvests 1..N and files every
+   candidate row of that fold — reaches the plan's numbers exactly, and gives up "each volume files only its
+   own harvest" in plain words; **(B)** what is built now — files the least, and loses 40 groups and 394 rows
+   unless the harvest files are re-read; **(C)** file every harvest row that passes the two *row* guards
+   (**≈8,910 rows**, 14× what B files) and answer the group question **by query**, which satisfies both
+   clauses and is the only one that keeps the grouping guards' measured false negative (しば ← 芝 ×416 /
+   縛 ×10) recoverable without re-reading the books. The seam is left in place so this is a call-site change
+   and not a rewrite: `fileVolumeWrittenForms(store, { harvests })` already accepts pre-read harvests and
+   refuses any later than the volume being filed, and `candidateGroupsInRecord(store, { upToVolume })`
+   already answers the group question over the rows a record carries. **Slice 2 should not be built until
+   this is answered**, because the identity door is exactly the thing that reads the answer. The full
+   options and costs are in `/tmp/opencode/plan07-slice1-questions.md`.

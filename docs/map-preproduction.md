@@ -243,7 +243,8 @@ counterfactual — the same line moved below the bullets — still parses as 2 c
 damage**, while the second claim's body becomes `"Addresses the man she reports to with vos… _Earlier in this record
 — …"`, which is a published claim rewritten by a render. Every
 call baseline is unmoved (82 / 17 and 28 / 6, 0 on the second pass in both), the level table is still 70 kinds, the
-freeze door table is still 15 doors, and no published file on the real corpus changes, **measured over copies of all 17 records** (gotcha 124):
+freeze door table is still 12 doors (the gate's own suite is 15 scenarios / 210 checks), and no published
+file on the real corpus changes, **measured over copies of all 17 records** (gotcha 124):
 their `facts` tables hold **22,469 rows and every one of them is `aspect = 'term_usage'`** — the published
 records carry **no voice claims at all** — with **58 superseded rows, all 58 glossary**, and **no record has
 an `axis` column** (16 on schema 8, volume 03 on schema 9). So the door is unreachable on this corpus twice

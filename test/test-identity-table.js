@@ -192,8 +192,8 @@ function fileCharacterRow(store, term, notes) {
   const { store, seriesDir } = openFixture("migration", { import: false });
   const file = path.join(seriesDir, "Test Story(01)", "series.db");
   try {
-    same(SCHEMA_VERSION, 11, "this build writes schema 11");
-    same(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], "the migrations are a list, oldest first, and each one is appended rather than an older one edited");
+    same(SCHEMA_VERSION, 12, "this build writes schema 12");
+    same(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], "the migrations are a list, oldest first, and each one is appended rather than an older one edited");
     const register = MIGRATIONS.find((m) => m.version === 10);
     ok(register && /register/.test(register.name), `the register migration is still there, unchanged: ${register && register.name}`);
     ok(MIGRATIONS.some((m) => m.version === 9 && /identity/.test(m.name)), "the identity migration is still there, unchanged, below it");
@@ -219,8 +219,8 @@ function fileCharacterRow(store, term, notes) {
 
     const reopened = openReferenceStore({ volume: 1, folder: "Test Story(01)", seriesDir, stage: "merge" });
     try {
-      same(readSchemaVersion(reopened.db), 11, "opening it with this build brings it up to 11");
-      same(reopened.schemaVersion, 11, "and the handle reports 11");
+      same(readSchemaVersion(reopened.db), 12, "opening it with this build brings it up to 12");
+      same(reopened.schemaVersion, 12, "and the handle reports 12");
       const tables = new Set(reopened.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
       ok(tables.has("cast_identities") && tables.has("cast_identity_links"), "the new tables exist in the reopened record");
       same(reopened.db.prepare("SELECT COUNT(*) n FROM cast_identities").get().n, 0, "and they start empty: a migration does not invent links");
