@@ -1,6 +1,9 @@
 # Plan 07: written forms, relations, and a voice record that never looks forward
 
-**Status: PLAN — direction approved by the account owner 2026-10-15. Nothing built yet.**
+**Status: direction approved by the account owner 2026-10-15. Slice 0 is BUILT (2026-10-15)** — the
+reader `utils/source/guide-groups.js`, its fixture suite `test/test-guide-groups.js` (94 checks), and
+the re-measurement `test/measure-guide-groups.js` (0 model calls). **§2 below is that re-measurement,
+and it corrects three numbers the plan was written with** (§2.2, §2.3, §2.7). Slices 1–7 are not built.
 
 This plan supersedes parts of `06-register-declarations.md` and says so plainly where. Plan 06 built
 the record machinery — declarations, per-question answers, the revision door, confirmations, the closing
@@ -66,6 +69,13 @@ author actually did with names, and nothing reads it. That file is the floor thi
 
 ## 2. The measurements
 
+Every number in §2 was re-run on 2026-10-15 by `test/measure-guide-groups.js`: 0 model calls, reads only
+the harvest JSON and the published markdown, opens a **copy** of one record (gotcha 124), writes nothing,
+and fails its own run if any `series.db` digest or `-wal` / `-shm` sidecar moved. The reader it measures
+is `utils/source/guide-groups.js`, and `test/test-guide-groups.js` (94 checks, fixtures only) is what
+pins its rule — a test may not read the 17 real volumes (AGENTS.md rule 8), so the numbers live here and
+the rule lives in the fixture.
+
 ### 2.1 The guide file is already there, and it is big
 
 Every volume's extraction writes `<base>-ruby-guides.json` beside its text: one row per word-and-reading
@@ -79,35 +89,91 @@ which base character carried which reading. Measured across all 17 volumes, 0 mo
 | total occurrences | **45,429** |
 | characters of reading text | 34,355 |
 
-### 2.2 The meaningful subset is small
+### 2.2 The candidate set, and the display subset that is not the rule
 
-Most guides are ordinary pronunciation help: a kanji word with its normal reading. The subset where the
-author is doing something *with* the word — a kanji word given a **katakana** reading — is:
+Two different subsets were measured, and the plan originally recorded only the narrower one.
+
+**The script-named display subset.** Most guides are ordinary pronunciation help. The subset where the
+author is doing something *with* the word — a **Han-script word given a katakana reading** — is:
 
 | | |
 |---|---|
 | rows, series-wide | **192** |
 | distinct readings | **99** |
+| occurrences | 668 |
 
-Occurrences are mostly 1–4. This is the set worth showing a model, and the set worth recording as facts.
+That rule **names two writing systems**. It is a rule about this series' orthography, not a rule about
+guided forms, and this repository's owner rule is that nothing is hard-wired to one language. It is
+kept as a **display** filter — it is the right set to show a model (§4.5), and it is how §2.3's table
+was found in the first place — and it is **not** the load-bearing identity rule. In code it is
+`isGuideGroupKatakanaOverHanForm`, and `collectGuideGroups` never consults it.
 
-### 2.3 The finding that changes the design
+**The script-neutral candidate set.** Four guards, all of them mechanical facts about two strings, none
+of them asking which script either side is written in: the reading is 2+ characters long; the reading
+shares no character with the written form; 2+ distinct written forms carry that reading; and at least
+one of those forms is 2+ characters long. Measured over the 17 volumes, 0 model calls:
 
-Asked which of those 99 readings the author prints over **more than one written form**, 24 of them do:
+| | |
+|---|---|
+| harvest rows read | 10,005 |
+| rows dropped — the reading is 1 character long | 1,084 |
+| rows dropped — the reading shares a character with the form | **10** |
+| rows skipped — the row names no written form (one real one: volume 11 guides a ruby with no base text at all, マイナス) | 1 |
+| rows left, over distinct readings | 8,910 rows / 3,316 readings |
+| readings dropped — only one written form carries it | 3,099 |
+| readings dropped — every form under the reading is one character long | 120 |
+| **candidate groups** | **97** |
+| distinct written forms across them | **222** |
+| harvest rows inside them | **634** |
+| occurrences inside them | **8,734** |
+| volumes they touch | 17 of 17 |
+| of those groups, the display filter selects | 14 |
+
+**The shared-character guard is nearly inert on this corpus, and that is a measurement, not an
+oversight.** It fires on **10 of 10,005 rows**. The harvest stores the word *already guide-free* (gotcha
+123), so a reading almost never has a character of the word to reuse: 蒲 guided かま passes the guard
+cleanly. The guard is script-neutral and it stays — it is the honest statement of "the author wrote
+something other than the word's own pronunciation" — but the guards that actually do the separating are
+the reading's length and the requirement that one form be multi-character.
+
+**The candidate set contains the noise, on purpose.** 美味 / 上手 → うま, 呆然 / 茫然 → ぼうぜん,
+披露 / 疲労 → ひろう, 振動 / 震動 → しんどう, 可哀想 / 可哀相 → かわいそう are all in it, beside
+翌桧 / 羽立桧菜 → あすなろ and 撫子 / 赤井撫子 → なでしこ. The reader generates candidates; deciding is
+§2.9 and slice 2. A reader that filtered the noise here would be deciding the plan's central question
+with a rule nobody reviewed.
+
+### 2.3 The finding that changes the design — and the three numbers in it that were wrong
+
+Asked which of the 99 display readings the author prints over **more than one written form**, the
+original answer was 24. **That counted readings printed over 2+ distinct (volume, form) pairs.** Asked
+about written forms alone, **14** of the 99 qualify. Ten of the 24 are one written form printed in
+several volumes, which is a different claim and not the design-changing one:
+
+> イラストレーター ← 世界の支配者 (7 volumes) · ブリキ ← 神 (7) · くさみルナ ← 草見月 (7) ·
+> ガーベラ ← 大千本槍 (4) · サザンカ ← 山茶花 (3) · ウータン ← 庄本先生 (3) · ボンヤリこ ← 本槍子 (3) ·
+> カビラ ← 川平 (2) · ローリエ ← 月桂樹 (2) · ワサビ ← 山葵 (2)
+
+The 14 that really are printed over more than one written form:
 
 | Reading | Written forms the author used for it |
 |---|---|
-| **パンジー** | 朱雀, 虎, 好きな女, その綺麗な女性, お姫様, 友達, 三色菫, 三色院菫子, 虹彩寺菫, 菫, 主人公, 恋人 — across 12 volumes; 311 occurrences of 虹彩寺菫 in volume 15 alone |
-| **コスモス** | 青龍, 生徒会長, 秋桜, 秋野桜, 怪物 |
-| **サンちやん** | 王子様, 大賀先輩, 親友, 大賀太陽 |
-| **イラストレーター** | 世界の支配者, in 7 different volumes |
-| **ブリキ** | 神, in 7 volumes |
-| **チエリー** | 桜桃, 面倒事, 桜原桃, 元生徒会長 |
-| **ホース** | 好きな男, 主人公, 葉月保雄 |
-| **ジヨーロ** | 玄武, 親友, 如雨露, 主人公 |
-| **ビオラ** | 菫, 誠実, 好きな人, 虹彩寺菫 |
-| **ガーベラ** | 大千本槍, in 4 volumes |
-| **サザンカ** | 山茶花, in 3 volumes |
+| **パンジー** | 虹彩寺菫 x406, 三色院菫子 x18, 三色菫 x12, 菫 x2, 好きな女 x2, その綺麗な女性 x1, お姫様 x1, 友達 x1, 主人公 x1, 恋人 x1, 朱雀 x1, 虎 x1 — **10 volumes** (01, 04, 05, 06, 09, 10, 14, 15, 16, 17), not 12; 虹彩寺菫 is 311 occurrences in volume 15 and 95 in volume 16 |
+| **コスモス** | 秋桜 x5, 生徒会長 x2, 秋野桜 x2, 青龍 x1, 怪物 x1 |
+| **チエリー** | 桜原桃 x5, 桜桃 x2, 面倒事 x1, 元生徒会長 x1 |
+| **サンちやん** | 親友 x3, 大賀太陽 x2, 王子様 x1, 大賀先輩 x1 |
+| **ビオラ** | 菫 x8, 虹彩寺菫 x3, 好きな人 x2, 誠実 x1 |
+| **ホース** | 葉月保雄 x4, 好きな男 x1, 主人公 x1 |
+| **ジヨーロ** | 親友 x2, 玄武 x1, 如雨露 x1, 主人公 x1 |
+| **ヒイラギ** | 柊 x2, 元木智冬 x2, 人見知り x1 |
+| **プリムラ** | 乙女桜 x1, 早乙女桜 x1, 新生徒会長 x1 |
+| **モブ** | 脇役 x4, 主人公 x1 |
+| **ツバキ** | 椿 x2, 特別な存在 x1 |
+| **ミント** | 薄荷 x2, 自分の彼氏 x1 |
+| **アイリス** | 恋人 x1, 文目 x1 |
+| **スパイラル** | ねじ込む x3, ねじ切れそう x1 |
+
+Under the script-neutral rule the same question gives **97 groups / 222 written forms / 634 rows /
+8,734 occurrences, homophone noise included** (§2.2). The 14 above are a subset of the 97.
 
 **The author writes a description and guides it with a name.** 好きな女 — "the girl I like" — read
 パンジー. 主人公 — "the protagonist" — read サンちやん. 世界の支配者 — "the ruler of the world" — read
@@ -117,19 +183,22 @@ Three consequences, each load-bearing:
 
 - **No name-matching rule can ever find these links.** "The protagonist" and 大賀太陽 being the same
   person is not discoverable from strings. It is discoverable from the guide.
-- **虹彩寺菫 → パンジー 311 times and 三色院菫子 → パンジー 16 times, in the same volume.** A name changes
+- **虹彩寺菫 → パンジー 311 times and 三色院菫子 → パンジー 16 times, in volume 15.** A name changes
   *within* one book. That is a relation with a date, which is exactly what `valid_from` / `valid_to` is for.
 - **サンちやん vs サンちゃん** — the two roster entries one character apart, open since plan 06 — is
-  settled by the guide, which prints the first form over four written forms.
+  settled by the guide, which prints the first form over four written forms. (Measured again in §2.9:
+  the guide's spelling is one edit from the roster's, and so are チエリー / チェリー and ジヨーロ / ジョーロ.)
 
 ### 2.4 A correction to plan 06, stated because a later slice must not reuse the old number
 
-Plan 06 §2.3 measured the guide file as stating **13 name links across 24 roster entries** and concluded
+Plan 06 **§2.11** (this plan's first draft cited it as §2.3, which is the aspect-collapse section)
+measured the guide file as stating **13 name links across 24 roster entries** and concluded
 it was a weak source. **That measurement asked the wrong question.** It looked for pairs where *both* sides
 were already roster names. The valuable shape is *any written form guided to the same reading*, which
-includes descriptions that are not names at all. Measured correctly: 192 rows, 99 readings, 24 readings
-spanning multiple written forms. Plan 06's conclusion — "no source states most of these links in a form a
-door can file" — is **retired**.
+includes descriptions that are not names at all. Measured correctly: 192 rows / 99 readings in the display
+subset, and **97 candidate groups / 222 written forms / 634 rows / 8,734 occurrences** under the
+script-neutral rule. Plan 06's conclusion — "no source states most of these links in a form a door can
+file" — is **retired**, and the row in plan 06 §2.11 that carries the 13-pair number now says so.
 
 ### 2.5 What the published records hold today (unchanged, and still the reason everything is fixture-proven)
 
@@ -146,12 +215,118 @@ way. Zero false positives. The code cost is one line plus one assertion. The rea
 published glossaries, which the freeze gate refuses once a translation has been built on the file — and
 **no translation exists today**.
 
+### 2.7 Two filters that were tried and failed, written down so nobody re-tries them
+
+Both were attempts to separate the identity-bearing groups from the phonetic-complement noise *inside
+the reader*. Both failed, and the reader therefore does neither.
+
+1. **Use the harvest's own annotation sequence to tell a whole-word guide from a partial one.** The
+   harvest records each annotation's base-and-reading sequence (`annotated`, schema 2 — the shape
+   gotcha 123's tripwire needed). The hope was that a guide sitting on one character of a multi-character
+   word would be visible there. **It is not in the data: all 10,005 rows report full coverage, 0 partial.**
+   The rows are keyed by the whole written form, so partial coverage cannot be recovered from them. The
+   field answers "which character carried which reading", which is a different question, and it is not
+   a candidate filter.
+2. **"A homophone group is all single-character forms; a label group contains a multi-character form."**
+   **It drops 0 groups.** Homophone groups contain multi-character forms too: うま ← 美味 x113 / 上手 x104,
+   ひろう ← 披露 x26 / 疲労 x5, ぼうぜん ← 呆然 x19 / 茫然 x4.
+
+What does work is the blunt version of that second idea — **at least one form in the group is 2+
+characters long** — and it is a length rule, not a script rule. It drops **120 of the 217** groups the
+first three guards produce. **Its measured cost:** one of those 120 is しば ← 芝 x416 / 縛 x10, and 芝 is
+a name the published record already holds. One known false negative, pinned in
+`test/test-guide-groups.js` scenario 4 so widening the guard later is a decision rather than a discovery.
+
+### 2.8 The plant-naming pattern — a hypothesis, not a measurement
+
+The gold groups cluster on plants, and the author alternates between the plain plant word and the
+character's actual name, guiding one with the other's reading:
+
+| Reading | The plant word the author guides | The person's own name, guided with the same reading |
+|---|---|---|
+| あすなろ | 翌桧 x4 | 羽立桧菜 x1 |
+| ヒイラギ | 柊 x2 | 元木智冬 x2 |
+| なでしこ | 撫子 x105 | 赤井撫子 x1 |
+| たんぽぽ | 蒲公英 x6 | 蒲田公英 x3 |
+| ひまわり | 向日葵 x6 | 日向葵 x2 |
+| コスモス | 秋桜 x5 | 秋野桜 x2 |
+| チエリー | 桜桃 x2 | 桜原桃 x5 |
+| パンジー | 三色菫 x12, 菫 x2 | 三色院菫子 x18, 虹彩寺菫 x406 |
+| ビオラ | 菫 x8 | 虹彩寺菫 x3 |
+| プリムラ | 乙女桜 x1 | 早乙女桜 x1 |
+| アイリス | 文目 x1 | (no personal name guided; the roster's own entry is **アイリス**) |
+| ミント | 薄荷 x2 — **the roster's entry is the plant word itself** | (no personal name guided) |
+| ツバキ | 椿 x2 | (no personal name guided; the roster's own entry is the reading, **ツバキ**) |
+
+**Hypothesis:** for this series the guide file *is* the identity key, and the homophone noise is the
+price of reading it. It is written here as a hypothesis because the *plant* pattern itself has not been
+measured — §2.9's roster test selected 18 groups without ever asking what a word means, and "the cast
+is named after plants" is an observation about 13 of them, not a rule anyone has run. What §2.9 *did*
+measure is that the record can pick the identity-bearing groups out of the 97; whether a plant-naming
+rule would do it better, or reach the ones the roster test misses, is slice 2's question.
+
+### 2.9 The decisive measurement: can the record tell the identity groups from the noise?
+
+The question slices 1–2 depend on. Run by `test/measure-guide-groups.js` over the 17 volumes and a
+**copy** of volume 17's record (gotcha 124), 0 model calls.
+
+**The roster.** The published `## Characters` tables across the 17 glossaries hold **196** distinct
+terms; a copy of volume 17's `cast` table holds **196** keys; **the two sets are identical** — which
+confirms plan 06 §2.11's finding that the roster *is* the glossary's Characters table.
+
+**The cast-name rule, tested as written** — *a group is an identity link when at least one of its forms
+is a name the record already knows and at least one other form is not*:
+
+| Class | Groups | Harvest rows | Occurrences |
+|---|---|---|---|
+| at least one form known, at least one form unknown | **15** | 111 | 1,107 |
+| every form known | **2** | 20 | 292 |
+| no form known | **80** | 503 | 7,335 |
+
+**It separates the noise cleanly and it is not the right rule.** All 15 are real links — すみれこ
+(菫子 / 董子), パンジー, なでしこ, ビオラ, たんぽぽ, ひまわり, コスモス, チエリー, サンちやん, あすなろ,
+ホース, ヒイラギ, プリムラ, ミント, アイリス — and **none of the homophone noise is in them**: うま,
+ぼうぜん, しんどう, かわいそう, ひろう, かわ, かし, いか, たち, かわい, わがまま and the other 69 are all
+in the no-known-form class. **Zero false positives on this corpus.**
+
+But the "and at least one other form is not" half throws away two groups that are exactly what slice 2
+is for: **さんしよくいんすみれこ ← 三色院菫子 x289 / 三色院董子 x1** and **つきみ ← 月見 / 草見月** —
+links where *both* sides are already roster names, which is the shape plan 06 §2.11 was built to look
+for and found almost none of. Dropping them is the mistake that measurement made, reappearing in a new
+rule.
+
+**The better separator the measurement found:** *a group is identity-bearing when at least one of its
+forms is a roster entry, **or the reading itself is one***. That selects **18 of the 97** — 134 harvest
+rows, 1,402 occurrences — and leaves 79 out (500 rows, 7,332 occurrences). The reading test adds 11
+groups on its own — パンジー, ビオラ, たんぽぽ, ひまわり, コスモス, あすなろ, ホース, ヒイラギ, **ツバキ**,
+プリムラ, アイリス — because the glossary recorded the guided reading as the character's entry, so the
+roster already carries the author's nickname. ツバキ ← 椿 / 特別な存在 is the case the form test alone
+misses.
+
+**What even the better rule misses**, and it is worth naming before slice 2 is built:
+
+- **ジヨーロ** ← 玄武 / 親友 / 如雨露 / 主人公. Its reading is one edit from the roster's ジョーロ, and
+  its form 如雨露 is a truncation of the roster's 如月雨露. Neither is an exact match, so nothing selects it.
+- **モブ** ← 脇役 / 主人公, and the pronoun groups **おれ** (← 俺 x3,820 / 脇役), **あなた** (← 貴方 x535 /
+  貴女 x278), **あなたたち**, **あなたさま**, **わたし** (← 自分 / 他人 / 菫). Every form is a description or
+  a pronoun, so a roster test cannot see them. Whether they are identity links at all is an open question
+  (§6.6), not a measurement.
+- Three readings sit **one edit** from a roster entry without being one: チエリー / チェリー,
+  サンちやん / サンちゃん, ジヨーロ / ジョーロ. An exact-match roster test is not enough for a book that
+  spells its own nicknames two ways; the store's own name rule is the door that has to answer this, and
+  widening it is a decision (gotcha 121 kept the matching rule narrow on purpose).
+- The display filter selects three groups the roster rule does not: ジヨーロ, モブ, スパイラル.
+
+**The answer to the question.** Yes — the record can separate the identity-bearing groups from the
+homophone noise, with zero false positives on the real corpus, using only rows the record already holds
+and 0 model calls. Slices 1 and 2 are buildable. What they must not do is require one form to be unknown.
+
 ---
 
 ## 3. What this replaces, and what it leaves alone
 
 **Replaced or retired**
-- Plan 06 §2.3's roster-link measurement and its conclusion (§2.4).
+- Plan 06 §2.11's roster-link measurement and its conclusion (§2.4).
 - The `Japanese | English | Notes` heading.
 - The idea, floated in plan 06 §10.9, that the identity table might never be wired: this plan wires it,
   because the relations model cannot exist without it.
@@ -261,9 +436,9 @@ is re-taught, or it silently reports an empty agenda against a source-language g
 
 | # | Slice | Acceptance line |
 |---|---|---|
-| **0** | **The corrected guide measurement.** Re-run the guide analysis properly over all 17 volumes, pin the numbers in a test, and retire plan 06 §2.3's 13-pair measurement in the docs. | The numbers in §2.1–§2.3 are reproduced by a script that reads only the guide files, 0 model calls, and a test fails if they move. Plan 06's retired conclusion is named as retired, not deleted. |
-| **1** | **Written forms become recorded facts.** A door files each meaningful guided form — form, reading, script, volumes, chapters, count — into the record. | Measured on copies of all 17 records: the filed set matches the §2.2 numbers. Every already-filed form is recognised on a second pass and files 0 new rows. No published artifact changes. No stage calls it yet. |
-| **2** | **Identities carry the forms, with the widened rule.** Two forms guided to the same reading join one identity. Statements only — no claim ever moves. | On a copy of volume 17's record: パンジー's group contains the forms in §2.3, and the group is reachable from a query. `cast_merges` stays 0. A planted claim stays under the form that filed it. |
+| **0** | **BUILT 2026-10-15 — the corrected guide measurement.** `utils/source/guide-groups.js` reads a harvest and produces candidate groups; `test/test-guide-groups.js` (94 checks, fixtures only) pins the rule; `test/measure-guide-groups.js` re-runs every number in §2 over the live corpus with 0 model calls and writes nothing. | **Met, and three of the plan's own numbers moved.** §2.1–§2.3 are reproduced by a script that reads only the guide files, 0 model calls, and a test fails if the *rule* moves. The corrections: the "24 readings over more than one written form" is **14** (24 counted volume-and-form pairs), the パンジー group spans **10** volumes not 12, and 三色院菫子 → パンジー is **18 occurrences series-wide, 16 of them in volume 15**. Plan 06 §2.11's retired conclusion is named as retired, not deleted. |
+| **1** | **Written forms become recorded facts.** A door files each candidate guided form — form, reading, script, volumes, chapters, count — into the record. | Measured on copies of all 17 records: the filed set matches the **§2.2 candidate set** (97 groups / 222 forms / 634 rows), not the display subset. Every already-filed form is recognised on a second pass and files 0 new rows. No published artifact changes. No stage calls it yet. |
+| **2** | **Identities carry the forms, with the widened rule.** Two forms guided to the same reading join one identity, **for the groups §2.9's roster test selects** — 18 of the 97 — and the rest are recorded as candidates or not at all, which is the decision §6.5 asks. Statements only — no claim ever moves. | On a copy of volume 17's record: パンジー's group contains the forms in §2.3, and the group is reachable from a query. `cast_merges` stays 0. A planted claim stays under the form that filed it. **The rule must not require one form to be unknown** — §2.9 shows that half throws away さんしよくいんすみれこ and つきみ, which are real links between two roster names. |
 | **3** | **The relations table.** Schema 12, the columns in §4.3, the two non-negotiable rules, and a door that files a relation and closes a span *with its reason*. | A planted development closes an earlier span in the later volume's copy and leaves the earlier volume's snapshot byte-identical. A span closed without a reason is refused. A row's content columns never change after filing — asserted column by column. |
 | **4** | **The extraction contract.** A relation is a kind in the chapter call that already runs — no extra call — with the §4.4 certainty ladder and `withheld` / `narration` as legal answers. | Pass 1 files relations, pass 2 over the same fixture pays 0 calls. A planted "the name in the quote is the addressee" case comes back `addressee-risk`, not `measured`. A chapter that names nobody files nothing and is named, not punished. |
 | **5** | **Normalise, teach, then show.** Ruby stripping before quote comparison; the markdown parsers taught; only then the annotated view. | The wrong order is proven to be the wrong order: a test shows a parser meeting un-taught markup glues a line onto a published claim's body, and shows the taught parser not doing so. The annotated view adds the §2.2 subset and nothing else. |
@@ -290,6 +465,23 @@ published files, and it is placed late so the measurement in §4.7 is done with 
 4. **Whether the identity door runs per volume or once per series.** Plan 06 §10.9 asked this and left it.
    This plan's recommendation: once per series, as the glossary step's last act, beside the terminology
    settlement — a query, no model calls, its own records, not declared artifacts.
-5. **How far the annotated view goes.** The §2.2 subset is 192 rows. Whether ordinary hiragana guides on
-   rare kanji are also worth showing is a judgement about the model's reading, not a measurement, and it
-   changes the size of every chapter prompt.
+5. **How far the annotated view goes.** The §2.2 display subset is 192 rows. Whether ordinary hiragana
+   guides on rare kanji are also worth showing is a judgement about the model's reading, not a
+   measurement, and it changes the size of every chapter prompt. (The candidate set is 634 rows / 8,734
+   occurrences, so the display filter is what keeps the view small — that is the whole reason it exists.)
+6. **Whether a group whose forms are all descriptions or first-person pronouns is an identity link at
+   all.** おれ (← 俺 x3,820 / 脇役), あなた (← 貴方 x535 / 貴女 x278), あなたたち, あなたさま, わたし
+   (← 自分 / 他人 / 菫) and モブ (← 脇役 / 主人公) are 4,700 occurrences the roster test cannot see, and
+   the guide is plainly *doing something* in them — the author guides 脇役 ("supporting role") with the
+   same reading as 俺 ("I"). Filing them as identities, filing them as written forms with no identity,
+   or leaving them out is a decision about what the record asserts, and §2.9 cannot answer it.
+7. **How wide the roster match has to be.** ジヨーロ is one edit from the roster's ジョーロ, and its form
+   如雨露 is a truncation of 如月雨露; チエリー / チェリー and サンちやん / サンちゃん are the same shape.
+   An exact-match test misses all three. The store's name-matching rule is deliberately narrow (gotcha
+   121 refused to widen it from one scene's evidence), and widening it changes how every later volume
+   measures every character — which is the owner's call, not a slice's.
+8. **What happens to the 79 groups no rule selects.** 500 harvest rows and 7,332 occurrences of homophone
+   pairs and orthographic variants (太股 / 太腿, 偽物 / 偽者, 潑溂 / 潑剌, 我侭 / 我儘, 呆然 / 茫然). Some are
+   the *same word written two ways*, which a written-form layer arguably should know even when no person
+   is involved. Filing them, or naming them in a report and filing nothing, is a decision about how big
+   the written-form table gets.

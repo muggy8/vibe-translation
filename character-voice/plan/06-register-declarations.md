@@ -297,7 +297,7 @@ roster entry, and a character the glossary described under two names is two entr
 | `cast_presence_match.name` | structured | **0** — 196 distinct (key, name) pairs, and every matched name is the key itself | 0 |
 | `facts.extracted_as`, `character-voice*.md` on disk | structured / file | **0** — no voice run has produced a row yet | 0 |
 | `document_prose`, `attribution_answers` | structured | **0** | 0 |
-| **`<base>-ruby-guides.json`** | **structured — the book's own markup** | **13 pairs** (20 guide rows across the 17 volumes) | **24 of 196 (12%)** |
+| **`<base>-ruby-guides.json`** | **structured — the book's own markup** | **13 pairs** (20 guide rows across the 17 volumes) — **RETIRED 2026-10-15 by plan 07 §2.4: this row asked for pairs where *both* sides were already roster names, which is the wrong question. Asked correctly, the same file yields 97 candidate groups over 222 written forms (634 rows, 8,734 occurrences), including forms that are descriptions rather than names. The number stays here because it is what slice 1 actually measured; the conclusion drawn from it is no longer the plan's.** | **24 of 196 (12%)** |
 | the glossary's Characters rows, in the **markdown** | a table cell of **model-written prose** | **56 pairs** (644 of 1,309 rows that name another key state a link; 665 only mention one) | 88 of 196 |
 | the same rows, already inside the **record** (`facts`, `section='Characters'`) | the same prose, stored | **56 pairs** (703 of 2,037 row-copies) | 88 of 196 |
 
@@ -314,6 +314,18 @@ survives, the reading folds into it) would merge **パンジー, a 17-volume ent
 4-volume one**, because volumes 15–16 print 虹彩寺菫 with the reading パンジー 406 times. `castAlias`
 requires a survivor and a reason; the source supplies neither. It also misses 大賀太陽 → サンちゃん
 outright, because the ruby is spelled サンちやん and the roster spells サンちゃん (2 rows).
+
+**And this whole subsection's guide-file half is RETIRED (2026-10-15, plan 07 §2.4).** The 13-pair /
+24-entry figure above counted only pairs where **both** sides were already roster entries. Plan 07
+slice 0 re-measured the same 17 files through `utils/source/guide-groups.js` and the same question
+asked without that restriction gives **97 candidate groups over 222 written forms — 634 rows, 8,734
+occurrences** — because the valuable shape is *any written form guided to the same reading*, and most
+of the forms the author guides are descriptions (好きな女, 主人公, 世界の支配者), not names. The
+conclusion this subsection drew from the 13 pairs — "no source states most of these links in a form a
+door can file" — is retired with it. What survives unchanged is the harder half of the paragraph above:
+the guide states the link and never states **which entry is the person**, and `castAlias` still has no
+survivor to ask for. Plan 07 §2.9 measures what the record can decide anyway: 18 of the 97 groups are
+selectable from rows the record already holds, with 0 model calls and 0 false positives on this corpus.
 
 **And the prose rule was measured before it was trusted.** The obvious shape — *`<K>'s nickname`* —
 fires **49 times on 5 pairs, and all 5 pairs are wrong**: "アネモネ's nickname for 芝" produced

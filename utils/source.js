@@ -33,6 +33,7 @@ const __html = require("./source/html");
 const __epub = require("./source/epub");
 const __images = require("./source/images");
 const __rubyGuides = require("./source/ruby-guides");
+const __guideGroups = require("./source/guide-groups");
 const __extract = require("./source/extract");
 const __bundle = require("./source/bundle");
 const __audit = require("./source/audit");
@@ -46,6 +47,7 @@ module.exports = {
   ...__epub,
   ...__images,
   ...__rubyGuides,
+  ...__guideGroups,
   ...__extract,
   ...__bundle,
   ...__audit,
