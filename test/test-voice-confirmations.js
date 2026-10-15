@@ -945,7 +945,7 @@ async function main() {
   same(kinds.length, 70, "the finding level table is still 70 kinds — this slice added none");
   same(kinds.filter((kind) => /confirm/i.test(kind)), [], "and none of them is a confirmation kind");
 
-  same(SCHEMA_VERSION, 12, "the store is at schema 12 — plan 07 slice 1 appended migration 12 after this one");
+  same(SCHEMA_VERSION, 13, "the store is at schema 13 — plan 07 slice 3 appended migration 13 after plan 07 slice 1 appended migration 12");
   const migration = MIGRATIONS.find((entry) => entry.version === 11);
   ok(migration && migration.up.join("\n").includes("claim_confirmations"), `the confirmation migration is appended, not folded into an older one: ${migration && `v${migration.version} — ${migration.name}`}`);
   ok(migration.up.join("\n").includes("CREATE TABLE IF NOT EXISTS claim_confirmations"), "it creates its own table");

@@ -851,7 +851,7 @@ const ENTRIES_SIX = [
   // The schema moved by one migration, appended, and the pair is nullable. Slice 7 appended migration 11
   // and plan 07 slice 1 appended migration 12 after this one, so this slice's migration is found by
   // version rather than by being last.
-  same(SCHEMA_VERSION, 12, "the store is at schema 12");
+  same(SCHEMA_VERSION, 13, "the store is at schema 13");
   const registerMigration = MIGRATIONS.find((m) => m.version === 10);
   same(registerMigration.version, 10, "appended, not edited");
   const up = registerMigration.up.join("\n");
@@ -884,7 +884,7 @@ const ENTRIES_SIX = [
   ok(/sentenceending: "register"[\s\S]*formality: "register"[\s\S]*vocabulary: "register"/.test(adapterLayer),
     "the aspect collapse is still there, untouched: undoing it is slice 5, and it needs this slice first");
 
-  console.log("  six rules, all reachable; no knob; 70 finding kinds; schema 12; the answer shape stayed open");
+  console.log("  six rules, all reachable; no knob; 70 finding kinds; schema 13; the answer shape stayed open");
 }
 
 console.log(`\nregister declaration: ${checks} checks, 0 model calls.`);

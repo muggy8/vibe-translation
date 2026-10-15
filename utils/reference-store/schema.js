@@ -186,7 +186,7 @@ const IDENTITY_LINK_SOURCES = ["ruby-guide", "glossary-character-row"];
 // ─── Version ──────────────────────────────────────────────────────────────────
 
 /** The schema this build of the code writes. */
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 /**
  * The migrations, oldest first. Version 1 is the whole design as built.
@@ -822,6 +822,114 @@ const MIGRATIONS = [
       `CREATE INDEX IF NOT EXISTS idx_written_forms_reading ON written_forms(reading, volume, form)`,
     ],
   },
+  {
+    version: 13,
+    name: "plan 07 slice 3 — an act of address becomes a recorded fact, with the span it covers",
+    // WHY THIS TABLE EXISTS AT ALL.
+    //
+    // A claim says who it is **about** and quotes **words somebody said**. Only the first half has ever
+    // been answerable in this store (plan 07 §0, and gotcha 121 is the measurement of the gap): the
+    // attribution door can ask *who is speaking the words this claim quotes*, and its answer is filed as
+    // an opinion about a claim, not as a record of the act. Nothing records **whom a character addresses,
+    // through which channel, in which form, over which volumes** — so "she calls him テメェ from volume 4
+    // on" is a sentence the pipeline cannot say, and the form she uses is exactly what a translator needs
+    // to keep consistent (plan 07 §4.4).
+    //
+    // WHY THE PARTIES ARE KEYED ON IDENTITIES AND NOT ON ROSTER KEYS.
+    //
+    // Plan 07 §4.3's rule. A roster key is a **spelling**; an identity is the set of spellings one person
+    // was found to be (slice 2's `cast_identities` / `cast_identity_links`). Keying a relation on a key
+    // would file the same act of address once per spelling and make "does this character address him in
+    // this volume" depend on which spelling the extraction happened to write — the failure gotcha 105 and
+    // gotcha 117 are both about. The consequence is named rather than hidden: a party the record has no
+    // identity for **files nothing** and is reported as a limit (`file.js`'s `namedLimits`), because the
+    // alternative is inventing a person or inventing an identity row, and §6.8 records that putting a name
+    // on the roster changes what every later volume's coverage guard counts. That is the owner's call, not
+    // this table's.
+    //
+    // WHY `addresser_kind` IS STORED AND NOT DERIVED FROM `channel`.
+    //
+    // A null `addresser` means two different things. `unknown` is a gap — the record does not know who
+    // spoke. `withheld` is a fact the author chose (plan 07 §0 decision 9: a withheld identity is a fact
+    // about the text, not a hole in the record), and `narrator` is a third thing: narration is not a
+    // person, and gotcha 121's rule is that it must never reach the roster or the coverage guard. Deriving
+    // the kind from the channel would collapse `unknown` and `withheld` into one shape and would make a
+    // gap look like an authorial act. So the kind is stored, and the pairings are checked both ways
+    // (`RELATION_CHANNEL_PARTY_KINDS`, `RELATION_CERTAINTY_PARTY_KINDS`).
+    //
+    // WHY THERE IS NO FREE-TEXT REASON COLUMN FOR A SPAN CLOSE.
+    //
+    // `MIN_LINK_WITHDRAWAL_REASON_CHARS` and `MIN_REOPEN_REASON_CHARS` exist because those acts have
+    // nothing else to point at. A span close has a **line of a book**: `closed_by_volume`,
+    // `closed_by_chapter`, `closed_by_quote` and `closed_by_line`, and the quote is checked against that
+    // volume's text through `findQuoteEvidence` before the close is allowed. A sentence somebody typed is
+    // not evidence; a line the book prints is. So the reason is four columns, and a close naming none is
+    // refused.
+    //
+    // WHY THE UNIQUE KEY USES `ifnull(...)` IN AN INDEX RATHER THAN A TABLE CONSTRAINT.
+    //
+    // A relation is one (volume, channel, form, addresser, addressee), and both parties can be null.
+    // SQL treats NULL as distinct from NULL, so a plain `UNIQUE` over those columns would let the same
+    // narration act be filed once per pass. `ifnull(addresser, -1)` collapses the null so the idempotence
+    // rule is enforced by the database and not only by the door. Measured on this machine's
+    // node:sqlite 3.46.1: an expression is **refused inside a table `UNIQUE` constraint** and **accepted
+    // in a `CREATE UNIQUE INDEX`**, which is why it is written as an index.
+    //
+    // WHY `valid_from_volume` DUPLICATES `established_volume`.
+    //
+    // Plan 07 §4.3 names both columns. They are equal at filing and stay equal, because the only act this
+    // layer performs after filing is **closing** a span, never moving its start — and a start that moved
+    // would be an edit to a published row, which rule 1 forbids. Keeping both is the honest way of saying
+    // "the span's start is not a second thought"; the equality is pinned in a test rather than assumed.
+    // `filed_by_volume` / `filed_by_stage` / `filed_at` record the **act**, which is a different fact from
+    // the volume the relation was established in: a later volume's pass may file a relation it read in an
+    // earlier book, and the two numbers being different is how that would show up.
+    //
+    // WHY `evidence` IS A JSON COLUMN AND NOT `valid_from_quote` / `valid_from_line`.
+    //
+    // `facts.evidence` already stores the citation shape this store uses everywhere — volume, chapter,
+    // line, quote, kind, matched — and `findQuoteEvidence` already produces it. Inventing a second shape
+    // for the same citation is how two citation shapes drift apart.
+    up: [
+      `CREATE TABLE IF NOT EXISTS relations (
+         relation_id      INTEGER PRIMARY KEY,
+         addresser        INTEGER REFERENCES cast_identities(identity),
+         addressee        INTEGER REFERENCES cast_identities(identity),
+         addresser_kind   TEXT    NOT NULL CHECK (addresser_kind IN ('identity', 'narrator', 'withheld', 'unknown')),
+         addressee_kind   TEXT    NOT NULL CHECK (addressee_kind IN ('identity', 'none')),
+         channel          TEXT    NOT NULL CHECK (channel IN ('spoken', 'self-address', 'inner-monologue', 'narration', 'withheld')),
+         certainty        TEXT    NOT NULL CHECK (certainty IN ('measured', 'addressee-risk', 'reading-resolved', 'narration', 'withheld', 'unknown')),
+         form_used        TEXT    NOT NULL,
+         form_reading     TEXT,
+         statement        TEXT    NOT NULL,
+         evidence         TEXT    NOT NULL DEFAULT '[]',
+         established_volume INTEGER NOT NULL,
+         valid_from_volume  INTEGER NOT NULL,
+         valid_from_chapter TEXT,
+         valid_to_volume    INTEGER,
+         valid_to_chapter   TEXT,
+         closed_by_volume   INTEGER,
+         closed_by_chapter  TEXT,
+         closed_by_quote    TEXT,
+         closed_by_line     INTEGER,
+         closed_at          TEXT,
+         filed_by_volume    INTEGER NOT NULL,
+         filed_by_stage     TEXT    NOT NULL,
+         filed_at           TEXT    NOT NULL,
+         note               TEXT
+       )`,
+
+      // The idempotence key, and the reason the nulls are collapsed (see the block above).
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_relations_key ON relations (
+         established_volume, channel, form_used, ifnull(addresser, -1), ifnull(addressee, -1)
+       )`,
+
+      // The two reads this table exists to serve: "what does this volume's record know about address, in
+      // book order", and "what is known about this one person".
+      `CREATE INDEX IF NOT EXISTS idx_relations_established ON relations(established_volume, addresser, addressee)`,
+      `CREATE INDEX IF NOT EXISTS idx_relations_identity ON relations(addresser, addressee, established_volume)`,
+    ],
+  },
 ];
 
 /**
@@ -854,6 +962,7 @@ const COUNTED_TABLES = [
   "cast_identity_links",
   "claim_confirmations",
   "written_forms",
+  "relations",
 ];
 
 // ─── Applying it ──────────────────────────────────────────────────────────────

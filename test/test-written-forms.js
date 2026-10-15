@@ -277,8 +277,8 @@ async function scenarioMigration() {
   const { store, seriesDir } = openFixture("migration", { import: false });
   const file = path.join(seriesDir, "Test Story(01)", "series.db");
   try {
-    same(SCHEMA_VERSION, 12, "this build writes schema 12");
-    same(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], "the migrations are a list, oldest first, and each one is appended rather than an older one edited");
+    same(SCHEMA_VERSION, 13, "this build writes schema 13");
+    same(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], "the migrations are a list, oldest first, and each one is appended rather than an older one edited");
     const written = MIGRATIONS.find((m) => m.version === 12);
     ok(written && /written form/i.test(written.name), `the written-forms migration is appended, not folded into an older one: ${written && written.name}`);
     ok(written.up.join("\n").includes("CREATE TABLE IF NOT EXISTS written_forms"), "it creates its own table");
@@ -301,8 +301,8 @@ async function scenarioMigration() {
 
     const reopened = openReferenceStore({ volume: 1, folder: "Test Story(01)", seriesDir, stage: "merge" });
     try {
-      same(readSchemaVersion(reopened.db), 12, "opening it with this build brings it up to 12");
-      same(reopened.schemaVersion, 12, "and the handle reports 12");
+      same(readSchemaVersion(reopened.db), 13, "opening it with this build brings it up to 13");
+      same(reopened.schemaVersion, 13, "and the handle reports 13");
       const tables = new Set(reopened.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
       ok(tables.has("written_forms"), "the new table exists in the reopened record");
       same(reopened.db.prepare("SELECT COUNT(*) n FROM written_forms").get().n, 0, "and it starts empty: a migration does not invent a written form nobody harvested");
