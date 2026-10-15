@@ -123,10 +123,30 @@ function fileVoiceExtraction(ctx, entries) {
     voiceEntries: entries,
   });
   const voice = filed.voice;
+  /**
+   * The refusals, split by what refused them.
+   *
+   * Before the register gate there was one reason a claim did not get filed — its quote is not in the
+   * book — and the log line said exactly that. Now there are two, and a line that names only the first
+   * would report a series' declaration being refused as though the book had failed to back the claim up.
+   * The split is read off the refusal's own rule name, which every door in the store now carries.
+   */
+  const registerRefused = voice.refused.filter((item) => typeof item.rule === "string" && item.rule.startsWith("register-"));
+  const quoteRefused = voice.refused.length - registerRefused.length;
+  const reasons = [];
+  if (quoteRefused) reasons.push(`${quoteRefused} for want of a quote that verifies`);
+  if (registerRefused.length) {
+    const byRule = new Map();
+    for (const item of registerRefused) byRule.set(item.rule, (byRule.get(item.rule) || 0) + 1);
+    reasons.push(
+      `${registerRefused.length} refused by this series' register declaration ` +
+      `(${[...byRule.entries()].map(([rule, n]) => `${n} × ${rule}`).join(", ")})`
+    );
+  }
   console.log(
     `Volume ${ctx.values.INSTALLMENT_NUMBER}: reference record filed ${voice.importedCount} extraction claim(s) ` +
       `(${voice.characters} character(s), ${voice.povCount} POV claim(s), ${voice.carried.length} already filed); ` +
-      `${voice.refused.length} refused for want of a quote that verifies.`
+      `${voice.refused.length} refused${reasons.length ? `: ${reasons.join("; ")}` : ""}.`
   );
   return voice;
 }

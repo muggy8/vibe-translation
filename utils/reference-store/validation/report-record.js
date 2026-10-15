@@ -106,9 +106,10 @@ function refusedRowsSection(refused) {
   if (refused.length) {
     out.push("## Rows the store refused to record");
     out.push("");
-    out.push(`${refused.length} claim(s) the store would not record. A claim with no citation that verifies`);
-    out.push("against the book is not stored, and it is not quietly dropped either. These are the claims");
-    out.push("that could not be checked.");
+    out.push(`${refused.length} claim(s) the store would not record. Two things get a claim refused here:` +
+      " a quote that does not verify against the book, and an answer to a register question this series");
+    out.push("did not declare or did not declare that answer for. Neither is quietly dropped, and neither");
+    out.push("is filed as something else — these are the claims the store turned down, with the reason.");
     out.push("");
     out.push(...listLines(refused, (item) => `- ${item.character ? `**${item.character}**` : ""}${item.label ? ` (${item.label})` : ""} — ${item.because}`));
     out.push("");

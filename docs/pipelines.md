@@ -221,6 +221,15 @@ decision in front of it and `--route=author` in front of that. It is removed, no
 is refused for every value, with a message that names what replaced it. The code is in git history at
 commit `75e59a7` if it is ever needed again. What follows is the one flow.
 
+**Before any volume is opened, the stage asks the series what questions it wants answered** (plan 06
+slice 3). `translation-target.json` must carry a `register` block — the axes the intake decided this book
+turn on, each with the set of answers this book prints. No block, or a malformed one, is a **structural**
+refusal naming the file and the door that fixes it, and there is no fallback axis list in the pipeline in
+any language and no setting that reaches that refusal. A series that declares none and says why
+(`{ "axes": [], "note": "…" }`) runs, and is told so out loud. `extract-voice.js` and `rebuild-voice.js`
+are deliberately outside this gate: they file claims that name no register question, so a series whose
+intake has not re-run still has a working door. → `utils/reference-store/register/`, gotcha 152.
+
 Per volume, in order — each volume's reference builds on the previous one's:
 
 1. **Open the volume's reference record** (`openVoiceRecord`) before anything is written. The previous

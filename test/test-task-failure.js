@@ -223,6 +223,18 @@ function makeSeries() {
       sourceLanguage: "Japanese",
       targetLanguage: "English",
       discovery: { summary: "fixture", confidence: 0.9, evidence: [], excluded: [] },
+      // The character-voice stage refuses to run on a series with no register declaration, so the fixture
+      // declares one. Its claims name no axis, so the filing gate never fires here — this test is about
+      // volume failure policy, not about registers.
+      register: {
+        axes: [
+          {
+            id: "speech-formality",
+            asks: "How formal is this character's speech in this volume?",
+            values: ["neutral", "formal"],
+          },
+        ],
+      },
       volumes,
     },
   };

@@ -2,9 +2,17 @@
  * utils/reference-store/facts/validate.js — the checks an insert and an update share.
  *
  * Everything about a proposal that is not its evidence: the closed aspect vocabulary, the
- * applies-span and impossible-provenance rules, the fields the harness owns, and which roster
- * entry the row's key belongs to. Asked the same way from both doors, so a fact cannot pass a
- * shape test at insert that it would fail at update.
+ * applies-span and impossible-provenance rules, the fields the harness owns, which roster
+ * entry the row's key belongs to, and the register gate — whether an axis a claim names is one
+ * this series declared and its value one this series declared for it. Asked the same way from
+ * both doors, so a fact cannot pass a shape test at insert that it would fail at update.
+ *
+ * The register gate lives here rather than in `insert.js` for the same reason the rest of these
+ * checks do: it is the check every door that files a fact already passes through, so a door cannot
+ * skip it. It reads the declaration off the store handle (`ctx.registerDeclaration`, frozen in
+ * `open.js`), never off an argument, and `updateOwnFact` reaches it with a merged row that carries
+ * no axis at all — `UPDATE_SCHEMA` is strict, so a patch cannot change which question a published
+ * claim answers.
  *
  * @module utils/reference-store/facts/validate
  */
@@ -13,13 +21,14 @@ const { refusal } = require("../refusals");
 const { getCast, upsertCast } = require("../cast");
 const { FACT_ASPECTS, isInVocabulary } = require("../schema");
 const { HARNESS_OWNED_FIELDS } = require("./contract");
+const { registerFilingRefusal } = require("../register/filing");
 require("../../../types"); // JSDoc type definitions
 
 /**
- * Check the parts of a proposal that are not evidence: the closed vocabularies, the
- * provenance rule, and the fields the harness owns.
+ * Check the parts of a proposal that are not evidence: the closed vocabularies, the provenance
+ * rule, the fields the harness owns, and the series' own register declaration.
  *
- * @param {{db: Object, scope: {volume: number, stage: string}}} ctx
+ * @param {{db: Object, scope: {volume: number, stage: string}, registerDeclaration?: Object}} ctx
  * @param {Object} proposal - Already zod-parsed.
  * @param {{existing: Object|null}} state - The row an update is amending, when it is one.
  * @returns {ReferenceRefusal|null}
@@ -64,6 +73,14 @@ function validateFactProposal(ctx, proposal, { existing = null } = {}) {
       detail: { establishedVolume: established, evidenceCeiling: ceiling },
     });
   }
+
+  // Plan 06 §4.3 guard 2: a value outside the series' declared set is refused here and named, so a
+  // model that invents a speech level this book does not print produces a refusal in the report rather
+  // than a row in the record. A proposal that names no axis is not this gate's business — which is the
+  // branch every door in this repository takes today, because the extraction prompt does not name axes
+  // yet (plan 06 slice 4).
+  const registerProblem = registerFilingRefusal(ctx, proposal, existing ? "update_own_fact" : "insert_fact");
+  if (registerProblem) return registerProblem;
 
   return null;
 }

@@ -129,8 +129,8 @@ function insertFact(ctx, proposal) {
          id, key, aspect, label, section, body, examples, formality, evidence,
          established_volume, established_chapter, applies_from_volume, applies_to_volume,
          status, supersedes, confidence, source_stage, owner_volume, owner_stage, sealed,
-         created_at, updated_at, row_version, ord, extracted_as
-       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+         created_at, updated_at, row_version, ord, extracted_as, axis, axis_value
+       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     )
     .run(
       id,
@@ -158,7 +158,12 @@ function insertFact(ctx, proposal) {
       null,
       1,
       nextOrd(ctx),
-      value.extractedAs || null
+      value.extractedAs || null,
+      // The register pair, already checked against the series' declaration by `validateFactProposal`.
+      // Null on both when the claim never claimed to answer a declared question, which is every claim
+      // this pipeline files today until plan 06 slice 4 asks the extraction to name one.
+      value.axis || null,
+      value.axisValue || null
     );
 
   if (Array.isArray(value.characters) && value.characters.length) {

@@ -36,6 +36,7 @@ const {
   markDocumentRebuilt,
 } = require("../document-prose");
 const { refusal } = require("../refusals");
+const { registerFilingRefusal } = require("../register/filing");
 
 const { rebuildClaimAlreadyStored, inspectVoiceMirrorForRebuild } = require("./mirror");
 const {
@@ -356,7 +357,7 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
       appliesFromVolume: vol,
     });
     if (!result.ok) {
-      refused.push({ kind: "pov", character: aspectKey, because: result.refusal.because });
+      refused.push({ kind: "pov", character: aspectKey, rule: result.refusal.rule, because: result.refusal.because });
       return;
     }
     filed.push(result.fact);
@@ -416,6 +417,16 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
       return;
     }
 
+    // The register gate, before the roster entry is written, for the same reason the evidence rule
+    // runs first: a claim refused for answering a question this series never declared must not leave
+    // its character on the roster, and it must not leave a candidate copy behind either. `insertFact`
+    // would refuse it anyway — this ordering is what makes the refusal cost nothing.
+    const gate = registerFilingRefusal(store, candidate, "insert_fact");
+    if (gate) {
+      refused.push({ kind: "voice", character: name, key: who.key, label, rule: gate.rule, because: gate.because });
+      return;
+    }
+
     if (!registerName(name).registered) return;
 
     // The candidate first, then the adoption: the candidate is the extraction's reading of this claim
@@ -454,12 +465,18 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
       examples: screen.examples.slice(0, REBUILT_EXAMPLES_PER_BULLET),
       formality: typeof entry.formalityLevel === "string" && entry.formalityLevel.trim() ? entry.formalityLevel.trim() : null,
       extractedAs,
+      // The register pair travels with the adoption. It is the candidate's own pair — read by the
+      // extraction door's shape function, not re-read here — so the adopted row and the candidate beside
+      // it can never disagree about which declared question this claim answers, and both go through the
+      // same filing gate (`register/filing.js`) on the way in.
+      axis: candidate.axis,
+      axisValue: candidate.axisValue,
       evidence,
       establishedVolume: vol,
       appliesFromVolume: vol,
     });
     if (!result.ok) {
-      refused.push({ kind: "voice", character: who.key, label, because: result.refusal.because });
+      refused.push({ kind: "voice", character: who.key, label, rule: result.refusal.rule, because: result.refusal.because });
       return;
     }
     filed.push(result.fact);

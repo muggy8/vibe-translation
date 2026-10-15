@@ -43,6 +43,7 @@ const { EXTRACTION_SOURCE_STAGE } = require("./schema");
 const { readChapterLines } = require("./source-chapters");
 const { quoteCandidates } = require("./voice-adapter");
 const { resolveExtractionName } = require("./name-resolution");
+const { registerFilingRefusal } = require("./register/filing");
 require("../../types"); // JSDoc type definitions
 
 /**
@@ -153,12 +154,28 @@ function findEntryEvidence(volumeDir, chapters, volume, examples, description, k
  *
  * @param {Object} entry - One `character-voice-new.json` voice record.
  * @param {string|null} key - The roster entry the claim resolves to.
- * @returns {{key: string|null, aspect: string, label: string, section: null, body: string, examples: string[], formality: string|null}}
+ * @returns {{key: string|null, aspect: string, label: string, section: null, body: string, examples: string[], formality: string|null, axis: string|undefined, axisValue: string|undefined}}
  */
 function voiceCandidateRow(entry, key) {
   const quirk = typeof entry.quirkType === "string" ? entry.quirkType.trim() : "";
   const label = quirk || EXTRACTION_VOICE_LABEL;
   const description = typeof entry.description === "string" ? entry.description.trim() : "";
+  /**
+   * The register pair, when the extraction named one (plan 06 §4.2, slice 3).
+   *
+   * The entry's own field names are the plan's — `axis` and `value` — and they are carried here as the
+   * store's — `axis` and `axisValue` — because the fact contract is strict and `value` is not one of its
+   * keys. **`undefined`, not `null`**, on a claim that names no axis: the contract says "a non-empty
+   * string, or absent", and a null in an optional string field is a contract violation, not an answer.
+   *
+   * Nothing checks them here. The check is `register/filing.js`, reached from `facts/validate.js` on the
+   * way into the row, against the declaration frozen into the store handle — so this shape function
+   * cannot file a value the series did not declare, and cannot decide which axis a claim belongs to
+   * either. Today no extraction entry names an axis at all (the prompt does not ask for one until slice
+   * 4), so every claim this function builds arrives with the pair absent.
+   */
+  const axis = typeof entry.axis === "string" ? entry.axis.trim() : "";
+  const axisValue = typeof entry.value === "string" ? entry.value.trim() : "";
   return {
     key,
     aspect: QUIRK_TYPE_TO_ASPECT[quirk.toLowerCase()] || UNMAPPED_ASPECT,
@@ -167,6 +184,8 @@ function voiceCandidateRow(entry, key) {
     body: description || label,
     examples: (Array.isArray(entry.examples) ? entry.examples : []).filter((s) => typeof s === "string").slice(0, QUOTE_CANDIDATES_PER_ENTRY),
     formality: typeof entry.formalityLevel === "string" && entry.formalityLevel.trim() ? entry.formalityLevel.trim() : null,
+    axis: axis || undefined,
+    axisValue: axisValue || undefined,
   };
 }
 
@@ -241,7 +260,7 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
         povCount += 1;
         if (result.unresolved) unresolved.push(result.unresolved);
       } else {
-        refused.push({ kind: "pov", because: result.because });
+        refused.push({ kind: "pov", rule: result.rule, because: result.because });
       }
       continue;
     }
@@ -282,6 +301,18 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
       continue;
     }
 
+    // The register gate is asked here, before the roster entry is written, for the same reason the
+    // evidence rule is: `insertFact` runs it too and no door can skip it, but by then this door has
+    // already registered the character — and a claim refused for answering a question the series never
+    // asked would leave its name on the roster, where the coverage rule then demands a voice profile
+    // for it. Asking here keeps the rule this file states in its header: a refused claim registers
+    // nothing.
+    const gate = registerFilingRefusal(store, row, "insert_fact");
+    if (gate) {
+      refused.push({ kind: "voice", character: name, key, label: row.label, rule: gate.rule, because: gate.because });
+      continue;
+    }
+
     // The roster entry is written only for a claim that passed the evidence gate. A claim the store
     // refused must not leave a name on the roster, because the coverage question then reports a
     // character nobody ever wrote anything about.
@@ -297,7 +328,7 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
     if (key) {
       const castResult = store.upsertCast({ key, firstSeenVolume: vol });
       if (!castResult.ok) {
-        refused.push({ kind: "voice", character: name, key, because: castResult.refusal.because });
+        refused.push({ kind: "voice", character: name, key, rule: castResult.refusal.rule, because: castResult.refusal.because });
         continue;
       }
     }
@@ -310,7 +341,7 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
       appliesFromVolume: vol,
     });
     if (!result.ok) {
-      refused.push({ kind: "voice", character: name, key, label: row.label, because: result.refusal.because });
+      refused.push({ kind: "voice", character: name, key, label: row.label, rule: result.refusal.rule, because: result.refusal.because });
       continue;
     }
     imported.push(result.fact);
@@ -341,7 +372,7 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
  * @param {Object} entry
  * @param {number} vol
  * @param {Array<{id: string, file: string}>} chapters
- * @returns {{ok: boolean, fact: Object|null, because: string|null, unresolved: {name: string, key: string, because: string}|null}}
+ * @returns {{ok: boolean, fact: Object|null, because: string|null, rule: string|null, unresolved: {name: string, key: string, because: string}|null}}
  */
 function importPovEntry(store, entry, vol, chapters) {
   const assigned = typeof entry.assignedCharacter === "string" ? entry.assignedCharacter.trim() : "";
@@ -352,7 +383,7 @@ function importPovEntry(store, entry, vol, chapters) {
   const key = resolved ? resolved.key : null;
 
   const row = povCandidateRow(entry, key);
-  if (!row) return { ok: false, fact: null, because: "the POV entry carries no description and no marker.", unresolved: null };
+  if (!row) return { ok: false, fact: null, because: "the POV entry carries no description and no marker.", rule: null, unresolved: null };
 
   const { evidence, tried } = findEntryEvidence(store.volumeDir, chapters, vol, entry.examples, row.body, key);
   if (!evidence) {
@@ -360,13 +391,14 @@ function importPovEntry(store, entry, vol, chapters) {
       ok: false,
       fact: null,
       because: `none of this POV claim's quotes (${tried.join(", ") || "no quoted span"}) occurs in volume ${vol}'s source text.`,
+      rule: null,
       unresolved: null,
     };
   }
 
   if (key) {
     const castResult = store.upsertCast({ key, firstSeenVolume: vol });
-    if (!castResult.ok) return { ok: false, fact: null, because: castResult.refusal.because, unresolved: null };
+    if (!castResult.ok) return { ok: false, fact: null, because: castResult.refusal.because, rule: castResult.refusal.rule, unresolved: null };
   }
 
   const result = store.insertFact({
@@ -376,7 +408,7 @@ function importPovEntry(store, entry, vol, chapters) {
     establishedVolume: vol,
     appliesFromVolume: vol,
   });
-  if (!result.ok) return { ok: false, fact: null, because: result.refusal.because, unresolved: null };
+  if (!result.ok) return { ok: false, fact: null, because: result.refusal.because, rule: result.refusal.rule, unresolved: null };
   return {
     ok: true,
     fact: result.fact,

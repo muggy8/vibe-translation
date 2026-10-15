@@ -64,6 +64,7 @@ const __povmap = require("./reference-store/pov-map");
 const __drafting = require("./reference-store/drafting");
 const __quarantine = require("./reference-store/quarantine");
 const __reopen = require("./reference-store/reopen");
+const __register = require("./reference-store/register");
 
 const __open = require("./reference-store/open");
 
@@ -96,5 +97,6 @@ module.exports = {
   ...__drafting,
   ...__quarantine,
   ...__reopen,
+  ...__register,
   openReferenceStore: __open.openReferenceStore,
 };

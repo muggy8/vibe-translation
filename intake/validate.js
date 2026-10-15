@@ -28,6 +28,7 @@ const { sha256OfFile } = require("../utils/source");
 
 const { MANIFEST_SCHEMA, discoverMinConfidence } = require("./config");
 const { validateVolumeIntegrity } = require("./integrity");
+const { REGISTER_MANIFEST_KEY, validateRegisterDeclaration } = require("../utils/reference-store/register");
 
 /**
  * Validate (and tidy) a manifest the intake agent wrote. Everything the rest of
@@ -60,6 +61,16 @@ function validateManifest(manifest) {
     throw new Error(`manifest "seriesNameAlt" must be a string when present.`);
   }
   if (manifest.discovery !== undefined) validateDiscoveryBlock(manifest.discovery);
+  // The register declaration (plan 06 slice 3) is **optional here and required by the voice stage**, and
+  // the asymmetry is the design, not an oversight: the questions a series asks about how people speak are
+  // written by the intake from the book, and there is no list in code for a plan to fall back on. A plan
+  // that predates the block stays valid for every stage that asks no register questions — so adding the
+  // block did not move the manifest schema and does not force `discover` to re-run a series that is not
+  // running the voice stage. A plan that HAS the block and wrote it badly is refused here, before any
+  // volume is processed, because the intake writes this decision and nobody else reviews it.
+  if (manifest[REGISTER_MANIFEST_KEY] !== undefined) {
+    validateRegisterDeclaration(manifest[REGISTER_MANIFEST_KEY]);
+  }
   if (!Array.isArray(manifest.volumes) || manifest.volumes.length === 0) {
     throw new Error(
       `manifest has no volumes — the intake agent found nothing to translate ` +

@@ -95,6 +95,63 @@ written in. Put a romanized or ASCII form in `seriesNameAlt` when the name is
 not written in Latin letters — later stages and humans use it for labels. Do
 not invent a marketing name, and do not translate the series name.
 
+## Deciding the register questions this series asks
+
+Most of the pipeline's work is names and events. Some of it is **how the characters speak** — and
+which questions about that are worth asking is a fact about *this* book, not a fact the pipeline
+knows. Some books turn on how deferential people are to each other. Some turn on which word each
+character uses for themselves. Some turn on how a character's speech changes when they are lying.
+Some turn on none of those.
+
+**You decide which questions this series asks, and you answer them from the text you sampled.** The
+pipeline has no list of questions to fall back on, and no list of possible answers: it asks the
+questions you declare, and it only accepts the answers you say this book prints. A claim that answers
+a question you did not declare, or with an answer you did not list, is refused when it is filed — so
+an answer set you invented is caught later as a refusal, and an answer set you read off the page is
+not.
+
+Declare one axis per distinction the book actually shows you, and only those. For each one:
+
+- `id` — a short lowercase name with hyphens (`address-form`, `self-reference`). It is how every later
+  stage refers to this question, so it must be unique in the series and it must not be a sentence.
+- `asks` — the question, in plain language, in a form a reader of the book could answer.
+- `values` — the distinct answers **this book prints**, as you saw them. Not a textbook's categories
+  and not a superset you are hedging with: a value nothing in the book matches is a value no claim
+  can ever file against.
+- `guidance` (optional) — what you noticed that a later reader would need to ask the question well
+  ("the two forms swap when X addresses Y in private").
+- `scope` (optional) — `character` when the answer belongs to the person, `character-addressee` when
+  it belongs to a pair ("how she speaks **to her superior**" is not the same answer as how she
+  speaks).
+- `renders` (optional) — how you suggest the translation render each declared value. A decision per
+  value, and only for values you declared.
+- `evidence` (optional) — the places in the book you saw this distinction, one line each.
+
+A book that genuinely needs no register questions **declares none and says why**: an empty `axes`
+list with a `note` explaining what this series does not turn on. That is a real answer, and it is a
+better one than an axis invented to fill the field. An empty list with no `note` is rejected — an
+unexplained empty declaration is indistinguishable from forgetting the block.
+
+The shape, with placeholders (the ids and values below are a shape, **not** a suggestion — copy the
+shape, never these names):
+
+```
+"register": {
+  "axes": [
+    {
+      "id": "<short-lowercase-name>",
+      "asks": "<the question, answerable from this book>",
+      "values": ["<an answer this book prints>", "<another one>"],
+      "guidance": "<optional: what you noticed that makes the question askable>",
+      "scope": "character",
+      "renders": { "<declared value>": "<how the translation should render it>" },
+      "evidence": ["<where in the book you saw this distinction>"]
+    }
+  ],
+  "note": "<optional when axes are declared; required when they are not>"
+}
+```
+
 ## Laying the series out
 
 You choose each volume's folder name. Rules you must respect:
@@ -136,6 +193,10 @@ fences:
     "confidence": { "seriesName": 0.9, "sourceLanguage": 0.95, "order": 0.9 },
     "evidence": ["<each decision and the evidence for it, one line each>"],
     "excluded": [ { "file": "<path>", "reason": "<why it is not a volume>" } ]
+  },
+  "register": {
+    "axes": [ { "id": "<short-lowercase-name>", "asks": "<the question>", "values": ["<answer this book prints>"] } ],
+    "note": "<why this series needs no register questions — required when axes is empty>"
   },
   "volumes": [
     {
@@ -182,14 +243,22 @@ fences:
   unmeasured guesses. Be honest: 0.9 means "I checked this against real
   evidence", 0.5 means "I guessed". A wrong order at 0.9 is worse than a
   flagged uncertainty at 0.5.
+- `register` is the series' own answer to "what does this book turn on, in how
+  people speak" (see **Deciding the register questions this series asks**). A
+  malformed block is rejected. A missing one leaves every other stage working
+  and the character-voice stage refusing to run, because there is no question
+  list in the pipeline for it to fall back on — so write the block, even when
+  the answer is an empty list with a reason.
 
 ## The plan document
 
 Also `writeFile` the plan document named in the request, as Markdown for a
 human who will read it before an overnight run: the series name and language
 you concluded (with the evidence), the volume table in reading order, every
-file you excluded and why, and a short "uncertain" section listing anything you
-were not sure about. Keep it under 100 lines.
+file you excluded and why, the register questions you declared for this series
+(each one with the evidence you saw it in) or the reason you declared none, and
+a short "uncertain" section listing anything you were not sure about. Keep it
+under 100 lines.
 
 ## Reporting
 

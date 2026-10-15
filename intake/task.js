@@ -29,6 +29,7 @@ const {
 } = require("../utils/manifest");
 const { fileExists } = require("../utils/fs");
 const { structuralError } = require("../configs/shared");
+const { REGISTER_MANIFEST_KEY, describeRegisterDeclaration } = require("../utils/reference-store/register");
 
 const { confidenceGate, findDuplicateSources, manifestSourcesExist, validateManifest } = require("./validate");
 const { firstManifestProblem, runDiscoveryAgent } = require("./agent");
@@ -59,6 +60,34 @@ function logManifestSummary(manifest) {
     harness.logLine(
       `[get-translation-target] excluded ${d.excluded.length} file(s): ` +
         d.excluded.map((e) => `${e.file} (${e.reason})`).join("; ")
+    );
+  }
+  // The register declaration, stated out loud at intake (plan 06 slice 3). The three states mean three
+  // different things to the character-voice stage, and a summary that prints only "register: yes/no"
+  // cannot tell an empty declaration — a decision a book is allowed to make, with a reason attached —
+  // from a plan that predates the block and will therefore be refused.
+  const register = describeRegisterDeclaration(manifest[REGISTER_MANIFEST_KEY]);
+  if (register.state === "declared") {
+    harness.logLine(
+      `[get-translation-target] register: ${register.axes.length} axis/axes declared for this series — ` +
+        register.axes.map((axis) => `"${axis.id}" (${axis.values.length} value(s))`).join(", ") +
+        ". The character-voice stage asks these questions of this book, and no others."
+    );
+  } else if (register.state === "empty") {
+    harness.logLine(
+      `[get-translation-target] register: this series declares NO register questions, and says why: ` +
+        `"${register.note}". The character-voice stage runs and files no axis-bearing claim.`
+    );
+  } else if (register.state === "absent") {
+    harness.logLine(
+      `[get-translation-target] register: this plan of record has no "${REGISTER_MANIFEST_KEY}" block. ` +
+        `Every other stage runs; the character-voice stage refuses until the intake writes one, because ` +
+        `there is no axis list in the pipeline to fall back on, in any language.`
+    );
+  } else {
+    harness.logLine(
+      `[get-translation-target] register: the "${REGISTER_MANIFEST_KEY}" block is malformed:\n  ` +
+        register.problems.join("\n  ")
     );
   }
 }

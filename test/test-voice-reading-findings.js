@@ -436,6 +436,16 @@ function buildFixture(label) {
           evidence: ["fixture"],
           excluded: [],
         },
+        // The character-voice stage refuses to run without a register declaration (plan 06 slice 3).
+        register: {
+          axes: [
+            {
+              id: "speech-formality",
+              asks: "How formal is this character's speech in this volume?",
+              values: ["neutral", "formal"],
+            },
+          ],
+        },
         volumes: FOLDERS.map((folder, i) => ({
           folder,
           sourceFile: `${folder}/${STAGED}`,

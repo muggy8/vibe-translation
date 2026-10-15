@@ -21,7 +21,8 @@ const fs = require("fs").promises;
 const path = require("path");
 require("../types");
 const { transformUserPrompt, writePromptDump } = require("../utils/prompt");
-const { validateRequiredEnv } = require("../configs/shared");
+const { validateRequiredEnv, structuralError } = require("../configs/shared");
+const { REGISTER_MANIFEST_KEY, describeRegisterDeclaration, registerDeclarationRefusalText } = require("../utils/reference-store/register");
 const { resolveSourceBundle, chapterSegmentNote } = require("../utils/source");
 const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifacts, volumeAlreadyAccepted, publishLatestToSeriesRoot, runVolumeSeries, reportVolumeFindings } = require("../utils/series-run");
 
@@ -93,6 +94,49 @@ async function loadPromptFiles() {
 }
 
 /**
+ * The character-voice stage's register decision, asked once per run before a volume is opened.
+ *
+ * Three states, three answers, and the difference between them is the design (plan 06 §4, slice 3):
+ *
+ *   - **declared** — the intake named the questions this book turns on. The stage runs, and the filing
+ *     gate (`register/filing.js`) checks every axis-bearing claim against that list.
+ *   - **empty** — the series declared none **and said why**. That is a book's legitimate answer, so the
+ *     stage runs and announces it. Forcing a fake axis to satisfy a field is how a declaration stops
+ *     meaning anything.
+ *   - **absent** or **malformed** — refuse, structurally, before any volume is opened. There is no
+ *     default question list behind this stage, in any language, and falling back to the one the
+ *     extraction prompt happens to name is the exact defect plan 06 exists to remove. A structural
+ *     error is what makes `ON_TASK_ERROR=continue` unable to walk past it, and the stage refuses in
+ *     `--dry-run` too: a preview of a stage that cannot run is not a preview.
+ *
+ * The refusal names the door (`npx gulp discover`), because re-running the intake is the only fix, and
+ * that is a model call the account owner has to choose to pay for.
+ *
+ * @param {Object} manifest - The plan of record `openSeriesRun` loaded.
+ * @returns {{state: string, axes: Array<Object>, note: string|null}} The declaration, for the run to carry.
+ * @throws {Error} A structural error, on `absent` and on `malformed`.
+ */
+function resolveStageRegisterDeclaration(manifest) {
+  const declaration = describeRegisterDeclaration(manifest && manifest[REGISTER_MANIFEST_KEY]);
+  if (declaration.state === "absent" || declaration.state === "malformed") {
+    throw structuralError(registerDeclarationRefusalText(declaration, "character-voice"));
+  }
+  if (declaration.state === "empty") {
+    console.log(
+      `character-voice: this series declares no register questions, and says why: "${declaration.note}". ` +
+      `The stage runs; no claim it files answers a register axis.`
+    );
+  } else {
+    console.log(
+      `character-voice: this series declares ${declaration.axes.length} register axis/axes — ` +
+      declaration.axes.map((axis) => `"${axis.id}" (${axis.asks})`).join("; ") +
+      ". A claim that answers one of them with a value outside its declared set is refused at filing."
+    );
+  }
+  return declaration;
+}
+
+/**
  * The gulp task entry point for the character-voice workflow.
  *
  * The cascade flag is the cumulative invariant: once any volume is regenerated, every LATER volume
@@ -112,10 +156,14 @@ async function characterVoice() {
   validateRequiredEnv({ dryRun });
 
   const prompts = await loadPromptFiles();
-  const { runSettings, folders, volumes, volumeByFolder } = await openSeriesRun({ seriesDir, dryRun, volumeArg });
+  const { manifest, runSettings, folders, volumes, volumeByFolder } = await openSeriesRun({ seriesDir, dryRun, volumeArg });
+
+  // The series' register declaration, asked before a single volume is opened (plan 06 slice 3). It
+  // refuses structurally on a series that has none, so `--dry-run` refuses too.
+  const registerDeclaration = resolveStageRegisterDeclaration(manifest);
 
   const cascade = { regeneratedAny: false, regeneratedFrom: null };
-  const run = { folders, volumeByFolder, runSettings, prompts, dryRun, force, cascade };
+  const run = { folders, volumeByFolder, runSettings, prompts, dryRun, force, cascade, registerDeclaration };
   await runVolumeSeries("character-voice", {
     volumes,
     folders,
@@ -345,6 +393,7 @@ async function dumpVolumePreview(ctx) {
 module.exports = {
   characterVoice,
   assertNoRouteSelector,
+  resolveStageRegisterDeclaration,
   VOICE_FILE,
   POV_FILE,
   VALIDATION_FILE,

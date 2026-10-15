@@ -479,6 +479,10 @@ function buildFixture(label) {
           evidence: ["fixture"],
           excluded: [],
         },
+        // The series' own register declaration (plan 06 slice 3), the same two axes the scripted reading
+        // pass answers — this fixture runs the real character-voice stage, and that stage now refuses a
+        // plan of record with no declaration rather than falling back to a list it does not have.
+        register: workflow.FIXTURE_REGISTER_DECLARATION,
         volumes: FOLDERS.map((folder, i) => ({
           folder,
           sourceFile: `${folder}/${STAGED}`,

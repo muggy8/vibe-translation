@@ -1,7 +1,7 @@
 /**
  * utils/reference-store/open.js — open one volume's reference store.
  *
- * This is where the two things the guards depend on get decided, and neither of them is
+ * This is where the three things the guards depend on get decided, and none of them is
  * decided by the caller of a write:
  *
  *   - **the file**, resolved at call time from `SERIES_LOCATION` plus the volume
@@ -13,6 +13,12 @@
  *     the volume folder is fixed by the caller at launch and every mutation passes through
  *     one predicate (`ai/tools-fs.js`). Slice 7 will build it as
  *     `createReferenceTools({volume: 3, stage: "extract"})`; the store already takes it.
+ *   - **the series' register declaration** — the questions this series asked about how people
+ *     speak, and the answers it accepts for each (plan 06 §4). Read from the series' own plan of
+ *     record at open and frozen onto the handle, so the filing gate (`register/filing.js`) cannot
+ *     be handed a declaration, a narrower one, or none. There is no default list behind it, in any
+ *     language: a series that has not declared one has a handle whose register state is `absent`,
+ *     and an axis-bearing claim is refused with the sentence that names the door.
  *
  * @module utils/reference-store/open
  */
@@ -30,6 +36,7 @@ const {
   installmentKey,
 } = require("./paths");
 const { listVolumeChapters } = require("./source-chapters");
+const { readRegisterDeclaration } = require("./register/declaration");
 const facts = require("./facts");
 const cast = require("./cast");
 const queries = require("./queries");
@@ -71,6 +78,26 @@ function openReferenceStore({ volume, folder, seriesDir, stage = "merge", create
   /** @type {ReferenceStoreScope} */
   const scope = Object.freeze({ volume: volNumber, stage: String(stage) });
 
+  /**
+   * The series' own register declaration, read from its plan of record **at open**, and frozen onto the
+   * handle the same way the write scope is.
+   *
+   * It is stamped here rather than passed to the write because the guard it feeds must not be a caller's
+   * choice: a door that could hand `insertFact` a declaration of its own — or none — is a door that can
+   * file a register claim no series asked for. Read fresh at call time like every other path in this
+   * layer (gotchas 79, 94), because `discover` rewrites the plan of record and a declaration remembered
+   * from an earlier process is not the one this series has.
+   *
+   * A series with no plan of record, or one whose declaration is malformed, is **not** an error here:
+   * the state travels with the handle, `register/filing.js` refuses an axis-bearing claim with the
+   * sentence that names the door, and the stage that cannot run without a declaration refuses at its own
+   * door (`character-voice/task.js`). A store that refuses to open because of a manifest the pipeline
+   * never asked it to read would be a new way to break a stage that has nothing to do with registers.
+   *
+   * @type {import("./register/declaration").RegisterDeclaration}
+   */
+  const registerDeclaration = Object.freeze(readRegisterDeclaration(resolved.seriesDir));
+
   /** @type {ReferenceStore} */
   const ctx = {
     file: resolved.file,
@@ -79,6 +106,7 @@ function openReferenceStore({ volume, folder, seriesDir, stage = "merge", create
     folder: resolved.folder,
     volume: volNumber,
     scope,
+    registerDeclaration,
     schemaVersion: schema.version,
     created: schema.created,
     db,

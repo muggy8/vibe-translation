@@ -186,7 +186,7 @@ const IDENTITY_LINK_SOURCES = ["ruby-guide", "glossary-character-row"];
 // ─── Version ──────────────────────────────────────────────────────────────────
 
 /** The schema this build of the code writes. */
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 /**
  * The migrations, oldest first. Version 1 is the whole design as built.
@@ -646,6 +646,47 @@ const MIGRATIONS = [
       `CREATE INDEX IF NOT EXISTS idx_identity_links_identity ON cast_identity_links(identity, withdrawn_at)`,
       `CREATE INDEX IF NOT EXISTS idx_identity_links_key      ON cast_identity_links(a, withdrawn_at)`,
       `CREATE INDEX IF NOT EXISTS idx_identity_links_key_b    ON cast_identity_links(b, withdrawn_at)`,
+    ],
+  },
+  {
+    version: 10,
+    name: "plan 06 slice 3 — a claim that answers a declared register question says which one",
+    // WHY TWO COLUMNS AND NOT ONE, AND WHY NOT THE `formality` COLUMN THAT IS ALREADY THERE.
+    //
+    // `facts.formality` already holds a word about how someone speaks. What it holds today is whatever
+    // the extraction wrote in `formalityLevel` — one of five words the prompt enumerated, or `neutral`
+    // from a fixture, or nothing — and nothing in the record can say whether that word means anything in
+    // this series. It is free text, it is already published into the artifacts, and a guard cannot be
+    // built on it without deciding what its vocabulary is, which is exactly the decision plan 06 §4
+    // hands to the intake.
+    //
+    // So the checked pair is stored **beside** it rather than in it. `axis` is the id of a question this
+    // series declared in its own plan of record; `axis_value` is one of the answers that declaration
+    // listed for it. Both are refused before they are written unless the declaration says them
+    // (`register/filing.js`), which is what makes them answerable: "which claims answer the axis the
+    // series called X, for this character, as of this volume" is a query over two columns that were
+    // checked, and it is the query slice 5 needs in order to stop four kinds of claim sharing one
+    // aspect. `formality` stays what it is — the extractor's own word — and is left alone.
+    //
+    // **Nullable, and null is the normal value today.** The extraction prompt does not name axes yet
+    // (that is slice 4), and a claim filed from a published document or a rebuild has no axis to name. A
+    // null pair is not a hole in this design; it is a claim that never claimed to answer a declared
+    // question, and the gate only fires on a claim that does.
+    //
+    // **Why a migration rather than an edit to version 1:** a volume's record is committed with the
+    // books, so a file written by the slice-1b build has to be brought up by the code running now. It
+    // also matters for `copy-forward.js`, which copies with `SELECT *` and refuses when the two files'
+    // schema versions differ — both sides migrate, so an older copy arrives with the two columns present
+    // and null rather than missing, and no carried row changes its answers.
+    up: [
+      `ALTER TABLE facts ADD COLUMN axis TEXT`,
+      `ALTER TABLE facts ADD COLUMN axis_value TEXT`,
+
+      // The two queries this pair exists to answer: "every claim that answers this axis" (slice 5's
+      // aspect-collapse undo, and the report that says which declared axis a volume never answered), and
+      // "this character's answer to this axis".
+      `CREATE INDEX IF NOT EXISTS idx_facts_axis      ON facts(axis, axis_value)`,
+      `CREATE INDEX IF NOT EXISTS idx_facts_axis_key  ON facts(key, axis, status)`,
     ],
   },
 ];

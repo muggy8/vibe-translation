@@ -192,10 +192,11 @@ function fileCharacterRow(store, term, notes) {
   const { store, seriesDir } = openFixture("migration", { import: false });
   const file = path.join(seriesDir, "Test Story(01)", "series.db");
   try {
-    same(SCHEMA_VERSION, 9, "this build writes schema 9");
-    same(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5, 6, 7, 8, 9], "the migrations are a list, oldest first, and 9 is appended rather than 8 edited");
+    same(SCHEMA_VERSION, 10, "this build writes schema 10");
+    same(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "the migrations are a list, oldest first, and 10 is appended rather than 9 edited");
     const last = MIGRATIONS[MIGRATIONS.length - 1];
-    ok(last.version === 9 && /identity/.test(last.name), `the newest migration names the identity tables: ${last.name}`);
+    ok(last.version === 10 && /register/.test(last.name), `the newest migration names the register pair: ${last.name}`);
+    ok(MIGRATIONS.some((m) => m.version === 9 && /identity/.test(m.name)), "the identity migration is still there, unchanged, below it");
     ok(COUNTED_TABLES.includes("cast_identities") && COUNTED_TABLES.includes("cast_identity_links"), "both new tables are counted, so copy-forward compares them");
 
     // Build the state the migration has to survive: a record written by the PREVIOUS build.
@@ -203,6 +204,13 @@ function fileCharacterRow(store, term, notes) {
     const down = openDatabase(file);
     down.exec("DROP TABLE cast_identity_links");
     down.exec("DROP TABLE cast_identities");
+    // And the shape migration 10 adds, taken back off, so the ALTER TABLEs in this build's newest
+    // migration run against a file that genuinely does not have the columns rather than failing on a
+    // duplicate. Dropping the indexes first is what lets the columns go.
+    down.exec("DROP INDEX IF EXISTS idx_facts_axis");
+    down.exec("DROP INDEX IF EXISTS idx_facts_axis_key");
+    down.exec("ALTER TABLE facts DROP COLUMN axis_value");
+    down.exec("ALTER TABLE facts DROP COLUMN axis");
     down.prepare("UPDATE store_info SET value = '8' WHERE key = 'schema_version'").run();
     down.close();
     const probe = openDatabase(file, { readOnly: true });
@@ -211,8 +219,8 @@ function fileCharacterRow(store, term, notes) {
 
     const reopened = openReferenceStore({ volume: 1, folder: "Test Story(01)", seriesDir, stage: "merge" });
     try {
-      same(readSchemaVersion(reopened.db), 9, "opening it with this build brings it up to 9");
-      same(reopened.schemaVersion, 9, "and the handle reports 9");
+      same(readSchemaVersion(reopened.db), 10, "opening it with this build brings it up to 10");
+      same(reopened.schemaVersion, 10, "and the handle reports 10");
       const tables = new Set(reopened.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
       ok(tables.has("cast_identities") && tables.has("cast_identity_links"), "the new tables exist in the reopened record");
       same(reopened.db.prepare("SELECT COUNT(*) n FROM cast_identities").get().n, 0, "and they start empty: a migration does not invent links");
@@ -221,10 +229,16 @@ function fileCharacterRow(store, term, notes) {
       ok(!reopened.created, "the file was opened, not re-created");
       const counts = reopened.tableCounts();
       ok(Object.keys(counts).length === COUNTED_TABLES.length, "every counted table is reported, old ones included");
+
+      // Migration 10, on the same file: the two register columns arrive, and every row that predates
+      // them arrives with them NULL — a carried claim does not gain an answer it never gave.
+      const factCols = new Set(reopened.db.prepare("PRAGMA table_info(facts)").all().map((c) => c.name));
+      ok(factCols.has("axis") && factCols.has("axis_value"), "the facts table gains the register pair");
+      same(reopened.db.prepare("SELECT COUNT(*) n FROM facts WHERE axis IS NOT NULL OR axis_value IS NOT NULL").get().n, 0, "and no pre-existing row is given an axis it never claimed");
     } finally {
       reopened.close();
     }
-    console.log("  1. migration: a schema-8 record opens, is brought to 9, and gains two empty tables");
+    console.log("  1. migration: a schema-8 record opens, is brought to 10, gains two empty tables and two null columns");
   } finally {
     try {
       store.close();

@@ -60,6 +60,18 @@ const FACT_PROPOSAL_SCHEMA = z.strictObject({
    * onto a different roster entry, or under none at all. See migration 6.
    */
   extractedAs: z.string().min(1).nullable().optional(),
+  /**
+   * The register axis this claim answers, and the answer it gives, as declared by the series. See
+   * migration 10 and `register/filing.js`.
+   *
+   * The contract only says "a non-empty string". The **check** — that the id is one this series declared
+   * and the value is one of that axis's declared values — runs at filing, in `facts/validate.js`, against
+   * the declaration frozen into the store handle. It is deliberately not a zod enumeration: the values
+   * come from the series' plan of record, not from this file, and a closed schema here would be the axis
+   * list in code that plan 06 §4 forbids.
+   */
+  axis: z.string().min(1).optional(),
+  axisValue: z.string().min(1).optional(),
   characters: z.array(z.strictObject({ key: z.string().min(1), role: z.string().optional() })).optional(),
   cast: z
     .strictObject({

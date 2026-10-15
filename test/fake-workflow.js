@@ -569,6 +569,38 @@ function consistencyReportMarkdown() {
   ].join("\n");
 }
 
+/**
+ * The fixture series' own register declaration (plan 06 slice 3). Two axes, because this fixture's books
+ * turn on two things about how its cast speaks and nothing else. These are **this fixture series'
+ * decision**, not a pipeline default: no pipeline module reads them, and the only thing they do is
+ * provide the set a filed claim is checked against. Every voice claim the scripted reading pass
+ * produces answers one of these two axes, with a value from that axis's own list — so a fixture that
+ * runs the character-voice stage must declare exactly this, because that stage now refuses a plan of
+ * record with no declaration instead of falling back to a list it does not have.
+ *
+ * @type {{axes: Array<Object>}}
+ */
+const FIXTURE_REGISTER_DECLARATION = {
+  axes: [
+    {
+      id: "speech-formality",
+      asks: "How formal is this character's speech in this volume?",
+      values: ["neutral", "formal"],
+      guidance: "The distinction shows up in word choice and in answers-as-confirmations, not in verb endings.",
+      scope: "character",
+      renders: { neutral: "plain, direct English", formal: "formal English, full clauses" },
+      evidence: ["volume 01: 灯里 answers in confirmations rather than requests"],
+    },
+    {
+      id: "vocabulary-register",
+      asks: "What kind of vocabulary does this character reach for?",
+      values: ["technical", "plain"],
+      scope: "character",
+      evidence: ["volume 01: 悠真 defines a term before using it and rejects metaphor"],
+    },
+  ],
+};
+
 /** The manifest the intake agent writes (schema 2, per `validateManifest`). */
 function manifestJson(seriesDir) {
   return JSON.stringify(
@@ -590,6 +622,10 @@ function manifestJson(seriesDir) {
         ],
         excluded: [],
       },
+      // The series' own register declaration (plan 06 slice 3) — see `FIXTURE_REGISTER_DECLARATION`
+      // below, which every fixture that runs the character-voice stage reuses so that the axes the
+      // fixture declares are the axes the scripted reading pass answers.
+      register: FIXTURE_REGISTER_DECLARATION,
       volumes: VOLUMES.map((v, i) => ({
         installmentNumber: v.installment,
         folder: v.folder,
@@ -854,6 +890,11 @@ function answer(req, ctx) {
                 description: "Avoids the request form; speaks as a confirmation rather than an order.",
                 examples: ["もう一度確認したい"],
                 formalityLevel: "neutral",
+                // The register pair this fixture series declares (see manifestJson). A claim that names
+                // an axis is checked at filing against the series' own declaration, so this is the branch
+                // the offline loop actually exercises.
+                axis: "speech-formality",
+                value: "neutral",
                 notes: "Consistent across the volume.",
               },
               {
@@ -863,6 +904,8 @@ function answer(req, ctx) {
                 description: "Defines a term before using it; rejects metaphor.",
                 examples: ["技術は反復で、魔法は依頼だ"],
                 formalityLevel: "formal",
+                axis: "vocabulary-register",
+                value: "technical",
                 notes: "",
               },
               {
@@ -1087,6 +1130,7 @@ module.exports = {
   TERMS,
   REVISIONS,
   VOLUMES,
+  FIXTURE_REGISTER_DECLARATION,
   ACCEPTANCE_SCORES,
   VERIFY_SCORES,
   VERIFY_SCORES_ROUND2,
