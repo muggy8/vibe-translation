@@ -155,8 +155,8 @@ function testRealLayersAreReadWhole() {
   }
 
   // The three layers this slice exists for. Measured 2026-10-15: the glossary layer nests
-  // three times (extract/, carry-forward/, settlement/), the character-voice stage nests once
-  // (reconcile/), and the whole-layer scans that name them read 13 and 3 more files.
+  // three times (extract/, carry-forward/, settlement/), the character-voice stage nests twice
+  // (reconcile/ and reading/), and the whole-layer scans that name them read 13 and 9 more files.
   const glossary = moduleLayerFiles(ROOT, "glossary.js", "glossary");
   ok(glossary.some((p) => p.endsWith(path.join("settlement", "decide.js"))), "the glossary scan does not reach glossary/settlement/decide.js");
   ok(glossary.some((p) => p.endsWith(path.join("extract", "answer-shape.js"))), "the glossary scan does not reach glossary/extract/answer-shape.js");
