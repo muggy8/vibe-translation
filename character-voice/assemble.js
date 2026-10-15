@@ -237,6 +237,14 @@ async function runAssembledVolume(ctx) {
       `${built.rebuild.adoptedCharacters} character(s), ${built.rebuild.refused.length} refused for want of a line this volume's text prints; ` +
       `${built.rendered.sections} section(s), ${built.povRendered.claims} POV claim(s) rendered into ${POV_FILE}.`
   );
+  // Plan 06 slice 7. A volume that re-saw what the record already stands behind files no claim, so the only
+  // way that fact reaches a run log is this line: how many claims this volume confirmed, and how many of its
+  // confirmations the door refused (and why).
+  console.log(
+    `Volume ${values.INSTALLMENT_NUMBER}: confirmed — ${built.rebuild.confirmations.filed.length} claim(s) this volume's own text ` +
+      `saw again (${built.rebuild.confirmations.alreadyFiled.length} already recorded)` +
+      (built.rebuild.confirmations.refused.length ? `; ${built.rebuild.confirmations.refused.length} refused: ${built.rebuild.confirmations.refused.map((r) => `${r.character || "?"} — ${r.rule}`).join(", ")}` : ".")
+  );
   if (built.rendered.truncated || built.povRendered.truncated) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: ${built.rendered.truncated + built.povRendered.truncated} bullet(s) were cut to fit one line.`);
   }

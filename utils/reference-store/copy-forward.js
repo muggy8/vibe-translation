@@ -32,7 +32,7 @@ const { openDatabase, copyDatabase, discardDatabase } = require("./db");
 const { referenceStorePath } = require("./paths");
 const { openReferenceStore } = require("./open");
 const { integrityFindings, INTEGRITY_STEP } = require("./integrity");
-const { COUNTED_TABLES, SCHEMA_VERSION, readSchemaVersion } = require("./schema");
+const { COUNTED_TABLES, SCHEMA_VERSION, readSchemaVersion, applySchema } = require("./schema");
 const { refusal } = require("./refusals");
 const { listCast } = require("./cast");
 const { countReopenRows } = require("./reopen");
@@ -80,6 +80,35 @@ function countsFromFile(file) {
     return countsFromHandle(db);
   } catch {
     return {};
+  } finally {
+    if (db) {
+      try {
+        db.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+/**
+ * Read a record's schema version out of a file no handle is held on.
+ *
+ * `schema.js`'s `readSchemaVersion` takes an **open handle**. Handing it a path returns null through its
+ * own catch — which is how the "records of different shapes" guard in `topUpVolumeRecord` came to compare
+ * null with null and never fire. This is the version that takes a path, and it is the one that guard now
+ * asks.
+ *
+ * @param {string} file
+ * @returns {number|null} null when the file is not a readable reference store.
+ */
+function readSchemaVersionOfFile(file) {
+  let db = null;
+  try {
+    db = openDatabase(file, { readOnly: true });
+    return readSchemaVersion(db);
+  } catch {
+    return null;
   } finally {
     if (db) {
       try {
@@ -512,6 +541,86 @@ function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFold
 
   if (!fs.existsSync(sourcePath.file) || !fs.existsSync(destPath.file)) return nothing("one of the two records is not there");
 
+  /**
+   * Both files are brought up to this build's shape before a single row moves.
+   *
+   * This door copies with `SELECT * FROM src.<table>` over `COUNTED_TABLES`, so it is the one door in
+   * this layer whose copy is a **column-for-column** statement. A record written before the last schema
+   * bump does not have the table the copy names, and the copy fails: measured on a fixture before this
+   * was fixed, a volume-2 record left at schema 8 by an older build, topped up from a volume 1 that had
+   * moved on, returned `HIGH / reference-top-up-failed` and `openVolumeRecord` refused the volume
+   * outright — which is every stage that writes into that record. `copyForwardStore` never hit this
+   * because it opens its source through `openReferenceStore`, which migrates; this door opened both files
+   * with `openDatabase`, which runs no DDL.
+   *
+   * The migration writes no row. It adds the tables and columns this build expects, exactly as opening
+   * the same record through any other door would, and the version guard below still refuses a file this
+   * build cannot read.
+   *
+   * @returns {{ok: true, sourceVersion: number, destVersion: number} | {ok: false, because: string, sourceVersion: number|null, destVersion: number|null}}
+   */
+  const bringUpToShape = () => {
+    /** @type {Array<{file: string, label: string, version: number|null}>} */
+    const opened = [];
+    for (const [label, file] of [["source", sourcePath.file], ["destination", destPath.file]]) {
+      let db = null;
+      try {
+        db = openDatabase(file);
+        applySchema(db);
+        opened.push({ file, label, version: readSchemaVersion(db) });
+      } catch (err) {
+        const version = db ? readSchemaVersion(db) : readSchemaVersionOfFile(file);
+        return {
+          ok: false,
+          because: `volume ${label === "source" ? fromVolume : toVolume}'s record could not be brought up to this build's schema (${String(err && err.message ? err.message : err)})`,
+          sourceVersion: opened.find((o) => o.label === "source")?.version ?? version,
+          destVersion: opened.find((o) => o.label === "destination")?.version ?? version,
+        };
+      } finally {
+        if (db) {
+          try {
+            db.close();
+          } catch {
+            /* already closed */
+          }
+        }
+      }
+    }
+    return { ok: true, sourceVersion: opened[0].version, destVersion: opened[1].version };
+  };
+
+  const shapes = bringUpToShape();
+  if (!shapes.ok) {
+    const findings = [
+      finding(
+        "HIGH",
+        "reference-top-up-schema-mismatch",
+        step,
+        volKey,
+        `${destPath.folder}/series.db`,
+        `volume ${fromVolume}'s record and volume ${toVolume}'s cannot be topped up between: ${shapes.because}. ` +
+          `Their versions read as ${shapes.sourceVersion} and ${shapes.destVersion}; this build writes ${SCHEMA_VERSION}.`
+      ),
+    ];
+    return {
+      ok: false,
+      skipped: true,
+      reason: null,
+      reattached: false,
+      copied: {},
+      total: 0,
+      refusal: refusal({
+        verb: "top_up_record",
+        rule: "reference-top-up-schema-mismatch",
+        because: findings[0].message,
+        useInstead: ["open both records with this build (any stage door migrates them)", "re-derive the copy from the volume before it"],
+        fix: "open both records with this build so both are brought up to its schema, then re-run the step.",
+        detail: { sourceVersion: shapes.sourceVersion, destVersion: shapes.destVersion, writes: SCHEMA_VERSION },
+      }),
+      findings,
+    };
+  }
+
   const sourceSha256 = sha256OfFile(sourcePath.file);
   const dest = openDatabase(destPath.file);
   const provenance = dest.prepare("SELECT * FROM copy_provenance WHERE volume = ?").get(Number(toVolume));
@@ -532,7 +641,7 @@ function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFold
     return nothing("the source record has not changed since this copy was made");
   }
 
-  if (readSchemaVersion(sourcePath.file) !== readSchemaVersion(destPath.file)) {
+  if (shapes.sourceVersion !== shapes.destVersion) {
     dest.close();
     const findings = [
       finding(
@@ -541,8 +650,8 @@ function topUpVolumeRecord({ fromVolume, toVolume, seriesDir, fromFolder, toFold
         step,
         volKey,
         `${destPath.folder}/series.db`,
-        `volume ${fromVolume}'s record is at schema ${readSchemaVersion(sourcePath.file)} and volume ${toVolume}'s is at ` +
-          `${readSchemaVersion(destPath.file)}; rows are not copied between records of different shapes.`
+        `volume ${fromVolume}'s record is at schema ${shapes.sourceVersion} and volume ${toVolume}'s is at ` +
+          `${shapes.destVersion}; rows are not copied between records of different shapes.`
       ),
     ];
     return {

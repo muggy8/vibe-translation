@@ -49,7 +49,7 @@ This is the hardest to detect — look for third-person narration that uses a ch
 ## Rules
 
 1. **Be exhaustive about the source.** A speech quirk or POV pattern that is missed means the translator will miss it later. When in doubt, include it.
-2. **Only new or changed information.** If a character's quirks are identical to what the block headed **"What this record already knows about the characters in this chapter"** already stands behind, note them as "unchanged" rather than duplicating.
+2. **Only new or changed information — and say plainly when nothing changed.** If a character's quirks are identical to what the block headed **"What this record already knows about the characters in this chapter"** already stands behind, do **not** re-state them as a claim. Emit one entry of `type: "confirm"` for each one instead: name the character, name the `quirkType` the unchanged thing is, and quote one line from **this chapter** that shows it is still true. A confirm entry asserts nothing new — it records that this volume saw the claim again, which is the only way the record can tell "still holds" from "nobody checked since volume 1". If this chapter prints no line for it, name no example: the character appearing in this volume is the weaker evidence, and the record writes down which of the two it relied on.
 3. **Use the source-language form** for all examples — quote directly from the text.
 4. **Provide specific quotes.** Every quirk and POV observation must be backed by a direct quote from the source text.
 5. **Classify each quirk** with a `type` from the list above.
@@ -60,7 +60,7 @@ This is the hardest to detect — look for third-person narration that uses a ch
 
 ## Output
 
-Respond with **only** a JSON object holding one key, `entries` — no prose, no markdown fences, no commentary. `entries` is an array, and each element of it is an object of one of the two kinds below.
+Respond with **only** a JSON object holding one key, `entries` — no prose, no markdown fences, no commentary. `entries` is an array, and each element of it is an object of one of the three kinds below.
 
 For **voice quirks**:
 ```json
@@ -90,6 +90,19 @@ For **POV analysis**:
   "notes": "any additional context"
 }
 ```
+
+For **something this volume saw again** — a claim the record already stands behind that this chapter still bears out, and therefore not a new claim:
+```json
+{
+  "type": "confirm",
+  "character": "the character's name, in the form this book prints it",
+  "quirkType": "sentenceEnding|pronoun|formality|vocabulary|catchphrase|dialect|internalVoice",
+  "examples": ["a line copied exactly from this chapter"],
+  "notes": "what this chapter shows that matches what the record already stands behind"
+}
+```
+
+A confirm entry names **no `axis`, no `value` and no `description`**: the claim it confirms is already in the record, and the record — not you — decides which of that character's claims an entry means. If what you noticed is something the record does **not** already say, it is a `voice` entry, not a confirm entry. If a character's quirks changed, it is a `voice` entry too.
 
 If there is **nothing new to extract**, respond with an object holding an empty array: `{"entries": []}`
 

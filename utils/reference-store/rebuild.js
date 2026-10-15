@@ -90,6 +90,8 @@ module.exports = {
   MAX_REBUILD_BULLET_CHARS: labels.MAX_REBUILD_BULLET_CHARS,
   REBUILT_EXAMPLES_PER_BULLET: labels.REBUILT_EXAMPLES_PER_BULLET,
   MAX_REBUILD_ARC_LINES_PER_CHARACTER: labels.MAX_REBUILD_ARC_LINES_PER_CHARACTER,
+  MAX_REBUILD_CONFIRMATION_LINES_PER_CHARACTER: labels.MAX_REBUILD_CONFIRMATION_LINES_PER_CHARACTER,
+  MAX_REBUILD_CONFIRMATION_BODY_CHARS: labels.MAX_REBUILD_CONFIRMATION_BODY_CHARS,
   applyAliasDeclarations: names.applyAliasDeclarations,
   rebuildClaimAlreadyStored: mirror.rebuildClaimAlreadyStored,
   inspectVoiceMirrorForRebuild: mirror.inspectVoiceMirrorForRebuild,

@@ -25,12 +25,31 @@
  * It is therefore **not a bullet and not a claim**: it files no row, it is not evidence for anything, and
  * it is capped and named like every other cap here.
  *
+ * ## The confirmation line (plan 06 slice 7)
+ *
+ * The other non-bullet line a section carries. `claim_confirmations` records that a later volume's own text
+ * contained the character a claim is about — the observation that turns "this claim still holds" from an
+ * assumption into a list — and the line prints it as `Confirmed in volumes 2, 3 and 5 — **Label**: "…"`.
+ *
+ * Same position rule as the arc, same reason: **before the first bullet**, because a non-bullet line after
+ * the first bullet is glued onto that bullet's body by `parseVoiceMarkdown` and the next re-import would
+ * rewrite a published claim with nothing announcing it (gotcha 157). Same cap, same named remainder.
+ *
+ * It quotes a **fragment** of the claim rather than the claim, because the bullet carrying the whole claim
+ * is printed directly below it and the plan's reason for making a confirmation its own row was that copying
+ * a body once per volume that saw it is the defect (§5). A confirmation is never a bullet, never reaches
+ * `facts`, and never reaches the chapter block a reading pass is shown — the render is the only place it
+ * becomes visible, and the render reads it out of its own table.
+ *
  * @module utils/reference-store/rebuild/render
  */
 
 const { EXTRACTION_SOURCE_STAGE } = require("../schema");
 const { currentClaimSql } = require("../facts");
 const { supersededVoiceClaims } = require("../voice-revision/rows");
+// The confirmations read (plan 06 slice 7). Read-only, and the same read the stage's log line asks, so
+// "which volumes saw this claim again" has one answer.
+const { confirmationsForCharacter } = require("../confirmations/rows");
 
 const {
   REBUILT_VOICE_TITLE,
@@ -38,6 +57,8 @@ const {
   MAX_REBUILD_BULLET_CHARS,
   REBUILT_EXAMPLES_PER_BULLET,
   MAX_REBUILD_ARC_LINES_PER_CHARACTER,
+  MAX_REBUILD_CONFIRMATION_LINES_PER_CHARACTER,
+  MAX_REBUILD_CONFIRMATION_BODY_CHARS,
   TRUNCATION_NOTE,
 } = require("./labels");
 require("../../../types"); // JSDoc type definitions
@@ -108,6 +129,45 @@ function renderArcLine(row) {
 }
 
 /**
+ * "Volumes 2, 3 and 5", or "volume 2" — the list a confirmation line names.
+ *
+ * @param {Array<number>} volumes - Ascending, because {@link confirmationsForCharacter} returns them in the
+ *   order the volumes confirmed the claim.
+ * @returns {string}
+ */
+function renderVolumeList(volumes) {
+  const list = volumes.map((volume) => Number(volume));
+  if (list.length === 1) return `volume ${list[0]}`;
+  return `volumes ${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
+/**
+ * One claim this record has seen again, as the line its character's section prints for it.
+ *
+ * The wording is chosen against `drafting.js`, the same way the arc line's was, because this file writes an
+ * artifact the store reads back and the audit scans line by line:
+ *
+ *   - **The claim is quoted in straight double quotes.** `drafting.js`'s repeated-token shape reads `'…'`
+ *     and `“…”`; a double-quoted span is not one of its token patterns.
+ *   - **No parentheses and no self-correction phrase.** Every marker `drafting.js` reports at MEDIUM lives
+ *     in one or the other, and a confirmation is not a defect.
+ *   - **It quotes a fragment, not the body.** The bullet carrying the full claim is three lines below; the
+ *     line's job is to say *which* bullet was seen again and *where*. Copying the body once per confirming
+ *     volume is the shape plan 06 §5 rejected for the record, and printing it is the same mistake in the
+ *     artifact.
+ *
+ * @param {{label: string|null, body: string, volumes: Array<number>}} group
+ * @returns {string}
+ */
+function renderConfirmationLine(group) {
+  const label = group.label || "Notes";
+  const body = String(group.body || "").replace(/\s*\n\s*/g, " ").trim();
+  const fragment = body.length > MAX_REBUILD_CONFIRMATION_BODY_CHARS ? `${body.slice(0, MAX_REBUILD_CONFIRMATION_BODY_CHARS - 1)}…` : body;
+  const line = `_Confirmed in ${renderVolumeList(group.volumes)} — **${label}**: "${fragment}"._`;
+  return fitBullet(line, MAX_REBUILD_BULLET_CHARS);
+}
+
+/**
  * Render this volume's character-voice reference from its record, in chapter order.
  *
  * Sections are ordered by the earliest chapter any of that character's claims cites; bullets within a
@@ -117,7 +177,7 @@ function renderArcLine(row) {
  *
  * @param {ReferenceStore} store
  * @param {{volume?: number, title?: string, preamble?: string[]}} [opts]
- * @returns {{markdown: string, opening: string[], sections: number, characters: Array<{key: string, display: string, bullets: number, arc: number, arcOmitted: number, firstChapter: string|null}>, unattached: number, truncated: number}}
+ * @returns {{markdown: string, opening: string[], sections: number, characters: Array<{key: string, display: string, bullets: number, arc: number, arcOmitted: number, confirmed: number, confirmedOmitted: number, firstChapter: string|null}>, unattached: number, truncated: number}}
  */
 function renderRebuiltVoice(store, { volume, title = REBUILT_VOICE_TITLE, preamble = null } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -208,7 +268,24 @@ function renderRebuiltVoice(store, { volume, title = REBUILT_VOICE_TITLE, preamb
     if (arcOmitted > 0) {
       out.push(`_${arcOmitted} more earlier answer(s) for this character are in this volume's reference record._`);
     }
-    if (shown.length || arcOmitted > 0) out.push("");
+
+    // The confirmations, also **before** the bullets and for the same reason the arc lines are: after the
+    // first bullet a non-bullet line is a continuation of that bullet, and `importVoice` would glue this
+    // line onto a published claim's body on the way back in. They come after the arc lines and before the
+    // bullets because they describe the bullets: this is the claim, and these are the volumes that saw it
+    // again.
+    //
+    // They are read through `confirmations/rows.js`, which filters on `currentClaimSql` and the span, so a
+    // confirmation of a claim this record has since replaced is not printed — it is a true fact about the
+    // past, and this file renders what the record stands behind at this volume.
+    const confirmed = confirmationsForCharacter(store, { key: character.key, volume: vol });
+    const confirmedShown = confirmed.slice(0, MAX_REBUILD_CONFIRMATION_LINES_PER_CHARACTER);
+    for (const group of confirmedShown) out.push(renderConfirmationLine(group));
+    const confirmedOmitted = confirmed.length - confirmedShown.length;
+    if (confirmedOmitted > 0) {
+      out.push(`_${confirmedOmitted} more claim(s) about this character were confirmed in another volume; they are in this volume's reference record._`);
+    }
+    if (shown.length || arcOmitted > 0 || confirmedShown.length || confirmedOmitted > 0) out.push("");
 
     for (const row of ordered) {
       const label = row.label || "Notes";
@@ -225,6 +302,8 @@ function renderRebuiltVoice(store, { volume, title = REBUILT_VOICE_TITLE, preamb
       bullets: ordered.length,
       arc: shown.length,
       arcOmitted,
+      confirmed: confirmedShown.length,
+      confirmedOmitted,
       firstChapter: first ? first.established_chapter : null,
     });
   }

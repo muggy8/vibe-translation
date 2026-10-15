@@ -81,6 +81,27 @@ const MAX_REBUILD_ARC_LINES_PER_CHARACTER = 6;
 /** What a capped bullet says about itself, so a reader knows the line is not the whole claim. */
 const TRUNCATION_NOTE = " (truncated here; the full claim is in this volume's reference record)";
 
+/**
+ * How many "seen again in volume N" lines one character's section may print before the rest are named.
+ *
+ * The confirmation line (plan 06 slice 7) is one per **claim** this volume re-confirmed, and each one lists
+ * every volume that has confirmed that claim, so it grows with the number of claims a character has rather
+ * than with the number of volumes a series has. It gets the same treatment every other cap in this module
+ * gets — a constant with no environment knob, and a line naming how many were left out rather than a
+ * silent cut.
+ */
+const MAX_REBUILD_CONFIRMATION_LINES_PER_CHARACTER = 6;
+
+/**
+ * How much of a confirmed claim's own words one confirmation line may quote.
+ *
+ * The line exists to point at a bullet, not to reprint it. The bullet is already in the section, and the
+ * plan's whole reason for making a confirmation its own row was that copying a claim's body once per volume
+ * that saw it would put the same sentence in the record up to seventeen times (plan 06 §5). A short
+ * fragment says which bullet the line means; the claim's words live in one place.
+ */
+const MAX_REBUILD_CONFIRMATION_BODY_CHARS = 120;
+
 module.exports = {
   REBUILT_VOICE_TITLE,
   REBUILT_VOICE_SECTION,
@@ -90,5 +111,7 @@ module.exports = {
   MAX_REBUILD_BULLET_CHARS,
   REBUILT_EXAMPLES_PER_BULLET,
   MAX_REBUILD_ARC_LINES_PER_CHARACTER,
+  MAX_REBUILD_CONFIRMATION_LINES_PER_CHARACTER,
+  MAX_REBUILD_CONFIRMATION_BODY_CHARS,
   TRUNCATION_NOTE,
 };

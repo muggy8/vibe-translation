@@ -490,6 +490,13 @@ async function main(args) {
     `  candidate copies:  ${rebuild.candidates.filed} filed this run, ${rebuild.candidates.carried} already there, ` +
       `${rebuild.candidates.refused.length} could not be filed`
   );
+  // Plan 06 slice 7: the claims this volume's own text said it had seen again. They are not claims and they
+  // are not counted above — a volume that confirmed three traits filed nothing, and that is the point.
+  console.log(
+    `  confirmed:         ${rebuild.confirmations.filed.length} claim(s) this volume saw again` +
+      (rebuild.confirmations.alreadyFiled.length ? `, ${rebuild.confirmations.alreadyFiled.length} already recorded` : "") +
+      (rebuild.confirmations.refused.length ? `, ${rebuild.confirmations.refused.length} refused (${rebuild.confirmations.refused.map((r) => r.rule).join(", ")})` : "")
+  );
   if (result.aliases.applied.length) console.log(`  aliases applied:   ${result.aliases.applied.map((a) => `${a.alias} → ${a.key}`).join(", ")}`);
   for (const aliasRefusal of result.aliases.refused) console.log(`  alias refused:     ${aliasRefusal.alias} → ${aliasRefusal.key}: ${aliasRefusal.because}`);
   if (rebuild.unresolved.length) {

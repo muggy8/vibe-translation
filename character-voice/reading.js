@@ -237,12 +237,25 @@ async function writePartial(volumeDir, segment, fingerprint, entries, installmen
 /**
  * Assemble the volume's notebook from its chapter partials, in reading order.
  *
+ * Each entry is stamped with the chapter its answer came from. The notebook used to flatten the chapters
+ * away, which meant that once a claim was in `character-voice-new.json` nothing in it said which chapter
+ * printed it — and a confirmation ("volume 5 saw this claim again") is worth nothing unless it can be
+ * traced to a chapter of volume 5. The stamp is code's, not the model's: it is not in the answer shape the
+ * request declares, and an entry that arrives without one (a notebook written before this existed) is
+ * filed with its chapter left null and named, not guessed.
+ *
  * @param {Array<{segment: {id: string}, entries: Array<Object>}>} chapters - Already in reading order.
  * @returns {Array<Object>}
  */
 function consolidateExtraction(chapters) {
   const all = [];
-  for (const chapter of chapters) all.push(...chapter.entries);
+  for (const chapter of chapters) {
+    const chapterId = chapter && chapter.segment ? chapter.segment.id : null;
+    for (const entry of chapter.entries) {
+      if (entry && chapterId && entry.chapter === undefined) all.push({ ...entry, chapter: chapterId });
+      else all.push(entry);
+    }
+  }
   return all;
 }
 

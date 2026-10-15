@@ -44,6 +44,9 @@ const { readChapterLines } = require("./source-chapters");
 const { quoteCandidates } = require("./voice-adapter");
 const { resolveExtractionName } = require("./name-resolution");
 const { registerFilingRefusal } = require("./register/filing");
+// A pure leaf, so this door can recognise the confirmation entry kind without requiring the door that
+// files it — which would close a cycle, because that door needs the aspect table this file owns.
+const { CONFIRMATION_ENTRY_TYPE } = require("./confirmations/shapes");
 require("../../types"); // JSDoc type definitions
 
 /**
@@ -263,6 +266,8 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
   const carried = [];
   const unresolved = [];
   const characters = new Set();
+  /** @type {Array<{kind: "confirm", character: string|null}>} */
+  const confirmations = [];
   let povCount = 0;
 
   for (const entry of Array.isArray(entries) ? entries : []) {
@@ -280,6 +285,22 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
       } else {
         refused.push({ kind: "pov", rule: result.rule, because: result.because });
       }
+      continue;
+    }
+
+    /**
+     * A confirmation is not a claim, and this door files claims.
+     *
+     * It falls through the `type` dispatch otherwise: `type: "confirm"` is not `pov`, so it would be read
+     * as a voice claim, get aspect `unclassified` and label `confirm`, and be published as a bullet about
+     * a character under a sentence the extraction never meant as a claim. So the kind is named here and
+     * **nothing is filed** — the door that files it is `confirmations/file.js`, reached from the rebuild
+     * door, which is the door that has this volume's chapters and its adopted claims in front of it.
+     * Naming them rather than dropping them is what keeps "the extraction reported 4 things still holding"
+     * visible in the stage's own log.
+     */
+    if (entry.type === CONFIRMATION_ENTRY_TYPE) {
+      confirmations.push({ kind: "confirm", character: typeof entry.character === "string" ? entry.character.trim() : null });
       continue;
     }
 
@@ -376,6 +397,7 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
     unresolved,
     characters: characters.size,
     povCount,
+    confirmations,
   };
 }
 

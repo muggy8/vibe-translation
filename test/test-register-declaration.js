@@ -848,10 +848,12 @@ const ENTRIES_SIX = [
   same(kinds.length, 70, "the finding level table is still 70 kinds — this slice added none");
   same(kinds.filter((k) => k.startsWith("register-")), [], "and none of them is a register kind");
 
-  // The schema moved by one migration, appended, and the pair is nullable.
-  same(SCHEMA_VERSION, 10, "the store is at schema 10");
-  same(MIGRATIONS[MIGRATIONS.length - 1].version, 10, "appended, not edited");
-  const up = MIGRATIONS[MIGRATIONS.length - 1].up.join("\n");
+  // The schema moved by one migration, appended, and the pair is nullable. Slice 7 appended migration 11
+  // after this one, so this slice's migration is found by version rather than by being last.
+  same(SCHEMA_VERSION, 11, "the store is at schema 11");
+  const registerMigration = MIGRATIONS.find((m) => m.version === 10);
+  same(registerMigration.version, 10, "appended, not edited");
+  const up = registerMigration.up.join("\n");
   ok(/ALTER TABLE facts ADD COLUMN axis TEXT/.test(up) && /ALTER TABLE facts ADD COLUMN axis_value TEXT/.test(up),
     "the two columns are added by migration 10");
   ok(!/NOT NULL/.test(up), "and neither is required: a claim that names no axis is the normal case today");
@@ -881,7 +883,7 @@ const ENTRIES_SIX = [
   ok(/sentenceending: "register"[\s\S]*formality: "register"[\s\S]*vocabulary: "register"/.test(adapterLayer),
     "the aspect collapse is still there, untouched: undoing it is slice 5, and it needs this slice first");
 
-  console.log("  six rules, all reachable; no knob; 70 finding kinds; schema 10; the answer shape stayed open");
+  console.log("  six rules, all reachable; no knob; 70 finding kinds; schema 11; the answer shape stayed open");
 }
 
 console.log(`\nregister declaration: ${checks} checks, 0 model calls.`);

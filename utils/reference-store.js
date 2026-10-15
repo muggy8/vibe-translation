@@ -67,6 +67,7 @@ const __quarantine = require("./reference-store/quarantine");
 const __reopen = require("./reference-store/reopen");
 const __register = require("./reference-store/register");
 const __voiceRevision = require("./reference-store/voice-revision");
+const __confirmations = require("./reference-store/confirmations");
 
 const __open = require("./reference-store/open");
 
@@ -102,5 +103,6 @@ module.exports = {
   ...__reopen,
   ...__register,
   ...__voiceRevision,
+  ...__confirmations,
   openReferenceStore: __open.openReferenceStore,
 };

@@ -37,6 +37,10 @@ const {
 } = require("../document-prose");
 const { refusal } = require("../refusals");
 const { registerFilingRefusal } = require("../register/filing");
+// The confirmation door, and the entry kind it is keyed on. `confirmations/shapes.js` is a pure leaf, so
+// this does not close a cycle with `../extraction-adapter`, which needs the same constant.
+const { fileVoiceConfirmations } = require("../confirmations/file");
+const { CONFIRMATION_ENTRY_TYPE } = require("../confirmations/shapes");
 
 const { rebuildClaimAlreadyStored, inspectVoiceMirrorForRebuild } = require("./mirror");
 const {
@@ -76,7 +80,7 @@ require("../../../types"); // JSDoc type definitions
  *   on the **same volume's record opened with the extract stage**: the write scope is what decides
  *   which kind of row a handle may write, so the rebuild's own handle cannot file candidates and does
  *   not try to.
- * @returns {{ok: boolean, filed: Array<Object>, filedCount: number, carried: Array<Object>, refused: Array<Object>, characters: number, adoptedClaims: number, adoptedCharacters: number, adoptedUnkeyed: number, candidateClaims: number, povAttached: number, povUnattached: number, resolved: Array<{name: string, key: string, how: string}>, unresolved: Array<{name: string, key: string}>, candidates: {filed: number, carried: number, refused: Array<Object>}, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, filed: Array<Object>, filedCount: number, carried: Array<Object>, refused: Array<Object>, characters: number, adoptedClaims: number, adoptedCharacters: number, adoptedUnkeyed: number, candidateClaims: number, povAttached: number, povUnattached: number, resolved: Array<{name: string, key: string, how: string}>, unresolved: Array<{name: string, key: string}>, candidates: {filed: number, carried: number, refused: Array<Object>}, confirmations: {filed: Array<Object>, alreadyFiled: Array<Object>, refused: Array<Object>, confirmations: number, nonConfirmations: number}, screened: Array<Object>, refusal: ReferenceRefusal|null}}
  */
 function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved = 0, candidateStore = null } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -488,8 +492,23 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
       continue;
     }
     if (entry.type === "pov") filePov(entry);
+    // A confirmation is not a claim, and `fileVoice` would file it as one: aspect `unclassified`, label
+    // `confirm`, and a bullet in the published reference under a sentence the extraction never meant as a
+    // claim. The kind is routed out here and filed by `confirmations/file.js` below, in the same breath,
+    // with this volume's chapters and its adopted claims already in front of it.
+    else if (entry.type === CONFIRMATION_ENTRY_TYPE) continue;
     else fileVoice(entry);
   }
+
+  /**
+   * The confirmations this volume's reading pass reported, filed after its claims.
+   *
+   * After the claims, because a confirmation is an observation about a claim this record already stands
+   * behind, and before `renderRebuiltVoice` ever runs, because the render is what makes the observation
+   * readable to a translator. The door files nothing into `facts`: it writes one row per (claim, volume)
+   * into `claim_confirmations` and leaves every claim row exactly as it is.
+   */
+  const confirmations = fileVoiceConfirmations(store, entries, { volume: vol, volumeDir: store.volumeDir, chapters });
 
   const resolved = [];
   const unresolved = [];
@@ -557,6 +576,7 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
     unresolved,
     candidates,
     screened,
+    confirmations,
     // True when this volume's record was already sealed by another stage (the glossary seals at the end
     // of its own work). The render went ahead because the seal froze no character-voice rows — but it is
     // worth a line in the log, because it says the reference being written here is the first one this

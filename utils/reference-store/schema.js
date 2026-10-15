@@ -186,7 +186,7 @@ const IDENTITY_LINK_SOURCES = ["ruby-guide", "glossary-character-row"];
 // ─── Version ──────────────────────────────────────────────────────────────────
 
 /** The schema this build of the code writes. */
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 /**
  * The migrations, oldest first. Version 1 is the whole design as built.
@@ -690,6 +690,62 @@ const MIGRATIONS = [
       `CREATE INDEX IF NOT EXISTS idx_facts_axis_key  ON facts(key, axis, status)`,
     ],
   },
+  {
+    version: 11,
+    name: "plan 06 slice 7 — a volume that saw a claim again recorded that it saw it",
+    // WHY THIS IS A TABLE OF ITS OWN AND NOT ANOTHER `facts` ROW.
+    //
+    // A chapter call is already asked to compare what it read against what the record already stands
+    // behind (plan 06 §2.5), and the answer it gives for a trait that has not moved is "unchanged". That
+    // answer used to go nowhere. So "this claim still holds at volume 9" was an **assumption** the render
+    // made on behalf of every volume nobody asked — the same assumption §2.4 measured as the reason
+    // `applies_to_volume` is null everywhere in this corpus.
+    //
+    // Filing the observation as a claim row is the shape this plan already rejected (§5): a confirmation
+    // carries no new assertion, so a claim row would copy the same body once per volume that saw it, and
+    // the coverage rules would count the same fact up to seventeen times. So the row carries **no body**.
+    // It names the claim it re-confirms, and the volume and chapter that saw it.
+    //
+    // WHY THE KEY IS THE CLAIM AND NOT (VOLUME, AXIS, CHARACTER).
+    //
+    // The plan's sketch keyed it on the axis and the character. Measured against this corpus that key has
+    // nothing to point at: **0 of the 22,469 `facts` rows in the 17 published records carry an `axis`**,
+    // and the series' plan of record declares no register question at all (plan 06 §2.11, §10.10). A
+    // confirmation keyed on a question this series never asked would be a row that only exists in a
+    // fixture. Keyed on the claim row, it works for a series that declares ten questions and for one that
+    // declares none, and it is checkable: the row names the exact claim a volume says it saw again.
+    //
+    // WHY IT CANNOT TOUCH THE CLAIM IT CONFIRMS.
+    //
+    // A published row is never edited, moved or re-labelled (AGENTS.md rule 5). `applies_to_volume` is
+    // not written here either — writing a validity span onto a row that has been published *is* editing
+    // it, and slice 6 reached the same conclusion for the same reason. Retirement from a current answer is
+    // a property of the `supersedes` link (`currentClaimSql`), not of a column. This table writes into
+    // `facts` **nothing at all**, which is a stricter rule than the revision door's: `markSuperseded`
+    // moves `status` and `updated_at`, and this door moves neither.
+    //
+    // One row per (claim, volume that saw it), because a volume either saw the claim or it did not, and a
+    // second chapter of the same volume seeing it again is the same observation. `seen_chapter` keeps the
+    // first chapter that reported it, so the observation is traceable to a line of a book.
+    up: [
+      `CREATE TABLE IF NOT EXISTS claim_confirmations (
+         fact_id       TEXT NOT NULL REFERENCES facts(id),
+         seen_volume   INTEGER NOT NULL,
+         seen_chapter  TEXT,
+         quote         TEXT,
+         seen_by_stage TEXT NOT NULL,
+         seen_at       TEXT NOT NULL,
+         note          TEXT,
+         PRIMARY KEY (fact_id, seen_volume)
+       )`,
+
+      // The two questions this table exists to answer: "which claims did this volume re-confirm" (the
+      // stage's log, and the render's per-character line), and "which volumes have confirmed this claim"
+      // (the render's `confirmed in volumes 1–6` half, and the audit's count). The second one is the
+      // primary key's own prefix, so only the first needs an index.
+      `CREATE INDEX IF NOT EXISTS idx_claim_confirmations_volume ON claim_confirmations(seen_volume, fact_id)`,
+    ],
+  },
 ];
 
 /**
@@ -720,6 +776,7 @@ const COUNTED_TABLES = [
   "research_notes",
   "cast_identities",
   "cast_identity_links",
+  "claim_confirmations",
 ];
 
 // ─── Applying it ──────────────────────────────────────────────────────────────

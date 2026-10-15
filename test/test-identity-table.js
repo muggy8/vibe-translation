@@ -192,10 +192,10 @@ function fileCharacterRow(store, term, notes) {
   const { store, seriesDir } = openFixture("migration", { import: false });
   const file = path.join(seriesDir, "Test Story(01)", "series.db");
   try {
-    same(SCHEMA_VERSION, 10, "this build writes schema 10");
-    same(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "the migrations are a list, oldest first, and 10 is appended rather than 9 edited");
-    const last = MIGRATIONS[MIGRATIONS.length - 1];
-    ok(last.version === 10 && /register/.test(last.name), `the newest migration names the register pair: ${last.name}`);
+    same(SCHEMA_VERSION, 11, "this build writes schema 11");
+    same(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], "the migrations are a list, oldest first, and each one is appended rather than an older one edited");
+    const register = MIGRATIONS.find((m) => m.version === 10);
+    ok(register && /register/.test(register.name), `the register migration is still there, unchanged: ${register && register.name}`);
     ok(MIGRATIONS.some((m) => m.version === 9 && /identity/.test(m.name)), "the identity migration is still there, unchanged, below it");
     ok(COUNTED_TABLES.includes("cast_identities") && COUNTED_TABLES.includes("cast_identity_links"), "both new tables are counted, so copy-forward compares them");
 
@@ -219,12 +219,13 @@ function fileCharacterRow(store, term, notes) {
 
     const reopened = openReferenceStore({ volume: 1, folder: "Test Story(01)", seriesDir, stage: "merge" });
     try {
-      same(readSchemaVersion(reopened.db), 10, "opening it with this build brings it up to 10");
-      same(reopened.schemaVersion, 10, "and the handle reports 10");
+      same(readSchemaVersion(reopened.db), 11, "opening it with this build brings it up to 11");
+      same(reopened.schemaVersion, 11, "and the handle reports 11");
       const tables = new Set(reopened.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
       ok(tables.has("cast_identities") && tables.has("cast_identity_links"), "the new tables exist in the reopened record");
       same(reopened.db.prepare("SELECT COUNT(*) n FROM cast_identities").get().n, 0, "and they start empty: a migration does not invent links");
       same(reopened.db.prepare("SELECT COUNT(*) n FROM cast_identity_links").get().n, 0, "including the link table");
+      same(reopened.db.prepare("SELECT COUNT(*) n FROM claim_confirmations").get().n, 0, "and neither does it invent a confirmation nobody observed");
       same(reopened.tableCounts().cast_identities, 0, "the counted-table report carries the new tables");
       ok(!reopened.created, "the file was opened, not re-created");
       const counts = reopened.tableCounts();
