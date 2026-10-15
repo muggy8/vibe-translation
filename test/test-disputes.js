@@ -225,8 +225,14 @@ async function scenarioDisputesFlowBackwards() {
   };
 
   try {
-    const { processVerifyVolume } = require("../verify-translate");
-    const systemPrompt = await fs.readFile(path.join(__dirname, "..", "system-prompts", "verify-translate.md"), "utf8");
+    const { processVerifyVolume, fillVerifyTargetLanguage } = require("../verify-translate");
+    // The rubric leaves the language for the stage to name (system-prompts/verify-translate.md carries
+    // {{TARGET_LANGUAGE}}), so a test that plays the stage has to name it too — the same door the
+    // stage uses, not a copy of the sentence.
+    const systemPrompt = fillVerifyTargetLanguage(
+      await fs.readFile(path.join(__dirname, "..", "system-prompts", "verify-translate.md"), "utf8"),
+      "English"
+    );
     const template = await fs.readFile(path.join(__dirname, "..", "user-prompts", "verify-translate.md"), "utf8");
 
     const res = await processVerifyVolume({

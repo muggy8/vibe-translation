@@ -1539,6 +1539,14 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   );
   assert.strictEqual(persisted.seriesName, "Oresuki", "the agent's series name is the plan of record");
   assert.strictEqual(persisted.generator, "get-translation-target.js");
+  // The plan says WHERE the source language came from. The agent read the books and answered, and no
+  // TRANSLATION_SOURCE_LANGUAGE is set, so this plan of record records the language as measured.
+  assert.strictEqual(live.sourceLanguageOrigin, "measured", "the intake measured the source language");
+  assert.strictEqual(persisted.sourceLanguageOrigin, "measured", "and the field is in the plan of record, not only in the returned object");
+  assert.ok(
+    logs.some((l) => /source language measured by the intake from the books/.test(l)),
+    "the run log says the language was measured, every time the plan is read"
+  );
   assert.ok(await fs.promises.stat(path.join(liveDir, intake.PLAN_FILE_NAME)), "the human-readable plan was written");
 
   // B. .env overrides win over the agent's decisions.
@@ -1548,6 +1556,13 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   assert.strictEqual(overridden.seriesName, "Chosen Name", "SERIES_NAME overrides the agent's name");
   assert.strictEqual(overridden.sourceLanguage, "Korean", "TRANSLATION_SOURCE_LANGUAGE overrides the agent's guess");
   assert.strictEqual(overridden.targetLanguage, "English", "the target language is a fixed setting");
+  // …and the plan says so: an override is a DECLARATION, which is a different fact from a measurement
+  // and a different fact again from the settings' default filling a gap.
+  assert.strictEqual(overridden.sourceLanguageOrigin, "declared", "the override is recorded as a declaration, not as a finding");
+  assert.ok(
+    logs.some((l) => /source language DECLARED by TRANSLATION_SOURCE_LANGUAGE/.test(l) && /overridden/.test(l)),
+    "and the log names the door that replaced the intake's answer"
+  );
 
   // C. a folder that already holds pipeline output keeps its name.
   const keepDir = makeTmpDir("ai-client-intake-committed-");
@@ -1688,6 +1703,7 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   );
   assert.deepStrictEqual(fs.readdirSync(liveDir), beforePreview, "the dry run created no new folders");
   assert.ok(logs.some((l) => /previewing the committed plan of record/.test(l)), "the preview is logged");
+  assert.strictEqual(preview.sourceLanguageOrigin, "measured", "the field travels with the plan of record — a preview of the committed plan reports how that plan got its language");
 
   // J. a series with no committed plan previews ANYWAY: the deterministic
   //    layout names itself from the books it found. (SERIES_NAME is no longer a
@@ -1705,6 +1721,15 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
     "Oresuki",
     "the preview derived the series name from the volume folders it found"
   );
+  // The deterministic layout is the ONE place a source language can be ASSUMED: no intake agent ran,
+  // no TRANSLATION_SOURCE_LANGUAGE is set, so the settings' default filled the gap. The plan says so,
+  // and the log says so, instead of presenting "Japanese" as something somebody worked out.
+  assert.strictEqual(previewUnnamed.sourceLanguageOrigin, "assumed", "nobody measured a language here, and the plan says so");
+  assert.strictEqual(previewUnnamed.sourceLanguage, "Japanese", "the value is the settings' default (configs/shared DEFAULT_SOURCE_LANGUAGE)");
+  assert.ok(
+    logs.some((l) => /source language ASSUMED, not measured/.test(l) && /npx gulp discover/.test(l)),
+    "and the run log names the assumption and the door that replaces it"
+  );
   await writeEpub(liveDir, "loose-extra.epub", {
     title: "Loose Extra",
     series: "Oresuki",
@@ -1714,7 +1739,47 @@ const KR_TEXT = "그날 교실에서 만난 그녀는 이렇게 말했다. 오�
   const previewNamed = await intake.getTranslationTarget({ dryRun: true });
   assert.ok(previewNamed.volumes.length >= 2, "an explicit SERIES_NAME still wins");
   assert.strictEqual(previewNamed.seriesName, "Oresuki", "and it is used verbatim");
+  assert.strictEqual(previewNamed.sourceLanguageOrigin, "assumed", "naming the series name does not make a source language measured");
   delete process.env.SERIES_NAME;
+
+  // The two states a reader has to be able to tell apart, shown side by side on the summary line the
+  // pipeline prints for every plan it reads: the assumption is NAMED when it happened, and silent when
+  // the language really was measured.
+  logs.length = 0;
+  intake.logManifestSummary({
+    volumes: [{ installmentNumber: "01", folder: "Old(01)" }],
+    seriesName: "Old Plan",
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+  });
+  assert.ok(
+    logs.some((l) => /source language origin NOT RECORDED/.test(l)),
+    "a plan written before the field existed is reported as unrecorded, never as measured"
+  );
+  logs.length = 0;
+  intake.logManifestSummary({
+    volumes: [{ installmentNumber: "01", folder: "Measured(01)" }],
+    seriesName: "Measured Plan",
+    sourceLanguage: "Korean",
+    targetLanguage: "English",
+    sourceLanguageOrigin: "measured",
+  });
+  assert.ok(
+    !logs.some((l) => /ASSUMED|NOT RECORDED|DECLARED/.test(l)),
+    "and the assumption line is absent when the intake did answer — named when it happened, silent when it did not"
+  );
+  logs.length = 0;
+  intake.logManifestSummary({
+    volumes: [{ installmentNumber: "01", folder: "Assumed(01)" }],
+    seriesName: "Assumed Plan",
+    sourceLanguage: "Japanese",
+    targetLanguage: "English",
+    sourceLanguageOrigin: "assumed",
+  });
+  assert.ok(
+    logs.some((l) => /source language ASSUMED, not measured/.test(l)),
+    "and present when the plan says the default filled it"
+  );
   // restore the committed plan for anything after this block
   stubIntakeAgent([planFor(twoVolumes())]);
   await intake.getTranslationTarget({ forceIntake: true });

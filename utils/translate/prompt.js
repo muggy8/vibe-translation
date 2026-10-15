@@ -17,6 +17,7 @@
 
 const fs = require("fs").promises;
 const tokens = require("../tokens");
+const { requireLanguageName } = require("../../configs/shared");
 
 // ─── The instTrans instruction language ─────────────────────────────────────
 
@@ -200,17 +201,22 @@ function buildTranslationTaskLines({
  * single-user-message shape: the header, the 【源文】 block, the numbered
  * 【约束要求】 list, and the output-only suffix).
  *
- * @param {{template: string, sourceText: string, tasks: string[], sourceLanguage?: string, targetLanguage?: string, genre?: string}} p
+ * @param {{template: string, sourceText: string, tasks: string[], sourceLanguage?: string, targetLanguage: string, genre?: string}} p
  * @returns {string} The final single user message.
  */
-function buildTranslationPrompt({ template, sourceText, tasks, sourceLanguage = "", targetLanguage = "English", genre }) {
+function buildTranslationPrompt({ template, sourceText, tasks, sourceLanguage = "", targetLanguage, genre }) {
+  // `sourceLanguage` keeps its empty default: an empty source language is the official client's
+  // `--source auto`, which is a real value and not a guess. `targetLanguage` has no default: the
+  // header the model is asked in names the language the translation is written IN, and that is a
+  // setting the run resolves (configs/shared/settings.js), not something this builder may fill in.
+  const target = requireLanguageName(targetLanguage, { language: "target", calledFrom: "buildTranslationPrompt" });
   const header = template.includes(HEADER_CONSTRAINED_CLAUSE)
     ? HEADER_CONSTRAINED_CLAUSE
     : HEADER_PLAIN_CLAUSE;
   let out = template
     .replaceAll("{{SOURCE_LANGUAGE}}", languageName(sourceLanguage))
     .replaceAll("{{GENRE}}", genre || translateGenre())
-    .replaceAll("{{TARGET_LANGUAGE}}", languageName(targetLanguage))
+    .replaceAll("{{TARGET_LANGUAGE}}", languageName(target))
     .replaceAll("{{SOURCE_TEXT}}", sourceText);
   if (tasks.length === 0) {
     // Nothing to constrain: the plain canonical shape, with no empty
@@ -401,7 +407,7 @@ function describeDroppedBlocks(dropped, label) {
  *   roleWindow: number,
  *   outputReserve: number,
  *   sourceLanguage?: string,
- *   targetLanguage?: string,
+ *   targetLanguage: string,
  *   genre?: string,
  *   label?: string,
  * }} p
@@ -422,10 +428,13 @@ function buildBudgetedTaskLines({
   roleWindow,
   outputReserve,
   sourceLanguage = "",
-  targetLanguage = "English",
+  targetLanguage,
   genre,
   label = "",
 }) {
+  // Asked here rather than left to `buildTranslationPrompt` so the refusal names the caller that
+  // actually forgot (a stage), not the builder two calls down.
+  const target = requireLanguageName(targetLanguage, { language: "target", calledFrom: "buildBudgetedTaskLines" });
   // What the request carries no matter what: the chapter text, the prompt
   // template, and the fixed instruction lines. These are never trimmed — a
   // chapter that does not fit with them must be split (TRANSLATE_CHUNK_CHARS),
@@ -484,7 +493,7 @@ function buildBudgetedTaskLines({
       sourceText,
       tasks,
       sourceLanguage,
-      targetLanguage,
+      targetLanguage: target,
       genre,
     }),
     dropped: fitted.dropped,

@@ -10,6 +10,8 @@
  * Part of the translate.js layer (split out of the original single file).
  */
 
+const { requireLanguageName } = require("../../configs/shared");
+
 /**
  * The floor below which a chapter's SOURCE counts as having nothing in it
  * (TRANSLATION_EMPTY_SOURCE_CHARS, default 40). This is deliberately far smaller
@@ -226,17 +228,24 @@ function countOccurrences(text, term, { wordBoundary = false } = {}) {
  *   - glossary terms that occur in the source but whose canonical rendering
  *     is absent from the draft (ignored terminology)
  *
- * @param {{sourceText: string, draftText: string, terms?: Array<{term: string, rendering: string}>, sourceLanguage?: string, targetLanguage?: string}} p
+ * @param {{sourceText: string, draftText: string, terms?: Array<{term: string, rendering: string}>, sourceLanguage: string, targetLanguage: string}} p
  * @returns {{ok: boolean, cjk: number, lengthRatio: number, missingTerms: Array<{term: string, rendering: string}>, warnings: string[], errors: string[]}}
  */
-function checkTranslationQa({ sourceText, draftText, terms = [], sourceLanguage = "Japanese", targetLanguage = "English" }) {
+function checkTranslationQa({ sourceText, draftText, terms = [], sourceLanguage, targetLanguage }) {
+  // No defaults here, on purpose (AGENTS.md: the language defaults live in configs/shared/settings.js
+  // and nowhere else). Every pipeline caller already hands both languages from
+  // `resolveRunSettings(...)`; a default in this signature would only ever answer for a caller that
+  // forgot, and the answer would be a residue check and a length band for the wrong pair — a QA gate
+  // that measures one script's characters in a book written in another and reports a clean pass.
+  const sourceLang = requireLanguageName(sourceLanguage, { language: "source", calledFrom: "checkTranslationQa" });
+  const targetLang = requireLanguageName(targetLanguage, { language: "target", calledFrom: "checkTranslationQa" });
   const errors = [];
   const warnings = [];
   const draft = (draftText || "").trim();
   const src = (sourceText || "").trim();
-  const residue = residueRatio(draft, sourceLanguage, targetLanguage);
-  const band = lengthBands(sourceLanguage, targetLanguage);
-  const wordBoundary = isSpaceSeparated(sourceLanguage);
+  const residue = residueRatio(draft, sourceLang, targetLang);
+  const band = lengthBands(sourceLang, targetLang);
+  const wordBoundary = isSpaceSeparated(sourceLang);
   const lengthRatio = src.length > 0 ? draft.length / src.length : draft.length > 0 ? Infinity : 0;
   if (!draft) errors.push("draft is empty");
   // An empty (or near-empty) SOURCE is not a translation problem — it is a

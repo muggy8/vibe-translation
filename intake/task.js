@@ -28,7 +28,7 @@ const {
   filterVolumesByInstallment,
 } = require("../utils/manifest");
 const { fileExists } = require("../utils/fs");
-const { structuralError } = require("../configs/shared");
+const { structuralError, DEFAULT_SOURCE_LANGUAGE, DEFAULT_TARGET_LANGUAGE } = require("../configs/shared");
 const { REGISTER_MANIFEST_KEY, describeRegisterDeclaration } = require("../utils/reference-store/register");
 
 const { confidenceGate, findDuplicateSources, manifestSourcesExist, validateManifest } = require("./validate");
@@ -51,6 +51,37 @@ function logManifestSummary(manifest) {
     `[get-translation-target] ${manifest.volumes.length} volume(s); series ` +
       `"${manifest.seriesName}"; ${manifest.sourceLanguage} -> ${manifest.targetLanguage}.`
   );
+  // Which of those two languages somebody actually WORKED OUT, stated every time the plan is read.
+  // The target language is always a setting (the intake is told it is fixed). The source language is
+  // supposed to be a finding from the book — and until now a plan could carry the settings' default
+  // and the log could not tell that apart from a decision. `sourceLanguageOrigin` is the field.
+  const origin = manifest.sourceLanguageOrigin;
+  if (origin === "assumed") {
+    harness.logLine(
+      `[get-translation-target] source language ASSUMED, not measured: no intake agent read these books ` +
+        `and TRANSLATION_SOURCE_LANGUAGE is unset, so the plan of record carries the settings' default ` +
+        `"${DEFAULT_SOURCE_LANGUAGE}". Every stage that measures the source — the glossary and voice ` +
+        `read passes, the wiki, the QA residue check — will measure that language. Run "npx gulp ` +
+        `discover" without --dry-run to have the intake work it out from the books.`
+    );
+  } else if (origin === "declared") {
+    harness.logLine(
+      `[get-translation-target] source language DECLARED by TRANSLATION_SOURCE_LANGUAGE ` +
+        `("${manifest.sourceLanguage}"), not measured from the book: the intake's own answer was ` +
+        `overridden, which is what the override is for.`
+    );
+  } else if (origin === "measured") {
+    harness.logLine(
+      `[get-translation-target] source language measured by the intake from the books: ` +
+        `"${manifest.sourceLanguage}".`
+    );
+  } else {
+    harness.logLine(
+      `[get-translation-target] source language origin NOT RECORDED: this plan of record predates the ` +
+        `"sourceLanguageOrigin" field, so nothing here says whether "${manifest.sourceLanguage}" was ` +
+        `read out of the books or assumed. Re-run "npx gulp discover --force" to record it.`
+    );
+  }
   if (d.summary) harness.logLine(`[get-translation-target] intake: ${d.summary}`);
   if (d.confidence && typeof d.confidence === "object") {
     const parts = Object.entries(d.confidence).map(([k, v]) => `${k}=${v}`);
@@ -193,10 +224,13 @@ async function getTranslationTarget({ forceIntake = false, dryRun = false } = {}
   }
 
   // .env wins over the manifest; an unset value is left to the intake agent.
+  // The target language is never left to the agent — the agent cannot know which language the account
+  // owner wants to read the books in (see intake/prompts.js `fixedValuesBlock`) — so it is resolved
+  // here from the settings' own default rather than from a literal this file invented.
   const overrides = {
     seriesName: process.env.SERIES_NAME || undefined,
     sourceLanguage: process.env.TRANSLATION_SOURCE_LANGUAGE || undefined,
-    targetLanguage: process.env.TRANSLATION_TARGET_LANGUAGE || "English",
+    targetLanguage: process.env.TRANSLATION_TARGET_LANGUAGE || DEFAULT_TARGET_LANGUAGE,
   };
 
   const manifestPath = path.join(seriesDir, MANIFEST_FILE_NAME);
@@ -230,11 +264,17 @@ async function getTranslationTarget({ forceIntake = false, dryRun = false } = {}
       `[get-translation-target] dry-run: no committed plan of record is usable here, so the layout is ` +
         `being built by scanning ${seriesDir} with no AI call. This preview is NOT the committed plan.`
     );
+    // Nobody read a book on this path — no intake agent ran — so no language was MEASURED. Either the
+    // operator declared one in .env, or the settings' own default filled it and this plan says so out
+    // loud rather than presenting "Japanese" as a finding. `sourceLanguageOrigin` is the field that
+    // carries the distinction into the plan of record.
+    const sourceLanguageOrigin = overrides.sourceLanguage ? "declared" : "assumed";
     const manifest = await buildDeterministicManifest(seriesDir, {
-      sourceLanguage: overrides.sourceLanguage || "Japanese",
+      sourceLanguage: overrides.sourceLanguage || DEFAULT_SOURCE_LANGUAGE,
       targetLanguage: overrides.targetLanguage,
       seriesName: overrides.seriesName,
     });
+    manifest.sourceLanguageOrigin = sourceLanguageOrigin;
     if (manifest.volumes.length === 0) {
       throw new Error(
         `No volumes found in ${seriesDir}: no volume folder holding a book and no ` +
@@ -357,6 +397,12 @@ async function getTranslationTarget({ forceIntake = false, dryRun = false } = {}
   manifest.seriesName = overrides.seriesName || manifest.seriesName;
   manifest.seriesNameAlt = manifest.seriesNameAlt || manifest.seriesName;
   manifest.sourceLanguage = overrides.sourceLanguage || manifest.sourceLanguage;
+  // Where the source language came from, recorded rather than implied: the agent read the books and
+  // answered ("measured"), the operator pinned it in .env and the agent's answer was replaced
+  // ("declared"), or nothing answered and the settings' default filled it ("assumed" — which only the
+  // no-AI deterministic preview above can produce, because a plan the agent wrote is validated as
+  // having a non-empty source language).
+  manifest.sourceLanguageOrigin = overrides.sourceLanguage ? "declared" : "measured";
   manifest.targetLanguage = overrides.targetLanguage;
   manifest.generator = "get-translation-target.js";
   manifest.generatedAt = new Date().toISOString();

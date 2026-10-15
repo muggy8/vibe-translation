@@ -12,6 +12,7 @@
  */
 
 const { isSpaceSeparated } = require("./qa");
+const { requireLanguageName } = require("../../configs/shared");
 
 /**
  * Find near-variants of the canonical renderings in a published volume.
@@ -31,13 +32,17 @@ const { isSpaceSeparated } = require("./qa");
  *   LOW   — the canonical rendering appears in a different case, or as a plural
  *           alongside the singular (often legitimate, so it is only reported).
  *
- * @param {{text: string, terms: Array<{term: string, rendering: string, section?: string}>, targetLanguage?: string}} p
+ * @param {{text: string, terms: Array<{term: string, rendering: string, section?: string}>, targetLanguage: string}} p
  * @returns {Array<{term: string, canonical: string, variant: string, count: number, kind: string, severity: "HIGH"|"MEDIUM"|"LOW"}>}
  */
-function findRenderingVariants({ text, terms = [], targetLanguage = "English" }) {
+function findRenderingVariants({ text, terms = [], targetLanguage }) {
+  // The target language decides whether a rendering is matched as a whole word or as a substring, so
+  // guessing it is guessing the scan. It comes from the run (`resolveRunSettings`), and this module
+  // holds no default for it — see configs/shared/settings.js `requireLanguageName`.
+  const targetLang = requireLanguageName(targetLanguage, { language: "target", calledFrom: "findRenderingVariants" });
   const body = text || "";
   if (!body.trim() || terms.length === 0) return [];
-  const wordBoundary = isSpaceSeparated(targetLanguage);
+  const wordBoundary = isSpaceSeparated(targetLang);
   const findings = [];
 
   // Escape a rendering for regex use, then allow the separators a human types

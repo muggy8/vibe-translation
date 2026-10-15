@@ -10,6 +10,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { fileExists } = require("../utils/fs");
+const { requireLanguageName } = require("../configs/shared");
 const { transformUserPrompt, parseAcceptanceScore, writePromptDump } = require("../utils/prompt");
 const {
   parseGlossaryDisputes,
@@ -514,11 +515,15 @@ async function processVerifyVolume(ctx) {
  *   volumeDir: string,
  *   bundle: {segments: Array<{id: string, file: string, title: string}>},
  *   refs: Object,
- *   targetLanguage?: string,
+ *   targetLanguage: string,
  * }} ctx
  * @returns {Promise<{rows: Array<Object>, passed: number, failed: number, noDraft: number, verified: number, skipped: number}>}
  */
-async function commitVerificationVolume({ volume, volumeDir, bundle, refs, targetLanguage = "English" }) {
+async function commitVerificationVolume({ volume, volumeDir, bundle, refs, targetLanguage }) {
+  // The commit phase hands the language to the deterministic variant scan, which matches renderings
+  // as whole words or as substrings depending on it. Both call sites already pass the run's own
+  // resolved target language, so this phase has no business guessing it.
+  const targetLang = requireLanguageName(targetLanguage, { language: "target", calledFrom: "commitVerificationVolume" });
   const state = await loadTranslationState(path.join(volumeDir, STATE_FILE));
   const sidecarPath = path.join(volumeDir, VERIFICATION_FILE);
   const sidecar = await loadVerificationSidecar(sidecarPath);
@@ -578,7 +583,7 @@ async function commitVerificationVolume({ volume, volumeDir, bundle, refs, targe
   const variantFindings = findRenderingVariants({
     text: publishedText,
     terms: (refs && refs.terms) || [],
-    targetLanguage,
+    targetLanguage: targetLang,
   });
   if (variantFindings.length > 0) {
     harness.logLine(

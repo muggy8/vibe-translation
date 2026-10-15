@@ -31,7 +31,7 @@ const assert = require("assert");
 const fs = require("fs").promises;
 const path = require("path");
 
-const { PASSING_SCORE, judgeTemperature } = require("../configs/shared");
+const { PASSING_SCORE, judgeTemperature, resolveRunSettings } = require("../configs/shared");
 const { roleEndpoint, describeEndpoint, medianScore } = require("../utils/translate");
 
 const CAL_DIR = __dirname;
@@ -213,8 +213,13 @@ async function main() {
   }
 
   const harness = require("../harness");
-  const { gradeChapter } = require("../verify-translate");
-  const systemPrompt = await fs.readFile(path.join(__dirname, "..", "system-prompts", "verify-translate.md"), "utf8");
+  const { gradeChapter, fillVerifyTargetLanguage } = require("../verify-translate");
+  // The rubric names its language through the stage's own door, so the calibration run resolves it the
+  // way a run does (.env, then the settings' default — there is no plan of record here).
+  const systemPrompt = fillVerifyTargetLanguage(
+    await fs.readFile(path.join(__dirname, "..", "system-prompts", "verify-translate.md"), "utf8"),
+    resolveRunSettings(null).targetLanguage
+  );
   const template = await fs.readFile(path.join(__dirname, "..", "user-prompts", "verify-translate.md"), "utf8");
   const endpoint = roleEndpoint("VERIFY");
 

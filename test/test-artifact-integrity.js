@@ -145,6 +145,15 @@ async function scenarioCommitVerificationPhase() {
     // The scan is persisted in the sidecar so the translation report can count it.
     const sidecar = JSON.parse(fs.readFileSync(path.join(volumeDir, VERIFICATION_FILE), "utf8"));
     assert.ok(Array.isArray(sidecar.volume.renderingVariants), "the scan is persisted");
+
+    // The commit phase names the language it hands the variant scan. Both real call sites already do
+    // (verify-translate/task.js passes the run's own resolved target language), so the phase has no
+    // default of its own to fall back on.
+    await assert.rejects(
+      () => commitVerificationVolume({ volume, volumeDir, bundle, refs: { terms: [] } }),
+      /commitVerificationVolume was called without naming its target language/,
+      "a commit phase that names no target language is refused rather than defaulted"
+    );
   } finally {
     cleanup(root);
   }

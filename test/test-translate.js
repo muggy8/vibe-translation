@@ -508,6 +508,7 @@ assert.strictEqual(sha256("a"), sha256("a"));
     template: "{{SOURCE_TEXT}}\n{{TASKS}}",
     roleWindow: 900,
     outputReserve: 400,
+    targetLanguage: "English",
     label: "test chapter",
   });
   assert.ok(budgeted.tasks.some((t) => t.includes('"ソラ" → "Sora"')), "terminology survives the squeeze");
@@ -523,9 +524,30 @@ assert.strictEqual(sha256("a"), sha256("a"));
     template: "{{SOURCE_TEXT}}\n{{TASKS}}",
     roleWindow: 32000,
     outputReserve: 4000,
+    targetLanguage: "English",
   });
   assert.deepStrictEqual(roomyTasks.dropped, [], "a roomy window drops nothing");
   assert.ok(roomyTasks.tasks.some((t) => t.includes("She says ya.")), "voice notes survive when there is room");
+
+  // The language the prompt header names is a required argument, and the refusal names the stage-level
+  // builder rather than the two-call-down prompt builder.
+  assert.throws(
+    () =>
+      buildBudgetedTaskLines({
+        terminologyLines: [],
+        sourceText: "本文です",
+        template: "{{SOURCE_TEXT}}\n{{TASKS}}",
+        roleWindow: 32000,
+        outputReserve: 4000,
+      }),
+    /buildBudgetedTaskLines was called without naming its target language/,
+    "a budgeted prompt with no target language is refused"
+  );
+  assert.throws(
+    () => buildTranslationPrompt({ template: "{{TARGET_LANGUAGE}}", sourceText: "x", tasks: [] }),
+    /buildTranslationPrompt was called without naming its target language/,
+    "the prompt builder itself refuses too"
+  );
 }
 
 // ─── chapterContextHash (per-chapter invalidation) ───────────────────────────
@@ -716,6 +738,19 @@ assert.strictEqual(sha256("a"), sha256("a"));
     findRenderingVariants({ text: "Soraque and Soran argued.", terms, targetLanguage: "English" }),
     [],
     "a longer word containing the rendering is not a variant"
+  );
+
+  // The target language decides whole-word matching versus substring matching, so it is a required
+  // argument: a scan that guessed it would scan a Korean volume with a CJK matcher and find nothing.
+  assert.throws(
+    () => findRenderingVariants({ text: "Sora looked at Blacksteel.", terms }),
+    /findRenderingVariants was called without naming its target language/,
+    "the variant scan refuses a caller that names no target language"
+  );
+  assert.deepStrictEqual(
+    findRenderingVariants({ text: "", terms, targetLanguage: "English" }),
+    [],
+    "an empty volume still reports nothing (the refusal is about the language, not the text)"
   );
 
   // The report section renders the scan for a human reader.
@@ -1029,19 +1064,24 @@ assert.strictEqual(sha256("a"), sha256("a"));
     { term: "黒鋼", rendering: "Kurogane" },
   ];
   const source = "ソラは黒鋼を見た。部屋は静かだった。誰も起きていなかった。";
+  // The languages are named on every call, because `checkTranslationQa` has no default to fall back
+  // on: the pair comes from the run (configs/shared `resolveRunSettings`), and a helper that guessed
+  // one would measure the wrong script and report a clean pass.
+  const JA_EN = { sourceLanguage: "Japanese", targetLanguage: "English" };
 
   // Good translation: passes, both renderings present.
   const good = checkTranslationQa({
     sourceText: source,
     draftText: "Sora looked at Kurogane. The room was quiet. No one was awake.",
     terms,
+    ...JA_EN,
   });
   assert.strictEqual(good.ok, true, JSON.stringify(good.errors));
   assert.strictEqual(good.missingTerms.length, 0);
   assert.ok(good.lengthRatio >= 0.6 && good.lengthRatio <= 2.5, `ratio ${good.lengthRatio}`);
 
   // Source echoed back: hard failure (CJK ratio).
-  const echoed = checkTranslationQa({ sourceText: source, draftText: source, terms });
+  const echoed = checkTranslationQa({ sourceText: source, draftText: source, terms, ...JA_EN });
   assert.strictEqual(echoed.ok, false);
   assert.ok(echoed.cjk > 0.05);
 
@@ -1050,25 +1090,45 @@ assert.strictEqual(sha256("a"), sha256("a"));
     sourceText: source,
     draftText: "Sora looked at the man.",
     terms,
+    ...JA_EN,
   });
   assert.strictEqual(partial.ok, true);
   assert.strictEqual(partial.missingTerms.length, 1);
   assert.strictEqual(partial.missingTerms[0].term, "黒鋼");
 
   // Empty draft: hard failure.
-  assert.strictEqual(checkTranslationQa({ sourceText: source, draftText: "", terms }).ok, false);
+  assert.strictEqual(checkTranslationQa({ sourceText: source, draftText: "", terms, ...JA_EN }).ok, false);
 
   // Short-but-plausible draft (length ratio in the 0.4–0.6 band): a warning,
   // still ok (a compact but complete rendering).
-  const shortWarn = checkTranslationQa({ sourceText: source, draftText: "Sora looked.", terms });
+  const shortWarn = checkTranslationQa({ sourceText: source, draftText: "Sora looked.", terms, ...JA_EN });
   assert.strictEqual(shortWarn.ok, true);
   assert.ok(shortWarn.warnings.some((w) => w.includes("length ratio")));
 
   // Grossly short draft (under 40% of the source length): a truncated response
   // is a hard failure (#1), not just a warning.
-  const truncated = checkTranslationQa({ sourceText: source, draftText: "Yes.", terms });
+  const truncated = checkTranslationQa({ sourceText: source, draftText: "Yes.", terms, ...JA_EN });
   assert.strictEqual(truncated.ok, false);
   assert.ok(truncated.errors.some((e) => e.includes("truncated")));
+
+  // No default on either side: a caller that names no language is refused, not handed a guess. The
+  // refusal is the point — this is the call shape that used to run a Japanese residue check against a
+  // Chinese book and report nothing.
+  assert.throws(
+    () => checkTranslationQa({ sourceText: source, draftText: "Sora looked.", terms, targetLanguage: "English" }),
+    /checkTranslationQa was called without naming its source language/,
+    "no source language: refused"
+  );
+  assert.throws(
+    () => checkTranslationQa({ sourceText: source, draftText: "Sora looked.", terms, sourceLanguage: "Japanese" }),
+    /checkTranslationQa was called without naming its target language/,
+    "no target language: refused"
+  );
+  assert.throws(
+    () => checkTranslationQa({ sourceText: source, draftText: "Sora looked.", terms, sourceLanguage: "  ", targetLanguage: "English" }),
+    /without naming its source language/,
+    "a blank language is the same as none"
+  );
 }
 
 // ─── multi-language residue / length / matching ────────────────────────────────

@@ -33,7 +33,11 @@
  *     the mention is FOR, pins the whole inventory, and pins the framing bucket at **empty**. A prompt
  *     that names the language of the work it is analysing — the defect plan 06 slice 4 removed from the
  *     voice extraction prompt and slice 10 removed from five more — is a finding whether or not the file
- *     has a right to name languages at all.
+ *     has a right to name languages at all. The same rule now catches a prompt naming the language it
+ *     WRITES in: `system-prompts/verify-translate.md` carries `{{TARGET_LANGUAGE}}` instead of a language,
+ *     `fillVerifyTargetLanguage` fills it from the run's settings, and the suite proves the filled prompt
+ *     is byte-identical to the one the stage always sent (so this is wiring, not a prompt change), that a
+ *     Korean run grades Korean, and that a fill which silently did nothing is refused rather than quiet.
  *   - **The two named exemptions:** `QUIRK_TYPE_TO_ASPECT` and `QUIRK_TYPE_TO_VOICE_LABEL` map the
  *     extraction prompt's own quirk kinds (four of which are register-ish) onto the store's aspects. They
  *     are the collapse plan 06 §2.3 measured, and plan 06 slice 5 (2026-10-14) closed it **per claim, on
@@ -48,10 +52,22 @@
 
 require("./test-home");
 const assert = require("assert");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.resolve(__dirname, "..");
+
+/**
+ * sha256 of a prompt's text — used to prove a rewritten prompt reproduces the bytes the stage was
+ * already sending.
+ *
+ * @param {string} text
+ * @returns {string} Hex digest.
+ */
+function sha256(text) {
+  return crypto.createHash("sha256").update(text).digest("hex");
+}
 
 let checks = 0;
 /** Count one assertion and run it. @param {boolean|void} condition @param {string} message */
@@ -375,9 +391,9 @@ function scanSourceForAxisLists(file, source) {
  *
  * Measured against all 43 prompt files before slice 10: it fires on **5** lines, and all 5 are the role
  * sentence of a prompt (`character-voice-acceptance`, `style-guide-acceptance`, `style-guide-extract`,
- * `style-guide`, `style-guide-validator`). It fires on **0** of the 7 language-naming lines that remain,
- * which name a language as something to work out from the page or as the language being written. That
- * zero-false-hit measurement is why this shape is pinned and the raw file count was not.
+ * `style-guide`, `style-guide-validator`). It fires on **0** of the 6 language-naming lines that remain,
+ * which name a language as something to work out from the page. That zero-false-hit measurement is why
+ * this shape is pinned and the raw file count was not.
  *
  * The boundary, stated rather than hidden: it reads a language name attached to a noun for the work. A
  * legitimate detection sentence written that way — "a Chinese book uses Han characters" — would trip it,
@@ -396,7 +412,7 @@ const FRAMING_SHAPE = new RegExp(
 const PROMPT_MENTION_BUCKETS = [
   "names-the-work-being-analysed", // the defect: must stay empty
   "works-out-the-source-language", // the intake's job: legitimate
-  "names-the-language-being-written", // the output language: legitimate today, named as debt
+  "names-the-language-being-written", // the output language: must stay empty (slice 11 filled it from the setting)
 ];
 
 /**
@@ -405,6 +421,9 @@ const PROMPT_MENTION_BUCKETS = [
  * guard until somebody reads it and says which bucket it belongs in.
  *
  * Measured 2026-10-15, after plan 06 slice 10 took the five framing sentences out: 7 lines, 2 files.
+ * After the language-defaults slice took the verifier's rubric language out (the same day): **6 lines,
+ * 1 file** — every remaining one is the intake's own language decision, which is the only thing a
+ * prompt is allowed to name a language FOR.
  *
  * @type {Array<{file: string, line: string, bucket: string, because: string}>}
  */
@@ -445,13 +464,20 @@ const PROMPT_LANGUAGE_MENTIONS = [
     bucket: "works-out-the-source-language",
     because: "a folder-naming rule that gives one example; it does not say the series is Japanese",
   },
-  {
-    file: "system-prompts/verify-translate.md",
-    line: "4. **Readability** — awkward, broken, or ambiguous English; leftover source-language text (stray kanji/kana that should have been translated); duplicated or garbled passages.",
-    bucket: "names-the-language-being-written",
-    because: "the target language is a setting (TRANSLATION_TARGET_LANGUAGE, default English) and this rubric line states it as a fact — named as debt, not fixed by this slice",
-  },
 ];
+
+/**
+ * The verifier's readability rubric, before and after the language was taken out of it. Kept here so
+ * the guard can prove the two things that matter at once: the RULES of the rubric are unchanged, and
+ * the only thing that changed is the language noun — which the stage now fills from its own settings.
+ *
+ * `before` is the line the prompt file held until 2026-10-15, and it is also exactly what the stage
+ * sends today when the run's target language is English: the request bytes are unchanged.
+ */
+const VERIFY_READABILITY_RULES = {
+  before: "4. **Readability** — awkward, broken, or ambiguous English; leftover source-language text (stray kanji/kana that should have been translated); duplicated or garbled passages.",
+  placeholder: "4. **Readability** — awkward, broken, or ambiguous {{TARGET_LANGUAGE}}; leftover source-language text (stray kanji/kana that should have been translated); duplicated or garbled passages.",
+};
 
 /**
  * The five role sentences plan 06 slice 10 took out of the prompts. Kept here so the guard can plant each
@@ -591,8 +617,8 @@ function promptMentionFindings(mentions, table) {
   same(detection.length, 6, "the intake's language decision is 6 lines, and 6 lines is all of it");
 
   const target = PROMPT_LANGUAGE_MENTIONS.filter((m) => m.bucket === "names-the-language-being-written");
-  same([...new Set(target.map((m) => m.file))], ["system-prompts/verify-translate.md"],
-    "one prompt names the OUTPUT language as a fact rather than reading it from the setting — named as debt, not this slice's to change");
+  same(target, [],
+    "no prompt names the OUTPUT language as a fact any more — the verifier's rubric leaves the language for the code that resolves it, and the bucket is pinned empty rather than dropped");
 
   // 4c. the five files slice 10 fixed now name no language at all, in any form.
   for (const plant of SLICE10_FRAMING_SENTENCES) {
@@ -647,9 +673,60 @@ function promptMentionFindings(mentions, table) {
   same(PROMPT_FILES_PRINTING_CJK.includes("system-prompts/character-voice-extract.md"), false,
     "the voice extraction prompt prints 0 characters of any CJK script — the stronger form slice 4 met");
 
+  // 4g. the verifier's readability rubric: the rules byte-identical, the language named by the code.
+  // This is the shape the language-defaults slice used for the one prompt that stated the OUTPUT
+  // language as a fact. Pinned three ways: the file leaves a hole, the code fills it, and filling it
+  // with the language today's settings resolve reproduces the old file byte for byte.
+  const VERIFY_FILE = "system-prompts/verify-translate.md";
+  const VERIFY_FILE_SHA256_BEFORE = "c345b98723f3438ac4dd224250bcb200d3d24fb197b5c0ad4024173b8e344d33";
+  const verifyText = fs.readFileSync(path.join(ROOT, VERIFY_FILE), "utf8");
+  const { fillVerifyTargetLanguage, TARGET_LANGUAGE_PLACEHOLDER } = require("../verify-translate");
+
+  same(TARGET_LANGUAGE_PLACEHOLDER, "{{TARGET_LANGUAGE}}", "the placeholder the rubric leaves is the one the stage fills");
+  same(verifyText.split("\n").filter((l) => l.includes(TARGET_LANGUAGE_PLACEHOLDER)), [VERIFY_READABILITY_RULES.placeholder],
+    "the verifier's rubric leaves exactly one hole, and it is the language noun");
+  same(verifyText.includes(VERIFY_READABILITY_RULES.before), false,
+    "and the file no longer states the output language as a fact");
+
+  const filledForEnglish = fillVerifyTargetLanguage(verifyText, "English");
+  same(filledForEnglish.split("\n").find((l) => l.startsWith("4. **Readability**")), VERIFY_READABILITY_RULES.before,
+    "filled with the language today's settings resolve, the rubric line is the line the stage has always sent");
+  same(sha256(filledForEnglish), VERIFY_FILE_SHA256_BEFORE,
+    "and the WHOLE prompt the verifier is given is byte-identical to the one it was given before the language moved out of the file — this is a wiring change, not a prompt change");
+  same(
+    fillVerifyTargetLanguage(verifyText, "Korean").split("\n").find((l) => l.startsWith("4. **Readability**")),
+    VERIFY_READABILITY_RULES.before.replace("English", "Korean"),
+    "and a run whose target language is Korean grades Korean — the reason the noun had to move"
+  );
+
+  // The door refuses to be decorative: a rubric that no longer leaves room for the language, and a
+  // caller that names no language, are both failures rather than silent no-ops.
+  same(promptLanguageMentions(VERIFY_FILE, filledForEnglish).map((m) => m.line), [VERIFY_READABILITY_RULES.before],
+    "put the language back into the filled prompt and the classifier sees it — which is what the inventory rule below enforces on the file itself");
+  let verifyFillRefusals = 0;
+  try {
+    fillVerifyTargetLanguage(verifyText.replace(VERIFY_READABILITY_RULES.placeholder, VERIFY_READABILITY_RULES.before), "English");
+  } catch {
+    verifyFillRefusals++;
+  }
+  try {
+    fillVerifyTargetLanguage(verifyText, "");
+  } catch {
+    verifyFillRefusals++;
+  }
+  same(verifyFillRefusals, 2,
+    "a rubric that stopped leaving room for the language, and a stage that resolved none, are both refused — a fill that silently did nothing is the defect this door exists to keep out");
+
+  // …and the inventory rule catches the language being written back into the file.
+  same(
+    promptMentionFindings(promptLanguageMentions(VERIFY_FILE, verifyText.replace(VERIFY_READABILITY_RULES.placeholder, VERIFY_READABILITY_RULES.before)), PROMPT_LANGUAGE_MENTIONS).length,
+    1,
+    "the old rubric line put back into the prompt file is reported: nobody classified it"
+  );
+
   console.log(`  ${promptFiles.length} prompt files: ${framing.length} name a language as the work, ` +
     `${new Set(detection.map((m) => m.file)).size} names languages as things to detect (${detection.length} lines), ` +
-    `${new Set(target.map((m) => m.file)).size} names the output language, ` +
+    `${target.length} name the output language (the verifier's rubric leaves it to the code), ` +
     `${printing.length} still print one language's script in their examples`);
 }
 

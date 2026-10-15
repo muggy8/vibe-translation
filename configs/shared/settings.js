@@ -218,10 +218,45 @@ function validateRequiredEnv({ dryRun = false } = {}) {
   }
 }
 
-/** Fallback source language when neither .env nor the manifest says. */
+/**
+ * Fallback source language when neither .env nor the manifest says.
+ *
+ * This is the ONLY place a source language default lives. A helper that needs one
+ * takes it from its caller (`resolveRunSettings`, or the intake's own override
+ * block); a helper that was not given one refuses — see `requireLanguageName`.
+ */
 const DEFAULT_SOURCE_LANGUAGE = "Japanese";
-/** Fallback target language when neither .env nor the manifest says. */
+/** Fallback target language when neither .env nor the manifest says. The same rule. */
 const DEFAULT_TARGET_LANGUAGE = "English";
+
+/**
+ * Refuse a helper call that did not say which language it means.
+ *
+ * The language a stage measures against comes from the run: `TRANSLATION_*` in .env, or the plan of
+ * record the intake wrote, or the two defaults above — and `resolveRunSettings` is the one function
+ * that applies that precedence. A `sourceLanguage = "…"` sitting in a helper's own signature is a
+ * second, quieter answer to the same question: the caller that forgot the argument gets a language
+ * instead of an error, and the check then measures the wrong script and reports nothing. So the
+ * default lives here and nowhere else, and a helper that needs a language asks its caller for one.
+ *
+ * @param {unknown} value - What the caller passed for this language.
+ * @param {{language: "source"|"target", calledFrom: string}} opts - Which language, and the helper that needs it.
+ * @returns {string} The language name, trimmed.
+ * @throws {Error} Naming the helper and the door that resolves the language.
+ */
+function requireLanguageName(value, { language, calledFrom }) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) {
+    throw new Error(
+      `${calledFrom} was called without naming its ${language} language, and this module holds no ` +
+        `default for it on purpose. The language is decided by the run — TRANSLATION_${language.toUpperCase()}_LANGUAGE ` +
+        `in .env, or the plan of record — and resolveRunSettings() is the one door that resolves it. ` +
+        `A default in a signature would give a caller that forgot the argument a silent answer: the check ` +
+        `would measure one script's characters in a book written in another and report nothing.`
+    );
+  }
+  return raw;
+}
 
 /**
  * Resolve the settings every stage fills its prompts with, from the two places
@@ -295,5 +330,6 @@ module.exports = {
   validateRequiredEnv,
   DEFAULT_SOURCE_LANGUAGE,
   DEFAULT_TARGET_LANGUAGE,
+  requireLanguageName,
   resolveRunSettings,
 };

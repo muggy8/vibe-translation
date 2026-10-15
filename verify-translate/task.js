@@ -21,7 +21,7 @@ const path = require("path");
 require("../types"); // JSDoc type definitions
 const harness = require("../harness");
 const { readRunArgs, openSeriesRun, walkVolumes } = require("../utils/series-run");
-const { validateRequiredEnv, volumeFailureError } = require("../configs/shared");
+const { validateRequiredEnv, volumeFailureError, requireLanguageName, structuralError } = require("../configs/shared");
 const { resolveSourceBundle } = require("../utils/source");
 const {
   collectVolumeDisputes,
@@ -75,12 +75,50 @@ const { runVerificationSamples } = require("./grade");
  */
 
 /**
+ * The placeholder the verifier's readability rubric leaves for the language it grades.
+ *
+ * `system-prompts/verify-translate.md` used to say "awkward, broken, or ambiguous English". The
+ * language a translation is written in is a setting (`TRANSLATION_TARGET_LANGUAGE`, resolved by
+ * `resolveRunSettings`), so a rubric that names it in the file states a setting as a fact — and keeps
+ * grading against the old language the day the setting changes. The rubric's RULES are unchanged; only
+ * the language noun is now left for the code that already knows it to fill.
+ */
+const TARGET_LANGUAGE_PLACEHOLDER = "{{TARGET_LANGUAGE}}";
+
+/**
+ * Name, in the verifier's rubric, the language this run writes its translations in.
+ *
+ * Refuses a rubric that no longer carries the placeholder: a fill that silently did nothing is the
+ * exact defect this door exists to keep out — the prompt would be back to stating one language as a
+ * fact while the code went on believing it had named the setting.
+ *
+ * @param {string} systemPrompt - The verifier's system prompt, as read from the file.
+ * @param {string} targetLanguage - The target language this run resolved.
+ * @returns {string} The prompt with the language named.
+ * @throws {Error} When no language is named, or the rubric no longer leaves room for one.
+ */
+function fillVerifyTargetLanguage(systemPrompt, targetLanguage) {
+  const language = requireLanguageName(targetLanguage, { language: "target", calledFrom: "fillVerifyTargetLanguage" });
+  if (!systemPrompt.includes(TARGET_LANGUAGE_PLACEHOLDER)) {
+    throw structuralError(
+      `system-prompts/verify-translate.md no longer carries ${TARGET_LANGUAGE_PLACEHOLDER} in its ` +
+        `readability rubric. The language a translation is written in is a setting, so the rubric must ` +
+        `leave the language for the code that resolves it — it must not state one.`
+    );
+  }
+  return systemPrompt.replaceAll(TARGET_LANGUAGE_PLACEHOLDER, language);
+}
+
+/**
  * Read the two prompt pairs this stage runs (the verifier's, and the cross-chapter audit's).
+ *
+ * @param {{targetLanguage: string}} opts - The language this run writes translations in, from its own resolved settings.
  * @returns {Promise<{systemPrompt: string, template: string, consistencySystemPrompt: string, consistencyTemplate: string}>}
  */
-async function loadVerifyPrompts() {
+async function loadVerifyPrompts({ targetLanguage }) {
+  const systemPrompt = await fs.readFile(verifySystemPromptFile, "utf-8");
   return {
-    systemPrompt: await fs.readFile(verifySystemPromptFile, "utf-8"),
+    systemPrompt: fillVerifyTargetLanguage(systemPrompt, targetLanguage),
     template: await fs.readFile(verifyTemplateFile, "utf-8"),
     consistencySystemPrompt: await fs.readFile(consistencySystemPromptFile, "utf-8"),
     consistencyTemplate: await fs.readFile(consistencyTemplateFile, "utf-8"),
@@ -325,9 +363,11 @@ async function verifyTranslate() {
     await harness.assertModelServing({ ...endpoint, label: "verify-translate stage" });
   }
 
-  const prompts = await loadVerifyPrompts();
   // --force here means "redo THIS stage" — it does NOT re-run the intake (see getTranslationTarget).
+  // The plan of record is read FIRST: the verifier's readability rubric names the language this run
+  // writes translations in, and that is a fact of the run, not of the prompt file.
   const series = await openSeriesRun({ seriesDir, dryRun, volumeArg });
+  const prompts = await loadVerifyPrompts({ targetLanguage: series.runSettings.targetLanguage });
   const { folders, volumes, volumeByFolder } = series;
 
   console.log(
@@ -408,5 +448,8 @@ async function verifyTranslate() {
 }
 
 module.exports = {
+  TARGET_LANGUAGE_PLACEHOLDER,
+  fillVerifyTargetLanguage,
+  loadVerifyPrompts,
   verifyTranslate,
 };
