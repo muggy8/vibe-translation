@@ -889,10 +889,11 @@ function answer(req, ctx) {
                 quirkType: "pronoun",
                 description: "Avoids the request form; speaks as a confirmation rather than an order.",
                 examples: ["もう一度確認したい"],
-                formalityLevel: "neutral",
                 // The register pair this fixture series declares (see manifestJson). A claim that names
                 // an axis is checked at filing against the series' own declaration, so this is the branch
-                // the offline loop actually exercises.
+                // the offline loop actually exercises. There is no `formalityLevel` here: the prompt no
+                // longer asks for one (plan 06 slice 4), and the answer to "how does this character speak"
+                // is the declared pair, not a word the pipeline picked.
                 axis: "speech-formality",
                 value: "neutral",
                 notes: "Consistent across the volume.",
@@ -903,7 +904,6 @@ function answer(req, ctx) {
                 quirkType: "vocabulary",
                 description: "Defines a term before using it; rejects metaphor.",
                 examples: ["技術は反復で、魔法は依頼だ"],
-                formalityLevel: "formal",
                 axis: "vocabulary-register",
                 value: "technical",
                 notes: "",

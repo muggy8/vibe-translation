@@ -223,7 +223,10 @@ async function runAssembledVolume(ctx) {
 
   // The candidate copies, filed through the store's import door. They are candidates: the
   // published bullets come from the adopted rows, and the gap between the two is a query the audit runs.
-  fileVoiceExtraction(ctx, entries);
+  // The refusals are kept, because the register gate refuses here and nowhere else on this route, and a
+  // refusal that only reaches the console is a refusal the grader never sees (plan 06 §4.3 guard 2).
+  const candidates = fileVoiceExtraction(ctx, entries);
+  const candidateRefusals = (candidates && candidates.refused) || [];
 
   const built = assembleFromRecord(ctx, entries, segments);
   if (!built.ok) {
@@ -251,7 +254,7 @@ async function runAssembledVolume(ctx) {
   // guard every cumulative stage runs, on a file this stage produced by rendering instead of writing.
   await assertVoiceCarryForward(ctx, "the assembled render");
 
-  const audit = await auditVoiceArtifact(ctx, { refused: built.rebuild.refused });
+  const audit = await auditVoiceArtifact(ctx, { refused: [...candidateRefusals, ...built.rebuild.refused] });
   if (audit.highFindings.length) {
     const moved = await quarantineAssembledArtifacts(ctx);
     throw new Error(

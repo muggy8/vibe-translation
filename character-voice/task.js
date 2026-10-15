@@ -29,6 +29,7 @@ const { readRunArgs, openSeriesRun, locatePreviousVolume, requirePreviousArtifac
 const { acceptanceSystemPromptFile, acceptanceUserPromptTemplateFile, extractSystemPromptFile, extractUserPromptTemplateFile, seriesDir } = require("./config");
 const { openVoiceRecord, fileVoiceExtraction, sealVoiceRecord } = require("./store");
 const { runAssembledVolume } = require("./assemble");
+const { buildExtractSystemPrompt } = require("./prompts");
 
 /** The character-voice stage's own file names inside a volume folder. */
 const VOICE_FILE = "character-voice.md";
@@ -163,7 +164,8 @@ async function characterVoice() {
   const registerDeclaration = resolveStageRegisterDeclaration(manifest);
 
   const cascade = { regeneratedAny: false, regeneratedFrom: null };
-  const run = { folders, volumeByFolder, runSettings, prompts, dryRun, force, cascade, registerDeclaration };
+  const extractSystemPrompt = buildExtractSystemPrompt(prompts.extractSystemPrompt, registerDeclaration);
+  const run = { folders, volumeByFolder, runSettings, prompts, extractSystemPrompt, dryRun, force, cascade, registerDeclaration };
   await runVolumeSeries("character-voice", {
     volumes,
     folders,
@@ -192,6 +194,8 @@ async function characterVoice() {
  *   volumeByFolder: Map<string, Object>,
  *   runSettings: {seriesName: string, sourceLanguage: string, targetLanguage: string},
  *   prompts: Object,
+ *   extractSystemPrompt: string,
+ *   registerDeclaration: {state: string, axes: Array<Object>, note: string|null},
  *   dryRun: boolean,
  *   force: boolean,
  *   cascade: { regeneratedAny: boolean },
@@ -199,7 +203,7 @@ async function characterVoice() {
  * @returns {Promise<void>}
  */
 async function processVoiceVolume({ folderName, index }, run) {
-  const { folders, volumeByFolder, runSettings, prompts, dryRun, force, cascade } = run;
+  const { folders, volumeByFolder, runSettings, prompts, extractSystemPrompt, registerDeclaration, dryRun, force, cascade } = run;
   const volume = volumeByFolder.get(folderName);
   const volumeDir = path.join(seriesDir, folderName);
   const values = {
@@ -215,7 +219,7 @@ async function processVoiceVolume({ folderName, index }, run) {
   const bundle = await resolveSourceBundle({ seriesDir, volume, volumeDir, force });
 
   const { ctx, proceed } = await buildVolumeContext({
-    folderName, index, folders, volumeByFolder, runSettings, prompts, values, bundle, volumeDir, dryRun,
+    folderName, index, folders, volumeByFolder, runSettings, prompts, extractSystemPrompt, registerDeclaration, values, bundle, volumeDir, dryRun,
   });
   if (!proceed) return;
 
@@ -308,10 +312,15 @@ async function processVoiceVolume({ folderName, index }, run) {
  * Assemble the volume context: the previous volume's reference (the base this volume's record carries
  * forward) and the prompts every chapter of the reading pass is sent.
  *
+ * `extractSystemPrompt` is the shared role file **with this series' declared register questions already
+ * appended** (`character-voice/prompts.js`), because the questions are a fact about the series and the
+ * prompt file is a fact about the pipeline. `registerDeclaration` travels beside it so the volume can say
+ * which questions it was asked — and, when there were none, say that too.
+ *
  * @returns {Promise<{ ctx: CharacterVoiceVolumeCtx, proceed: boolean }>} `proceed` false when the
  *   run policy said to skip this volume (a missing base).
  */
-async function buildVolumeContext({ folderName, index, folders, volumeByFolder, runSettings, prompts, values, bundle, volumeDir, dryRun }) {
+async function buildVolumeContext({ folderName, index, folders, volumeByFolder, runSettings, prompts, extractSystemPrompt, registerDeclaration, values, bundle, volumeDir, dryRun }) {
   const { isFirst, previousFolderName } = locatePreviousVolume({ folders, index, volumeByFolder });
 
   const previous = await requirePreviousArtifacts({
@@ -340,7 +349,8 @@ async function buildVolumeContext({ folderName, index, folders, volumeByFolder, 
     extractPrompt: transformUserPrompt(prompts.extractTemplate, values),
     acceptancePrompt: transformUserPrompt(prompts.acceptanceTemplate, values),
     extractTemplate: prompts.extractTemplate,
-    extractSystemPrompt: prompts.extractSystemPrompt,
+    extractSystemPrompt,
+    registerDeclaration,
     acceptanceSystemPrompt: prompts.acceptanceSystemPrompt,
   };
 

@@ -403,11 +403,19 @@ function scenarioTheThreeShapesAreDifferentOnPurpose() {
     "the voice shape gained `strict` — strict is a promise that the schema is closed, and this one is not");
 
   // The voice inventory is the prompt's own keys, and the key its own example produced is among them.
-  for (const key of ["type", "character", "quirkType", "description", "examples", "formalityLevel", "notes",
+  for (const key of ["type", "character", "quirkType", "description", "examples", "axis", "value", "notes",
     "povCategory", "marker", "assignedCharacter", "narrationType", "sectionDescription"]) {
     ok(VOICE_ENTRY_KEYS.includes(key), `the voice key inventory no longer names "${key}"`);
     ok(Object.prototype.hasOwnProperty.call(voiceItem.properties, key), `the voice shape does not declare "${key}"`);
   }
+  // `formalityLevel` left with the prompt that named one language's politeness levels (plan 06 slice 4).
+  // It is pinned as **absent** because the tolerant read of it survives in the store's adapters, and a
+  // reader with nothing left to read is how a removed field quietly comes back.
+  ok(!VOICE_ENTRY_KEYS.includes("formalityLevel"),
+    "the voice key inventory names `formalityLevel` again — it was replaced by the declared `axis` / `value` pair");
+  ok(!Object.prototype.hasOwnProperty.call(voiceItem.properties, "formalityLevel"),
+    "the voice shape declares `formalityLevel` again");
+  same(VOICE_ENTRY_KEYS.length, 13, "the voice key inventory is the 13 keys the prompt names for its two element kinds");
   same(voiceItem.required, ["type"], "the voice entry shape changed what it requires");
   same(glossaryItem.required, ["term", "rendering", "note", "type", "query"], "the glossary entry shape changed what it requires");
   same(styleItem.required, ["category", "pattern", "description", "examples", "frequency", "notes"], "the style entry shape changed what it requires");
@@ -556,10 +564,12 @@ function scenarioThePromptsAskForTheEnvelope() {
   ok(povBlock.includes('"sectionDescription"'), "the voice prompt's POV key block lost `sectionDescription`");
   // Every key the example answer produces is a key the prompt names.
   const example = voice.slice(voice.indexOf("Example shape (do not copy these values):"));
-  for (const key of ["type", "povCategory", "marker", "description", "character", "quirkType", "examples", "formalityLevel", "notes"]) {
+  for (const key of ["type", "povCategory", "marker", "description", "character", "quirkType", "examples", "axis", "value", "notes"]) {
     ok(example.includes(`"${key}"`), `the voice prompt's example no longer produces "${key}"`);
     ok(VOICE_ENTRY_KEYS.includes(key), `the voice prompt's example produces "${key}", which the declared inventory does not hold`);
   }
+  ok(!example.includes('"formalityLevel"'),
+    "the voice prompt's example produces `formalityLevel` again — the field the declared axis/value pair replaced");
 
   console.log("9/10: all three prompts ask for their envelope, the glossary prompt asks for both lists it declares, and the voice prompt names the key its own example produces");
 }

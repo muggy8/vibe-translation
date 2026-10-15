@@ -10,10 +10,10 @@
  * ## What the gate looks at, and what it ignores
  *
  * The gate fires on a **proposal that names an axis**. A claim that names none is filed exactly as it
- * was before this module existed — which is the whole reason the slice can land before the prompt
- * changes (slice 4 is what asks the extraction to name axes at all). The gate is therefore not "every
- * voice claim must answer a declared question"; it is "a claim that says which question it answers must
- * answer one this series asked, in one of the answers this series declared".
+ * was before this module existed — which is the whole reason the slice could land before the prompt
+ * changed (plan 06 slice 4 is what asks the extraction to name axes at all, and it is built). The gate is
+ * therefore not "every voice claim must answer a declared question"; it is "a claim that says which
+ * question it answers must answer one this series asked, in one of the answers this series declared".
  *
  * The same rule runs whether the series has a declaration or not, and the two cases differ only in the
  * sentence:
@@ -96,8 +96,10 @@ function registerFilingRefusal(ctx, proposal, verb = "insert_fact") {
   const state = declaration && declaration.state ? declaration.state : "absent";
   const { axis, value, namedValue } = namedAxisOfProposal(proposal);
 
-  // A claim that names no axis is not this gate's business. Stated out loud because it is the branch
-  // every existing door takes today, and the day it stops being the branch is slice 4's decision.
+  // A claim that names no axis is not this gate's business. Stated out loud because it is the branch a
+  // rebuild takes, the branch a document mirror takes, the branch a series with no declaration takes, and
+  // the branch the extraction takes for a claim the extractor deliberately attached to no declared
+  // question — which the prompt tells it to prefer over stretching an observation to fit (slice 4).
   if (!axis && !value) return null;
 
   if (!axis) {

@@ -108,6 +108,40 @@ function openVoiceRecord(ctx, previousVolume) {
 }
 
 /**
+ * Why the volume's claims did not get filed, in one line.
+ *
+ * Before the register gate there was one reason a claim did not get filed — its quote is not in the
+ * book — and the log line said exactly that. Now there are two, and a line that names only the first
+ * would report a series' declaration being refused as though the book had failed to back the claim up.
+ * The split is read off the refusal's own rule name, which every door in the store now carries.
+ *
+ * It lives here rather than inside `fileVoiceExtraction` because two doors print this line — the stage
+ * and `extract-voice.js` — and two doors keeping their own opinion of what a refusal meant is how one of
+ * them ends up describing a register refusal as a missing quote.
+ *
+ * @param {Array<Object>} refused - The import report's refusals, each carrying its own `rule` when it
+ *   has one.
+ * @returns {string} e.g. `2 refused: 1 for want of a quote that verifies; 1 refused by this series'
+ *   register declaration (1 × register-value-outside-declared-set)`. Empty refusals give `0 refused`.
+ */
+function describeVoiceRefusals(refused) {
+  const list = Array.isArray(refused) ? refused : [];
+  const registerRefused = list.filter((item) => typeof item.rule === "string" && item.rule.startsWith("register-"));
+  const quoteRefused = list.length - registerRefused.length;
+  const reasons = [];
+  if (quoteRefused) reasons.push(`${quoteRefused} for want of a quote that verifies`);
+  if (registerRefused.length) {
+    const byRule = new Map();
+    for (const item of registerRefused) byRule.set(item.rule, (byRule.get(item.rule) || 0) + 1);
+    reasons.push(
+      `${registerRefused.length} refused by this series' register declaration ` +
+      `(${[...byRule.entries()].map(([rule, n]) => `${n} × ${rule}`).join(", ")})`
+    );
+  }
+  return `${list.length} refused${reasons.length ? `: ${reasons.join("; ")}` : ""}`;
+}
+
+/**
  * File this volume's extraction claims in its record.
  *
  * @param {{ values: Object, folderName: string, seriesDir: string, refStore: Object|null }} ctx
@@ -123,30 +157,10 @@ function fileVoiceExtraction(ctx, entries) {
     voiceEntries: entries,
   });
   const voice = filed.voice;
-  /**
-   * The refusals, split by what refused them.
-   *
-   * Before the register gate there was one reason a claim did not get filed — its quote is not in the
-   * book — and the log line said exactly that. Now there are two, and a line that names only the first
-   * would report a series' declaration being refused as though the book had failed to back the claim up.
-   * The split is read off the refusal's own rule name, which every door in the store now carries.
-   */
-  const registerRefused = voice.refused.filter((item) => typeof item.rule === "string" && item.rule.startsWith("register-"));
-  const quoteRefused = voice.refused.length - registerRefused.length;
-  const reasons = [];
-  if (quoteRefused) reasons.push(`${quoteRefused} for want of a quote that verifies`);
-  if (registerRefused.length) {
-    const byRule = new Map();
-    for (const item of registerRefused) byRule.set(item.rule, (byRule.get(item.rule) || 0) + 1);
-    reasons.push(
-      `${registerRefused.length} refused by this series' register declaration ` +
-      `(${[...byRule.entries()].map(([rule, n]) => `${n} × ${rule}`).join(", ")})`
-    );
-  }
   console.log(
     `Volume ${ctx.values.INSTALLMENT_NUMBER}: reference record filed ${voice.importedCount} extraction claim(s) ` +
       `(${voice.characters} character(s), ${voice.povCount} POV claim(s), ${voice.carried.length} already filed); ` +
-      `${voice.refused.length} refused${reasons.length ? `: ${reasons.join("; ")}` : ""}.`
+      `${describeVoiceRefusals(voice.refused)}.`
   );
   return voice;
 }
@@ -255,6 +269,7 @@ module.exports = {
   VOICE_ARTIFACT_NAME,
   openVoiceRecord,
   fileVoiceExtraction,
+  describeVoiceRefusals,
   voiceGradeSample,
   auditVoiceArtifact,
   sealVoiceRecord,

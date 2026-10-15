@@ -668,10 +668,11 @@ const MIGRATIONS = [
     // checked, and it is the query slice 5 needs in order to stop four kinds of claim sharing one
     // aspect. `formality` stays what it is — the extractor's own word — and is left alone.
     //
-    // **Nullable, and null is the normal value today.** The extraction prompt does not name axes yet
-    // (that is slice 4), and a claim filed from a published document or a rebuild has no axis to name. A
-    // null pair is not a hole in this design; it is a claim that never claimed to answer a declared
-    // question, and the gate only fires on a claim that does.
+    // **Nullable, and null is a normal value.** A claim filed from a published document or a rebuild has
+    // no axis to name, and neither does a claim from a series whose plan of record declares no register
+    // question — which is every real volume in this corpus today, because its intake has not re-run
+    // (plan 06 §10.10). A null pair is not a hole in this design; it is a claim that never claimed to
+    // answer a declared question, and the gate only fires on a claim that does.
     //
     // **Why a migration rather than an edit to version 1:** a volume's record is committed with the
     // books, so a file written by the slice-1b build has to be brought up by the code running now. It

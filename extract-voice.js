@@ -91,8 +91,8 @@ const { openSeriesRun, locatePreviousVolume } = require("./utils/series-run");
 const { assertDoorAllowed } = require("./utils/prereqs/freeze");
 const { resolveSourceBundle, chapterSegmentNote } = require("./utils/source");
 const rs = require("./utils/reference-store");
-const { buildAlreadyExtractedNote } = require("./character-voice/prompts");
-const { openVoiceRecord, fileVoiceExtraction } = require("./character-voice/store");
+const { buildAlreadyExtractedNote, buildExtractSystemPrompt } = require("./character-voice/prompts");
+const { openVoiceRecord, fileVoiceExtraction, describeVoiceRefusals } = require("./character-voice/store");
 const reading = require("./character-voice/reading");
 const { extractSystemPromptFile, extractUserPromptTemplateFile } = require("./character-voice/config");
 require("./types"); // JSDoc type definitions
@@ -124,6 +124,45 @@ function readArgs(argv) {
 }
 
 /**
+ * What this command says about the series' register declaration, before it reads a single chapter.
+ *
+ * Three states, and the command says all three out loud rather than filing quietly. It is the
+ * "named, not punished" shape plan 06 §10.11 recommends: `extract-voice` is the door a person uses to
+ * read a volume when the stage will not run, so refusing here would close the only working door for a
+ * series whose intake has not re-run — and printing nothing would let a register-blind artifact be
+ * published by hand with no record of it having been blind.
+ *
+ * @param {{state: string, axes: Array<Object>, note: string|null, file: string}} declaration - What
+ *   `readRegisterDeclaration` answered.
+ * @returns {string[]} One line to print. Never empty.
+ */
+function registerAnnouncementLines(declaration) {
+  const state = declaration && declaration.state ? declaration.state : "absent";
+  const axes = declaration && Array.isArray(declaration.axes) ? declaration.axes : [];
+  if (state === "declared" && axes.length) {
+    return [
+      `  register: this series declares ${axes.length} register question(s) — ` +
+      axes.map((axis) => `"${axis.id}" (${axis.asks})`).join("; ") +
+      ". The reading pass is asked those, and only those.",
+    ];
+  }
+  if (state === "empty") {
+    return [
+      `  register: this series declares no register questions, and says why: "${declaration.note}". ` +
+      "The reading pass is asked none, and no claim it files answers a register question.",
+    ];
+  }
+  const because = state === "malformed"
+    ? `the "${rs.REGISTER_MANIFEST_KEY}" block in ${declaration.file || "the plan of record"} is present but malformed`
+    : `the plan of record (${declaration.file || "translation-target.json"}) carries no "${rs.REGISTER_MANIFEST_KEY}" block`;
+  return [
+    `  register: ${because}, so this volume is filed with NO register axis — every claim it files answers ` +
+    "no register question, and a claim that named one would be refused at filing because there is no " +
+    "question list in the pipeline to check it against. The door that declares them is the intake: npx gulp discover.",
+  ];
+}
+
+/**
  * Read one volume chapter by chapter and write its notebook.
  *
  * @param {Object} opts
@@ -136,7 +175,7 @@ function readArgs(argv) {
  * @returns {Promise<{ok: boolean, refusal: Object|null, volume: string, folder: string, chapters: Array<Object>, entries: number, refusedClaims: Array<Object>, incompleteChapters: string[], record: Object|null, extractionFile: string|null, dryRun: boolean}>}
  */
 async function runExtractPass({ seriesDir, volumeArg, dryRun = false, force = false, chapters: onlyChapters = null, log = console.log }) {
-  const systemPrompt = await fs.promises.readFile(extractSystemPromptFile, "utf8");
+  const baseSystemPrompt = await fs.promises.readFile(extractSystemPromptFile, "utf8");
   const template = await fs.promises.readFile(extractUserPromptTemplateFile, "utf8");
 
   const { runSettings, folders, volumes, volumeByFolder } = await openSeriesRun({ seriesDir, dryRun, volumeArg });
@@ -193,6 +232,16 @@ async function runExtractPass({ seriesDir, volumeArg, dryRun = false, force = fa
   const segments = bundle.segments && bundle.segments.length ? bundle.segments : [];
   log(`  chapters: ${segments.length} segment(s), ${bundle.wholeChars} characters whole — read one at a time`);
 
+  // The series' register declaration, read from its own plan of record. This door does **not** refuse a
+  // series that has none — that refusal belongs to the stage, which renders an artifact out of the
+  // answers and cannot render answers it was never asked for. Here the honest shape is "named, not
+  // punished" (plan 06 §10.11): the volume is still read and still filed, and the run says out loud that
+  // nothing it files answers a register question. What the reading pass is *shown* is the same block the
+  // stage shows, so the two doors cannot ask a book two different questions.
+  const registerDeclaration = rs.readRegisterDeclaration(seriesDir);
+  const extractSystemPrompt = buildExtractSystemPrompt(baseSystemPrompt, registerDeclaration);
+  for (const line of registerAnnouncementLines(registerDeclaration)) log(line);
+
   const values = {
     INSTALLMENT_NUMBER: installmentNumber,
     SOURCE_NAME: runSettings.seriesName,
@@ -213,7 +262,8 @@ async function runExtractPass({ seriesDir, volumeArg, dryRun = false, force = fa
     previousVoiceRefFile: isFirst ? null : path.join(seriesDir, previousFolderName, "character-voice.md"),
     voiceOutputFile: path.join(volumeDir, "character-voice.md"),
     extractPrompt: transformUserPrompt(template, values),
-    extractSystemPrompt: systemPrompt,
+    extractSystemPrompt,
+    registerDeclaration,
     refStore: null,
   };
 
@@ -346,9 +396,18 @@ async function runExtractPass({ seriesDir, volumeArg, dryRun = false, force = fa
       log(`  how it was read: ${reportFile}`);
     }
 
-    const voice = fileVoiceExtraction(ctx, entries) || { importedCount: 0, carried: [], refused: [], characters: 0, povCount: 0, unresolved: [] };
+    const voice = fileVoiceExtraction(ctx, entries) || { importedCount: 0, carried: [], refused: [], characters: 0, povCount: 0, unresolved: [], imported: [] };
     log(`  record filed: ${voice.importedCount} claim(s) about ${voice.characters} character(s), ${voice.povCount} POV claim(s), ${voice.carried.length} already filed`);
-    log(`  refused:      ${voice.refused.length} for want of a line this volume's text prints`);
+    log(`  refused:      ${describeVoiceRefusals(voice.refused)}`);
+    // The outcome, printed beside the promise. The line above this pass says what the series declares;
+    // this one says what this volume actually filed, because a declaration nobody answered is the fact
+    // the account owner needs and a declaration that exists is not that fact (plan 06 §10.11).
+    const axisBearing = (voice.imported || []).filter((fact) => fact && fact.axis).length;
+    if (axisBearing) {
+      log(`  axis:         ${axisBearing} of the ${voice.importedCount} claim(s) filed answer a declared register question`);
+    } else if (voice.importedCount) {
+      log(`  axis:         NO register axis — none of the ${voice.importedCount} claim(s) this volume filed answers a register question.`);
+    }
     for (const item of voice.refused.slice(0, 40)) log(`    ${item.character || "(no character)"} ${item.label || item.kind}: ${item.because}`);
     if (voice.unresolved && voice.unresolved.length) {
       log(`  names the roster does not carry: ${voice.unresolved.map((u) => `${u.name} → filed as ${u.key}`).join(", ")}`);
@@ -455,6 +514,7 @@ module.exports = {
   MAX_ATTEMPTS_PER_CHAPTER: reading.MAX_ATTEMPTS_PER_CHAPTER,
   EXTRACTION_RETRY_THINKING_LEVEL: reading.EXTRACTION_RETRY_THINKING_LEVEL,
   readArgs,
+  registerAnnouncementLines,
   partialPath: reading.partialPath,
   segmentFingerprint: reading.segmentFingerprint,
   readPartial: reading.readPartial,

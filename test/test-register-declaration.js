@@ -870,8 +870,13 @@ const ENTRIES_SIX = [
   ok(entrySchema.additionalProperties === undefined && entrySchema.strict !== true,
     "the voice entry schema is still open — the value is checked at filing, not on the wire (test-answer-envelopes scenario 7)");
   const stagesLayer = readModuleLayer(ROOT, "character-voice/stages.js");
-  ok(!/axis/i.test(stagesLayer.match(/VOICE_ENTRY_KEYS[\s\S]{0,400}/)[0]),
-    "and the answer shape does not name an axis yet: asking the extraction for one is slice 4, which is a prompt change");
+  const keyBlock = stagesLayer.match(/VOICE_ENTRY_KEYS[\s\S]{0,400}/)[0];
+  ok(/"axis"/.test(keyBlock) && /"value"/.test(keyBlock),
+    "the answer shape no longer names the declared axis pair: slice 4 asks the extraction for it, and the filing gate is what checks it");
+  ok(!/"formalityLevel"/.test(keyBlock),
+    "the answer shape still names `formalityLevel`, the enumeration the declaration replaces");
+  ok(!/values:\s*\[/.test(stagesLayer),
+    "the voice stage holds a value set of its own — the value set belongs to the series' declaration, not to the pipeline");
   const adapterLayer = readModuleLayer(ROOT, "utils/reference-store/extraction-adapter.js");
   ok(/sentenceending: "register"[\s\S]*formality: "register"[\s\S]*vocabulary: "register"/.test(adapterLayer),
     "the aspect collapse is still there, untouched: undoing it is slice 5, and it needs this slice first");

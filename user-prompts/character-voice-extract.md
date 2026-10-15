@@ -14,13 +14,13 @@ Read the following materials **in full** before extracting anything:
 
 ## Task
 
-Following the system prompt, analyze volume {{INSTALLMENT_NUMBER}}'s source text and produce a JSON array of voice quirks and POV analysis:
+Following the system prompt, analyze volume {{INSTALLMENT_NUMBER}}'s source text and produce the voice-quirk and POV-analysis entries it describes:
 
-1. **Extract character voice quirks** — every character's distinctive speech patterns, vocabulary, formality, catchphrases, dialect, and internal voice.
-2. **Analyze POV patterns** — POV markers (※, ☆, etc.), narration types (first-person-internal, free-indirect, third-person-omniscient, etc.), POV assignments, and free indirect discourse instances.
+1. **Extract character voice quirks** — every character's distinctive speech patterns, vocabulary, catchphrases, and internal voice, plus the answer to each register question this series declares (named in the system prompt), where this volume's text shows one.
+2. **Analyze POV patterns** — the perspective markers **this volume** prints, whatever they look like, the narration types, POV assignments, and free indirect discourse instances.
 
 For each extraction, provide source-language quotes as examples.
 
 ## Output
 
-Respond with **only** a JSON array — no prose, no markdown fences, no commentary. Each element is either a voice quirk entry or a POV analysis entry as specified in the system prompt. If there is **nothing new to extract**, respond with an empty JSON array: `[]`
+Respond with **only** a JSON object holding one key, `entries` — no prose, no markdown fences, no commentary. Each element of `entries` is either a voice quirk entry or a POV analysis entry as specified in the system prompt. If there is **nothing new to extract**, respond with an object holding an empty array: `{"entries": []}`

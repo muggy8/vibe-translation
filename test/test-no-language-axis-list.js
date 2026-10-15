@@ -25,9 +25,10 @@
  *     -agnostic: it catches a "universal" axis list whose answers are words this guard has never
  *     heard, which is the hole detector 2 leaves.
  *   - **What it does NOT scan, and why that is written down:** the prompt files. `system-prompts/` and
- *     `user-prompts/` are where a language's names legitimately live today — seven of them name Japanese
- *     — and removing that is plan 06 slice 4 and slice 10, a prompt program, not this slice. This suite
- *     pins how many of them do, so the debt has a number that can only go down.
+ *     `user-prompts/` are where a language's names legitimately live today — six of them name Japanese —
+ *     and removing the rest is plan 06 slice 10, a prompt program, not this scan. This suite pins how
+ *     many of them do, so the debt has a number that can only go down, and scenario 4 runs the same
+ *     detectors over the voice extraction prompt so a language name put back into it is caught.
  *   - **The two named exemptions:** `QUIRK_TYPE_TO_ASPECT` and `QUIRK_TYPE_TO_VOICE_LABEL` map the
  *     extraction prompt's own quirk kinds (four of which are register-ish) onto the store's aspects. They
  *     are the collapse plan 06 §2.3 measured, and slice 5 removes it. Until then they are exempt **by
@@ -344,12 +345,30 @@ function scanSourceForAxisLists(file, source) {
   const namingJapanese = promptFiles.filter((rel) => /japanese|日本語/i.test(fs.readFileSync(path.join(ROOT, rel), "utf8")));
 
   ok(promptFiles.length >= 40, `${promptFiles.length} prompt files exist`);
-  ok(namingJapanese.length <= 7,
-    `prompt files that name Japanese: ${namingJapanese.length} — this is plan 06 slice 4 (the voice prompt) and slice 10 (the rest), and the number may only go down`);
-  ok(namingJapanese.includes("system-prompts/character-voice-extract.md"),
-    "the voice extraction prompt is one of them, which is exactly what slice 4 is for");
-  ok(!namingJapanese.includes("system-prompts/translation-target.md") === false,
+  // Pinned at exactly 6 since plan 06 slice 4 took the voice extraction prompt out of this list. It was 7.
+  // The number is pinned rather than capped because a cap lets a new Japanese-named prompt in silently,
+  // and the six that remain are the ones plan 06 slice 10 still has to do.
+  same(namingJapanese.length, 6,
+    `prompt files that name Japanese: ${namingJapanese.length} — 6 since slice 4 removed the voice extraction prompt; the rest are plan 06 slice 10`);
+  same(namingJapanese.includes("system-prompts/character-voice-extract.md"), false,
+    "the voice extraction prompt names Japanese again — slice 4 is what took it out, and the register questions " +
+      "are appended in code (character-voice/prompts.js), not written into the file");
+  ok(namingJapanese.includes("system-prompts/character-voice-acceptance.md"),
+    "the voice acceptance prompt still names Japanese — that is slice 10's, not slice 4's");
+  ok(namingJapanese.includes("system-prompts/translation-target.md"),
     "the intake prompt names Japanese too — it is the file that asks the intake to decide the register questions from the book");
+
+  // The planted check, which is the half that makes the scan above more than a count: a language name put
+  // back into the voice prompt is caught by the same rule that catches one put into a `.js` file.
+  const voicePrompt = fs.readFileSync(path.join(ROOT, "system-prompts", "character-voice-extract.md"), "utf8");
+  same(scanSourceForAxisLists("system-prompts/character-voice-extract.md", voicePrompt), [],
+    "the voice extraction prompt trips the axis-list guard on its own text");
+  const planted = scanSourceForAxisLists("planted: a Japanese axis list put back into the voice prompt",
+    `${voicePrompt}\n\nAnswer the formality axis in Japanese: "丁寧語", "普通語", "尊敬語", "謙譲語".\n`);
+  ok(planted.some((f) => f.detector === "register-value-vocabulary"),
+    "the planted Japanese register vocabulary in the voice prompt was not reported");
+  ok(planted.some((f) => f.detector === "language-named-next-to-an-axis"),
+    "a language named next to an axis word in the voice prompt was not reported");
 
   console.log(`  ${namingJapanese.length}/${promptFiles.length} prompt files name Japanese; the .js scan does not cover them, and that is written down`);
 }

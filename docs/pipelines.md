@@ -230,6 +230,18 @@ any language and no setting that reaches that refusal. A series that declares no
 are deliberately outside this gate: they file claims that name no register question, so a series whose
 intake has not re-run still has a working door. → `utils/reference-store/register/`, gotcha 152.
 
+**And the declared questions reach the model as text the code appends** (plan 06 slice 4, built
+2026-10-14). `system-prompts/character-voice-extract.md` names **no language** and prints no character of
+any one language's script; it asks each claim to name the question it answers in `axis` and answer it in
+`value`, in the declared words, or name neither. The questions themselves are appended per series by
+`character-voice/prompts.js` → `buildExtractSystemPrompt`, from the same block the store checks filings
+against, so the stage cannot ask a question its own record would refuse; a series that declares none gets
+a block that says so and forbids naming an axis. `extract-voice.js` composes the identical block and
+**announces** what it filed — `NO register axis` when none of the volume's claims answer a declared
+question — rather than refusing, because it is the working door for a series whose intake has not re-run.
+The answer shape stays open: the accepted answers belong to the series, and a value list in the pipeline
+would be the axis list the account owner forbade. → `test/test-voice-prompt-declaration.js`, gotcha 154.
+
 Per volume, in order — each volume's reference builds on the previous one's:
 
 1. **Open the volume's reference record** (`openVoiceRecord`) before anything is written. The previous
@@ -239,8 +251,10 @@ Per volume, in order — each volume's reference builds on the previous one's:
    so a switch in front of it would not turn a check off, it would turn the volume off.
 2. **Read the volume chapter by chapter** (`character-voice/reading.js` — the same pass
    `extract-voice.js` runs). One extraction one-shot per chapter: source text → `{"entries": […]}`, each
-   entry a `{ type, character, quirkType, description, examples, … }` record covering both voice quirks and
-   POV analysis, parsed by `parseVoiceQuirks` (tolerates markdown fences, prose, the bare array it used to
+   entry a `{ type, character, quirkType, description, examples, axis, value, … }` record covering both voice
+   quirks and POV analysis — `axis` / `value` being the register question this claim answers and the answer
+   the series declared for it, both omitted when the claim answers no declared question (plan 06 slice 4) —
+   parsed by `parseVoiceQuirks` (tolerates markdown fences, prose, the bare array it used to
    ask for, and the `{"voice": […], "pov": […]}` split a model reaches for when a prompt opens by telling it
    to "produce two outputs"). The shape it asks for (`voiceResponseFormat`) is **open on purpose** — it names
    a key inventory and requires only `type`, and it is the one envelope of the three that is not closed; the

@@ -152,11 +152,23 @@ function truncateVoiceRef(content, sourceText) {
  * own example answer produces. Read off the prompt, because no real extraction answer is on disk to read
  * them off of.
  *
- * Declared voice keys: `type`, `character`, `quirkType`, `description`, `examples`, `formalityLevel`,
+ * Declared voice keys: `type`, `character`, `quirkType`, `description`, `examples`, `axis`, `value`,
  * `notes`. Declared POV keys: `type`, `povCategory`, `marker`, `description`, `assignedCharacter`,
- * `narrationType`, `sectionDescription`, `examples`, `notes`. The example voice object produces exactly the
- * seven declared voice keys; the example POV object produces `type`, `povCategory`, `marker`, `description`
- * — and `description` is the one that was missing from the declared POV list until this slice.
+ * `narrationType`, `sectionDescription`, `examples`, `notes`. The example voice object produces exactly
+ * the eight declared voice keys; the example POV object produces `type`, `povCategory`, `marker`,
+ * `description` — and `description` is the one that was missing from the declared POV list until the
+ * envelope slice.
+ *
+ * ## What moved when the prompt stopped naming a language (plan 06 slice 4)
+ *
+ * `formalityLevel` is **out**. It was one of five words, four of them the name of one language's
+ * politeness categories, and a book that is not that book's had no value to put in it. The pair that
+ * replaced it is `axis` / `value`: the question the claim answers and the answer this series declared
+ * for it, both read from the series' own plan of record and appended to the prompt by
+ * `character-voice/prompts.js`. The pair is what `utils/reference-store/extraction-adapter.js` carries
+ * into `facts.axis` / `facts.axis_value`, and the filing gate is what refuses a value the series never
+ * declared — which is why the pair is declared on the wire but **not** closed into an enumeration here:
+ * the value set belongs to the series, and a set in this file would be the axis list the owner forbade.
  *
  * @type {string[]}
  */
@@ -166,7 +178,8 @@ const VOICE_ENTRY_KEYS = [
   "quirkType",
   "description",
   "examples",
-  "formalityLevel",
+  "axis",
+  "value",
   "notes",
   "povCategory",
   "marker",

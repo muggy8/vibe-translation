@@ -160,8 +160,11 @@ function insertFact(ctx, proposal) {
       nextOrd(ctx),
       value.extractedAs || null,
       // The register pair, already checked against the series' declaration by `validateFactProposal`.
-      // Null on both when the claim never claimed to answer a declared question, which is every claim
-      // this pipeline files today until plan 06 slice 4 asks the extraction to name one.
+      // Null on both when the claim never claimed to answer a declared question: a claim filed from a
+      // published document or a rebuild, a claim from a series whose plan of record declares no register
+      // question, and — since plan 06 slice 4 asks the extraction for the pair — a claim the extractor
+      // chose not to attach to any declared question, which the prompt tells it to prefer over stretching
+      // an observation into the nearest declared answer.
       value.axis || null,
       value.axisValue || null
     );

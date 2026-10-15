@@ -171,8 +171,9 @@ function voiceCandidateRow(entry, key) {
    * Nothing checks them here. The check is `register/filing.js`, reached from `facts/validate.js` on the
    * way into the row, against the declaration frozen into the store handle — so this shape function
    * cannot file a value the series did not declare, and cannot decide which axis a claim belongs to
-   * either. Today no extraction entry names an axis at all (the prompt does not ask for one until slice
-   * 4), so every claim this function builds arrives with the pair absent.
+   * either. Since plan 06 slice 4 the extraction **is** asked for the pair, and is asked for it by the
+   * series' own declared questions (`character-voice/prompts.js`), not by anything in this file; a claim
+   * that answers none of them still arrives with the pair absent, which is what `rebuild.js` files.
    */
   const axis = typeof entry.axis === "string" ? entry.axis.trim() : "";
   const axisValue = typeof entry.value === "string" ? entry.value.trim() : "";
