@@ -89,6 +89,7 @@ module.exports = {
   POV_VOICE_LABEL: labels.POV_VOICE_LABEL,
   MAX_REBUILD_BULLET_CHARS: labels.MAX_REBUILD_BULLET_CHARS,
   REBUILT_EXAMPLES_PER_BULLET: labels.REBUILT_EXAMPLES_PER_BULLET,
+  MAX_REBUILD_ARC_LINES_PER_CHARACTER: labels.MAX_REBUILD_ARC_LINES_PER_CHARACTER,
   applyAliasDeclarations: names.applyAliasDeclarations,
   rebuildClaimAlreadyStored: mirror.rebuildClaimAlreadyStored,
   inspectVoiceMirrorForRebuild: mirror.inspectVoiceMirrorForRebuild,

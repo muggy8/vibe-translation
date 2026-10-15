@@ -67,6 +67,17 @@ const MAX_REBUILD_BULLET_CHARS = 2000;
 /** How many of a claim's own quotes are printed in its bullet. */
 const REBUILT_EXAMPLES_PER_BULLET = 3;
 
+/**
+ * How many earlier answers one character's section may print before the rest are named as left out.
+ *
+ * The arc (plan 06 slice 6) is the record's account of what it used to stand behind, and it exists so a
+ * character's development does not read as a contradiction. It is also the one part of the file that
+ * grows with the number of revisions rather than with the number of characters, so it gets the same
+ * treatment every other cap in this module gets: a constant with no environment knob, and a line that
+ * names how many it left out rather than a silent cut.
+ */
+const MAX_REBUILD_ARC_LINES_PER_CHARACTER = 6;
+
 /** What a capped bullet says about itself, so a reader knows the line is not the whole claim. */
 const TRUNCATION_NOTE = " (truncated here; the full claim is in this volume's reference record)";
 
@@ -78,5 +89,6 @@ module.exports = {
   UNLABELED_VOICE_LABEL,
   MAX_REBUILD_BULLET_CHARS,
   REBUILT_EXAMPLES_PER_BULLET,
+  MAX_REBUILD_ARC_LINES_PER_CHARACTER,
   TRUNCATION_NOTE,
 };

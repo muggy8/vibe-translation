@@ -182,6 +182,57 @@ grade reads, so the offline loop's largest `acceptance` prompt moved 10,418 → 
 `utils/reference-store/register/answers.js`, `utils/reference-store/validation/report-axes.js`,
 `test/test-axis-answers.js`, gotcha 156.
 
+**And a later volume can now replace a character claim without editing one** (plan 06 slice 6, built
+2026-10-14). The glossary has had a revision door since the store was built — a later volume files a **new**
+row for a term and marks the old one superseded — and the voice side had none, so a character who *changes*
+across the series had no legal answer: `update_own_fact` refuses a row this volume does not own, `challenge_fact`
+marks a claim `disputed` (the right mark for a claim somebody disagrees with, the wrong one for a claim a later
+volume replaced), and `resolve_challenge` supersedes only as the closing half of a dispute opened as a challenge.
+`utils/reference-store/voice-revision/` is that door, and it adds **no new verb**: it files the replacement through
+the ordinary `insertFact` and marks the published row through `facts/supersede.js`'s `markSuperseded`, both in one
+transaction. **It is keyed on (roster entry, declared register question)** — not on the claim's own words, because
+`(key, aspect, body)` is the store's *dedupe* identity and rewording the body is the whole content of a revision,
+and not on the `aspect` either, because plan 06 §2.3 measured four of the seven observation kinds landing on the
+one `register` aspect. The consequence is stated rather than hidden: **a series whose plan of record declares no
+register question has no door onto its voice claims**, and the refusal (`voice-revision-needs-a-register-declaration`)
+is asked *before* the record is read, because the read would answer "no claim answers that question" — true, and the
+wrong reason: nothing answers it because the series never asked one. The fix it names is the intake. The load-bearing
+guard is the quote: the replacement must cite a line **this volume's own text prints** (the same `findQuoteEvidence`
+the glossary door uses), refused not warned, because that is the only thing between "a later volume found evidence
+in its own book" and "a later volume changed a character because it felt like it". A revision that restates the
+answer already in force is refused too — same words is a *confirmation*, and a confirmation is slice 7's act.
+**What the render gained is the arc.** A superseded claim was already absent from every *current* answer
+(`currentClaimSql`), so the record could say "now" but not "it used to say this, from volume X until volume Y" —
+which makes a character who changed read as a character who was described wrongly. `renderRebuiltVoice` now prints
+each replaced answer as one italic line under its character's heading, capped at 6 per character with the remainder
+named. The line sits **before** the first bullet, and that is not cosmetics: `parseVoiceMarkdown` treats a
+non-bullet line after the first bullet as a continuation of that bullet, so the same line placed after the bullets
+would be glued onto a published claim's body the next time the file is re-imported (gotcha 157). **The door is wired into no
+stage**, and that is a decision rather than an omission: nothing in the pipeline can tell, without asking the model
+a second question per chapter, that a character changed — and plan 06 §6 names turning extraction noise into
+published "development" as the thing to avoid. Measured on fixtures, 0 model calls (`test/test-voice-revisions.js`,
+8 scenarios, 263 checks): a planted replacement changes what the render calls current (2 current bullets, 1 arc
+line), the axis query returns 1 claim where it returned 1 different one, the chapter's known-facts block reports
+`claimsReplaced 1`, the replaced row's content columns are identical and only `status` / `updated_at` move, two
+identical proposals file 1 row and a re-run files 0 with the record digest unchanged, 3 revisions quoting lines the
+book does not print file 0, 11 malformed entries + 2 wrong handles + 2 axis-less refusals file 0, the coverage
+answer is identical before and after, and 7 replaced answers render 6 lines plus one naming the one left out. **The
+placement is measured both ways**, because the render writes a file the store reads back: the shipped file parses
+through `parseVoiceMarkdown` as the same **2 claims plus 1 lead line** with no bullet body carrying the arc, and the
+counterfactual — the same line moved below the bullets — still parses as 2 claims with **nothing announcing the
+damage**, while the second claim's body becomes `"Addresses the man she reports to with vos… _Earlier in this record
+— …"`, which is a published claim rewritten by a render. Every
+call baseline is unmoved (82 / 17 and 28 / 6, 0 on the second pass in both), the level table is still 70 kinds, the
+freeze door table is still 15 doors, and no published file on the real corpus changes, **measured over copies of all 17 records** (gotcha 124):
+their `facts` tables hold **22,469 rows and every one of them is `aspect = 'term_usage'`** — the published
+records carry **no voice claims at all** — with **58 superseded rows, all 58 glossary**, and **no record has
+an `axis` column** (16 on schema 8, volume 03 on schema 9). So the door is unreachable on this corpus twice
+over: the series declares no register question, and the column the door keys on is not in those tables.
+Checked directly: rendering volume 17's **copied** record gives **0 sections / 0 bullets / 293 bytes** — all
+22,469 rows have `key IS NULL` — and opening that copy migrated it **8 → 10**, which is what reaching schema
+10 on a published record costs. →
+`utils/reference-store/voice-revision/`, `test/test-voice-revisions.js`, `/tmp/opencode/voice-revision-slice6-questions.md`.
+
 | File | Lines | What it owns |
 | --- | --- | --- |
 | `character-voice/config.js` | 63 | Prompt-file locations and the truncation window for a reference a call is shown. **Two prompt pairs, not five**: extraction and acceptance. The author, validator and feedback pairs went with the route that sent them. clientDir is the project root — a module in this folder reaches it through projectRoot, not through its own __dirname. **`VOICE_REF_TRUNCATION_MAX_CHARS` (24 KiB, a constant with no env knob) is new** (plan 06 slice 2): the two limits that were here are a relevance threshold (64 KiB) and a **section count** (200), and a section count cannot bound this artifact, which renders one section per roster entry — 196 entries came back from the picker unchanged. It is the same order as `character-voice/known-facts.js`'s block ceiling, so the layer has one answer to "how much of a voice reference reaches a prompt". |

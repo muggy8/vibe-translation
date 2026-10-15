@@ -7,17 +7,37 @@
  * verified quotes inline, so the file is self-citing, and a line over the read limit is capped **and
  * named as truncated** rather than becoming the 54,341-character line that destroyed volume 01.
  *
+ * ## The arc line (plan 06 slice 6)
+ *
+ * A superseded claim is already absent from every *current* answer — `currentClaimSql` excludes a row a
+ * live row supersedes, and that is what the render's bullets, the chapter's known-facts block and the axis
+ * queries all read. What the record had to gain was the other half: **what it used to stand behind, and
+ * from which volume**. Without it a character who changed is rendered as a character who was described
+ * wrongly, and the file gives a translator no way to tell those two apart.
+ *
+ * So each section carries its replaced answers as one italic line each, under its heading and **before**
+ * its bullets. The position is not cosmetic. `parseVoiceMarkdown` treats a non-bullet line after the first
+ * bullet as a *continuation of that bullet* and glues it onto the claim's body; the same line before the
+ * first bullet is the section's own prose and is stored as document prose. Placing the arc after the
+ * bullets would corrupt a published claim on the way back in, which is the one thing this file must not do
+ * to a file it also re-imports.
+ *
+ * It is therefore **not a bullet and not a claim**: it files no row, it is not evidence for anything, and
+ * it is capped and named like every other cap here.
+ *
  * @module utils/reference-store/rebuild/render
  */
 
 const { EXTRACTION_SOURCE_STAGE } = require("../schema");
 const { currentClaimSql } = require("../facts");
+const { supersededVoiceClaims } = require("../voice-revision/rows");
 
 const {
   REBUILT_VOICE_TITLE,
   REBUILT_VOICE_SECTION,
   MAX_REBUILD_BULLET_CHARS,
   REBUILT_EXAMPLES_PER_BULLET,
+  MAX_REBUILD_ARC_LINES_PER_CHARACTER,
   TRUNCATION_NOTE,
 } = require("./labels");
 require("../../../types"); // JSDoc type definitions
@@ -44,7 +64,7 @@ function renderExamples(examples) {
 }
 
 /**
- * Keep one bullet inside the read limit, and say out loud when it had to.
+ * Keep one rendered line inside the read limit, and say out loud when it had to.
  *
  * @param {string} body
  * @param {number} budget - How many characters the body may use once the `- **Label**: ` prefix is
@@ -58,6 +78,36 @@ function fitBullet(body, budget) {
 }
 
 /**
+ * One answer this record replaced, as the line its character's section prints for it.
+ *
+ * The wording is the whole design, so it is stated here rather than guessed at by a reader:
+ *
+ *   - **It quotes the replaced claim in straight double quotes.** `drafting.js`'s repeated-token shape
+ *     reads `'…'` and `“…”`; a double-quoted span is not one of its token patterns, so reproducing an
+ *     older claim's wording here cannot manufacture the "quotes the same span three times beside its own
+ *     correction" defect. The claim's own words are reproduced, not paraphrased, because the point of the
+ *     line is that a reader can see what changed.
+ *   - **It carries no parentheses and no self-correction phrase.** `no longer`, `not present`, a bracketed
+ *     aside: every one of those is a marker `drafting.js` reports at MEDIUM when it appears in the
+ *     artifact, and an arc line is not a defect. "was the answer from volume X until volume Y" says the
+ *     same thing in a shape the audit does not flag.
+ *   - **It names both volumes.** Which volume the answer held from, and which volume replaced it, are the
+ *     two facts a translator needs in order to know which chapters the old description was written for.
+ *
+ * @param {{body: string, label: string|null, appliesFromVolume: number, replacedBy: Array<{appliesFromVolume: number}>}} row
+ * @returns {string}
+ */
+function renderArcLine(row) {
+  const label = row.label || "Notes";
+  const replacedBy = row.replacedBy[0];
+  const body = String(row.body || "").replace(/\s*\n\s*/g, " ").trim();
+  const line =
+    `_Earlier in this record — **${label}**: "${body}" was the answer from volume ${row.appliesFromVolume} ` +
+    `until volume ${Number(replacedBy.appliesFromVolume)}._`;
+  return fitBullet(line, MAX_REBUILD_BULLET_CHARS);
+}
+
+/**
  * Render this volume's character-voice reference from its record, in chapter order.
  *
  * Sections are ordered by the earliest chapter any of that character's claims cites; bullets within a
@@ -67,7 +117,7 @@ function fitBullet(body, budget) {
  *
  * @param {ReferenceStore} store
  * @param {{volume?: number, title?: string, preamble?: string[]}} [opts]
- * @returns {{markdown: string, opening: string[], sections: number, characters: Array<{key: string, display: string, bullets: number, firstChapter: string|null}>, unattached: number, truncated: number}}
+ * @returns {{markdown: string, opening: string[], sections: number, characters: Array<{key: string, display: string, bullets: number, arc: number, arcOmitted: number, firstChapter: string|null}>, unattached: number, truncated: number}}
  */
 function renderRebuiltVoice(store, { volume, title = REBUILT_VOICE_TITLE, preamble = null } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -105,6 +155,23 @@ function renderRebuiltVoice(store, { volume, title = REBUILT_VOICE_TITLE, preamb
     byCharacter.get(row.key).rows.push(row);
   }
 
+  /**
+   * The arc, read once for the whole record and grouped by character.
+   *
+   * Read through `voice-revision/rows.js` rather than by walking `supersedes` here, so there is one
+   * answer to "what did this record used to stand behind" — the same answer the revision door asks.
+   * Bounded by the same volume the bullets are bounded by: a replacement that has not happened yet at
+   * this volume is not part of this volume's history.
+   *
+   * @type {Map<string, Array<Object>>}
+   */
+  const arcByKey = new Map();
+  for (const row of supersededVoiceClaims(store, { volume: vol })) {
+    if (row.key === null || row.key === undefined) continue;
+    if (!arcByKey.has(row.key)) arcByKey.set(row.key, []);
+    arcByKey.get(row.key).push(row);
+  }
+
   const sections = [...byCharacter.values()].sort((a, b) => {
     const wa = Math.min(...a.rows.map(when));
     const wb = Math.min(...b.rows.map(when));
@@ -130,6 +197,19 @@ function renderRebuiltVoice(store, { volume, title = REBUILT_VOICE_TITLE, preamb
     });
     const first = ordered[0];
     out.push(`### ${character.display}`, "");
+
+    // The replaced answers, under the heading and **before** the bullets: after the first bullet a
+    // non-bullet line is a continuation of that bullet, and `importVoice` would glue this line onto a
+    // published claim's body on the way back in. Before the bullets it is the section's own prose.
+    const arc = arcByKey.get(character.key) || [];
+    const shown = arc.slice(0, MAX_REBUILD_ARC_LINES_PER_CHARACTER);
+    for (const replaced of shown) out.push(renderArcLine(replaced));
+    const arcOmitted = arc.length - shown.length;
+    if (arcOmitted > 0) {
+      out.push(`_${arcOmitted} more earlier answer(s) for this character are in this volume's reference record._`);
+    }
+    if (shown.length || arcOmitted > 0) out.push("");
+
     for (const row of ordered) {
       const label = row.label || "Notes";
       const prefix = `- **${label}**: `;
@@ -143,6 +223,8 @@ function renderRebuiltVoice(store, { volume, title = REBUILT_VOICE_TITLE, preamb
       key: character.key,
       display: character.display,
       bullets: ordered.length,
+      arc: shown.length,
+      arcOmitted,
       firstChapter: first ? first.established_chapter : null,
     });
   }
