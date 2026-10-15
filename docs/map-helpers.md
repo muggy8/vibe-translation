@@ -262,7 +262,8 @@ a patch path — the pattern matches the folder as well as the file, so splittin
 out of the ban, and `test/test-freeze-gate.js` §15 pins that for `utils/prereqs.js` and
 `utils/prereqs/freeze.js` alike. The gate reads no environment variable, and the check that pins it
 scans the **whole layer** through `test/module-layer.js`'s `readModuleLayer` rather than the cover alone
-— a scan of a cover is a check that can never report (gotcha 67).
+— a scan of a cover is a check that can never report (gotcha 67), and the walk now follows the layer to
+the bottom of the folder it names (gotcha 161).
 
 | File | Lines | What it owns |
 | --- | --- | --- |

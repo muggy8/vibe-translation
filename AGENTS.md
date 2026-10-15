@@ -90,7 +90,7 @@ Each map doc ends with a table of the **implementation folders** its module was 
 
 Code comments cite `AGENTS.md gotcha N`. The numbers are unchanged from when the gotchas were
 one file: the list now lives in the five `docs/gotchas-*.md` slices (1–20, 21–45, 46–63,
-64–69, 70–160), and each slice says which part of the list it holds.
+64–69, 70–161), and each slice says which part of the list it holds.
 
 ## 3. The implementation folders
 
@@ -144,7 +144,18 @@ each resolve their own folder through `utils/postmortem`, so a module inside `ut
 reached back for them would close a require cycle and hand them a half-built barrel. → gotcha 85
 
 `test/module-layer.js` is the helper that lets a test which scans source text follow a module
-into its folder (`readModuleLayer(rootDir, "utils/translate.js")`).
+into its folder (`readModuleLayer(rootDir, "utils/translate.js")`). The walk is **recursive
+inside the named folder**, because a split layer nests: `glossary/` holds `glossary/extract/`,
+`glossary/carry-forward/` and `glossary/settlement/`, and a scan that stopped one level down
+would report a guarantee that lives in a nested submodule as a missing one — the same blindness
+the helper exists to remove, one level further down (gotcha 161). It never leaves the named
+folder, never follows a symlink, never walks `plan/` or a dotted folder, and stops at
+`MAX_LAYER_DEPTH` (4), which `test/test-module-layer.js` pins against the deepest real layer
+folder (1) so the bound cannot silently truncate a scan. `dropModuleLayer` forgets **the same
+list**, so a "fresh process" simulation forgets a nested submodule's own state and not just the
+face's. The default folder is still the one **named after the module**: `character-voice/task.js`
+reads only itself, because its pin is about that entry point, and widening the default to "the
+folder containing the file" would widen it for the wrong reason.
 
 ## 4. The rules that do not bend
 
