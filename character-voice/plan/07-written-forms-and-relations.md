@@ -868,3 +868,10 @@ Still open:
    ~3,099 readings and forces §2.2 to be re-measured, not tweaked. **Recommendation: keep A.** If the two pairs
    are wanted, the honest route is B with the candidate-set question answered first, not a special case inside
    the door.
+10. **The order the two doors have to run in, and who runs them (slice 3's report §5).** A relation's parties are
+   foreign keys to `cast_identities`, so the relations door is **unreachable on a record whose identity door has not
+   run** — which is every record in the corpus today (0 `cast_identities` rows in all 17). The honest order is
+   identity first, relations second, and neither is wired into a stage. This is item 3's question again now carrying
+   a dependency: answering it for the identity door silently answers it for the relations door. Slice 3's builder
+   recommends **keeping item 8's option (A)** — the limit is named in the door's own output and re-measurable, while
+   both ways past it re-open a defect this repository already paid for (gotcha 105, gotcha 117).
