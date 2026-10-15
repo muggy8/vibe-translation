@@ -1,56 +1,83 @@
 /**
- * utils/reference-store/written-forms/file.js — the door that files one volume's candidate written forms.
+ * utils/reference-store/written-forms/file.js — the door that files one volume's written forms.
  *
- * Plan 07 slice 1. The door reads **one volume's own pronunciation-guide harvest** — the file the
- * extraction writes beside the bundle since gotcha 123 fixed the guide-split defect, one row per
- * (word, reading) pair, 10,005 rows and 45,429 occurrences across the 17 real books, and read by
- * nothing at all until this slice — folds it into candidate groups with the shipped rule
- * (`utils/source/guide-groups.js`), and files each written form inside each candidate group as one
- * `written_forms` row: this volume printed this form, the author guided it with this reading, this many
- * times, in these chapters.
+ * Plan 07 slice 1, **widened to the scope the account owner chose in §6.7 (2026-10-15)**. The door reads
+ * **one volume's own pronunciation-guide harvest** — the file the extraction writes beside the bundle since
+ * gotcha 123 fixed the guide-split defect, one row per (word, reading) pair, 10,005 rows and 45,429
+ * occurrences across the 17 real books — and files **every harvested row that passes the two *row* guards**:
+ * the guided reading is at least `GUIDE_GROUP_MIN_READING_CHARS` characters long, and the reading shares no
+ * character with the written form. Each filed row is one `written_forms` row: this volume printed this form,
+ * the author guided it with this reading, this many times, in these chapters.
+ *
+ * ## Filing is judgement-free; grouping is a read
+ *
+ * The door applies **two** of `utils/source/guide-groups.js`'s four guards — the two that are facts about a
+ * single (form, reading) pair — and **none** of the two that are facts about a **set**: "2+ distinct written
+ * forms carry this reading" (`GUIDE_GROUP_MIN_FORMS`) and "at least one of them is 2+ characters long"
+ * (`GUIDE_GROUP_MIN_FORM_CHARS`). Those two stay exactly where slice 0 measured them, in the reader and in
+ * `rows.js`'s `candidateGroupsInRecord`, and they **stop deciding what gets filed**.
+ *
+ * The reason is the owner's, and it is the reason this shape exists rather than the narrower one slice 1
+ * first built: **the grouping guards are arguable, and they already carry a measured false negative.** しば ←
+ * 芝 x416 / 縛 x10 is dropped by the "at least one form 2+ characters" rule, and 芝 is a name the published
+ * record already holds (plan 07 §2.7). A door that applies an arguable judgement **when it files** is a door
+ * that makes that judgement impossible to widen later — the rows it never wrote are not in the table to be
+ * re-read by a better rule. Filing stays per-volume and judgement-free; grouping is a read, and a read can be
+ * re-asked. Measured on the 17 real books: the two row guards keep **8,910 of 10,005 rows** (1,084 dropped
+ * for a one-character reading, 10 for a reading that reuses a character of its own word, 1 skipped for
+ * naming no written form at all), and regrouping those rows through the shipped fold reproduces §2.2's
+ * **97 groups / 222 written forms / 634 rows / 8,734 occurrences** exactly.
+ *
+ * **The row guards are the reader's own, not a copy of them.** `GUIDE_GROUP_MIN_READING_CHARS` and
+ * `readingSharesNoCharacterWithForm` are imported from `utils/source/guide-groups.js`, and `normalizeSpaces`
+ * is the same normaliser `foldVolumeHarvest` runs each row through, so the rows the door writes are the rows
+ * the reader would have grouped — `test/test-written-forms.js` asserts the two tallies agree field for field.
  *
  * ## What the door asserts, and what it refuses to assert
  *
- * **It files no identity.** Plan 07 §5's slice-1 row is the account owner's rule: the roster-or-reading
- * claim that says two written forms are one person belongs to slice 2, and it covers 18 of the 97
- * groups. This door files all candidate groups — the 18 the roster selects **and** the 79 it cannot see,
- * including the six pronoun-and-description groups the owner answered with *"record the words, no
- * character"*. Filing a group is transcribing markup; filing a person is a claim, and the claim needs
- * the identity table, which this layer does not require and does not write.
+ * **It files no identity.** Plan 07 §5's slice-1 row is the account owner's rule: the roster-or-reading claim
+ * that says two written forms are one person belongs to slice 2, and it covers 18 of the 97 groups. This door
+ * files the forms of the 18 **and** of the 79 the roster cannot see, including the pronoun-and-description
+ * groups the owner answered with *"record the words, no character"*. Filing a form is transcribing markup;
+ * filing a person is a claim, and the claim needs the identity table, which this layer does not require and
+ * does not write.
  *
  * **It reports the roster's answer without acting on it.** `splitGroupsByRoster` and
- * `classifyUnselectedGroups` run on every pass and their numbers come back in the result, because plan
- * 07 §2.9's 18 / 79 and §2.10's 25 / 54 are only meaningful next to the pass that produced them. Nothing
- * is filed *because* of either split, and neither one is a finding: the 54 sound-alike groups are
- * ordinary homophones the author chose to gloss, and a rule that called them defects would cry wolf 54
- * times over 17 legitimate books.
+ * `classifyUnselectedGroups` run on every pass and their numbers come back in the result, because plan 07
+ * §2.9's 18 / 79 and §2.10's 25 / 54 are only meaningful next to the pass that produced them. Both are
+ * computed over the **groups the fold derives**, never over the rows the door filed — a filed row is not a
+ * candidate group, and a report that counted filed rows as groups would be counting a different thing than
+ * the plan's numbers describe. Nothing is filed *because* of either split, and neither one is a finding: the
+ * 54 sound-alike groups are ordinary homophones the author chose to gloss, and a rule that called them
+ * defects would cry wolf 54 times over 17 legitimate books.
  *
  * ## Why it reads only its own volume, and refuses anything later
  *
- * The account owner's asymmetry (plan 07 §4.4) is that **voice never looks forward**: a volume's record
- * is built from that volume and the volumes before it, so the snapshot an earlier volume published stays
+ * The account owner's asymmetry (plan 07 §4.4) is that **voice never looks forward**: a volume's record is
+ * built from that volume and the volumes before it, so the snapshot an earlier volume published stays
  * byte-identical no matter what a later book turns out to say. A door that filed volume 9's markup into
  * volume 4's record would break that, and it would do it silently. So the volume is checked *before*
- * anything is read (`written-forms-cannot-look-forward`), and the harvest is read out of the volume
- * folder the store itself resolved — there is no path through this door to another volume's book.
+ * anything is read (`written-forms-cannot-look-forward`), and the harvest is read out of the volume folder
+ * the store itself resolved — there is no path through this door to another volume's book.
  *
- * **The consequence is measured and reported, not hidden:** "one reading printed over two or more
- * written forms" is a question about a **set**, and it is not decomposable per volume. Folding each
- * volume's own harvest alone produces 57 groups / 240 rows across the 17 real books; folding all 17
- * together produces the 97 groups / 634 rows plan 07 §2.2 measures. The 40 groups that only exist in the
- * union are groups whose second written form appears in a **later** book (つきみ ← 月見 in volume 4 and
- * 草見月 in volume 11). This door cannot see them, by the owner's own rule. `candidateGroupsInRecord` in
- * `rows.js` is the read that answers the question over the rows the copy-forward carried — which can only
- * ever be this volume's and earlier ones' — and the widening decision is written up in
- * `/tmp/opencode/plan07-slice1-questions.md` rather than made here.
+ * **And the widening is what makes that rule survivable.** §2.13 measured that filing only each volume's
+ * *candidate groups* reaches 57 groups / 240 rows across the 17 books against the 97 / 634 the whole-series
+ * fold measures, because three of the 18 identity-bearing groups (ホース, ミント, つきみ) are never a
+ * candidate group in any single book — their second written form appears in a **later** one. Under the widened
+ * scope each volume files its own eligible rows and nothing else, so the no-forward rule is untouched, and
+ * the group appears anyway: the rows travel forward through copy-forward (`written_forms` is in
+ * `COUNTED_TABLES`), and `candidateGroupsInRecord` re-derives the group over the rows the copy carries. The
+ * door never has to look forward to file; only the read does.
  *
- * ## No seal guard, and that is deliberate
+ * ## No seal guard, and that is the owner's answer, not a borrowed one
  *
- * Same reasoning as `identity/file.js`: `castAlias` refuses to merge on a sealed record because a merge
- * re-points rows the record already published. Filing a written-forms row re-points nothing — no
- * renderer, audit rule, presence matcher, coverage rule, chapter-facts query or stage reads this table
- * (plan 07 slice 1's acceptance line, and `test/test-written-forms.js` greps the tree to prove the
- * count is zero). A row that reaches nothing published cannot damage what a seal protects.
+ * Plan 07 §2b (2026-10-15): **no seal on a written-forms row**, because *"future volumes won't be touching
+ * this volume's copy"* — a later volume works in its own copy, so a seal on a row that reaches no published
+ * file protects nothing. Same reasoning `identity/file.js` already gives: `castAlias` refuses to merge on a
+ * sealed record because a merge re-points rows the record already published, and filing a written-forms row
+ * re-points nothing — no renderer, audit rule, presence matcher, coverage rule, chapter-facts query or stage
+ * reads this table (plan 07 slice 1's acceptance line, and `test/test-written-forms.js` greps the tree to
+ * prove the count is zero). A row that reaches nothing published cannot damage what a seal protects.
  *
  * ## Idempotence
  *
@@ -67,7 +94,12 @@ const path = require("path");
 
 const { refusal } = require("../refusals");
 const { RUBY_GUIDE_FILE_SUFFIX, readRubyGuideFile } = require("../../source/ruby-guides");
-const { collectGuideGroups } = require("../../source/guide-groups");
+const { normalizeSpaces } = require("../../source/html");
+const {
+  GUIDE_GROUP_MIN_READING_CHARS,
+  collectGuideGroups,
+  readingSharesNoCharacterWithForm,
+} = require("../../source/guide-groups");
 const { splitGroupsByRoster, classifyUnselectedGroups, describeGroupForReport } = require("./shapes");
 const { writtenFormAlreadyFiled, insertWrittenFormRow, writtenFormCounts } = require("./rows");
 require("../../../types"); // JSDoc type definitions
@@ -156,7 +188,133 @@ function scriptOfGroup(group) {
 }
 
 /**
- * File one volume's candidate written forms into the record this store has open.
+ * @typedef {Object} WrittenFormFilingTally
+ * What the door's **two row guards** saw, counted per guard, so the widened scope is re-readable rather
+ * than remembered. The two *group* guards are not here and must never be: they decide nothing about filing.
+ * @property {number} harvestRows           — Rows read out of this volume's harvest, every one counted.
+ * @property {number} rowsSkippedWithoutWordOrReading — Rows naming no written form or no reading: counted, never filed.
+ *   (the same name `GuideGroupTotals` gives the same count, so the door's tally and the reader's tally read
+ *   as one vocabulary and `test/test-written-forms.js` can assert they agree)
+ * @property {number} rowsDroppedByReadingLength — Rows whose reading is shorter than `GUIDE_GROUP_MIN_READING_CHARS`.
+ * @property {number} rowsDroppedBySharedCharacter — Rows whose reading shares a character with the written form.
+ * @property {number} rowsEligible          — Rows that passed both row guards.
+ * @property {number} rowsMerged            — Eligible rows that shared a (form, reading) key and were summed rather than filed twice.
+ * @property {number} rowsToFile            — Distinct (form, reading) keys the door will file.
+ * @property {number} distinctReadings      — Distinct guided readings among them.
+ * @property {number} distinctForms         — Distinct written forms among them.
+ * @property {number} occurrences           — Guided occurrences summed over the rows to file.
+ */
+
+/**
+ * The rows one volume's harvest yields **under the two row guards only**, merged per (form, reading).
+ *
+ * This is the widened filing set (plan 07 §6.7). It is deliberately **not** a group list: a row is filed
+ * whatever group it would or would not have joined, so the arguable set-level guards in
+ * `utils/source/guide-groups.js` cannot silently decide what the record gets to know. The two row guards
+ * applied here are that module's own constant and its own predicate, and the normalisation is its own
+ * `normalizeSpaces`, so the door and the reader cannot disagree about what an eligible row is.
+ *
+ * Merging on (form, reading) is what keeps a harvest that lists one pair twice from doubling a count — the
+ * same protection `foldVolumeHarvest` gives the fold — and it is also what makes the door's output match the
+ * table's primary key one-for-one.
+ *
+ * @param {Array<Object>} harvestRows - One volume's `guides` array, in the shape `utils/source/ruby-guides.js` writes it.
+ * @returns {{rows: Array<{form: string, reading: string, readingScript: string, ambiguousScript: boolean, occurrences: number, chapters: string[]}>, tally: WrittenFormFilingTally, missingScriptRows: Array<{form: string, reading: string}>, ambiguousScripts: string[]}}
+ *   `missingScriptRows` names the rows that carry no script label for their reading — refused rather than
+ *   filed half — and `ambiguousScripts` the readings that arrive under more than one label.
+ */
+function eligibleWrittenFormRows(harvestRows) {
+  /** @type {Map<string, {form: string, reading: string, scripts: Set<string>, occurrences: number, chapters: string[]}>} */
+  const byKey = new Map();
+  const tally = {
+    harvestRows: 0,
+    rowsSkippedWithoutWordOrReading: 0,
+    rowsDroppedByReadingLength: 0,
+    rowsDroppedBySharedCharacter: 0,
+    rowsEligible: 0,
+    rowsMerged: 0,
+    rowsToFile: 0,
+    distinctReadings: 0,
+    distinctForms: 0,
+    occurrences: 0,
+  };
+  /** @type {Array<{form: string, reading: string}>} */
+  const missingScriptRows = [];
+
+  for (const row of Array.isArray(harvestRows) ? harvestRows : []) {
+    tally.harvestRows += 1;
+    // The same normalisation the fold runs, so a filed row and a grouped row are the same string.
+    const form = normalizeSpaces(row && row.word);
+    const reading = normalizeSpaces(row && row.reading);
+    if (!form || !reading) {
+      tally.rowsSkippedWithoutWordOrReading += 1;
+      continue;
+    }
+    if (reading.length < GUIDE_GROUP_MIN_READING_CHARS) {
+      tally.rowsDroppedByReadingLength += 1;
+      continue;
+    }
+    if (!readingSharesNoCharacterWithForm(reading, form)) {
+      tally.rowsDroppedBySharedCharacter += 1;
+      continue;
+    }
+    tally.rowsEligible += 1;
+
+    const key = `${form}\u0000${reading}`;
+    let entry = byKey.get(key);
+    if (entry) tally.rowsMerged += 1;
+    else {
+      entry = { form, reading, scripts: new Set(), occurrences: 0, chapters: [] };
+      byKey.set(key, entry);
+    }
+    entry.occurrences += Number.isFinite(row && row.count) ? Number(row.count) : 0;
+    if (row && row.readingScript) entry.scripts.add(String(row.readingScript));
+    for (const chapter of (row && Array.isArray(row.chapters)) ? row.chapters : []) {
+      if (chapter && !entry.chapters.includes(chapter)) entry.chapters.push(chapter);
+    }
+  }
+
+  // Reading, then form: the same order `writtenFormsInRecord` reads the rows back in, so the filing log
+  // and the record's own read cannot look like two different passes.
+  const merged = [...byKey.values()].sort(
+    (a, b) =>
+      a.reading < b.reading ? -1 : a.reading > b.reading ? 1 : a.form < b.form ? -1 : a.form > b.form ? 1 : 0
+  );
+
+  /** @type {Array<{form: string, reading: string, readingScript: string, ambiguousScript: boolean, occurrences: number, chapters: string[]}>} */
+  const rows = [];
+  /** @type {string[]} */
+  const ambiguousScripts = [];
+  for (const entry of merged) {
+    const scripts = [...entry.scripts].sort();
+    if (scripts.length === 0) {
+      missingScriptRows.push({ form: entry.form, reading: entry.reading });
+      continue;
+    }
+    if (scripts.length > 1) ambiguousScripts.push(entry.reading);
+    rows.push({
+      form: entry.form,
+      reading: entry.reading,
+      readingScript: scripts[0],
+      ambiguousScript: scripts.length > 1,
+      occurrences: entry.occurrences,
+      chapters: entry.chapters.slice(),
+    });
+  }
+
+  tally.rowsToFile = rows.length;
+  tally.distinctReadings = new Set(rows.map((row) => row.reading)).size;
+  tally.distinctForms = new Set(rows.map((row) => row.form)).size;
+  tally.occurrences = rows.reduce((sum, row) => sum + row.occurrences, 0);
+  return { rows, tally, missingScriptRows, ambiguousScripts: [...new Set(ambiguousScripts)].sort() };
+}
+
+/**
+ * File one volume's written forms into the record this store has open.
+ *
+ * Every harvested row that passes the two **row** guards is filed, whatever group it would or would not
+ * have joined (plan 07 §6.7, the account owner's answer). The two **group** guards stay in
+ * `utils/source/guide-groups.js` and in `rows.js`'s `candidateGroupsInRecord`, and they decide nothing here.
  *
  * @param {Object} store - The store context from `openReferenceStore` / `openVolumeRecord`.
  * @param {Object} [opts]
@@ -164,7 +322,7 @@ function scriptOfGroup(group) {
  * @param {Array<{volume: number, guides: Array<Object>}>} [opts.harvests] - Pre-read harvests, for a
  *   caller that already holds them (the measurement script). Every one must belong to this volume or an
  *   earlier one; a later volume is refused by name.
- * @returns {Promise<{ok: boolean, volume: number, harvestFiles: string[], harvestMissing: boolean, harvestErrors: Array<Object>, harvestReadError: string|null, totals: Object, candidateGroups: number, candidateForms: number, candidateRows: number, candidateOccurrences: number, identityBearing: {groups: number, rows: number, occurrences: number, readings: string[]}, unselected: {groups: number, rows: number, occurrences: number, spellingVariants: number, soundAlikes: number}, spellingVariantGroups: Array<Object>, soundAlikeGroups: Array<Object>, ambiguousReadingScripts: string[], harvestVolumesIgnored: number[], formsFiled: Array<Object>, rowsFiled: number, rowsAlreadyFiled: number, counts: Object, refusal: ReferenceRefusal|null}>}
+ * @returns {Promise<{ok: boolean, volume: number, harvestFiles: string[], harvestMissing: boolean, harvestErrors: Array<Object>, harvestReadError: string|null, filing: WrittenFormFilingTally, totals: Object, candidateGroups: number, candidateForms: number, candidateRows: number, candidateOccurrences: number, identityBearing: {groups: number, rows: number, occurrences: number, readings: string[]}, unselected: {groups: number, rows: number, occurrences: number, spellingVariants: number, soundAlikes: number}, spellingVariantGroups: Array<Object>, soundAlikeGroups: Array<Object>, ambiguousReadingScripts: string[], harvestVolumesIgnored: number[], formsFiled: Array<Object>, rowsFiled: number, rowsAlreadyFiled: number, counts: Object, refusal: ReferenceRefusal|null}>}
  */
 async function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -173,6 +331,7 @@ async function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
     harvestMissing: false,
     harvestErrors: [],
     harvestReadError: null,
+    filing: null,
     totals: null,
     candidateGroups: 0,
     candidateForms: 0,
@@ -183,10 +342,10 @@ async function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
     spellingVariantGroups: [],
     soundAlikeGroups: [],
     ambiguousReadingScripts: [],
+    harvestVolumesIgnored: [],
     formsFiled: [],
     rowsFiled: 0,
     rowsAlreadyFiled: 0,
-    harvestVolumesIgnored: [],
   };
 
   if (!Number.isInteger(vol) || vol < 1) {
@@ -204,7 +363,9 @@ async function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
   }
   // The no-forward rule, asked before anything is read. A record is what this volume and the volumes
   // before it measured; filing a later book's markup into it would rewrite what an earlier snapshot
-  // published, which is the asymmetry plan 07 §4.4 exists to keep.
+  // published, which is the asymmetry plan 07 §4.4 exists to keep. The widening does not soften this:
+  // a volume files its OWN eligible rows and nothing else, and the group that needs two books is
+  // recovered later by the read, not by looking ahead here.
   if (Number.isInteger(store.volume) && vol > Number(store.volume)) {
     return {
       ...empty,
@@ -266,13 +427,21 @@ async function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
   const ignoredVolumes = [...new Set(read.filter((harvest) => harvest.volume !== vol).map((harvest) => harvest.volume))].sort(
     (a, b) => a - b
   );
+  const ownRows = own.flatMap((harvest) => (harvest.guides && harvest.guides) || []);
+
+  // ── What gets filed: the two row guards, and nothing else. ───────────────────────────────────────
+  const { rows, tally, missingScriptRows, ambiguousScripts } = eligibleWrittenFormRows(ownRows);
+
+  // ── What gets reported: the shipped grouping fold, over the same rows. ───────────────────────────
+  // The fold is the ONLY place the two group guards are applied to this volume's rows, and it decides
+  // nothing here. It runs so the roster's answer (plan 07 §2.9) and the 25 / 54 split (§2.10) can be
+  // printed beside the pass that produced them — as data, over the GROUPS the fold derives, never over
+  // the rows the door filed.
   const folded = collectGuideGroups(own, { displaySubset: false });
   const roster = rosterKeysInRecord(store);
   const split = splitGroupsByRoster(folded.groups, roster);
   const unselectedReport = classifyUnselectedGroups(split.unselected);
-  const ambiguousReadingScripts = folded.groups
-    .filter((group) => scriptOfGroup(group).ambiguous)
-    .map((group) => group.reading);
+  const ambiguousReadingScripts = [...new Set([...ambiguousScripts, ...folded.groups.filter((group) => scriptOfGroup(group).ambiguous).map((group) => group.reading)])].sort();
 
   /** @type {Array<Object>} */
   const formsFiled = [];
@@ -281,40 +450,39 @@ async function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
 
   store.db.exec("BEGIN");
   try {
-    for (const group of folded.groups) {
-      const script = scriptOfGroup(group);
-      if (!script.readingScript) {
-        throw new Error(
-          `[reference-store] fileVolumeWrittenForms: the group "${group.reading}" carries no script label for its reading, ` +
-            "and a written-form row that cannot say how its reading is written is a row a later reader has to guess about."
-        );
+    // A row whose reading carries no script label is **refused, not filed half**: a row that cannot say
+    // how its reading is written is a row a later reader has to guess about, and guessing is how a
+    // script-neutral table quietly stops being one. It throws, so the whole pass rolls back rather than
+    // publishing a volume whose filing is part-finished.
+    if (missingScriptRows.length) {
+      throw new Error(
+        `[reference-store] fileVolumeWrittenForms: ${missingScriptRows.length} written form(s) in volume ${vol} carry no script label for ` +
+          `their reading (first: "${missingScriptRows[0].form}" → "${missingScriptRows[0].reading}"), and a row that cannot say how its ` +
+          "reading is written is a row a later reader has to guess about."
+      );
+    }
+    for (const row of rows) {
+      const existing = writtenFormAlreadyFiled(store, { volume: vol, form: row.form, reading: row.reading });
+      if (existing) {
+        rowsAlreadyFiled += 1;
+        continue;
       }
-      for (const form of group.forms) {
-        for (const occurrence of form.occurrences || []) {
-          if (Number(occurrence.volume) !== vol) continue;
-          const existing = writtenFormAlreadyFiled(store, { volume: vol, form: form.form, reading: group.reading });
-          if (existing) {
-            rowsAlreadyFiled += 1;
-            continue;
-          }
-          insertWrittenFormRow(store, {
-            volume: vol,
-            form: form.form,
-            reading: group.reading,
-            readingScript: script.readingScript,
-            occurrences: Number(occurrence.count),
-            chapters: occurrence.chapters || [],
-          });
-          rowsFiled += 1;
-          formsFiled.push({
-            form: form.form,
-            reading: group.reading,
-            readingScript: script.readingScript,
-            occurrences: Number(occurrence.count),
-            chapters: (occurrence.chapters || []).slice(),
-          });
-        }
-      }
+      insertWrittenFormRow(store, {
+        volume: vol,
+        form: row.form,
+        reading: row.reading,
+        readingScript: row.readingScript,
+        occurrences: row.occurrences,
+        chapters: row.chapters,
+      });
+      rowsFiled += 1;
+      formsFiled.push({
+        form: row.form,
+        reading: row.reading,
+        readingScript: row.readingScript,
+        occurrences: row.occurrences,
+        chapters: row.chapters.slice(),
+      });
     }
     store.db.exec("COMMIT");
   } catch (err) {
@@ -329,6 +497,7 @@ async function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
     harvestMissing,
     harvestErrors,
     harvestReadError,
+    filing: tally,
     totals: folded.totals,
     candidateGroups: folded.totals.candidateGroups,
     candidateForms: folded.totals.candidateForms,
@@ -364,5 +533,6 @@ module.exports = {
   writtenFormHarvestFiles,
   readWrittenFormHarvest,
   scriptOfGroup,
+  eligibleWrittenFormRows,
   fileVolumeWrittenForms,
 };

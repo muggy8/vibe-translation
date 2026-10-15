@@ -15,9 +15,14 @@
  *   1. **the migration.** A record written at schema 11 opens after this change, is brought to 12, keeps
  *      every row every other table had, and `written_forms` starts empty. A migration does not invent a
  *      written form nobody harvested.
- *   2. **the door files the harvest, and only the candidate groups.** Which rows it filed, with the count
- *      and the chapters the harvest recorded, and the two report halves (the roster's answer, and the
- *      spelling-shape split) printed beside them.
+ *   2. **the door files every row the two ROW guards keep — plan 07 §6.7, the account owner's answer.**
+ *      15 harvest rows → **13 filed**, whatever group each one would or would not have joined, with the
+ *      count and the chapters the harvest recorded. Both halves are pinned: a row that joins **no** group
+ *      in this volume (大賀太陽 → サンちゃん, guided over one written form; 恐 / 遅 → おそ, a group whose
+ *      forms are all one character — the shape that hides しば ← 芝 / 縛) is **filed**, and a row one of the
+ *      two row guards refuses (言い訳 → いい, 替 → か) is **not**. The two report halves (the roster's
+ *      answer, and the spelling-shape split) are computed over the **groups the fold derives**, not over
+ *      what was filed, and they are unmoved by the widening.
  *   3. **a second pass files 0, and every content column is identical column by column** — not "nothing
  *      obviously changed".
  *   4. **it files no identity and touches no roster.** `cast`, `facts` and `cast_merges` come out
@@ -30,20 +35,26 @@
  *      alike shape stays out of the variant list; the ratio is a subsequence over the **shorter** form, so
  *      美味 / 上手 is 0 of 2 and is left alone.
  *   7. **no forward look, asked twice** — the volume, and every harvest handed to the door. Each refusal
- *      files nothing.
+ *      files nothing. The widening does not soften this: a volume files its own rows and nothing else.
  *   8. **the group question is a query, not a column.** Two volumes that each saw one form of one reading
  *      describe the group only when the rows are read together, and `upToVolume` bounds how far the read may
- *      look. This is the measured reason the door's own scope cannot reach plan 07 §2.2's 97 groups.
- *   9. **insert-only.** A duplicate row throws rather than overwriting; a damaged `chapters` cell is named
+ *      look. This is why the door is allowed to file judgement-free: the read is where a set is decided.
+ *   9. **the point of the widening, end to end.** 芝 is planted in one fixture volume and 縛 in another —
+ *      the exact shape of plan 07 §2.7's measured false negative. Neither volume's own harvest forms the
+ *      group, so under the scope this slice first built **neither form would ever have been filed**; under
+ *      the widened scope both are, and the group appears in `candidateGroupsInRecord` at the later volume
+ *      and did not appear at the earlier one.
+ *   10. **insert-only.** A duplicate row throws rather than overwriting; a damaged `chapters` cell is named
  *      rather than repaired.
- *   10. **what this slice did not add**: no finding kind, no setting, no command, no freeze door, no declared
+ *   11. **what this slice did not add**: no finding kind, no setting, no command, no freeze door, no declared
  *      artifact, no verb on the store's handle, **no stage that calls the door**, and **nothing outside the
- *      layer that reads the table**.
+ *      layer that reads the table**. And the cover's whole export list is compared against the store's barrel,
+ *      because the barrel is a spread and a name a submodule forgets disappears from it silently (gotcha 151)
+ *      — the widened door added one name, `eligibleWrittenFormRows`.
  *
- * The slice-0 row guards are pinned in scenario 2: a reading that reuses a character of its own word, a
- * one-character reading, a reading carried by one written form, and a group whose forms are all one
- * character (the shape that hides しば ← 芝 x416 / 縛 x10, plan 07 §2's known false negative) are each
- * counted and named rather than dropped quietly.
+ * The two row guards the door applies are pinned in scenario 2 beside the two group guards the fold still
+ * applies to its own report, and the two tallies are asserted to agree field for field — the door's guards
+ * are the reader's constant and the reader's predicate, not a copy of them.
  *
  * Fixtures only, under `/tmp/opencode/series-fixtures`. Nothing here reads the real 17 volumes or any file
  * under the series folder, and nothing here reaches a model (AGENTS.md rule 8, gotcha 69). The real-corpus
@@ -142,6 +153,12 @@ _Starter glossary for the written-forms suite._
  * the real corpus contains: 三色院菫子 → パンジー is the rename, 偽物 / 偽者 is the 25-group shape, 美味 /
  * 上手 is the 54-group shape, 言い訳 → いい is the ordinary prose gotcha 128 says a pattern rule cannot tell
  * apart from a defect, and 恐 / 遅 → おそ is the single-character group that hides しば ← 芝.
+ *
+ * **The last four rows are the widened scope, planted.** 言い訳 → いい and 替 → か are refused by the two
+ * ROW guards, so the door does not file them. 大賀太陽 → サンちゃん (one written form under that reading)
+ * and 恐 / 遅 → おそ (a group whose forms are all one character) are refused only by the two GROUP guards,
+ * so the door files all three of them and the fold still reports their groups as dropped. That is plan 07
+ * §6.7 in fixture shape: filing keeps the row, grouping decides the set.
  */
 const HARVEST = {
   schema: 2,
@@ -302,7 +319,7 @@ async function scenarioMigration() {
   console.log("1. migration: schema 11 → 12, every other table's rows identical, the new table empty");
 }
 
-// ─── 2. the door files the harvest, and only the candidate groups ─────────────
+// ─── 2. the door files every row the two ROW guards keep ──────────────────────
 
 /** Scenario 2. @returns {Promise<void>} */
 async function scenarioDoor() {
@@ -318,20 +335,50 @@ async function scenarioDoor() {
     same(pass.harvestMissing, false, "the volume has a harvest, so nothing is missing");
     same(pass.harvestErrors, [], "and it parsed");
 
-    same(pass.totals.harvestRows, 15, "every harvest row was counted, including the ones the guards throw away");
-    same(pass.totals.rowsDroppedByReadingLength, 1, "a one-character reading is a phonetic complement, not a name (替 → か)");
-    same(pass.totals.rowsDroppedBySharedCharacter, 1, "a reading that reuses a character of its own word is the word's ordinary pronunciation (言い訳 → いい)");
-    same(pass.totals.groupsDroppedBelowFormFloor, 1, "one reading carried by one written form is just a word with its pronunciation (大賀太陽 → サンちゃん)");
-    same(pass.totals.groupsDroppedWithEveryFormSingleCharacter, 1, "and a group whose forms are all one character is dropped — the guard that also hides しば ← 芝 / 縛, plan 07 §2's known false negative");
-    same(pass.totals.candidateGroups, 5, "five candidate groups survive");
+    // ── the filing tally: the two ROW guards, counted per guard (plan 07 §6.7) ──
+    same(pass.filing.harvestRows, 15, "every harvest row was counted, including the ones the guards throw away");
+    same(pass.filing.rowsSkippedWithoutWordOrReading, 0, "no row in this fixture names neither a form nor a reading");
+    same(pass.filing.rowsDroppedByReadingLength, 1, "a one-character reading is a phonetic complement, not a name (替 → か)");
+    same(pass.filing.rowsDroppedBySharedCharacter, 1, "a reading that reuses a character of its own word is the word's ordinary pronunciation (言い訳 → いい)");
+    same(pass.filing.rowsEligible, 13, "13 rows passed the two row guards");
+    same(pass.filing.rowsMerged, 0, "and no two of them share a (form, reading) key, so nothing was summed");
+    same(pass.filing.rowsToFile, 13, "13 distinct (form, reading) keys to file");
+    same(pass.filing.distinctReadings, 7, "over 7 guided readings");
+    same(pass.filing.distinctForms, 12, "and 12 written forms");
+    same(pass.filing.occurrences, 283, "283 guided occurrences filed");
+
+    same(pass.rowsFiled, 13, "and the door filed exactly those 13 rows — every row the row guards keep, whatever group it joins");
+    same(pass.rowsAlreadyFiled, 0, "none of them was already there");
+    same(pass.counts.thisVolume, 13, "the record's own count agrees");
+    same(pass.counts.distinctForms, 12, "and so does its distinct-form count");
+    same(pass.counts.distinctReadings, 7, "and its distinct-reading count");
+    same(pass.counts.occurrences, 283, "and the occurrences it summed");
+
+    // The door's row guards are the reader's constant and the reader's predicate, not a copy of them:
+    // the two tallies count the same rows through the same two guards, so they must agree field for field.
+    same(pass.filing.harvestRows, pass.totals.harvestRows, "the door and the fold read the same 15 rows");
+    same(pass.filing.rowsDroppedByReadingLength, pass.totals.rowsDroppedByReadingLength, "and agree on what the reading-length guard dropped");
+    same(pass.filing.rowsDroppedBySharedCharacter, pass.totals.rowsDroppedBySharedCharacter, "and on what the shared-character guard dropped");
+    same(pass.filing.rowsSkippedWithoutWordOrReading, pass.totals.rowsSkippedWithoutWordOrReading, "and on the rows that name nothing");
+    same(pass.filing.rowsEligible, pass.totals.rowsEligible, "and on how many rows are eligible");
+
+    // ── the group report: the two GROUP guards, still applied, still deciding nothing about filing ──
+    same(pass.totals.groupsDroppedBelowFormFloor, 1, "one reading carried by one written form is not a candidate group (大賀太陽 → サンちゃん)");
+    same(pass.totals.groupsDroppedWithEveryFormSingleCharacter, 1, "and a group whose forms are all one character is not one either — the guard that also hides しば ← 芝 / 縛, plan 07 §2's known false negative");
+    same(pass.totals.candidateGroups, 5, "five candidate groups survive the group guards");
     same(pass.totals.candidateRows, 10, "ten harvest rows sit inside them");
     same(pass.totals.candidateForms, 9, "nine distinct written forms");
     same(pass.totals.candidateOccurrences, 272, "272 guided occurrences");
+    same(pass.candidateGroups, 5, "and the door reports the same five groups it reported before the scope widened");
 
-    same(pass.rowsFiled, 10, "and the door filed exactly those ten rows");
-    same(pass.rowsAlreadyFiled, 0, "none of them was already there");
-    same(pass.counts.thisVolume, 10, "the record's own count agrees");
-    same(pass.counts.distinctForms, 9, "and so does its distinct-form count");
+    // **The half the widening is for: a row that joins NO group in this volume is filed anyway.**
+    ok(writtenFormAlreadyFiled(store, { volume: 1, form: "大賀太陽", reading: "サンちゃん" }), "the lone form under its reading is filed, even though no group guard would have kept it");
+    ok(writtenFormAlreadyFiled(store, { volume: 1, form: "恐", reading: "おそ" }), "and so is a form inside the all-single-character group the length guard drops");
+    ok(writtenFormAlreadyFiled(store, { volume: 1, form: "遅", reading: "おそ" }), "…and its partner: both rows are in the record, so widening that guard later costs no re-read of the book");
+
+    // **The half that did not change: a row one of the two ROW guards refuses is not filed.**
+    same(writtenFormAlreadyFiled(store, { volume: 1, form: "言い訳", reading: "いい" }), null, "a reading that reuses a character of its own word is not filed");
+    same(writtenFormAlreadyFiled(store, { volume: 1, form: "替", reading: "か" }), null, "and neither is a one-character reading");
 
     const pansy = pass.formsFiled.filter((row) => row.reading === "パンジー").map((row) => row.form).sort();
     same(pansy, ["三色院菫子", "好きな女"], "the rename group is filed as the two forms the book printed, not as one entry");
@@ -344,19 +391,20 @@ async function scenarioDoor() {
     same(sumire.chapters, ["ch1"], "and the chapters it recorded");
     same(sumire.readingScript, "katakana", "and the script label the harvest carried");
 
-    // The two report halves, printed beside the filing.
+    // The two report halves, printed beside the filing, computed over the GROUPS the fold derives.
     same(pass.identityBearing.groups, 3, "the roster selects three of the five groups");
     same(pass.identityBearing.readings, ["パンジー", "ツバキ", "主人公"], "named, in the order the fold produced them");
     same(pass.identityBearing.rows, 6, "six harvest rows inside them");
     same(pass.identityBearing.occurrences, 34, "34 occurrences");
     same(pass.unselected.groups, 2, "and it cannot see the other two");
+    same(pass.unselected.rows, 4, "four harvest rows inside those two");
     same(pass.unselected.spellingVariants, 1, "one of them is one word spelled two ways");
     same(pass.unselected.soundAlikes, 1, "the other is two words that happen to sound alike");
     same(pass.spellingVariantGroups.map((g) => g.reading), ["にせもの"], "named with both spellings");
     same(pass.spellingVariantGroups[0].forms.map((f) => f.form), ["偽物", "偽者"], "so a dictionary can print it");
     same(pass.soundAlikeGroups.map((g) => g.reading), ["うま"], "and the sound-alike is named as a class, not as an error");
     same(pass.ambiguousReadingScripts, [], "no reading arrives under two script labels");
-    console.log("2. door: 15 harvest rows → 5 candidate groups / 10 rows filed, 3 identity-bearing, 1 spelling variant, 1 sound-alike");
+    console.log("2. door: 15 harvest rows → 13 filed under the two row guards, 5 candidate groups reported (not filed), 3 identity-bearing, 1 spelling variant, 1 sound-alike");
   } finally {
     store.close();
   }
@@ -375,14 +423,15 @@ async function scenarioIdempotence() {
     const second = await fileVolumeWrittenForms(store, {});
     ok(second.ok && second.refusal === null, `the second pass should not fail: ${second.refusal && second.refusal.because}`);
     same(second.rowsFiled, 0, "a second pass over the same volume files 0 new rows");
-    same(second.rowsAlreadyFiled, 10, "and reports all ten as already filed, rather than failing on them");
+    same(second.rowsAlreadyFiled, 13, "and reports all thirteen as already filed, rather than failing on them");
     same(second.candidateGroups, 5, "it still sees the same five groups");
+    same(second.filing.rowsEligible, 13, "and the same thirteen eligible rows");
     same(second.formsFiled, [], "and files nothing");
 
     same(filedRowsWithoutStamps(store), rowsAfterFirst, "every content column of every filed row is identical, column by column");
     same(writtenFormsInRecord(store).map((row) => row.createdAt), stampsAfterFirst, "and no created_at moved either: the table is insert-only, so there is nothing to update");
-    same(writtenFormCounts(store).total, 10, "the record still holds ten rows, not twenty");
-    console.log("3. idempotence: pass 2 files 0 / reports 10 already filed, and every column is byte-identical");
+    same(writtenFormCounts(store).total, 13, "the record still holds thirteen rows, not twenty-six");
+    console.log("3. idempotence: pass 2 files 0 / reports 13 already filed, and every column is byte-identical");
   } finally {
     store.close();
   }
@@ -524,8 +573,9 @@ async function scenarioNoForward() {
       ],
     });
     ok(earlier.ok, "volume 0 is not later than volume 1, so it is not a forward look");
-    same(earlier.rowsFiled, 10, "the door files only volume 1's own rows");
+    same(earlier.rowsFiled, 13, "the door files only volume 1's own rows");
     same(earlier.totals.harvestRows, 15, "and the fold saw only volume 1's harvest: another volume's rows are not folded in here");
+    same(earlier.harvestVolumesIgnored, [0], "and it names the volume whose harvest it did not file here");
     console.log("7. no forward look: the volume is checked, the harvests are checked, and each refusal files 0");
   } finally {
     store.close();
@@ -573,9 +623,107 @@ function scenarioGroupQuery() {
   }
 }
 
-// ─── 9. insert-only, and a damaged cell is named ──────────────────────────────
+// ─── 9. the point of the widening: a group two books make together is filed anyway ─
 
-/** Scenario 9. @returns {void} */
+/**
+ * The two harvests of scenario 9, planted as the real corpus's two shapes.
+ *
+ * 芝 → しば x416 and 縛 → しば x10 are plan 07 §2.7's measured false negative, split across two books:
+ * each form is one character, so the "at least one form is 2+ characters" guard drops the group **even in
+ * the whole-series fold**. 月見 → つきみ and 草見月 → つきみ are the shape §2.13 names as unreachable per
+ * volume but reachable in the union: both forms are multi-character, and each book prints only one of them.
+ *
+ * @type {Object<string, Array<Object>>}
+ */
+const SPLIT_HARVESTS = {
+  1: [
+    { word: "芝", reading: "しば", count: 416, readingScript: "hiragana", chapters: ["ch0"], annotated: [{ base: "芝", reading: "しば" }] },
+    { word: "月見", reading: "つきみ", count: 1, readingScript: "hiragana", chapters: ["ch1"], annotated: [{ base: "月見", reading: "つきみ" }] },
+  ],
+  2: [
+    { word: "縛", reading: "しば", count: 10, readingScript: "hiragana", chapters: ["ch0"], annotated: [{ base: "縛", reading: "しば" }] },
+    { word: "草見月", reading: "つきみ", count: 1, readingScript: "hiragana", chapters: ["ch0"], annotated: [{ base: "草見月", reading: "つきみ" }] },
+  ],
+};
+
+/**
+ * A two-volume fixture with a different harvest in each volume folder.
+ *
+ * @param {string} label
+ * @returns {{fx: Object, seriesDir: string}}
+ */
+function openSplitFixture(label) {
+  const fx = fixtureStoreSeries(`written-forms-${label}`);
+  for (const [volume, guides] of Object.entries(SPLIT_HARVESTS)) {
+    const index = Number(volume) - 1;
+    const base = fx.volumes[index].base;
+    fs.writeFileSync(
+      path.join(fx.volumes[index].dir, `${base}${RUBY_GUIDE_FILE_SUFFIX}`),
+      JSON.stringify({ schema: 2, guides }, null, 2) + "\n",
+      "utf8"
+    );
+  }
+  return { fx, seriesDir: fx.dir };
+}
+
+/** Scenario 9. @returns {Promise<void>} */
+async function scenarioCrossVolumeGroup() {
+  const { fx, seriesDir } = openSplitFixture("cross-volume");
+  const store1 = openReferenceStore({ volume: 1, folder: "Test Story(01)", seriesDir, stage: "merge" });
+  const store2 = openReferenceStore({ volume: 2, folder: "Test Story(02)", seriesDir, stage: "merge" });
+  assertInsideFixture(store1.file, seriesDir);
+  assertInsideFixture(store2.file, seriesDir);
+  try {
+    // Neither book forms either group on its own. This is the fact the widening is built on: under the
+    // scope slice 1 first shipped, the door filed what the group guards kept, so **none of these four
+    // forms would ever have been written down** — the group exists only across two books, and no volume
+    // is allowed to look forward to find it.
+    const alone1 = collectGuideGroups([{ volume: 1, guides: SPLIT_HARVESTS[1] }], { displaySubset: false });
+    const alone2 = collectGuideGroups([{ volume: 2, guides: SPLIT_HARVESTS[2] }], { displaySubset: false });
+    same(alone1.totals.candidateGroups, 0, "volume 1's own harvest forms no candidate group");
+    same(alone1.totals.candidateRows, 0, "and files no row under the grouping rule");
+    same(alone2.totals.candidateGroups, 0, "nor does volume 2's");
+    same(alone2.totals.candidateRows, 0, "…nor its rows");
+
+    // Volume 1's own record: the door files its rows anyway.
+    const pass1 = await fileVolumeWrittenForms(store1, {});
+    ok(pass1.ok, `volume 1's door should file: ${pass1.refusal && pass1.refusal.because}`);
+    same(pass1.rowsFiled, 2, "volume 1 files both of its eligible rows, group or no group");
+    same(pass1.candidateGroups, 0, "and reports honestly that its own harvest describes no candidate group");
+    same(candidateGroupsInRecord(store1).totals.candidateGroups, 0, "read back from the record, volume 1 alone is still no group: つきみ has one written form here");
+
+    // Volume 2's record carries volume 1's rows — which is what copy-forward does in a real run, because
+    // `written_forms` is in `COUNTED_TABLES`. Filed here through the same door, stamped with the volume
+    // that printed each form, so the scenario needs no sealed volume to show the shape.
+    const carried = await fileVolumeWrittenForms(store2, { volume: 1, harvests: [{ volume: 1, guides: SPLIT_HARVESTS[1] }] });
+    ok(carried.ok && carried.rowsFiled === 2, `volume 1's rows should travel into volume 2's record: ${carried.refusal && carried.refusal.because}`);
+    const own2 = await fileVolumeWrittenForms(store2, {});
+    ok(own2.ok && own2.rowsFiled === 2, `volume 2's own pass should file its two rows: ${own2.refusal && own2.refusal.because}`);
+    same(writtenFormCounts(store2).total, 4, "volume 2's record now holds four written forms, two from each book");
+
+    // The group the two books make together, found by the READ.
+    const union = candidateGroupsInRecord(store2);
+    same(union.totals.candidateGroups, 1, "read together, the same four rows describe one candidate group");
+    same(union.totals.groupsSeen, 2, "two readings were seen");
+    same(union.totals.groupsDroppedWithEveryFormSingleCharacter, 1, "and しば is dropped by the length guard — **named, not lost**: both of its rows are in the table, so widening that guard later recovers the group with 0 model calls and 0 re-reads of any book");
+    const tsukimi = union.groups.find((group) => group.reading === "つきみ");
+    ok(Boolean(tsukimi), "つきみ is the group the union produces");
+    same(tsukimi.forms.map((f) => f.form), ["月見", "草見月"], "with both written forms");
+    same(tsukimi.forms.map((f) => f.volumes), [["1"], ["2"]], "each form keeping the book it came out of");
+    same(tsukimi.volumes, ["1", "2"], "and the group dated to both books");
+
+    // The read is still bounded: volume 2 may not look past itself, and volume 1's own record never saw this.
+    same(candidateGroupsInRecord(store2, { upToVolume: 1 }).totals.candidateGroups, 0, "and the read bounded to volume 1 still finds nothing: the second form had not been printed yet");
+    console.log("9. widening: 4 rows filed across two books, 0 groups in either book alone, 1 group (つきみ) in the union, しば kept as rows and named as a dropped group");
+  } finally {
+    store1.close();
+    store2.close();
+  }
+}
+
+// ─── 10. insert-only, and a damaged cell is named ──────────────────────────────
+
+/** Scenario 10. @returns {void} */
 function scenarioInsertOnly() {
   const { store } = openFixture("insert-only");
   try {
@@ -618,13 +766,13 @@ function scenarioInsertOnly() {
     const counts = writtenFormCounts(store);
     same(counts.perVolume, { 1: 1 }, "the per-volume report says which book each row came out of");
     same(counts.occurrences, 113, "and sums the occurrences");
-    console.log("9. insert-only: a duplicate throws, four malformed rows are refused, a damaged cell is named");
+    console.log("10. insert-only: a duplicate throws, four malformed rows are refused, a damaged cell is named");
   } finally {
     store.close();
   }
 }
 
-// ─── 10. what this slice did not add ──────────────────────────────────────────
+// ─── 11. what this slice did not add ──────────────────────────────────────────
 
 /** Folders that are not pipeline code — the same list `test/test-no-language-axis-list.js` states. */
 const SKIP_DIRS = new Set(["node_modules", "test", "docs", "plan", "epub_source", "hooks", "calibration", "test-series"]);
@@ -647,7 +795,7 @@ function pipelineSourceFiles(dir = ROOT, out = []) {
   return out.sort();
 }
 
-/** Scenario 10. @returns {void} */
+/** Scenario 11. @returns {void} */
 function scenarioNothingAdded() {
   const kinds = Object.keys(FINDING_LEVELS);
   same(kinds.length, 70, "the finding level table is still 70 kinds — this slice added none");
@@ -691,11 +839,21 @@ function scenarioNothingAdded() {
   const coverText = fs.readFileSync(coverFile, "utf8");
   ok(/fileVolumeWrittenForms/.test(coverText) && /candidateGroupsInRecord/.test(coverText) && /identityBearingGroups/.test(coverText), "the cover re-exports the door, the read and the pure half");
   ok(/require\("\.\.\/\.\.\/source\/guide-groups"\)/.test(fs.readFileSync(path.join(layerPrefix, "rows.js"), "utf8")), "and the read hands its rows to the shipped grouping rule rather than restating it");
+
+  // The store's barrel is a spread, so a name a submodule forgets to export disappears from it silently and
+  // a caller destructures `undefined` — gotcha 151. The widened door added one name (`eligibleWrittenFormRows`,
+  // the filing set on its own, for a caller that wants to ask what the two row guards keep without opening a
+  // record), so the whole cover list is compared against the barrel rather than a hand-written subset.
+  const coverNames = Object.keys(require(coverFile));
+  ok(coverNames.includes("eligibleWrittenFormRows"), "the cover exports the row-guard filing set, so the widened scope is readable without a store");
+  const missingFromBarrel = coverNames.filter((name) => rs[name] === undefined);
+  same(missingFromBarrel, [], `and every one of the cover's ${coverNames.length} names reaches the store's barrel`);
+
   const barrelText = fs.readFileSync(barrelFile, "utf8");
   ok(/__writtenForms/.test(barrelText), "and the store's barrel re-exports the cover");
   same(RUBY_GUIDE_FILE_SUFFIX, "-ruby-guides.json", "the file name the door scans for is the name the extraction writes");
 
-  console.log("10. nothing added: 70 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 stage callers, 0 readers of the table");
+  console.log("11. nothing added: 70 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 stage callers, 0 readers of the table");
 }
 
 // ─── Run ──────────────────────────────────────────────────────────────────────
@@ -709,6 +867,7 @@ function scenarioNothingAdded() {
   scenarioClassifier();
   await scenarioNoForward();
   scenarioGroupQuery();
+  await scenarioCrossVolumeGroup();
   scenarioInsertOnly();
   scenarioNothingAdded();
   console.log(`\nwritten forms: ${checks} checks, 0 model calls.`);

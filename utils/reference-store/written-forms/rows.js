@@ -186,9 +186,11 @@ function parseChapters(raw) {
 /**
  * How many rows this record holds, per volume, and what they add up to.
  *
- * Reported as **data, not a finding**: a volume whose harvest produced no candidate group is a volume
- * that guided no reading over two written forms, which is a fact about that book. Plan 07 slice 1 files
- * nothing and punishes nothing for it.
+ * Reported as **data, not a finding**: a volume whose harvest produced no candidate group is a volume that
+ * guided no reading over two written forms, which is a fact about that book. Plan 07 slice 1 files nothing
+ * and punishes nothing for it. Under the widened filing scope (plan 07 §6.7) a volume can file rows and
+ * still form no candidate group at all — every reading it guided was guided over one written form — and
+ * that is the same fact, seen from the other side.
  *
  * @param {{db: Object, volume: number}} store
  * @param {{volume?: number}} [opts] - Defaults to the record's own volume.
@@ -224,17 +226,24 @@ function writtenFormCounts(store, { volume } = {}) {
 /**
  * The candidate groups this record's own rows describe, rebuilt by **the shipped grouping rule itself**.
  *
- * **This is the read a later slice asks**, and it exists because the grouping rule is not decomposable
- * per volume: "one reading printed over two or more written forms" is a question about a **set**, and a
- * volume that guided 月見 with つきみ cannot know that another book guided 草見月 with the same reading.
- * Each volume files only its own harvest (plan 07 §5's slice-1 rule, and the no-forward-leak rule the
- * account owner set), so the group question is answered here, over the rows the copy-forward carried —
- * which can only ever be this volume's and earlier ones'.
+ * **This is the only place the two *group* guards are ever applied to the rows the door filed** (plan 07
+ * §6.7, the account owner's answer of 2026-10-15). The door files every row that passes the two *row*
+ * guards and applies neither group guard, so this read is not one of two places where a candidate is
+ * decided — it is the one place where it is decided, over rows that were deliberately filed without that
+ * judgement. That is what makes an arguable guard re-askable: widening `GUIDE_GROUP_MIN_FORM_CHARS` later
+ * changes what this read returns, and needs no re-reading of a single book.
+ *
+ * It is also the read a later slice asks, and it exists because the grouping rule is not decomposable per
+ * volume: "one reading printed over two or more written forms" is a question about a **set**, and a volume
+ * that guided 月見 with つきみ cannot know that another book guided 草見月 with the same reading. Each
+ * volume files only its own harvest (plan 07 §5's slice-1 rule, and the no-forward-leak rule the account
+ * owner set), so the group question is answered here, over the rows the copy-forward carried — which can
+ * only ever be this volume's and earlier ones'.
  *
  * It is not a second implementation of the fold. The rows are handed back to
  * `utils/source/guide-groups.js`'s `collectGuideGroups` in the same shape the harvest file holds them
  * (`word` / `reading` / `count` / `chapters` / `readingScript`), so the door that files and the query that
- * groups **cannot** drift into two different definitions of a candidate — which is the failure mode
+ * groups **cannot** drift into two different definitions of an eligible row — which is the failure mode
  * `utils/reference-store/drafting.js` and the two reading passes were each built to avoid. The totals
  * returned are that module's own `GuideGroupTotals`, field for field.
  *

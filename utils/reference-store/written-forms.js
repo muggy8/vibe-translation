@@ -12,8 +12,9 @@
  *     (insert-only, no update, no delete), whether this record already holds it, every row this record
  *     carries, the counts, and the candidate groups the rows describe when handed back to the shipped
  *     grouping rule.
- *   - `written-forms/file.js` — the **door**: read one volume's own pronunciation-guide harvest, fold it
- *     with `utils/source/guide-groups.js`, and file each candidate group's written forms.
+ *   - `written-forms/file.js` — the **door**: read one volume's own pronunciation-guide harvest and file
+ *     every harvested row that passes the two **row** guards, whatever group it would or would not have
+ *     joined; the same file runs the shipped fold alongside, for the report only.
  *
  * ## What this layer is, in one line
  *
@@ -21,6 +22,22 @@
  * it with うま, 113 times, in these chapters.* It is the book's own markup transcribed, and it is the
  * floor plan 07 was written because the extraction has been writing that harvest beside every volume
  * since gotcha 123 and **nothing has ever read it back**.
+ *
+ * ## Filing is judgement-free; grouping is a read (plan 07 §6.7, the owner's answer)
+ *
+ * The door files **every harvested row that passes the two row guards** — the guided reading is 2+
+ * characters long, and the reading shares no character with the written form. The two **group** guards
+ * (`GUIDE_GROUP_MIN_FORMS`, `GUIDE_GROUP_MIN_FORM_CHARS`) stay in `utils/source/guide-groups.js` and in
+ * `rows.js`'s `candidateGroupsInRecord`, and they decide nothing about what gets filed. That is the
+ * account owner's decision of 2026-10-15, and the reason written into `file.js`: the grouping guards are
+ * arguable and already carry a measured false negative (しば ← 芝 x416 / 縛 x10 is dropped by the
+ * length guard, and 芝 is a name the published record holds), and a door that applies an arguable
+ * judgement **when it files** is a door that makes that judgement impossible to widen later. Filing stays
+ * per-volume and judgement-free; grouping is a read, and a read can be re-asked against the same rows.
+ *
+ * **No seal on a written-forms row**, also the owner's answer (§2b): a later volume works in its own copy,
+ * so a seal on a row that reaches no published file protects nothing. `identity/file.js` already reasons
+ * this way and `file.js` follows it.
  *
  * ## What it never touches
  *
@@ -73,5 +90,6 @@ module.exports = {
   writtenFormHarvestFiles: file.writtenFormHarvestFiles,
   readWrittenFormHarvest: file.readWrittenFormHarvest,
   scriptOfGroup: file.scriptOfGroup,
+  eligibleWrittenFormRows: file.eligibleWrittenFormRows,
   fileVolumeWrittenForms: file.fileVolumeWrittenForms,
 };
