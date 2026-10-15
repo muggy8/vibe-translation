@@ -162,10 +162,31 @@ const ATTRIBUTION_ANSWERS = ["confirmed", "reassign", "narrator", "unknown"];
 /** The roles a character can play in a relational fact (doc 03 §2). */
 const FACT_CHARACTER_ROLES = ["subject", "agent", "patient", "witness"];
 
+/**
+ * The only sources allowed to state that two roster entries are the same character (plan 06 §2.11).
+ *
+ * The list is closed and it is short because the measurement is what narrowed it. Across the 17 real
+ * records and the 17 published glossaries: `cast.aliases` holds 0 links, `cast_merges` holds 0, every
+ * `cast_presence_match.name` equals its own key, `facts.extracted_as` holds 0 rows, `document_prose`
+ * holds 0 rows and `attribution_answers` holds 0 — and the two things that actually state a link are
+ * the extraction's pronunciation-guide harvest (**13 pairs, 24 of the 196 roster entries**, the book's
+ * own markup) and the glossary's Characters rows (**56 pairs, 88 entries**, model-written prose that is
+ * already inside the record as `facts` with `section = 'Characters'`).
+ *
+ * A value is a **provenance label, not a confidence level**: it says which door put the link in, so a
+ * wrong link can be found by source and withdrawn by source. It is deliberately not a per-link score
+ * and there is no "somebody inferred this" value, because the one prose shape that looked narrowest —
+ * `<K>'s nickname` — was measured at 49 row-hits producing 5 pairs with **all 5 wrong**, and an
+ * `inferred` source is how that measurement would get filed anyway.
+ *
+ * @type {string[]}
+ */
+const IDENTITY_LINK_SOURCES = ["ruby-guide", "glossary-character-row"];
+
 // ─── Version ──────────────────────────────────────────────────────────────────
 
 /** The schema this build of the code writes. */
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 /**
  * The migrations, oldest first. Version 1 is the whole design as built.
@@ -543,6 +564,90 @@ const MIGRATIONS = [
       `CREATE INDEX IF NOT EXISTS idx_research_notes_asker ON research_notes(asked_by_volume, found)`,
     ],
   },
+  {
+    version: 9,
+    name: "plan 06 slice 1b — an identity, and the roster names that belong to it",
+    // WHY THIS EXISTS, AND WHY IT IS A TABLE AND NOT A MERGE.
+    //
+    // The roster is the glossary's Characters table copied into `cast`: all 196 distinct cast keys
+    // across the 17 real records are one of the 196 terms those tables publish. A character the
+    // glossary described under two names is therefore **two roster entries by construction**, and the
+    // coverage guard asks a question per entry — so it demands a voice profile for ジョーロ as well as
+    // for 如月雨露, and for each of the six names the biggest group in this corpus goes by.
+    //
+    // The mechanism the layer already has for that is `castAlias` → `cast_merges`: re-point the
+    // duplicate's rows onto a survivor. Slice 1 measured why that is the wrong door here
+    // (plan 06 §2.11, §10.8). A merge is the one operation in this folder that can make a character's
+    // claims vanish from a query; it is irreversible on a sealed record; and the source that states
+    // most of these links — model-written prose — produced **5 pairs, all 5 wrong** from the
+    // narrowest-looking shape it could be read with. The one structured source, the ruby-guide harvest,
+    // states the link but not which entry is the character, so its own direction would fold パンジー
+    // (17 volumes) into 虹彩寺菫 (4). A door that cannot say which name survives should not be filing
+    // a decision whose whole content is which name survives.
+    //
+    // So this migration adds a **relation, not a rewrite**. An identity is a row. A link is a row that
+    // names two cast entries and says which source stated it and in which volume. Nothing in `cast`
+    // moves, no `facts` row changes its `key`, no entry is deleted, marked `merged_into`, or re-pointed,
+    // and `cast_merges` stays exactly as full as it was. The identity is what a later slice can ask a
+    // coverage question about; it is not what a claim is filed under, and that separation is the point
+    // of the whole design — `test/test-identity-table-isolation.js` is the guard that keeps it true.
+    //
+    // **An identity has no name.** The sources state that two names are one character and never state
+    // which one is the person, so the row carries no label: its primary key is a number and its content
+    // is its members. A display name is a render-time decision (slice 8), and a label stored here would
+    // be read as the person by the first slice that rendered it.
+    //
+    // **A link is withdrawn, never deleted** — the same shape `cast.merged_into` and `challenges.outcome`
+    // use. "Removable" and "traceable" are both requirements, and a deleted row satisfies only one of
+    // them. A withdrawn link stops grouping and stays readable with the reason it was withdrawn.
+    up: [
+      // The identity. No label column, on purpose (see above). `members` and `links` are the live
+      // counts, stored beside the answer for the same reason `cast_presence` stores `chapters` and
+      // `matches`: a reader of the group should not have to know the detail table exists to see how
+      // big the group is.
+      `CREATE TABLE IF NOT EXISTS cast_identities (
+         identity            INTEGER PRIMARY KEY,
+         created_by_volume   INTEGER NOT NULL,
+         created_at          TEXT NOT NULL,
+         members             INTEGER NOT NULL DEFAULT 0,
+         links               INTEGER NOT NULL DEFAULT 0,
+         absorbed_into       INTEGER REFERENCES cast_identities(identity),
+         absorbed_reason     TEXT,
+         note                TEXT
+       )`,
+
+      // The one-to-many, in the only form the sources actually support: a **stated link**. One row per
+      // (pair, source, volume), each carrying the reason the source gave — the ruby row itself for the
+      // book's markup, the glossary row's own notes cell for the prose — so a wrong link is findable by
+      // source and removable by source. `a` and `b` are stored in sorted order so the same pair stated
+      // twice (once by the book, once by the glossary) is two rows a reader can compare rather than one
+      // row whose provenance was decided by whichever door ran first.
+      //
+      // `UNIQUE (a, b, stated_by, stated_by_volume)` is the idempotence rule: re-running the pass over a
+      // volume it already filed does not stack a second copy of the same statement.
+      `CREATE TABLE IF NOT EXISTS cast_identity_links (
+         link_id          INTEGER PRIMARY KEY,
+         identity         INTEGER NOT NULL REFERENCES cast_identities(identity),
+         a                TEXT NOT NULL REFERENCES cast(key),
+         b                TEXT NOT NULL REFERENCES cast(key),
+         stated_by        TEXT NOT NULL CHECK (stated_by IN ('ruby-guide','glossary-character-row')),
+         stated_by_volume INTEGER NOT NULL,
+         source_file      TEXT,
+         reason           TEXT NOT NULL,
+         added_at         TEXT NOT NULL,
+         withdrawn_at     TEXT,
+         withdrawn_reason TEXT,
+         UNIQUE (a, b, stated_by, stated_by_volume)
+       )`,
+
+      // The two queries this layer actually asks: "which groups exist, and how big are they", and "is
+      // this roster name inside one". Withdrawn links are excluded from the second one by the caller,
+      // because "is this name linked" has to mean "is it linked by something still standing".
+      `CREATE INDEX IF NOT EXISTS idx_identity_links_identity ON cast_identity_links(identity, withdrawn_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_identity_links_key      ON cast_identity_links(a, withdrawn_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_identity_links_key_b    ON cast_identity_links(b, withdrawn_at)`,
+    ],
+  },
 ];
 
 /**
@@ -571,6 +676,8 @@ const COUNTED_TABLES = [
   "record_reopens",
   "attribution_answers",
   "research_notes",
+  "cast_identities",
+  "cast_identity_links",
 ];
 
 // ─── Applying it ──────────────────────────────────────────────────────────────
@@ -662,6 +769,7 @@ module.exports = {
   SOURCE_STAGES,
   FACT_CHARACTER_ROLES,
   ATTRIBUTION_ANSWERS,
+  IDENTITY_LINK_SOURCES,
   EVIDENCE_KINDS,
   EVIDENCE_MATCHES,
   EXTRACTION_SOURCE_STAGE,

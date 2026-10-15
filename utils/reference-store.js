@@ -49,6 +49,7 @@ const __integrity = require("./reference-store/integrity");
 const __prose = require("./reference-store/document-prose");
 const __presence = require("./reference-store/presence");
 const __names = require("./reference-store/name-resolution");
+const __identity = require("./reference-store/identity");
 const __narrator = require("./reference-store/narrator");
 const __attribution = require("./reference-store/attribution");
 const __researchNotes = require("./reference-store/research-notes");
@@ -80,6 +81,7 @@ module.exports = {
   ...__prose,
   ...__presence,
   ...__names,
+  ...__identity,
   ...__narrator,
   ...__attribution,
   ...__researchNotes,

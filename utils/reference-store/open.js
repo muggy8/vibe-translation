@@ -36,6 +36,7 @@ const queries = require("./queries");
 const integrity = require("./integrity");
 const documentProse = require("./document-prose");
 const presence = require("./presence");
+const identity = require("./identity");
 const attribution = require("./attribution");
 const { storeError } = require("./refusals");
 require("../../types"); // JSDoc type definitions
@@ -269,6 +270,19 @@ function openReferenceStore({ volume, folder, seriesDir, stage = "merge", create
   ctx.castPresence = (vol) => presence.castPresence(ctx, vol);
   ctx.presenceDetail = (vol, key) => presence.presenceDetail(ctx, vol, key);
   ctx.presenceMeasured = (vol) => presence.presenceMeasured(ctx, vol);
+
+  // The identity tables (plan 06 slice 1b). Reachable from the store, and from NOTHING that files a
+  // claim: `castAlias`, `mergeInheritedCastEntry`, `resolveExtractionName` and `recordCastPresence` do
+  // not require this module and never will — filing a link must not be able to change who a claim lands
+  // under, which is the guarantee `test/test-identity-table-isolation.js` pins.
+  ctx.fileIdentityLinks = (opts) => identity.fileIdentityLinks(ctx, opts);
+  ctx.withdrawIdentityLink = (linkId, reason) => identity.withdrawIdentityLink(ctx, linkId, reason);
+  ctx.castIdentities = (opts) => identity.castIdentities(ctx, opts);
+  ctx.castIdentityLinks = (opts) => identity.castIdentityLinks(ctx, opts);
+  ctx.castIdentityMembers = (id) => identity.castIdentityMembers(ctx, id);
+  ctx.identityOfCastKey = (key) => identity.identityOfCastKey(ctx, key);
+  ctx.unlinkedCastKeys = () => identity.unlinkedCastKeys(ctx);
+  ctx.identityCoverageSummary = () => identity.identityCoverageSummary(ctx);
 
   ctx.attributionDoubts = (opts) => attribution.attributionDoubts(ctx, opts);
   ctx.attributionSummary = (opts) => attribution.attributionSummary(ctx, opts);
