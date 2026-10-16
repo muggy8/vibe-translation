@@ -418,9 +418,9 @@ async function renderGlossaryArtifact(ctx, { moveAside = true } = {}) {
     title: glossaryTitleBlock(ctx.values),
   });
   const sections = (markdown.match(/^## /gm) || []).length;
-  // Every section's table costs one header line (`| Japanese | English | Notes |`) that matches the
-  // same shape as a data row; the separator line (`|---|---|---|`) does not. So the row count is the
-  // table lines minus one per section.
+  // Every section's table costs one header line — the words are `GLOSSARY_HEADER`, and they name what a
+  // column holds rather than a language — that matches the same shape as a data row; the separator line
+  // (`|---|---|---|`) does not. So the row count is the table lines minus one per section.
   const tableLines = (markdown.match(/^\| (?!-)/gm) || []).length;
   const rows = Math.max(0, tableLines - sections);
   const bytes = Buffer.byteLength(markdown, "utf8");

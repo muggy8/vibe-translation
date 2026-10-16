@@ -32,6 +32,19 @@
 const fs = require("fs");
 const path = require("path");
 
+const { GLOSSARY_HEADER } = require("../utils/reference-store/glossary-adapter");
+
+/**
+ * The table header line the fixture glossaries are written with.
+ *
+ * Built from the store's own constant rather than typed out, because a fixture that spells the labels out
+ * pins them in a test file where nothing says they are the artifact's labels. The one place that claim is
+ * allowed to be pinned is `test/test-glossary-re-render.js`, which pins the constant itself and proves
+ * that every reader of a published glossary drops the header row by POSITION — so a fixture written under
+ * any other words still parses into the same rows.
+ */
+const GLOSSARY_TABLE_HEADER = `| ${GLOSSARY_HEADER.join(" | ")} |`;
+
 /** Where these fixtures live. Each suite passes its own label so they cannot collide. */
 const FIXTURES_ROOT = "/tmp/opencode/series-fixtures";
 
@@ -102,7 +115,7 @@ _Canonical renderings for the fixture series._
 
 ## Characters
 
-| Japanese | English | Notes |
+${GLOSSARY_TABLE_HEADER}
 |---|---|---|
 | 如月雨露 | Kisaragi Amatsuyu | Protagonist; the narrator |
 | 大賀太陽 | Oga Taiyo | Best friend since junior high |
@@ -110,7 +123,7 @@ _Canonical renderings for the fixture series._
 
 ## Nicknames
 
-| Japanese | English | Notes |
+${GLOSSARY_TABLE_HEADER}
 |---|---|---|
 | ジョーロ | Joro | Nickname of Kisaragi Amatsuyu |
 
@@ -118,7 +131,7 @@ _Canonical renderings for the fixture series._
 
 Parodies and coinages are indexed here by their in-story form.
 
-| Japanese | English | Notes |
+${GLOSSARY_TABLE_HEADER}
 |---|---|---|
 | 会計担当 | The Accounting Person | The book says it plainly: 「山田は会計の人である。」 |
 `;

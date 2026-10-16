@@ -104,6 +104,29 @@ counterparts, and they are gone from the tree, not parked behind a flag.
 | `glossary/settlement/records.js` | 412 | `glossary-settlement.md` (the human decision log) and `glossary-settlement.json` (its machine twin), written into the **run's own records**, not declared corpus artifacts — the `extract` step's precedent. The twin is what makes a second pass cost **0 model calls**, and the rule is one question about the entry: **did the reading call bring back an answer the parser could read as a decision?** `keep`, and `revise` whether the revision door took it or refused it, close their agenda identity. A revision that was filed **and reached the settled record** closes the identity of the rendering it chose as well — without that second key the pass re-asks the term it just settled, which is what this file's first version did. An answer that never arrived (`unusable`) or that the pass could not ask for (`unreachable`) is recorded so the cost is visible and **closes nothing**: the next pass asks the term again, because a question nobody answered must not look like a question that needed no asking (gotcha 138). Both rules are **derived from the entry's own `decision`**, never stored, so a record written before them is read by them rather than re-paid for. Every term the bound cut is named in the log, with the shape that made it a candidate. The pass writes **no finding kinds** and its two records are not on the post-mortem's disk, so nothing it reports reaches the triage or the halt gate — and the finding channel (`utils/postmortem/channel.js`, gotcha 146) is not its door either, because that channel is per volume and this pass runs once, after the last volume. What a settlement failure costs is therefore visibility in its own log, not a stop. |
 | `glossary/settlement/publish.js` | 184 | Renders the settled record into the series-root `glossary.md`, with the provenance sidecar pointing at the record it came from, and refuses rather than publishing a render with no rows. **No per-volume `glossary.md` is rewritten, ever** — each one stays the record of what that installment found, which is the evidence the agenda rule reads. When the file on disk already matches the render, nothing is written and the run says so. |
 
+### `glossary/re-render/` — the implementation of `glossary/re-render.js` (83 lines of face)
+
+**A door, not a stage.** No step calls it, it is not in `index.js`'s step list, and it makes **0 model
+calls**: it exists so a published `glossary.md` can be rebuilt from the record it is already a render of,
+which is the only honest way to publish a rendering the record already holds. Rehearsal is the default.
+
+| File | Lines | What it owns |
+| --- | --- | --- |
+| `glossary/re-render.js` | 83 | **The cover**, and the only name another module should require. It holds no logic: it re-exports the three files below. |
+| `glossary/re-render/record.js` | 167 | Opening the volume's record **as a copy** (gotcha 124 — opening a corpus `series.db` with a database client folds its write-ahead log and deletes the `-wal` / `-shm` sidecars in the folder it was read from), asking it which volume it is out of its own `volumes` row, and reading the settled rows through the same door `renderGlossary` uses. **It refuses a scratch folder equal to, or anywhere inside, the volume folder it is reading** — a copy that lands on the corpus record is not a copy, and that is the mistake this door made once (plan 07 §5 slice 6). |
+| `glossary/re-render/compare.js` | 301 | **The gate.** The render is compared against the file on disk before anything is replaced, and every disagreement is a refusal that publishes nothing: a row that vanishes (named with the term and the section, beside the store rule that refused it), a row that appears, a rendering or notes cell that moves, a section that disappears, a render with **0** rows, and a render that cannot reproduce the file's own title and preamble. **No flag reaches any of them.** A file whose only difference is its header line is reported as `onlyHeaderLinesDiffer` — the shape the 2026-10-15 rename produced when it was measured against the files that still carried the old labels; measured again after the rename, **17 of 17 published files are identical to their own record's render**. |
+| `glossary/re-render/publish.js` | 184 | The only half that writes, and only under `--apply --move-aside`: the file it replaces is kept as `glossary.md.rejected` through the shared numbered door (`utils/reference-store/quarantine.js`), which is the shape `classifyVolumeQuarantine` reads as a re-render rather than a gate refusal. **It asks the existing `glossary` freeze door before it writes** (`assertDoorAllowed({ door: "glossary", cancelledBy: "apply" })`) and adds no door of its own; a refusal names the artifact, why the skip would have cancelled the freeze, and the translations built on it. |
+
+Measured on the real corpus, 0 model calls, copies only (`test/measure-glossary-re-render.js`): **17
+volumes, 11,219 rows on disk, 0 lost, 0 gained, 0 rendering or notes cell changed, 0 sections lost, 0 rows
+refused by the evidence rule**, and 22,469 glossary rows compared column by column between a copy and its
+source with **0 columns moved and 0 `row_version` moved**. The plan's older warning that a re-render loses
+rows (volume 02 124 → 120, volume 17 554 → 520) compared a render against an **authored** file; every
+glossary this corpus publishes is already a render of its own record, so it loses none — plan 07 §4.7 says
+so inline.
+
+
+
 ### `glossary/carry-forward/` — the implementation of `glossary/carry-forward.js` (48 lines of face)
 
 | File | Lines | What it owns |

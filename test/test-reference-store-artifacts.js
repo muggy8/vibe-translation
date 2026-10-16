@@ -112,7 +112,11 @@ function scenarioGlossaryRoundTrip() {
     rendered.startsWith("# Glossary\n\n_Canonical renderings for the fixture series._\n\n## Characters"),
     "the title and preamble come back verbatim"
   );
-  assert.match(rendered, /^\| Japanese \| English \| Notes \|$/m, "the header row is the pipeline's, not the store's");
+  assert.match(
+    rendered,
+    new RegExp(`^\\| ${GLOSSARY_HEADER.join(" \\| ")} \\|$`, "m"),
+    "the header row is the one the store's own constant names — the words are pinned in test/test-glossary-re-render.js"
+  );
   const proseRows = store.documentProse("glossary");
   assert.strictEqual(proseRows.filter((row) => row.section === null).length, 4, "title plus the preamble block, blank lines included");
   assert.strictEqual(proseRows.filter((row) => row.section === "Terms").length, 3, "and a section's own paragraph is stored against that section");
@@ -320,7 +324,10 @@ function scenarioParsersAreIndependent() {
   const ourSections = parseVoiceMarkdown(VOICE_01).characters.map((c) => c.key);
   assert.deepStrictEqual(ourSections, theirSections, "and the same for the character sections");
 
-  assert.deepStrictEqual(GLOSSARY_HEADER, ["Japanese", "English", "Notes"], "the headers the real artifact and delivery-verify already read");
+  // The header WORDS are pinned in `test/test-glossary-re-render.js`, which also proves every reader of a
+  // published glossary drops the header row by position. What belongs here is the shape this round trip
+  // depends on: three columns, one per cell the parsers split.
+  assert.strictEqual(GLOSSARY_HEADER.length, 3, "the glossary table has the three columns the parsers split");
   assert.strictEqual(VOICE_SECTION, "Characters");
 
   console.log("reference-store artifacts: the store's parsers are its own, so the round trip is a real cross-check");

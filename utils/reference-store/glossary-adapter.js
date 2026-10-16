@@ -27,16 +27,19 @@
  *
  *     ## <Section>
  *
- *     | Japanese | English | Notes |
+ *     | Original | Translated | Notes |
  *     |---|---|---|
  *     | <term> | <rendering> | <notes> |
  *
  * The title line and the preamble are stored in `document_prose` and rendered back verbatim
  * (review 05 §3.4): the real glossary opens with a title and two style-policy paragraphs, and
  * a renderer that drops them cannot diff clean against the file it claims to reproduce. The
- * column headers are the ones the real file uses and the rest of the pipeline already reads —
- * `Japanese | English | Notes`, not `Term | Rendering | Notes` — because `utils/delivery-verify`
- * counts the file's sections and terms and `parseGlossaryTerms` reads it back.
+ * column headers come from `GLOSSARY_HEADER` in `glossary-adapter/labels.js` — the one place
+ * they are written — and are named for what each column holds rather than for one language,
+ * because the pipeline works from a source language the intake works out per series. Every
+ * reader of the file takes the columns **by position**, so a glossary published before the
+ * rename still imports and still counts: `utils/delivery-verify` counts the file's sections
+ * and terms and `parseGlossaryTerms` reads it back.
  *
  * ## Where the code lives
  *

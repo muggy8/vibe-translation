@@ -15,8 +15,19 @@ require("../../../types"); // JSDoc type definitions
 /** The heading the renderer writes when a store holds no title of its own. */
 const GLOSSARY_TITLE = "# Glossary";
 
-/** The column header every section's table gets — the one the real artifact and the pipeline use. */
-const GLOSSARY_HEADER = ["Japanese", "English", "Notes"];
+/**
+ * The column header every section's table gets — the one the real artifact and the pipeline use.
+ *
+ * `Original` / `Translated`, the account owner's wording (plan 07 §2b, 2026-10-15). The old pair named
+ * two languages, which is a claim about this series that the artifact has no business making: the same
+ * renderer publishes a glossary for a series written in any script, and a heading that says
+ * `Japanese | English` is wrong the moment the series is not. These two name what a column HOLDS — the
+ * word as the book writes it, and the rendering the pipeline chose for it — and nothing else.
+ *
+ * One door writes it ({@link renderGlossary}); the three readers of a published glossary drop the header
+ * row by POSITION, not by matching these words, which is why renaming it moves no row.
+ */
+const GLOSSARY_HEADER = ["Original", "Translated", "Notes"];
 
 /**
  * The section whose rows are the volume's roster.
