@@ -29,7 +29,20 @@
  *     skeleton is two common kanji sitting next to each other and coincidence is not evidence.
  *     Each evidence item then carries `matched: "verbatim" | "skeleton"` so an auditor can
  *     tell "the book prints this string" from "the book prints these characters in this
- *     order" (review 05 §3.1).
+ *     order" (review 05 §3.1);
+ *   - **a `skeleton` match is refused when the quote is made of the line's own pronunciation guides**
+ *     (plan 09 §4.2, closed by slice 1 and widened by slice 1b, 2026-10-16). Han characters alone are what a
+ *     fabricated quote keeps: `蒲田かまたを見た` carries 蒲田's skeleton and is a string the book prints in
+ *     neither form the file actually holds. `quoteExistsOnlyAsGuideSplice` asks the quote against the line's
+ *     own markup pairing and refuses three shapes — the line flattened whole, **one annotated word spliced
+ *     while the line's other guides stay as markup**, and a piece-by-piece line read as its own interleaving.
+ *     The middle one is what the first version missed: a real chapter line carries several annotated words at
+ *     once (measured: 10,773 of the 25,790 annotated lines in the 17 books carry two or more ruby elements, in
+ *     131 of 133 chapters), and a quote splicing some of them and not all is in neither of the line's two
+ *     whole-string extremes. The rung itself is **not** narrowed — it is what lets 秋野桜 match 秋野あきの桜,
+ *     and 346 published citations match through it against a line carrying markup, all 346 unchanged. The two
+ *     shapes the guard still cannot reach are named in that function's own comment and pinned as limits in
+ *     `test/test-guide-free-search.js`.
  *
  * Symmetry is a requirement, not a nicety (review 05 §2.5): `verifyStoredEvidence` — the
  * re-check copy-forward runs before a volume's file may become the next volume's starting
@@ -56,7 +69,7 @@ const { listVolumeChapters, readChapterLines } = require("./source-chapters");
 // term. `glossary/carry-forward/table.js` is a pure leaf — it requires nothing — so reaching it
 // from `utils/` closes no require cycle (gotcha 85).
 const { glossaryTermSkeleton, GLOSSARY_SKELETON_MIN_CHARS } = require("../../glossary/carry-forward/table");
-const { stripRubyMarkup, hasRubyMarkup, guideSplicedTextOf } = require("./ruby-markup");
+const { stripRubyMarkup, hasRubyMarkup, guideSplicedTextOf, rubyMarkupUnitsOf } = require("./ruby-markup");
 const { EVIDENCE_KINDS, EVIDENCE_MATCHES } = require("./schema");
 require("../../types"); // JSDoc type definitions
 
@@ -150,7 +163,7 @@ function matchPreparedLine(preparedLine, preparedQuote) {
 }
 
 /**
- * Whether a quote exists in a line ONLY as the flattened markup — the guides pasted into the word.
+ * Whether a quote is built out of a line's own pronunciation guides rather than out of the line.
  *
  * THE HOLE THIS CLOSES. The skeleton rung compares Han characters alone, because two furiganed spellings
  * of one term (秋野桜 and 秋野あきの桜) are the same term and the store must not refuse a citation for
@@ -160,9 +173,29 @@ function matchPreparedLine(preparedLine, preparedQuote) {
  * tags, which is what the file holds. Its skeleton is 蒲田, which is the line's skeleton, so the rung used
  * to accept it, and the store recorded a citation to a line that does not contain it.
  *
- * The test is therefore: the quote is not in the line as the file holds it, and it IS in the line with the
- * ruby tags removed and every reading kept where it was written. That is the flattened shape, and it is
- * the only shape left.
+ * THE HOLE THIS CLOSES NOW, which the first hole did not reach. A chapter line carries several annotated
+ * words at once — measured on the 17 real books, **10,773 of the 25,790 annotated lines carry two or more
+ * ruby elements, in 131 of the 133 chapters** — and a quote can paste **one** of those guides into its word
+ * and leave the **others** as markup. That string is in neither of the two extremes a whole line has: not
+ * the line as the file holds it, and not the line with every guide removed. It is also not the line
+ * flattened, which is the only third form the previous version of this guard tested. So all three tests
+ * passed and the citation stood. The quote
+ * `牡丹一華ぼたんいちかは、<ruby>清廉潔白<rt>せいれんけつぱく</rt></ruby>という言葉がよく似合う少女だ。`
+ * against the line this repository's own converter wrote for volume 8 chapter 1 is that shape, and it
+ * matched as `skeleton` until this clause was added.
+ *
+ * THE RULE, in the order it is asked. A quote is a splice when:
+ *   1. the line carries ruby markup at all — with no markup there is nothing to splice, and the honest
+ *      furiganed citation (秋野桜 against a book that prints 秋野あきの桜 as ordinary text) must survive;
+ *   2. the quote is **not** in the line as the file holds it, and **not** in the line with every guide
+ *      removed. Those are the two forms the book prints. A quote in either one is a quote the book prints,
+ *      whatever else it looks like — this is the clause that keeps the fullwidth-vs-ASCII citation
+ *      `鈍感純情BOY` against `<ruby>鈍感純情<rt>どんかんじゆんじよう</rt></ruby>ＢＯＹ` a match, because that
+ *      quote is not made of the line's guide;
+ *   3. and the quote **is** made of the line's guides: either it is the whole line read with every reading
+ *      pasted into its word, or it carries at least one of this line's annotated words with that word's own
+ *      reading written after it. Both halves are read off the line's own markup pairing. Nothing here
+ *      compiles a pattern, and nothing here guesses what a reading looks like.
  *
  * **What this guard cannot do, and does not pretend to.** The OLD converter's shape (蒲かま田た) is not the
  * flattened shape of canonical markup (蒲田かまた): rebuilding it needs to know which character of the word
@@ -170,24 +203,87 @@ function matchPreparedLine(preparedLine, preparedQuote) {
  * harvest the extraction writes beside the book does, and `test/test-glossary-reading-block.js` pins that
  * exactly one door in this store may open it. So the interleaved shape is guarded where that harvest is in
  * reach — by `guide-split-in-text` in the extraction audit, which reads it at extraction time and is
- * unchanged — and this door guards the flattened shape, which is the one a citation can actually be forged
- * into from an annotated chapter.
+ * unchanged — and this door guards the shapes markup alone can be spliced into. Two of them stay open and
+ * are pinned as limits in `test/test-guide-free-search.js`: a quote that **reorders** a piece-by-piece
+ * interleaving (`蒲田かまた` against `<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>`), and a quote that pastes
+ * **part** of a reading (`牡丹一華ぼたん` for `牡丹一華ぼたんいちか`). Both keep their Han skeleton and both
+ * are named, not hidden.
  *
  * Inert on a line with no markup: flattening changes nothing, so the guard cannot refuse a legitimate
- * furiganed citation such as 秋野桜 against 秋野あきの桜.
+ * furiganed citation such as 秋野桜 against 秋野あきの桜. Measured over **copies** of all 17 published records
+ * it is inert on the real corpus too: 0 of 22,469 evidence items change verdict, including 0 of the 346 that
+ * match by skeleton against a line carrying markup.
  *
  * @param {string} line - One physical line of the chapter's source text, as the file holds it.
  * @param {{needle: string}} preparedQuote - From `prepareQuoteForSearch`.
- * @returns {boolean} True when the quote occurs in the line only as flattened markup.
+ * @returns {boolean} True when the quote exists only as this line's guides pasted into its words.
  */
 function quoteExistsOnlyAsGuideSplice(line, preparedQuote) {
   if (!preparedQuote || !preparedQuote.usable) return false;
   const raw = String(line === undefined || line === null ? "" : line);
-  const spliced = guideSplicedTextOf(raw);
-  if (spliced === raw) return false;
+  const splicedLine = guideSplicedTextOf(raw);
+  // No ruby-family tag in the line: there is no guide here for the quote to be made of.
+  if (splicedLine === raw) return false;
   const needle = preparedQuote.needle;
+  // Clause 2: the two forms this book prints. A quote in either one is the book's own string.
   if (squashForMarkupCheck(raw).includes(needle)) return false;
-  return squashForMarkupCheck(spliced).includes(needle);
+  if (squashForMarkupCheck(stripRubyMarkup(raw)).includes(needle)) return false;
+  // Clause 3a: the whole line read with every reading pasted into its word (plan 09 slice 1's shape).
+  if (squashForMarkupCheck(splicedLine).includes(needle)) return true;
+  // Clause 3b: the mixed shape — one annotated word spliced, the line's other guides left as markup.
+  return guideSpliceRunsInQuote(raw, needle).length > 0;
+}
+
+/**
+ * Which of a line's annotated words the quote carries with its reading pasted into it.
+ *
+ * The evidence for the refusal's sentence, and the mixed-shape half of `quoteExistsOnlyAsGuideSplice`: a run
+ * is returned only when it is a guide the **line itself** writes over that word, never a run this function
+ * assembled. A unit whose spliced form is the same as its guide-free form (a ruby with no reading in it)
+ * names nothing.
+ *
+ * @param {string} line - One physical line of the chapter's source text, as the file holds it.
+ * @param {string} needle - The quote, already normalised by `prepareQuoteForSearch`.
+ * @returns {Array<{spliced: string, guideFree: string}>} One entry per annotated word the quote splices.
+ */
+function guideSpliceRunsInQuote(line, needle) {
+  const raw = String(line === undefined || line === null ? "" : line);
+  if (!needle || !raw.includes("<")) return [];
+  const runs = [];
+  for (const unit of rubyMarkupUnitsOf(raw)) {
+    const spliced = squashForMarkupCheck(unit.spliced);
+    const guideFree = squashForMarkupCheck(unit.guideFree);
+    if (!spliced || spliced === guideFree) continue;
+    if (needle.includes(spliced)) runs.push({ spliced, guideFree });
+  }
+  return runs;
+}
+
+/**
+ * The sentence a refused citation gets: which shape the quote is, and what to write instead.
+ *
+ * Two shapes, and the sentence names the one it found. When the quote is the whole line flattened it says so
+ * (plan 09 slice 1's wording, kept byte-for-byte so a report that quotes it still matches). When the quote
+ * splices only some of the line's annotated words it names each one — the run the quote carries, beside the
+ * word this line actually prints — because the fix is not "find the right line", it is "quote the line", and
+ * a filer who cannot see which half of their quote is invented cannot do that.
+ *
+ * @param {string} line - One physical line of the chapter's source text, as the file holds it.
+ * @param {string} needle - The quote, already normalised by `prepareQuoteForSearch`.
+ * @returns {string} The sentence, ending in the instruction.
+ */
+function guideSpliceRefusalSentence(line, needle) {
+  const splicedLine = guideSplicedTextOf(line);
+  const runs = squashForMarkupCheck(splicedLine).includes(needle) ? [] : guideSpliceRunsInQuote(line, needle);
+  const carried = runs.length
+    ? `it carries ${runs.map((r) => `${JSON.stringify(r.spliced.slice(0, 60))}, and this line prints that word as ${JSON.stringify(r.guideFree.slice(0, 60))}`).join("; ")}. `
+    : "";
+  return (
+    `The quote is the shape this line's word takes when its pronunciation guide is pasted into it: ` +
+    `${carried}${carried ? "This" : "this"} line, with the ruby tags removed and every reading kept where it was written, ` +
+    `reads ${JSON.stringify(splicedLine.slice(0, 120))}, and the line as the book prints it reads ` +
+    `${JSON.stringify(stripRubyMarkup(line).slice(0, 120))}. Quote the line, not the reading.`
+  );
 }
 
 /**
@@ -213,7 +309,8 @@ function squashForMarkupCheck(text) {
  *
  * This is the convenience wrapper over `matchPreparedLine`, and it is the same rule — plus the one thing
  * the prepared-line fast path deliberately does not do: `quoteExistsOnlyAsGuideSplice`, which refuses a
- * citation that exists only as flattened markup. It lives HERE and not in `matchPreparedLine` because it
+ * citation built out of the line's own pronunciation guides — the whole line flattened, or one of its
+ * annotated words with its reading pasted into it. It lives HERE and not in `matchPreparedLine` because it
  * is a rule about a QUOTATION. `presence.js`, `chapter-facts.js` and the confirmation door search a NAME
  * through the prepared fast path, thousands of times a chapter, and a name is not a claim that a line
  * prints a passage.
@@ -388,10 +485,7 @@ function verifyEvidenceItem(item, resolveVolume) {
   // is not "find the right line" — it is "quote the line".
   const preparedQuote = prepareQuoteForSearch(item.quote);
   const splicedShape = quoteExistsOnlyAsGuideSplice(citedLine, preparedQuote)
-    ? `The quote is the shape this line's word takes when its pronunciation guide is pasted into it: ` +
-      `this line, with the ruby tags removed and every reading kept where it was written, reads ` +
-      `${JSON.stringify(guideSplicedTextOf(citedLine).slice(0, 120))}, and the line as the book prints it ` +
-      `reads ${JSON.stringify(stripRubyMarkup(citedLine).slice(0, 120))}. Quote the line, not the reading.`
+    ? guideSpliceRefusalSentence(citedLine, preparedQuote.needle)
     : "";
   return {
     ok: false,

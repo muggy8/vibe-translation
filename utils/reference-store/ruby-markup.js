@@ -16,7 +16,10 @@
  *     computable before anyone pays for a bigger prompt;
  *   - **recognise** — a parser that is being taught to survive markup needs to know what it is looking
  *     at, and a parser that guesses produces a corrupted claim body with no finding and no count that
- *     moves (plan 07 §4.6, second bullet).
+ *     moves (plan 07 §4.6, second bullet);
+ *   - **split per element** — a whole string has only two extremes (every guide off, every guide pasted in),
+ *     and plan 09 slice 1b needs the middle: a quote that pastes one line's guides and leaves others as
+ *     markup. `rubyMarkupUnitsOf` is the per-element view the extremes are built from.
  *
  * THE TAG VOCABULARY IS THE CONVERTER'S, AND IT IS PINNED AGAINST IT. `RUBY_GUIDE_TAGS` in
  * `utils/source/html.js` is the list the two converters use to decide what inside a `<ruby>` is not part of
@@ -208,6 +211,59 @@ function guideSplicedTextOf(text) {
 }
 
 /**
+ * The ruby elements a string holds, each one given the two ways its word can be read.
+ *
+ * WHY THIS EXISTS. `stripRubyMarkup` and `guideSplicedTextOf` answer about a whole string, and a whole
+ * string has only the two extremes: every guide off, or every guide pasted into its word. Plan 09 slice 1b
+ * needs the middle. A chapter line carries several annotated words at once — measured on the 17 real books,
+ * **10,773 of the 25,790 annotated lines carry two or more ruby elements, in 131 of the 133 chapters** — and a
+ * quote can paste ONE of those guides into its word while leaving the others as markup. That string is in
+ * neither extreme, so a rule written only over the extremes cannot see it, and the Han-skeleton rung accepts
+ * it. This function is what makes the middle addressable: it hands back each annotated word with both of its
+ * readings, so a door can ask "does the quote carry *this* word with *this* guide pasted into it".
+ *
+ * It reports the **top-level** element and folds anything nested inside it, because the two readings it
+ * returns are the two forms a reader of that element actually sees, and a nested ruby is not a shape this
+ * converter writes (the extraction audit's `ruby-markup-not-canonical` check names it if one appears).
+ *
+ * @param {string|null|undefined} text - Text that may carry ruby markup.
+ * @returns {Array<{markup: string, guideFree: string, spliced: string}>} One entry per ruby element, in
+ *   document order: the markup as the text holds it, the word with its guides taken off, and the word with
+ *   its guides pasted into it. Empty when the text carries no ruby element.
+ */
+function rubyMarkupUnitsOf(text) {
+  const raw = String(text === undefined || text === null ? "" : text);
+  if (!raw.includes("<")) return [];
+  const units = [];
+  /** @param {number} at @param {number} end */
+  const pushUnit = (at, end) => {
+    const markup = raw.slice(at, end);
+    units.push({ markup, guideFree: stripRubyMarkup(markup), spliced: guideSplicedTextOf(markup) });
+  };
+  let rubyDepth = 0;
+  let openAt = -1;
+  for (const match of raw.matchAll(rubyTagMatcher())) {
+    if (String(match[2]).toLowerCase() !== "ruby") continue;
+    const closing = match[1] === "/";
+    if (!closing) {
+      if (rubyDepth === 0) openAt = match.index;
+      rubyDepth += 1;
+      continue;
+    }
+    // A stray `</ruby>` with nothing open is markup noise: it closes no word, so it names no unit.
+    if (rubyDepth === 0) continue;
+    rubyDepth -= 1;
+    if (rubyDepth === 0 && openAt >= 0) {
+      pushUnit(openAt, match.index + match[0].length);
+      openAt = -1;
+    }
+  }
+  // An unclosed `<ruby>` runs to the end of the string, which is how `stripRubyMarkup` reads it too.
+  if (rubyDepth > 0 && openAt >= 0) pushUnit(openAt, raw.length);
+  return units;
+}
+
+/**
  * How many characters one annotation adds to a chapter.
  *
  * @param {{form: string, reading: string}} unit
@@ -226,6 +282,7 @@ module.exports = {
   rubyMarkupUnitCount,
   stripRubyMarkup,
   guideSplicedTextOf,
+  rubyMarkupUnitsOf,
   rubyMarkupFor,
   rubyMarkupAddedChars,
 };

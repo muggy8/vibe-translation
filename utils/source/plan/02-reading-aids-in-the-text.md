@@ -1,10 +1,12 @@
 # Plan 09 — the extraction keeps every reading aid in the text
 
-Plan of record. Written 2026-10-16. Status: **slices 0 and 1 BUILT 2026-10-16** (slice 0: the converter, both
+Plan of record. Written 2026-10-16. Status: **slices 0, 1 and 1b BUILT 2026-10-16** (slice 0: the converter, both
 paths, bundle schema 8 → 9; slice 1: the guide-free search surface on every door that reads chapter text, the
-two new extraction checks, the forged-quote rung closed, bundle schema **9 → 10**); **slices 2–6 not built**.
-Slice 0's own measurement is §2.5 and slice 1's is §2.6, and each corrected figures this plan had published —
-the corrections are in the sections themselves, not buried in the slice table.
+two new extraction checks, the forged-quote rung closed, bundle schema **9 → 10**; slice 1b: the **mixed**
+splice — a quote that pastes some of a line's guides and leaves others as markup — closed on the same rung,
+§2.7); **slices 2–6 not built**.
+Slice 0's own measurement is §2.5, slice 1's is §2.6 and slice 1b's is §2.7, and each corrected figures this
+plan had published — the corrections are in the sections themselves, not buried in the slice table.
 
 This plan **supersedes plan 08 slice 0** (the per-chapter reading table, built 2026-10-16 and committed as
 `9116904`) and **absorbs plan 08 slices 1–4**, which are re-numbered here. Plan 08 stays as the record of why
@@ -264,6 +266,63 @@ and still fires on a planted split string (`test/test-source-ruby-markup.js`).
 
 ---
 
+### 2.7 What slice 1b measured (2026-10-16) — the guard's three forms were not the whole set
+
+Slice 1's guard tested **three whole-line forms**: the line as the file holds it, the line guide-free, and the
+line flattened. A quote that pastes **one** of a line's annotated guides into its word and leaves the **others**
+as markup is in **none of the three**. It matched as `skeleton`. The conductor reproduced it against a real
+chapter this repository's own converter wrote (volume 08 chapter 1):
+
+```
+line   <ruby>牡丹一華<rt>ぼたんいちか</rt></ruby>は、<ruby>清廉潔白<rt>せいれんけつぱく</rt></ruby>という言葉がよく似合う少女だ。
+quote  牡丹一華ぼたんいちかは、<ruby>清廉潔白<rt>せいれんけつぱく</rt></ruby>という言葉がよく似合う少女だ。
+```
+
+Not in the raw line (the tags are in the way), not in the guide-free line (the reading is in the way), **not in
+the flattened line either** — the flattened line carries `清廉潔白せいれんけつぱく`, and the quote does not. All
+three tests passed and the citation stood.
+
+**This is not a corner case, and the number says so.** Over the 17 real books, 133 chapters, 25,790 lines
+carrying at least one ruby element and **45,428 ruby elements**: **10,773 lines carry two or more ruby elements,
+and 131 of the 133 chapters contain at least one such line** (the most on a single line: 16, volume 3 chapter 1).
+The mixed shape is the ordinary shape of an annotated line.
+
+**The rule that closes it** (`utils/reference-store/evidence.js`, `quoteExistsOnlyAsGuideSplice`, widened in
+place — no new exported name, no new door, no new call site): a `skeleton` match is refused when the quote is in
+neither form the line prints **and** it carries one of this line's annotated words with **that word's own
+reading** written after it. The pairs come from the line's own markup (`rubyMarkupUnitsOf`, new in
+`utils/reference-store/ruby-markup.js`: `{markup, guideFree, spliced}` per element). Nothing compiles a pattern
+and nothing guesses what a reading looks like. The rung itself is **not** narrowed and
+`GLOSSARY_SKELETON_MIN_CHARS` stays **3**.
+
+Measured, 0 model calls, 0 corpus writes, corpus records opened as copies only:
+
+| Question | Answer |
+|---|---|
+| The strict A/B over every published citation (`/tmp/opencode/p09s1b-replay-ab.js`, copies of all 17 records) | **22,469 facts / 22,469 evidence items — 22,045 verbatim, 424 skeleton, 0 refused, before and after. 0 verdict changes.** The guard ran on all 424 skeleton matches and fired on **0** of them |
+| Skeleton citations against a line **carrying** ruby markup | **346** (78 against a line with no markup) — all 346 unchanged |
+| Legitimate material cut out of the real books (`/tmp/opencode/p09s1b-false-positives.js`): every contiguous substring, 12 / 20 / 40 characters, of every line carrying 2+ ruby elements | **972,327 quotes, 0 refused** |
+| The same lines quoted guide-free whole | **10,773, 0 refused** |
+| Planted forgeries on those same lines — one guide pasted, the rest left as markup | **10,773 planted, 10,773 refused** |
+| Planted forgeries — the whole line flattened | **10,773 planted, 10,773 refused** |
+| The 17 `series.db` digests and the 34 `-wal` / `-shm` sidecars | **identical before and after** (`/tmp/opencode/p09s1b-corpus-before.tsv` → `…-corpus-after.tsv`) |
+
+**Two limits stay open, and they are pinned as limits rather than hidden.** A quote that **reorders** a
+piece-by-piece interleaving (`蒲田かまた` against `<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>`) keeps its
+`skeleton` — the pairing lives only in the harvest, and this door may not open it (§2.6, unchanged). A quote that
+pastes only **part** of a reading (`牡丹一華ぼたん` for `牡丹一華ぼたんいちか`) keeps its `skeleton` — deciding
+where a reading ends is guessing what a reading looks like, which is the thing this plan's decision 2 rejected.
+Both are asserted in `test/test-guide-free-search.js`.
+
+**What the slice did not do.** It did not move the rule into `matchPreparedLine`: the prepared fast path still
+answers the mixed shape `skeleton`, and that is asserted in the suite, because `presence.js`,
+`chapter-facts.js` and the confirmation door search a **name** through it and a name is not a claim that a line
+prints a passage. It added no table, column, schema bump, finding kind, level, freeze door, command, setting,
+knob, prompt kind or prompt byte. `test/test-guide-free-search.js` went **11 scenarios / 93 checks →
+12 scenarios / 124 checks**; every other pinned number and both call baselines are unmoved.
+
+---
+
 ## 3. What this replaces, and what it leaves alone
 
 | Stays | Changes |
@@ -308,16 +367,24 @@ A quote that only exists *with* the markup inside it is refused — that is a fo
 > sides. Probing this is what found it; the details and the three ways out are in §5's slice-0 note and in
 > `/tmp/opencode/plan09-slice0-questions.md` question 4.
 
-> **Both halves are now true, built by slice 1 (2026-10-16).** The second sentence's exception is closed:
-> `utils/reference-store/evidence.js`'s `quoteExistsOnlyAsGuideSplice` refuses a `skeleton` match when the quote
-> is in neither the raw line nor the guide-free line but **is** in the line with the tags removed and every
-> reading kept where it was written. It lives in `matchQuoteOnLine` and **not** in `matchPreparedLine`, because
-> it is a rule about a **quotation**: `presence.js`, `chapter-facts.js` and the confirmation door search a
-> **name** through the prepared fast path thousands of times a chapter, and a name is not a claim that a line
-> prints a passage. The first sentence needed **six** doors added, not four verified — see §2.6. And the
-> flattened shape is not the interleaved one: `蒲かま田た` needs the harvest's pairing to rebuild, so that
-> shape stays guarded by `guide-split-in-text` at extraction time. The limit is stated in §2.6 and pinned as a
-> test assertion.
+> **Both halves are now true, built by slice 1 and widened by slice 1b (2026-10-16).** The second sentence's
+> exception is closed: `utils/reference-store/evidence.js`'s `quoteExistsOnlyAsGuideSplice` refuses a `skeleton`
+> match when the quote is in neither the raw line nor the guide-free line but **is** made of the line's own
+> guides — the line flattened whole, **or one of its annotated words with that word's reading written after it**.
+> It lives in `matchQuoteOnLine` and **not** in `matchPreparedLine`, because it is a rule about a **quotation**:
+> `presence.js`, `chapter-facts.js` and the confirmation door search a **name** through the prepared fast path
+> thousands of times a chapter, and a name is not a claim that a line prints a passage. The first sentence needed
+> **six** doors added, not four verified — see §2.6. And the flattened shape is not the interleaved one:
+> `蒲かま田た` needs the harvest's pairing to rebuild, so that shape stays guarded by `guide-split-in-text` at
+> extraction time. The limit is stated in §2.6 and pinned as a test assertion.
+>
+> **Slice 1 found the guard's own hole, and slice 1b closed it (2026-10-16).** "The quote is in neither the raw
+> line nor the guide-free line but **is** in the line flattened" is a rule over a line's three whole-string
+> forms, and a line with several annotated words has a **middle** those three forms do not reach: paste one
+> guide, leave the others as markup. That quote is in none of the three, and it matched. Measured: 10,773 of the
+> 25,790 annotated lines in the 17 books carry two or more ruby elements, in 131 of 133 chapters. The rule is now
+> built from the line's own per-element markup pairing rather than from the line's extremes. §2.7 is the
+> measurement, including the 972,327 legitimate substrings it refuses **0** of.
 
 ### 4.3 The corpus act is separate — **and that sentence is wrong about the code**
 
@@ -361,6 +428,7 @@ taken before trusting it, and both are the reason the act is safe rather than me
 |---|---|---|
 | **0** | **The converter keeps the guides, canonically, and the bundle schema moves.** Both converter paths, one shape. **BUILT 2026-10-16 — every clause met, measured in §2.5.** Two figures this plan carried into §2.2 were corrected by the build, and one wording choice (§4.1's "every reading aid") is narrower in practice than it reads: headings and titles stay guide-free. | A fixture whose source annotates a word piece by piece extracts as `<ruby>蒲田<rt>かまた</rt></ruby>` with the base contiguous; the split string appears **0** times; the harvest rows and counts are **identical** to what the same fixture produced before the change; `BUNDLE_SCHEMA_VERSION` **8 → 9** and a cached bundle under 8 is refused rather than reused; a guide with no base emits plain text; the six extraction audits run over markup-bearing text and the split tripwire still reports 0 on legitimate fixtures. **0 model calls, 0 corpus writes.** |
 | **1** | **Every door that searches chapter text searches the guide-free projection.** **BUILT 2026-10-16 — every clause met, measured in §2.6.** It was dispatched as "two doors" and turned out to be **six**, and it also had to close a rung rather than only widen a search. | On a fixture chapter carrying canonical ruby: a name the book annotates as a whole is found; a name the book annotates **piece by piece across two elements** is found; a phrase spanning two annotated words is found; a planted quote that only exists with the markup inside it is **refused**; `cast_presence_match` and the chapter-facts query report the same characters with and without the markup. The extraction audit gains a canonical-shape check and a markup-count check. **0 model calls.** → `test/test-guide-free-search.js` (11 scenarios, **93 checks**), `test/test-source-audit.js` (the two new checks), `test/test-source-ruby-markup.js` (the shape scan, and the split tripwire still firing). Measured on the real corpus: **0 findings across all 17 books** from the eight checks, **0 verdict changes** over **22,469 published facts**, `guide-split-in-text` still **0** and still firing on a planted string. |
+| **1b** | **The same rung, the shape slice 1 missed: a quote that splices SOME of a line's guides and leaves the others as markup.** **BUILT 2026-10-16 — measured in §2.7.** It was found by running the built guard against a real chapter, not by reading the guard. | The mixed quote above, against the real volume 08 chapter 1 line, is **refused**, both ways round and as a short quote; every honest citation on that same line is **unchanged**; `matchPreparedLine` still answers the mixed shape `skeleton` (the fast path is untouched, and that is asserted); the strict A/B over **22,469 published evidence items** reports **0 verdict changes** and the guard fires on **0** of the 424 skeleton matches; over the real books it refuses **10,773 of 10,773** planted mixed forgeries and **0 of 972,327** legitimate substrings. **0 model calls, 0 corpus writes.** → `test/test-guide-free-search.js` (now 12 scenarios, **124 checks**), gotcha 178. |
 | **2** | **The glossary read pass reads the hints from the text, and the table is deleted.** | `glossary/extract/reading-block.js`, its suite, its 13 barrel exports and its two call sites are **gone**; `system-prompts/glossary-terms.md` names the markup and says the term is the word without the tags; the offline loops' `glossary-extract` prompt returns to its pre-table size on plain-text fixtures; **0 new model calls**, both loop baselines unmoved. |
 | **3** | **The reading is recorded beside the term, and the published glossary gains its column.** | A new **insert-only** row kind at `SCHEMA_VERSION` **14**; filing a term the book guided records every reading that volume guided for that form; a term the book never guided records nothing and says so; a second pass files 0; every content column of the published term row compared and **unmoved**; `GLOSSARY_HEADER` gains the fourth column and all three readers still drop the header by position; the re-render door's comparison still refuses a lost row, a moved cell and an empty render, measured over **copies** of all 17 records; a wording that contradicts a printed reading is **filed and named** in the report the grader reads. |
 | **4** | **"The reading changed" becomes the forward half of the terminology review.** | A query over the recorded readings replaces `FORWARD_REVEAL_SHAPES`; on copies of the 17 records, 0 model calls, it finds the measured **266 / 129** classes and ranks them inside the existing 24-call bound; a fixture where a later volume guides a form differently puts that term on the agenda with **no phrase matching at all**; the phrase path stays for records that predate the column and the coverage report names which half produced the agenda. |

@@ -43,7 +43,11 @@
  *   9. `cast_presence_match` and the chapter-facts query answering **identically** with and without the
  *      markup, through the store's own doors on two fixture records;
  *  10. the citation door refusing a forged quote at `insertFact`, and naming the fix;
- *  11. that nothing else moved: the level table, the schema, the counted tables, the freeze doors, the
+ *  11. the **mixed** splice — a line carrying two annotated words, quoted with one guide pasted into its word
+ *      and the other left as markup — refused, the honest citations on that same line unchanged, the prepared
+ *      fast path answering it exactly as before, and the two shapes the door still cannot reach named as
+ *      limits;
+ *  12. that nothing else moved: the level table, the schema, the counted tables, the freeze doors, the
  *      npm scripts, and the translate layer naming the one ruby rule instead of restating it.
  *
  * Fixtures only, under the shared fixture root. Nothing here reads the real 17 volumes or any file under
@@ -76,7 +80,7 @@ const {
   SCHEMA_VERSION,
   COUNTED_TABLES,
 } = rs;
-const { stripRubyMarkup, hasRubyMarkup, rubyMarkupUnitCount, guideSplicedTextOf } = require("../utils/reference-store/ruby-markup");
+const { stripRubyMarkup, hasRubyMarkup, rubyMarkupUnitCount, guideSplicedTextOf, rubyMarkupUnitsOf } = require("../utils/reference-store/ruby-markup");
 const { lineSpeechKind } = require("../utils/reference-store/attribution/lines");
 const { readingAidSpan, hanCharacters } = require("../utils/reference-store/attribution/reading-aids");
 const { countOccurrences } = require("../utils/translate/qa");
@@ -553,7 +557,155 @@ function scenarioTheDoorRefuses() {
   same(filed, 1, "the legitimate claim is the only one that reached the table");
 }
 
-// ─── Scenario 11 — nothing else moved ─────────────────────────────────────────
+// ─── Scenario 11 — the MIXED splice: some guides pasted in, others left as markup ──
+
+/**
+ * One line of a real chapter, copied out of volume 08 chapter 1 as this repository's own converter wrote it.
+ *
+ * It is in the suite as a literal because it is the line the hole was found on, and the shape a whole line
+ * takes when it carries **two** annotated words is the shape the previous guard could not see. Nothing here
+ * opens the corpus (AGENTS.md rule 8).
+ *
+ * @type {string}
+ */
+const TWO_GUIDE_LINE =
+  "<ruby>牡丹一華<rt>ぼたんいちか</rt></ruby>は、<ruby>清廉潔白<rt>せいれんけつぱく</rt></ruby>という言葉がよく似合う少女だ。";
+
+/** The same line quoted with the FIRST guide pasted into its word and the SECOND left as markup. @type {string} */
+const MIXED_FIRST =
+  "牡丹一華ぼたんいちかは、<ruby>清廉潔白<rt>せいれんけつぱく</rt></ruby>という言葉がよく似合う少女だ。";
+
+/** The same line quoted the other way round. @type {string} */
+const MIXED_SECOND =
+  "<ruby>牡丹一華<rt>ぼたんいちか</rt></ruby>は、清廉潔白せいれんけつぱくという言葉がよく似合う少女だ。";
+
+/**
+ * The ruby elements a line holds, each with the two ways its word can be read.
+ *
+ * The scan `quoteExistsOnlyAsGuideSplice` needs to reach the middle between a line's two extremes.
+ * @param {string} text
+ * @returns {Array<[string, string]>} `[guideFree, spliced]` per element, for comparing compactly.
+ */
+function unitForms(text) {
+  return rubyMarkupUnitsOf(text).map((u) => [u.guideFree, u.spliced]);
+}
+
+/**
+ * The mixed shape, refused; the honest shapes, untouched; and the two limits this door still has.
+ *
+ * WHY THIS SCENARIO EXISTS. Plan 09 slice 1's guard tested three whole-line forms — the line as the file
+ * holds it, the line guide-free, and the line flattened. A quote that pastes **one** of a line's annotated
+ * guides and leaves the **others** as markup is in none of the three, so all three tests passed and the
+ * citation stood. Measured on the 17 real books: 10,773 of the 25,790 annotated lines carry two or more ruby
+ * elements, in 131 of the 133 chapters, so this is not a corner — it is the ordinary case.
+ * @returns {void}
+ */
+function scenarioTheMixedSplice() {
+  // The scan the guard is built on, on the shapes the converter can actually write.
+  same(unitForms(TWO_GUIDE_LINE), [["牡丹一華", "牡丹一華ぼたんいちか"], ["清廉潔白", "清廉潔白せいれんけつぱく"]], "two annotated words are two units, each with its word and its word-plus-guide");
+  same(unitForms(ANNOTATED_LINES[5]), [["蒲田", "蒲かま田た"]], "a word guided piece by piece is ONE unit, and its spliced form keeps the interleaving — it does not invent 蒲田かまた");
+  same(unitForms("<ruby>蒲田<rt>かま</rt><rt>た</rt></ruby>を見た。"), [["蒲田", "蒲田かまた"]], "one word guided twice is one unit carrying both readings");
+  same(unitForms(ANNOTATED_LINES[2]), [["三色院", "三色院さんしよくいん"], ["菫子", "菫子すみれこ"]], "two adjacent elements are two units, not one");
+  same(unitForms("markup-free line"), [], "a line with no ruby element names no unit");
+  same(unitForms("</ruby>ただのテキスト"), [], "a stray closing tag closes no word and names no unit");
+  same(unitForms("<ruby>蒲田<rt>かまた</rt></ruby>"), [["蒲田", "蒲田かまた"]], "and a bare element with no prose around it is still one unit");
+  same(
+    rubyMarkupUnitsOf(TWO_GUIDE_LINE).map((u) => u.markup),
+    ["<ruby>牡丹一華<rt>ぼたんいちか</rt></ruby>", "<ruby>清廉潔白<rt>せいれんけつぱく</rt></ruby>"],
+    "each unit carries the markup itself, in document order"
+  );
+
+  /**
+   * Assert one (line, quote) pair matches by one rule.
+   * @param {string} line @param {string} quote @param {string|null} expected @param {string} why
+   * @returns {void}
+   */
+  function matchAs(line, quote, expected, why) {
+    const matched = matchQuoteOnLine(line, quote);
+    checks++;
+    assert.strictEqual(matched, expected, `${why} (got ${JSON.stringify(matched)})`);
+  }
+
+  // The hole, on the line it was found on.
+  matchAs(TWO_GUIDE_LINE, MIXED_FIRST, null, "a quote that pastes one of this line's two guides and leaves the other as markup is refused");
+  matchAs(TWO_GUIDE_LINE, MIXED_SECOND, null, "and so is the same quote with the OTHER guide pasted in");
+  matchAs(TWO_GUIDE_LINE, "牡丹一華ぼたんいちかは、清廉潔白", null, "a short quote that splices one annotated word and stops before the other is refused");
+  matchAs(ANNOTATED_LINES[2], "三色院菫子すみれこは本を読んでいた。", null, "the fixture's own two-element line: the second word spliced is refused");
+  matchAs(ANNOTATED_LINES[2], "三色院さんしよくいん菫子は本を読んでいた。", null, "and so is the first");
+  ok(
+    quoteExistsOnlyAsGuideSplice(TWO_GUIDE_LINE, prepareQuoteForSearch(MIXED_FIRST)),
+    "the guard itself says yes to the mixed shape, not only the door that wraps it"
+  );
+
+  // The honest shapes on the SAME line, each one unchanged.
+  matchAs(TWO_GUIDE_LINE, TWO_GUIDE_LINE, "verbatim", "the annotated line copied verbatim is still the book's own string");
+  matchAs(TWO_GUIDE_LINE, stripRubyMarkup(TWO_GUIDE_LINE), "verbatim", "and so is the line with every guide taken off");
+  matchAs(TWO_GUIDE_LINE, "牡丹一華は、清廉潔白", "verbatim", "a phrase spanning both annotated words, guide-free, is still found");
+  matchAs(TWO_GUIDE_LINE, "<ruby>牡丹一華<rt>ぼたんいちか</rt></ruby>は、清廉潔白", "verbatim", "and a quote that kept one guide as markup and dropped the other is still the book's string");
+  matchAs(TWO_GUIDE_LINE, "清廉潔白という言葉がよく似合う少女だ。", "verbatim", "the second annotated word quoted alone, guide-free, is still found");
+  matchAs("<ruby>如月雨露<rt>きさらぎあまつゆ</rt></ruby>ＢＯＹと呼ばれていた。", "如月雨露BOYと呼ばれていた。", "skeleton", "the rung's real job on a markup-bearing line — a fullwidth-vs-ASCII citation — is NOT refused, because the quote is not made of the line's guide");
+  matchAs("<ruby>蒲田<rt>かま</rt><rt>た</rt></ruby>を見た。", "蒲田を見た。", "verbatim", "a word guided twice, quoted guide-free, is still the book");
+
+  // The multi-reading shape, spliced.
+  matchAs("<ruby>蒲田<rt>かま</rt><rt>た</rt></ruby>を見た。", "蒲田かまたを見た。", null, "and pasting both of that word's readings into it is refused");
+
+  // The prepared fast path is untouched: it answers the mixed shape exactly as it answered it before.
+  same(
+    rs.matchPreparedLine(rs.prepareLineForQuoteSearch(TWO_GUIDE_LINE), prepareQuoteForSearch(MIXED_FIRST)),
+    "skeleton",
+    "matchPreparedLine still answers the mixed shape by skeleton — the new rule is on the QUOTATION path only, and presence.js / chapter-facts.js / the confirmation door go through the fast path"
+  );
+
+  // The two shapes this door still cannot reach, pinned as limits rather than hidden.
+  matchAs(
+    TWO_GUIDE_LINE,
+    "牡丹一華ぼたんは、清廉潔白という言葉がよく似合う少女だ。",
+    "skeleton",
+    "LIMIT: a quote that pastes only PART of a reading keeps its skeleton — the guard matches a whole annotated word with its whole guide, and guessing where a reading ends is guessing what a reading looks like"
+  );
+  matchAs(
+    ANNOTATED_LINES[5],
+    "蒲田かまたを見た。",
+    "skeleton",
+    "LIMIT (unchanged from scenario 2): a quote that REORDERS a piece-by-piece interleaving keeps its skeleton — the pairing lives only in the harvest, and this door may not open it"
+  );
+  ok(
+    !quoteExistsOnlyAsGuideSplice(ANNOTATED_LINES[5], prepareQuoteForSearch("蒲田かまたを見た。")),
+    "and the guard says no to it, because 蒲かま田た is what this line's own markup pairing flattens to, and the quote is not that"
+  );
+
+  // The door refuses it at insert, and names the run it carried.
+  const chapter = `${TWO_GUIDE_LINE}\n\n${ANNOTATED_LINES[2]}\n`;
+  const { store } = storeOverFixture("gfs-mixed-splice", chapter);
+  const legit = store.insertFact({
+    key: "牡丹一華",
+    cast: { display: "牡丹一華" },
+    aspect: "catchphrase",
+    label: "Catchphrases",
+    body: "A girl the book describes with two guided words.",
+    evidence: [{ volume: 1, chapter: "ch1", line: 1, quote: stripRubyMarkup(TWO_GUIDE_LINE) }],
+  });
+  ok(legit.ok, `the guide-free citation of the two-guide line files: ${legit.refusal && legit.refusal.because}`);
+  const mixed = store.insertFact({
+    key: "牡丹一華",
+    cast: { display: "牡丹一華" },
+    aspect: "catchphrase",
+    label: "Catchphrases",
+    body: "A citation that pasted one guide and left the other as markup.",
+    evidence: [{ volume: 1, chapter: "ch1", line: 1, quote: MIXED_FIRST }],
+  });
+  ok(!mixed.ok, "the mixed citation is refused at the door");
+  const mixedText = JSON.stringify(mixed.refusal || {});
+  ok(/Quote the line, not the reading\./.test(mixedText), `and the refusal still ends in the instruction: ${mixedText.slice(0, 500)}`);
+  ok(
+    mixedText.includes("牡丹一華ぼたんいちか") && /prints that word as \\"牡丹一華\\"/.test(mixedText),
+    "and it names the run the quote carried AND the word this line actually prints, because \"wrong line\" is the wrong fix here"
+  );
+  const filed = store.db.prepare("SELECT COUNT(*) AS n FROM facts").get().n;
+  same(filed, 1, "only the honest citation reached the table");
+}
+
+// ─── Scenario 12 — nothing else moved ─────────────────────────────────────────
 
 /**
  * The slice fixed doors. It added no level, no table, no door, no command, and no second ruby rule.
@@ -601,8 +753,9 @@ scenarioReadingAidProbe();
 scenarioLineSpeechKind();
 scenarioPresenceAndChapterFacts();
 scenarioTheDoorRefuses();
+scenarioTheMixedSplice();
 scenarioNothingElseMoved();
 
 console.log(
-  `test/test-guide-free-search.js: 11 scenarios, ${checks} checks, ${Date.now() - started} ms, 0 model calls, 0 corpus reads`
+  `test/test-guide-free-search.js: 12 scenarios, ${checks} checks, ${Date.now() - started} ms, 0 model calls, 0 corpus reads`
 );
