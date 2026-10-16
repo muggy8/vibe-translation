@@ -32,6 +32,9 @@
  *     glossary a chapter is shown as full rows, ranked by whether the text in front of the extractor
  *     mentions them under ANY spelling the row names (gotcha 82), and the complete name-and-rendering
  *     index appended underneath so the window hides Notes and never an entry.
+ *   - `extract/reading-block.js` — the readings the BOOK printed: the volume's own pronunciation-guide
+ *     harvest, read once, turned into the per-chapter table the term-list call is shown (plan 08 slice 0).
+ *     Every guide is eligible, multiplicity is printed, and the lines the cap drops are named.
  *
  * Not to be confused with `extract.js` at the repository root (the extraction PIPELINE STEP) or
  * `utils/source/extract.js` (the converter that writes the chapter files). This one is the glossary
@@ -49,6 +52,7 @@ const answer = require("./extract/answer");
 const reads = require("./extract/reads");
 const readReport = require("./extract/read-report");
 const windowLayer = require("./extract/window");
+const readingBlock = require("./extract/reading-block");
 
 // The public surface, unchanged from the single file.
 module.exports = {
@@ -62,4 +66,18 @@ module.exports = {
   readTermList: reads.readTermList,
   extractionReadReport: readReport.extractionReadReport,
   truncateGlossary: windowLayer.truncateGlossary,
+  // The book's own readings (plan 08 slice 0). The volume's harvest is read once and the block is built
+  // per chapter from it; nothing here is a new model call or a new prompt kind.
+  loadReadingAids: readingBlock.loadReadingAids,
+  readVolumeReadingAids: readingBlock.readVolumeReadingAids,
+  chapterReadingLines: readingBlock.chapterReadingLines,
+  buildReadingBlock: readingBlock.buildReadingBlock,
+  showReadingAidsForCall: readingBlock.showReadingAidsForCall,
+  readingBlockTruncationNote: readingBlock.readingBlockTruncationNote,
+  readingBlockFloorLine: readingBlock.readingBlockFloorLine,
+  READING_BLOCK_MAX_LINES: readingBlock.READING_BLOCK_MAX_LINES,
+  READING_BLOCK_NAMED_OMITTED: readingBlock.READING_BLOCK_NAMED_OMITTED,
+  READING_BLOCK_NOTE_MAX_CHARS: readingBlock.READING_BLOCK_NOTE_MAX_CHARS,
+  READING_BLOCK_HEADING: readingBlock.READING_BLOCK_HEADING,
+  READING_BLOCK_HEADING_VOLUME: readingBlock.READING_BLOCK_HEADING_VOLUME,
 };

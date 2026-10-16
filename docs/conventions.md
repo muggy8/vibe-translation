@@ -32,6 +32,6 @@ Part of the ai-client documentation; the entry point is [AGENTS.md](../AGENTS.md
 | `docs/pipelines.md` | The five pre-production pipelines and the translation stage (§4 to §8.5). |
 | `docs/environment.md` | Every `.env` variable, its default, and what it decides. |
 | `docs/conventions.md` | This file. |
-| `docs/gotchas-*.md` | The numbered gotcha list in five slices (1–20, 21–45, 46–63, 64–69, 70–174). Code comments cite `AGENTS.md gotcha N`; the numbers never change, only which slice holds them. |
+| `docs/gotchas-*.md` | The numbered gotcha list in five slices (1–20, 21–45, 46–63, 64–69, 70–175). Code comments cite `AGENTS.md gotcha N`; the numbers never change, only which slice holds them. |
 | `docs/docker.md` | Running the pipeline in a container: the folders that are shared, how to point it at a model server, and what is deliberately not in the image. |
 | `harness/` | NOT the harness implementation (`harness.js` + `ai/` are). These are the tracked design documents for the planned interactive/PTC layer. Never delete this folder. |

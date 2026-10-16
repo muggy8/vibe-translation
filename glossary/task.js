@@ -35,7 +35,7 @@ const { RESEARCH_MAX_TERMS_PER_VOLUME } = require("./researchable");
 const { assertGlossaryCarryForward } = require("./carry-forward");
 const { openGlossaryRecord, fileGlossaryExtraction, fileGlossaryTermRows, fileGlossaryRevisions, renderGlossaryArtifact, quarantineGlossaryArtifact, sealGlossaryRecord } = require("./store");
 const { writeGlossaryCoverageReport } = require("./coverage");
-const { truncateGlossary, readTermList, termsResponseFormat } = require("./extract");
+const { truncateGlossary, readTermList, termsResponseFormat, showReadingAidsForCall } = require("./extract");
 const { runChunkedVolumeAgent } = require("./chunked");
 const { runQaLoop } = require("./qa");
 const { settleGlossaryRun } = require("./settlement");
@@ -410,6 +410,16 @@ async function dumpVolumePreview(ctx) {
   const sections = [
     { title: "One-shot — terms extraction system prompt", prompt: ctx.termsSystemPrompt },
     { title: "One-shot — terms extraction user prompt", prompt: ctx.termsPrompt },
+    {
+      title:
+        "CODE — the readings the book itself prints, appended to the extraction call as its own message " +
+        "(no prompt file, no model call)",
+      prompt: (await showReadingAidsForCall({
+        ctx,
+        chapters: ctx.bundle && Array.isArray(ctx.bundle.segments) ? ctx.bundle.segments : [],
+        label: `Volume ${values.INSTALLMENT_NUMBER} (--dry-run)`,
+      })).text,
+    },
     { title: "One-shot — research reading system prompt (tool-less)", prompt: RESEARCH_SYSTEM_PROMPT },
     {
       title: `ONE-SHOT — research reading prompt (illustrative term; at most ${RESEARCH_MAX_TERMS_PER_VOLUME} per volume, and the lookup is made by code, not by the model)`,
@@ -578,6 +588,15 @@ async function extractNewTerms(ctx) {
   const { values, sourceFile, previousGlossaryFile, termsPrompt, termsSystemPrompt } = ctx;
   console.log(`Volume ${values.INSTALLMENT_NUMBER}: extracting new terms...`);
   const baseMessages = [{ file: sourceFile, name: path.basename(sourceFile) }];
+  // **The readings the book itself printed** (plan 08 slice 0). This route is shown the whole installment,
+  // so it gets the volume's guides chapter by chapter, each chapter under the same line cap the
+  // chapter-by-chapter route uses. Built from this volume's own harvest, read once.
+  const readingAids = await showReadingAidsForCall({
+    ctx,
+    chapters: ctx.bundle && Array.isArray(ctx.bundle.segments) ? ctx.bundle.segments : [],
+    label: `Volume ${values.INSTALLMENT_NUMBER}`,
+  });
+  baseMessages.push({ text: readingAids.text });
   if (!ctx.isFirst) {
     const volumeSourceText = await fs.readFile(sourceFile, "utf8");
     baseMessages.push(
@@ -663,4 +682,7 @@ module.exports = {
   glossary,
   runVolumeAgent,
   prepareVolumeFolder,
+  // Exported so a suite can prove the whole-installment read pass really puts the book's own readings on
+  // the wire (plan 08 slice 0), rather than only that the function that builds them returns them.
+  extractNewTerms,
 };
