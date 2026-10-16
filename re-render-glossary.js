@@ -187,9 +187,17 @@ async function reRenderOneVolume({ volume, seriesDir, scratchSeriesDir, workSeri
     return { installment: volume.installmentNumber, folder: volume.folder, ok: false, refusal: rendered.refusal };
   }
 
+  // The volume's own harvest is read whether or not a published file exists, because the report has to be
+  // able to say WHY its reading column is empty. A copy of a corpus record is migrated by the store's own
+  // open door, so the table is there and EMPTY — the thing that files a harvest into a record is
+  // `ensureVolumeWrittenFormsInRecord`, inside `openVolumeRecord`, which this door deliberately does not
+  // use. Without the harvest count beside it, "render fills 0 of 410 rows" reads as "this book guided
+  // nothing", next to a harvest file that holds 825 guided forms.
+  const harvest = await door.readHarvestRows(volumeDir);
+  const harvestGuideRows = harvest.length;
+
   let comparison = null;
   if (artifactPresent) {
-    const harvest = await door.readHarvestRows(volumeDir);
     comparison = door.compareGlossaryRender({
       onDisk,
       rendered: rendered.markdown,
@@ -197,6 +205,10 @@ async function reRenderOneVolume({ volume, seriesDir, scratchSeriesDir, workSeri
       volume: volumeNumber,
       guideSplitForms: door.guideSplitFormsOfHarvest(harvest),
       explain: true,
+      // The third text the gate compares: what the RECORD says each row's reading cell is. Without it the
+      // gate would only be able to ask "does the file match the render", which a renderer that invents a
+      // guide answers perfectly well.
+      expectedReadingCells: rendered.readingCells,
     });
   }
 
@@ -219,6 +231,12 @@ async function reRenderOneVolume({ volume, seriesDir, scratchSeriesDir, workSeri
     lostRows: comparison ? comparison.lostRows : [],
     gainedRows: comparison ? comparison.gainedRows : [],
     changedRows: comparison ? comparison.changedRows : [],
+    readingChanges: comparison ? comparison.readingChanges : [],
+    readingChangesByKind: comparison ? comparison.readingChangesByKind : {},
+    readingColumnOnDisk: comparison ? comparison.readingColumnOnDisk : false,
+    readingColumnRendered: comparison ? comparison.readingColumnRendered : false,
+    readingTotals: rendered.readingTotals || null,
+    harvestGuideRows,
     sectionsLost: comparison ? comparison.sectionsLost : [],
     proseLinesLost: comparison ? comparison.proseLinesLost : [],
     proseLinesGained: comparison ? comparison.proseLinesGained : [],
@@ -258,6 +276,51 @@ async function reRenderOneVolume({ volume, seriesDir, scratchSeriesDir, workSeri
 }
 
 /**
+ * One line about what the `Readings` column would do to one volume.
+ *
+ * Written as one function because the same sentence is printed on the console and in the report, and a
+ * column that reports itself two ways is a column two reports can disagree about.
+ *
+ * @param {Object} entry - One volume's report entry.
+ * @returns {string}
+ */
+function describeReadings(entry) {
+  const totals = entry.readingTotals;
+  const kinds = entry.readingChangesByKind || {};
+  const filled = totals ? totals.rowsFilled : 0;
+  const empty = totals ? totals.rowsEmpty : 0;
+  const several = totals ? totals.rowsWithSeveralReadings : 0;
+  return (
+    `file ${entry.readingColumnOnDisk ? "prints guides" : "has no reading column"} → ` +
+    `render fills ${filled} of ${totals ? totals.rows : 0} row(s)${totals ? ` (${empty} say "no reading recorded", ${several} carry more than one)` : ""}${readingColumnReason(entry)}; ` +
+    `added ${kinds.added || 0}, lost ${kinds.lost || 0}, invented ${kinds.invented || 0}`
+  );
+}
+
+/**
+ * Why the column this render would publish is empty, when it is — the sentence that keeps "0 rows filled"
+ * from being read as "this book guided nothing".
+ *
+ * There are two different empties and this door can meet both on the same corpus. A record that predates
+ * schema 12 has no `written_forms` table. A record copied from a corpus volume IS migrated by the store's
+ * own open door, so its table exists and is empty, because the thing that files a harvest into a record is
+ * `ensureVolumeWrittenFormsInRecord` inside `openVolumeRecord` and this door reads a copy, not a stage run.
+ * The second one is the easy one to mistake for the first, and both sit beside a harvest file full of
+ * guides.
+ *
+ * @param {Object} entry - One volume's report entry.
+ * @returns {string} A clause, or "" when the column is not empty and nothing has to be explained.
+ */
+function readingColumnReason(entry) {
+  const totals = entry.readingTotals;
+  if (!totals || totals.rowsFilled > 0) return "";
+  if (totals.tablePresent === false) return ", and this record has NO written-forms table at all";
+  const harvest = entry.harvestGuideRows || 0;
+  if (harvest === 0) return ", and this volume's folder holds no pronunciation-guide harvest to file";
+  return `, and the copy this render read holds 0 written-form rows while volume ${entry.installment}'s own harvest holds ${harvest} guide row(s) — nothing has filed that harvest into the record`
+}
+
+/**
  * Render the report a person reads.
  *
  * @param {Object} report
@@ -274,19 +337,58 @@ function renderReport({ seriesDir, apply, entries }) {
     `Mode: ${apply ? "APPLIED — the published files were replaced, each kept as \`glossary.md.rejected\`" : "rehearsal — nothing in the series folder was touched"}`,
     "Model calls: 0. Rows written, edited or moved: 0. The corpus records were copied, never opened.",
     "",
-    "| Volume | Rows on disk | Rows rendered | Sections | Header lines | Lost | Gained | Changed | Only headers differ | Identical |",
-    "|---|---|---|---|---|---|---|---|---|---|",
+    "| Volume | Rows on disk | Rows rendered | Sections | Header lines | Lost | Gained | Changed | Rows with a guide | Rows saying \"no reading recorded\" | Guides added | Guides lost | Guides invented | Only headers differ | Identical |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
   ];
   for (const entry of entries) {
     if (!entry.ok) {
-      lines.push(`| ${entry.installment} | — | — | — | — | — | — | — | — | refused: ${entry.refusal ? entry.refusal.rule : "unknown"} |`);
+      lines.push(`| ${entry.installment} | — | — | — | — | — | — | — | — | — | — | — | — | refused: ${entry.refusal ? entry.refusal.rule : "unknown"} |`);
       continue;
     }
+    const totals = entry.readingTotals || {};
+    const kinds = entry.readingChangesByKind || {};
     lines.push(
       `| ${entry.installment} | ${entry.rowsOnDisk} | ${entry.rowsRendered} | ${entry.sectionsOnDisk} → ${entry.sectionsRendered} | ` +
         `${entry.headerLinesOnDisk} → ${entry.headerLinesRendered} | ${entry.lostRows.length} | ${entry.gainedRows.length} | ` +
-        `${entry.changedRows.length} | ${entry.onlyHeaderLinesDiffer ? "yes" : "no"} | ${entry.identical ? "yes" : "no"} |`
+        `${entry.changedRows.length} | ${totals.rowsFilled ?? "—"} | ${totals.rowsEmpty ?? "—"} | ` +
+        `${kinds.added || 0} | ${kinds.lost || 0} | ${kinds.invented || 0} | ` +
+        `${entry.onlyHeaderLinesDiffer ? "yes" : "no"} | ${entry.identical ? "yes" : "no"} |`
     );
+  }
+  lines.push("");
+  lines.push("## The reading column, volume by volume");
+  lines.push("");
+  lines.push("Every guide below comes from a `written_forms` row this volume's own record carries, bounded to");
+  lines.push("this volume and the ones before it. A guide the record does not hold is refused, not printed.");
+  lines.push("");
+  for (const entry of entries) {
+    if (!entry.ok) continue;
+    lines.push(`- volume ${entry.installment}: ${describeReadings(entry)}`);
+    if (entry.readingTotals && entry.readingTotals.rowsFilled === 0) {
+      lines.push(
+        `    (every row prints "no reading recorded", and that is NOT the sentence "these books guided ` +
+          `nothing": ${readingColumnReason(entry).replace(/^, and /, "")})`
+      );
+    }
+  }
+  lines.push("");
+  const guideDamage = entries.filter((entry) => entry.ok && entry.readingChanges && entry.readingChanges.some((change) => change.kind === "lost" || change.kind === "invented"));
+  lines.push("## Guides this render would lose, or print without a record to back them");
+  lines.push("");
+  if (!guideDamage.length) lines.push("None. Every guide every published glossary prints is a guide its own record holds, and every guide the render prints is in the record.");
+  for (const entry of guideDamage) {
+    const bad = entry.readingChanges.filter((change) => change.kind === "lost" || change.kind === "invented");
+    lines.push(`### Volume ${entry.installment} — ${bad.length} row(s)`);
+    lines.push("");
+    for (const change of bad) {
+      lines.push(
+        `- **${change.term}** (${change.section}) — \`${change.kind}\`: file prints ` +
+          `${change.onDisk.map((r) => JSON.stringify(r)).join(", ") || "(nothing)"}, record holds ` +
+          `${(change.expected || []).map((r) => JSON.stringify(r)).join(", ") || "(nothing)"}, render prints ` +
+          `${change.rendered.map((r) => JSON.stringify(r)).join(", ") || "(nothing)"}`
+      );
+    }
+    lines.push("");
   }
   const named = entries.filter((entry) => entry.lostRows && entry.lostRows.length);
   lines.push("");
@@ -419,6 +521,7 @@ async function main() {
       `\nvolume ${entry.installment}: rows on disk ${entry.rowsOnDisk} → rendered ${entry.rowsRendered}; ` +
         `lost ${entry.lostRows.length}, gained ${entry.gainedRows.length}, changed ${entry.changedRows.length}; ` +
         `sections ${entry.sectionsOnDisk} → ${entry.sectionsRendered}; header lines ${entry.headerLinesOnDisk} → ${entry.headerLinesRendered}; ` +
+        `readings: ${describeReadings(entry)}; ` +
         `only headers differ: ${entry.onlyHeaderLinesDiffer ? "yes" : "no"}; identical: ${entry.identical ? "yes" : "no"}`
     );
     for (const row of entry.lostRows.slice(0, 8)) console.log(`  LOST ${JSON.stringify(row.term)} (${row.section}) — ${row.rule}`);

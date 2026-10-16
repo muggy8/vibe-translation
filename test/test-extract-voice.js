@@ -50,7 +50,7 @@ const rs = require("../utils/reference-store");
 const { resolveSourceBundle } = require("../utils/source");
 const ev = require("../extract-voice");
 const { KNOWN_FACTS_HEADING } = require("../character-voice/known-facts");
-const { GLOSSARY_01, VOICE_01, FIXTURES_ROOT } = require("./fixture-reference-store");
+const { GLOSSARY_01, GLOSSARY_NO_READING_CELL: NO_READING, VOICE_01, FIXTURES_ROOT } = require("./fixture-reference-store");
 
 /**
  * One chapter block, long enough to become its own segment.
@@ -144,8 +144,8 @@ const BOOK_02 = [
  * read into its record" an assertion about new rows rather than about the copy.
  */
 const GLOSSARY_02 = GLOSSARY_01.replace(
-  "| 三色院菫子 | Sanshokuin Sumireko | Library committee |",
-  "| 三色院菫子 | Sanshokuin Sumireko | Library committee |\n| 駱駝 | Rakuda | Named in the afterword |"
+  `| 三色院菫子 | Sanshokuin Sumireko | ${NO_READING} | Library committee |`,
+  `| 三色院菫子 | Sanshokuin Sumireko | ${NO_READING} | Library committee |\n| 駱駝 | Rakuda | ${NO_READING} | Named in the afterword |`
 );
 
 /**

@@ -13,6 +13,12 @@
  *      store's own evidence rule against this volume's own book and reports which of the two measured
  *      shapes fired: the row's spellings are nowhere in the volume's text, or the row spells a word the
  *      way the OLD converter printed it (gotcha 123), which the guide-free text no longer contains.
+ *   3. **Cell by cell, for the `Readings` column** (plan 09 slice 3b). Three texts are compared, not two:
+ *      what the published file prints, what the render prints, and what the **record** says the cell should
+ *      be — asked through the same helper the renderer used, against the same store. A render that prints a
+ *      guide the record does not hold is `invented`; one that drops a guide the file or the record holds is
+ *      `lost`; a guide the record holds and the file does not yet print is `added`, and that is the only
+ *      allowed answer, because it is the entire content of the change this column exists to make.
  *
  * The comparison is deliberately **not** a similarity score. It answers "what would disappear?" and
  * "what would appear?", and it says 0 when nothing would.
@@ -26,6 +32,7 @@ const {
   parseGlossaryMarkdown,
   glossaryTermSpans,
   findRowEvidence,
+  readingsFromCell,
 } = require("../../utils/reference-store/glossary-adapter");
 const { rubyGuideSplitFormOf } = require("../../utils/source/ruby-guides");
 require("../../types"); // JSDoc type definitions
@@ -104,10 +111,10 @@ function withoutTableHeaders(markdown) {
  * boundaries the store uses when it files a row — not a second opinion about where a table ends.
  *
  * @param {string} markdown
- * @returns {Map<string, {term: string, rendering: string, notes: string, section: string}>}
+ * @returns {Map<string, {term: string, rendering: string, reading: string, notes: string, section: string}>}
  */
 function glossaryRowsByKey(markdown) {
-  /** @type {Map<string, {term: string, rendering: string, notes: string, section: string}>} */
+  /** @type {Map<string, {term: string, rendering: string, reading: string, notes: string, section: string}>} */
   const out = new Map();
   for (const row of parseGlossaryMarkdown(markdown).rows) {
     const key = normalizeQuote(row.term);
@@ -134,6 +141,108 @@ function guideSplitFormsOfHarvest(harvestRows) {
     if (form) forms.add(form);
   }
   return forms;
+}
+
+/**
+ * How many cells one Markdown table line declares, positionally (the shells off the ends).
+ *
+ * @param {string} line
+ * @returns {number}
+ */
+function tableCellCount(line) {
+  const parts = String(line || "").split("|");
+  if (parts.length > 0 && parts[0].trim() === "") parts.shift();
+  if (parts.length > 0 && parts[parts.length - 1].trim() === "") parts.pop();
+  return parts.length;
+}
+
+/**
+ * Whether a document's tables declare a fourth column.
+ *
+ * @param {string[]} headerLines - The header lines {@link classifyGlossaryLines} found.
+ * @returns {boolean}
+ */
+function headerDeclaresReadingColumn(headerLines) {
+  return (headerLines || []).some((line) => tableCellCount(line) >= 4);
+}
+
+/**
+ * The readings one cell names, as a set.
+ *
+ * @param {string} cell
+ * @returns {Set<string>}
+ */
+function readingSetOf(cell) {
+  return new Set(readingsFromCell(cell).map((entry) => entry.reading));
+}
+
+/**
+ * What the `Readings` column would do to one row, and which of the four answers it is.
+ *
+ * Three texts are compared, not two, and that is the whole point of this function:
+ *
+ *   - **what the published file prints** (`onDisk`),
+ *   - **what the render prints** (`rendered`),
+ *   - **what the record says the cell should be** (`expected`, from the same store the render was made
+ *     from, through the same helper the renderer used).
+ *
+ * Comparing only the first two would let a renderer that mis-queries the record publish a reading the
+ * record does not hold, and the file would look self-consistent. Comparing only the last two would let a
+ * render silently drop a guide the published file already prints. Both are refused, and each has its own
+ * name:
+ *
+ *   - `invented` — the render prints a reading the record does not hold.
+ *   - `lost` — a reading the published file prints, or the record holds, is not in the render.
+ *   - `added` — the render prints a guide the published file does not yet print, and the record holds it.
+ *     **This is the only allowed answer**, and it is the whole content of the change: plan 09 slice 3b is a
+ *     door that puts guides the book printed into a file that does not print them. `hadGuidesOnDisk` says
+ *     which flavour it is — a row getting its first guide (the answer every three-column file gets), or an
+ *     extra guide arriving beside ones the file already prints.
+ *
+ * There is deliberately **no fourth refusal**. Once `invented` and `lost` are out of the way, the only
+ * difference left is a guide the record holds and the file lacks, and refusing that would mean a published
+ * glossary could never gain a guide without re-deriving the volume from its book — a door that costs a
+ * stage run to fix a fact the record already has.
+ *
+ * @param {Object} opts
+ * @param {string} opts.onDiskCell - The published file's reading cell ("" when its table has no such column).
+ * @param {string} opts.renderedCell - The render's reading cell.
+ * @param {string|null} [opts.expectedCell] - The cell the record says this row's readings are, or null when
+ *   the caller did not ask the record (then `invented` cannot be answered and says so).
+ * @returns {{kind: string, onDisk: string[], rendered: string[], expected: string[]|null, invented: string[], lost: string[], added: string[], hadGuidesOnDisk: boolean, expectedAsked: boolean}}
+ */
+function compareReadingCell({ onDiskCell, renderedCell, expectedCell }) {
+  const disk = [...readingSetOf(onDiskCell)];
+  const rendered = [...readingSetOf(renderedCell)];
+  const expectedAsked = typeof expectedCell === "string";
+  const expected = expectedAsked ? [...readingSetOf(expectedCell)] : null;
+
+  const renderedSet = new Set(rendered);
+  const diskSet = new Set(disk);
+  const expectedSet = expected ? new Set(expected) : null;
+
+  const invented = expected ? rendered.filter((reading) => !expectedSet.has(reading)) : [];
+  const lost = [
+    ...disk.filter((reading) => !renderedSet.has(reading)),
+    ...(expected ? expected.filter((reading) => !renderedSet.has(reading)) : []),
+  ].filter((reading, index, all) => all.indexOf(reading) === index);
+  const added = rendered.filter((reading) => !diskSet.has(reading));
+
+  let kind = "same";
+  if (invented.length) kind = "invented";
+  else if (lost.length) kind = "lost";
+  else if (added.length) kind = "added";
+  return {
+    kind,
+    onDisk: disk,
+    rendered,
+    expected,
+    invented,
+    lost,
+    added,
+    hadGuidesOnDisk: disk.length > 0,
+    expectedAsked,
+  };
 }
 
 /**
@@ -203,6 +312,9 @@ function explainAbsentGlossaryRow({ volumeDir, volume, row, guideSplitForms }) {
  * @param {number} [opts.volume]
  * @param {Set<string>} [opts.guideSplitForms]
  * @param {boolean} [opts.explain] - Ask {@link explainAbsentGlossaryRow} for every lost row.
+ * @param {Map<string, string>} [opts.expectedReadingCells] - The cell the record says each row's `Readings`
+ *   column holds, keyed on `normalizeQuote(term)` — the same call {@link renderGlossary} used, asked of the
+ *   same store. Without it the `invented` answer cannot be given, and the result says so.
  * @returns {{
  *   identical: boolean,
  *   onlyHeaderLinesDiffer: boolean,
@@ -214,10 +326,22 @@ function explainAbsentGlossaryRow({ volumeDir, volume, row, guideSplitForms }) {
  *   lostRows: Array<{term: string, rendering: string, section: string, rule: string|null, because: string|null}>,
  *   gainedRows: Array<{term: string, rendering: string, section: string}>,
  *   changedRows: Array<{term: string, field: string, onDisk: string, rendered: string}>,
+ *   readingColumnOnDisk: boolean, readingColumnRendered: boolean,
+ *   readingChanges: Array<{term: string, section: string, kind: string, onDisk: string[], rendered: string[], expected: string[]|null, invented: string[], lost: string[], added: string[], expectedAsked: boolean}>,
+ *   readingChangesByKind: Record<string, number>,
+ *   readingsAsked: boolean,
  *   nonHeaderTextIdentical: boolean,
  * }}
  */
-function compareGlossaryRender({ onDisk, rendered, volumeDir, volume, guideSplitForms, explain = false }) {
+function compareGlossaryRender({
+  onDisk,
+  rendered,
+  volumeDir,
+  volume,
+  guideSplitForms,
+  explain = false,
+  expectedReadingCells = null,
+}) {
   const a = classifyGlossaryLines(onDisk);
   const b = classifyGlossaryLines(rendered);
   const rowsA = glossaryRowsByKey(onDisk);
@@ -252,6 +376,34 @@ function compareGlossaryRender({ onDisk, rendered, volumeDir, volume, guideSplit
     }
   }
 
+  // The reading column, row by row, against the record as well as against the file. A row the two documents
+  // do not both hold is already named by lostRows / gainedRows, so this loop answers only the column.
+  const readingChanges = [];
+  for (const [key, rowA] of rowsA) {
+    const rowB = rowsB.get(key);
+    if (!rowB) continue;
+    // When the caller asked the record, a row the record's own reading query did not answer is a row the
+    // record says has NO readings — an empty answer, not an unknown one. Treating it as unknown would make
+    // the `invented` refusal quietly switch off for exactly the rows a broken renderer would get wrong.
+    const expectedCell = expectedReadingCells ? String(expectedReadingCells.get(key) ?? "") : null;
+    const answer = compareReadingCell({
+      onDiskCell: rowA.reading,
+      renderedCell: rowB.reading,
+      expectedCell,
+    });
+    if (answer.kind === "same") continue;
+    readingChanges.push({ term: rowA.term, section: rowA.section, ...answer });
+  }
+  const readingChangesByKind = {};
+  for (const change of readingChanges) {
+    readingChangesByKind[change.kind] = (readingChangesByKind[change.kind] || 0) + 1;
+  }
+  // "This file prints a reading column" is a fact about the table's own header, not about whether any cell
+  // is filled: a four-column glossary whose every row says "no reading recorded" HAS the column, and a
+  // three-column one does not. Deciding it from the cells would call the first file the second.
+  const readingColumnOnDisk = headerDeclaresReadingColumn(a.headers);
+  const readingColumnRendered = headerDeclaresReadingColumn(b.headers);
+
   const sectionsA = a.sections;
   const sectionsB = new Set(b.sections);
   const sectionsLost = sectionsA.filter((line) => !sectionsB.has(line));
@@ -285,6 +437,11 @@ function compareGlossaryRender({ onDisk, rendered, volumeDir, volume, guideSplit
     lostRows,
     gainedRows,
     changedRows,
+    readingColumnOnDisk,
+    readingColumnRendered,
+    readingChanges,
+    readingChangesByKind,
+    readingsAsked: expectedReadingCells !== null && expectedReadingCells !== undefined,
     nonHeaderTextIdentical,
     rowLinesIdentical,
   };
@@ -295,6 +452,10 @@ module.exports = {
   classifyGlossaryLines,
   withoutTableHeaders,
   glossaryRowsByKey,
+  tableCellCount,
+  headerDeclaresReadingColumn,
+  readingSetOf,
+  compareReadingCell,
   guideSplitFormsOfHarvest,
   explainAbsentGlossaryRow,
   compareGlossaryRender,

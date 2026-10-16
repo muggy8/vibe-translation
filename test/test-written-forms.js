@@ -111,6 +111,9 @@ const {
   rosterKeysInRecord,
   fileVolumeWrittenForms,
   openVolumeRecord,
+  readingsForFormsInRecord,
+  formsCarryingSeveralReadingsInRecord,
+  foldReadingsByForm,
   identityBearingGroups,
   splitGroupsByRoster,
   classifyUnselectedGroups,
@@ -869,15 +872,26 @@ function scenarioNothingAdded() {
   const pipelineStore = path.join("utils", "reference-store", "pipeline-store.js");
 
   /** @type {string[]} */ const doorCallers = [];
-  /** @type {string[]} */ const tableReaders = [];
+  /** @type {string[]} */ const sqlReaders = [];
+  /** @type {string[]} */ const readingQueryCallers = [];
+  /** @type {string[]} */ const proseMentions = [];
   /** @type {string[]} */ const identityRequires = [];
   /** @type {string[]} */ const groupQueryCallers = [];
+
+  // A SQL statement that names the table. This is the shape the ban was always about — a door outside this
+  // layer selecting rows for its own purpose — and it is now written as the shape rather than as the token.
+  // The token appears in prose too (a refusal message, a report line, a doc comment), and a guard that
+  // counts prose as a read cannot tell a read from a sentence about one.
+  const SQL_NAMES_TABLE = /\b(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+written_forms\b/i;
+  const READING_QUERY_CALL = /\b(readingsForFormsInRecord|formsCarryingSeveralReadingsInRecord)\s*\(/;
 
   for (const file of files) {
     const text = fs.readFileSync(file, "utf8");
     const insideLayer = file.startsWith(layerPrefix) || file === coverFile;
     if (/fileVolumeWrittenForms\s*\(/.test(text) && !insideLayer) doorCallers.push(path.relative(ROOT, file));
-    if (/\bwritten_forms\b/.test(text) && !insideLayer && file !== schemaFile) tableReaders.push(path.relative(ROOT, file));
+    if (SQL_NAMES_TABLE.test(text) && !insideLayer && file !== schemaFile) sqlReaders.push(path.relative(ROOT, file));
+    if (READING_QUERY_CALL.test(text) && !insideLayer) readingQueryCallers.push(path.relative(ROOT, file));
+    if (/\bwritten_forms\b/.test(text) && !insideLayer && file !== schemaFile) proseMentions.push(path.relative(ROOT, file));
     if (/reference-store\/identity/.test(text) && file.startsWith(layerPrefix)) identityRequires.push(path.relative(ROOT, file));
     if (/candidateGroupsInRecord\s*\(/.test(text) && !insideLayer) groupQueryCallers.push(path.relative(ROOT, file));
   }
@@ -894,7 +908,42 @@ function scenarioNothingAdded() {
    * published file. That half is what plan 09 slice 3b has to change on purpose.
    */
   same(doorCallers, [pipelineStore], "the door has exactly one caller outside its own layer — `pipeline-store.js`, the record-open every stage already comes through — and no stage, step or command calls it directly");
-  same(tableReaders, [], "and nothing outside the layer and the migration reads the table: no renderer, no audit rule, no presence matcher, no coverage rule, no chapter-facts query, no stage — not even the file that now runs the door");
+
+  /**
+   * The reading half, re-cut for plan 09 slice 3b (2026-10-16), and re-cut **narrower**, not wider.
+   *
+   * The sentence this pin used to carry — "nothing outside the layer reads the table" — was true while the
+   * table reached no published file, and slice 3b is the act of letting it reach one. Keeping the old
+   * assertion would have meant widening the match to let the new caller through, which is how a ban decays.
+   * So the ban is now written as the three things it was always protecting, each with its own answer:
+   *
+   *   1. **No door outside this layer runs a query against the table.** Not one file in the pipeline holds a
+   *      `FROM written_forms`. The rows leave this layer only through a function this layer exports.
+   *   2. **Exactly one door outside this layer asks the reading question**, and it is named by path:
+   *      `glossary-adapter/readings.js`, the glossary's `Readings` column. No stage, no audit rule, no
+   *      presence matcher, no coverage rule, no chapter-facts query and no translator view asks it.
+   *   3. **A file that only says the table's name in prose is not a reader** — a refusal message and a
+   *      report line are not a query. Those files are listed rather than ignored, so the set is visible and
+   *      a new one is a decision somebody has to make out loud.
+   */
+  same(sqlReaders, [], "no file outside this layer and the migration holds a SQL statement against `written_forms` — the rows leave the layer through a function, never through a query");
+  same(
+    readingQueryCallers,
+    [path.join("utils", "reference-store", "glossary-adapter", "readings.js")],
+    "exactly one door outside this layer asks the reading question, and it is the glossary's reading column — no stage, audit rule, presence matcher, coverage rule, chapter-facts query or translator view asks it"
+  );
+  same(
+    proseMentions,
+    [
+      path.join("glossary", "re-render", "publish.js"),
+      path.join("re-render-glossary.js"),
+      path.join("utils", "reference-store", "glossary-adapter.js"),
+      path.join("utils", "reference-store", "glossary-adapter", "labels.js"),
+      path.join("utils", "reference-store", "glossary-adapter", "readings.js"),
+      path.join("utils", "reference-store", "glossary-adapter", "render.js"),
+    ].sort(),
+    "the only files outside this layer that name the table at all name it in prose — a refusal message, a report line and a doc comment are not a read, and the list is printed so a new one is a decision, not an accident"
+  );
   same(identityRequires, [], "the layer requires nothing under `utils/reference-store/identity/`: the identity claim is slice 2's, and this wiring does not reach it");
   same(groupQueryCallers, [path.join("utils", "reference-store", "identity", "file.js")], "the only door outside this layer that asks the grouping question is slice 2's identity door — no stage, no report renderer, and no audit rule asks it");
 
@@ -914,6 +963,32 @@ function scenarioNothingAdded() {
   );
   same(doorCallersUnder(scratch), ["pipeline-store.js", "planted-stage.js"],
     "the scan named the planted stage beside the real wiring — a second caller would be reported, not absorbed");
+
+  // And the two new pins are proven the same way: a planted reading caller and a planted query are named
+  // beside the real glossary column. A pin nobody has seen fail is a sentence.
+  fs.writeFileSync(
+    path.join(scratch, "planted-reading.js"),
+    'const { readingsForFormsInRecord } = require("../utils/reference-store");\n' +
+      "function ask(store) { return readingsForFormsInRecord(store, { upToVolume: 1 }); }\n" +
+      "module.exports = { ask };\n",
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(scratch, "planted-query.js"),
+    "function readForms(db) { return db.prepare('SELECT form FROM written_forms WHERE volume = 1').all(); }\n" +
+      "module.exports = { readForms };\n",
+    "utf8"
+  );
+  const plantedReaders = [];
+  const plantedQueries = [];
+  for (const name of fs.readdirSync(scratch)) {
+    if (!name.endsWith(".js")) continue;
+    const text = fs.readFileSync(path.join(scratch, name), "utf8");
+    if (READING_QUERY_CALL.test(text)) plantedReaders.push(name);
+    if (SQL_NAMES_TABLE.test(text)) plantedQueries.push(name);
+  }
+  same(plantedReaders, ["planted-reading.js"], "the reading-query pin fires: a second door asking the reading question is named beside the glossary column");
+  same(plantedQueries, ["planted-query.js"], "and the SQL pin fires: a file outside the layer that selects from the table is named, not absorbed");
   fs.rmSync(scratch, { recursive: true, force: true });
 
   const coverText = fs.readFileSync(coverFile, "utf8");
@@ -1218,7 +1293,7 @@ function scenarioWiringAtTheOpen() {
     brokenOpen.store.close();
   }
 
-  // ── Nothing published reads it: the same stage acts, with the harvest and without. ──────────────
+  // ── The A/B a published file can now be asked for: the same stage act, harvest present and absent. ──
   const withHarvest = fixtureStoreSeries("written-forms-wiring-published");
   writeHarvest(withHarvest.volumes[0].dir, withHarvest.volumes[0].base, HARVEST);
   const withoutHarvest = fixtureStoreSeries("written-forms-wiring-published-bare");
@@ -1235,8 +1310,32 @@ function scenarioWiringAtTheOpen() {
 
     const renderedWith = rs.renderGlossary(withStore, { volume: 1 });
     const renderedBare = rs.renderGlossary(bareStore, { volume: 1 });
-    same(renderedWith, renderedBare, "and the published glossary is byte-identical: the rows reach no artifact");
-    ok(!/らくだ|にせもの|うま/.test(renderedWith), "no harvested reading appears in the published file");
+
+    /**
+     * Plan 09 slice 3b re-cut this comparison, and it re-cut it in the direction the change makes
+     * unavoidable: the published glossary is **no longer** byte-identical when the harvest is present,
+     * because the `Readings` column is what the harvest was filed for. What the A/B proves now is the
+     * narrower and harder claim — the difference is confined to that one column.
+     */
+    const rowsWith = rs.parseGlossaryMarkdown(renderedWith).rows;
+    const rowsBare = rs.parseGlossaryMarkdown(renderedBare).rows;
+    const shapeOf = (rows) => rows.map((row) => `${row.section} || ${row.term} || ${row.rendering} || ${row.notes}`);
+    same(shapeOf(rowsWith), shapeOf(rowsBare), "every term, every rendering, every note and every section is the same bytes with the harvest and without it");
+    same(rowsWith.length, rowsBare.length, "no row appears or disappears");
+    ok(renderedWith !== renderedBare, "and the two files are NOT identical — the reading column is the point of the wiring");
+    const bareCells = rowsBare.map((row) => row.reading);
+    same(bareCells, rowsBare.map(() => rs.GLOSSARY_NO_READING_CELL), "the record with no harvest prints the empty marker on every row, not a blank");
+    const filled = rowsWith.filter((row) => row.reading !== rs.GLOSSARY_NO_READING_CELL);
+    ok(filled.length > 0, `the record with the harvest prints a guide on ${filled.length} row(s): ${filled.map((row) => `${row.term} → ${row.reading}`).join("; ")}`);
+    for (const row of filled) {
+      const guides = rs.readingsFromCell(row.reading).map((entry) => entry.reading);
+      const held = withStore.db
+        .prepare("SELECT DISTINCT reading FROM written_forms WHERE form = ? AND volume <= 1")
+        .all(row.term)
+        .map((recordRow) => recordRow.reading);
+      same(guides.sort(), held.sort(), `${row.term}: the guides the published file prints are exactly the guides this record holds for that spelling — nothing added, nothing dropped`);
+    }
+    ok(!/らくだ/.test(renderedWith), "and a form the glossary holds no row for contributes no cell anywhere");
 
     const chapterText = fs.readFileSync(path.join(withHarvest.volumes[0].dir, "test_story(1)-ch1.md"), "utf8");
     const shownWith = rs.chapterKnownFacts(withStore, { chapterText, volume: 1 });
@@ -1247,7 +1346,237 @@ function scenarioWiringAtTheOpen() {
     bareStore.close();
   }
 
-  console.log("13. the wiring: 13 rows filed at the open, 15 carried to volume 3, a second pass files 0, a plain-text volume still opens, a damaged harvest is named, and 0 bytes move in a published file");
+  // ── A record that predates the table: the column answers, and says which empty it is. ────────────
+  /**
+   * Every one of this corpus's 17 records is still on schema 8, and `openDatabase` runs no DDL, so a
+   * read-only handle on one of them points at a database with no `written_forms` table. `renderGlossary`
+   * is reached from three live doors through `utils/translate/settled-glossary.js`'s `withSettledRecord`,
+   * which turns any throw into a STRUCTURAL refusal — so a reading query that needs a table the record does
+   * not have would refuse the translation stage's terminology law on all 17 volumes. This block pins the
+   * answer that replaced the throw, and the flag that keeps it from being mistaken for "these books guided
+   * nothing".
+   */
+  const oldSeries = fixtureStoreSeries("written-forms-wiring-predates-table");
+  writeHarvest(oldSeries.volumes[0].dir, oldSeries.volumes[0].base, HARVEST);
+  const oldStore = openVolumeRecord({ volume: 1, folder: "Test Story(01)", seriesDir: oldSeries.dir }).store;
+  try {
+    same(oldStore.db.prepare("SELECT COUNT(*) n FROM written_forms").get().n, 13, "the fixture record starts with the table and its 13 rows");
+    importGlossary(oldStore, GLOSSARY);
+    const beforeRows = rs.parseGlossaryMarkdown(rs.renderGlossary(oldStore, { volume: 1 })).rows;
+    const beforeFilled = beforeRows.filter((row) => row.reading !== rs.GLOSSARY_NO_READING_CELL);
+    ok(beforeFilled.length > 0, `with the table the column prints a guide on ${beforeFilled.length} of ${beforeRows.length} row(s)`);
+
+    // The state a real corpus record is in today: opened, never migrated.
+    oldStore.db.exec("DROP TABLE written_forms");
+
+    const askedOld = readingsForFormsInRecord(oldStore, { upToVolume: 1 });
+    ok(askedOld.ok, "a record with no written-forms table ANSWERS the reading question instead of throwing");
+    same(askedOld.totals.tablePresent, false, "and names that the table is absent — the fact that separates this from an empty table");
+    same(askedOld.totals.rowsInRange, 0, "with no rows in range");
+    same(askedOld.forms, [], "and no form named");
+    const severalOld = formsCarryingSeveralReadingsInRecord(oldStore, { upToVolume: 1 });
+    ok(severalOld.ok, "the named multi-guide set answers too rather than throwing");
+    same(severalOld.totals.tablePresent, false, "carrying the same flag");
+    same(severalOld.forms, [], "and naming no form");
+
+    const forwardOld = readingsForFormsInRecord(oldStore, { upToVolume: 2 });
+    ok(!forwardOld.ok, "and the no-forward refusal still fires on such a record — the volume checks come before the table probe");
+    same(forwardOld.refusal.rule, "written-form-readings-cannot-look-forward", "under the same name");
+
+    const cellsOld = rs.glossaryReadingCellsForRows(oldStore, { volume: 1 });
+    ok(cellsOld.ok, "the glossary column's own door answers it as well");
+    same(cellsOld.totals.tablePresent, false, "carrying the query door's flag rather than running its own probe");
+    same(cellsOld.totals.rowsFilled, 0, "filling no row");
+    ok(cellsOld.totals.rows > 0, `while the record still holds ${cellsOld.totals.rows} glossary row(s) to print`);
+
+    let renderedOld = null;
+    const warnings = [];
+    const realWarn = console.warn;
+    console.warn = (line) => warnings.push(String(line));
+    try {
+      renderedOld = rs.renderGlossary(oldStore, { volume: 1 });
+    } catch (err) {
+      throw new Error(`renderGlossary threw on a record with no written-forms table: ${String(err && err.message)}`);
+    } finally {
+      console.warn = realWarn;
+    }
+    const rowsOld = rs.parseGlossaryMarkdown(renderedOld).rows;
+    same(rowsOld.length, cellsOld.totals.rows, "the render still prints every row the record holds");
+    same(rowsOld.map((row) => row.reading), rowsOld.map(() => rs.GLOSSARY_NO_READING_CELL), "and every reading cell is the marker, never a blank");
+    same(rs.parseGlossaryMarkdown(renderedOld).annotatedRows, [], "and no markup reaches the file");
+
+    // The naming is the load-bearing half: an empty column with nothing saying WHY reads as a book that
+    // guided nothing. The renderer prints the sentence, so the file never stands alone.
+    same(warnings.length, 1, "the renderer says out loud that this record has no table");
+    ok(/no `written_forms` table/.test(warnings[0]), `naming the record, not the books: ${warnings[0]}`);
+
+    const warned = [];
+    const bareAgain = openVolumeRecord({ volume: 1, folder: "Test Story(01)", seriesDir: withoutHarvest.dir }).store;
+    same(bareAgain.db.prepare("SELECT COUNT(*) n FROM written_forms").get().n, 0, "the comparison record HAS the table and holds no rows in it");
+    const realWarn2 = console.warn;
+    console.warn = (line) => warned.push(String(line));
+    try {
+      rs.renderGlossary(bareAgain, { volume: 1 });
+    } finally {
+      console.warn = realWarn2;
+      bareAgain.close();
+    }
+    same(warned, [], "while a record that HAS the table and holds no rows prints nothing — the two empties stay two facts");
+  } finally {
+    oldStore.close();
+  }
+
+  console.log("13. the wiring: 13 rows filed at the open, 15 carried to volume 3, a second pass files 0, a plain-text volume still opens, a damaged harvest is named, a record that predates the table answers and says so, and the published glossary changes in the Readings column and nowhere else");
+}
+
+// ─── 14. the reading column's query: the order it publishes, and the bound it will not cross ───
+
+/**
+ * Scenario 14. `readingsForFormsInRecord` is the one door the published glossary's `Readings` column is
+ * filled from (plan 09 slice 3b), so the two things a column a translator scans has to get right are pinned
+ * here rather than left to a `GROUP BY`: **the order the guides come back in**, and **how far the record is
+ * allowed to look**.
+ *
+ * The order is `guided occurrences desc → earliest volume asc → the reading string asc`. The reason is what
+ * the real corpus contains: 三色院菫子 is guided さんしよくいんすみれこ 289 times and パンジー 18, and
+ * ordering by volume would put a one-off guide from book 3 ahead of the author's habitual guide. The fixture
+ * plants exactly that shape — a habitual guide whose biggest book is the LATER one, and a one-off in the
+ * earlier one — so the order is forced by the data rather than confirmed by it.
+ *
+ * The bound is the owner's asymmetry (plan 07 §4.4): a volume's record is that volume and the volumes before
+ * it, so asking a volume-2 record for volume 3's readings is **refused**, not answered with a fold that
+ * reached forward. A reading column that could reach forward would print, in volume 2's published file, a
+ * guide volume 2's book never printed — the same silent rewrite of the past the bound exists to prevent,
+ * arriving through the newest column in the document.
+ */
+function scenarioReadingQuery() {
+  console.log("14. the reading query: most-guided first, then the earliest volume, then the reading; and it will not look forward");
+
+  const fx = fixtureStoreSeries("written-forms-reading-query");
+  writeHarvest(fx.volumes[0].dir, fx.volumes[0].base, {
+    schema: 2,
+    generatedBy: "test/test-written-forms.js",
+    guides: [
+      // The habitual guide, whose biggest book is the LATER one. Volume order would rank this second.
+      { word: "如月雨露", reading: "主人公", count: 9, readingScript: "han", chapters: ["ch0"], annotated: [{ base: "如月雨露", reading: "主人公" }] },
+      // The one-off, printed in the EARLIER book. Guidance does not rank it first.
+      { word: "如月雨露", reading: "カグヤ", count: 1, readingScript: "katakana", chapters: ["ch0"], annotated: [{ base: "如月雨露", reading: "カグヤ" }] },
+      // Tied on count with the volume-2 guide below, and recorded in the earlier book: the volume tie-break.
+      { word: "三色院菫子", reading: "すみれ", count: 3, readingScript: "hiragana", chapters: ["ch1"], annotated: [{ base: "三色院菫子", reading: "すみれ" }] },
+      // A one-character reading: the store's own row guard refuses it at filing, so it must never reach the column.
+      { word: "替", reading: "か", count: 9, readingScript: "hiragana", chapters: ["ch0"], annotated: [{ base: "替", reading: "か" }] },
+    ],
+  });
+  writeHarvest(fx.volumes[1].dir, fx.volumes[1].base, {
+    schema: 2,
+    generatedBy: "test/test-written-forms.js",
+    guides: [
+      { word: "如月雨露", reading: "主人公", count: 12, readingScript: "han", chapters: ["ch0"], annotated: [{ base: "如月雨露", reading: "主人公" }] },
+      { word: "三色院菫子", reading: "スミレ", count: 3, readingScript: "katakana", chapters: ["ch0"], annotated: [{ base: "三色院菫子", reading: "スミレ" }] },
+      { word: "駱駝", reading: "らくだ", count: 4, readingScript: "hiragana", chapters: ["ch0"], annotated: [{ base: "駱駝", reading: "らくだ" }] },
+    ],
+  });
+
+  const one = openVolumeRecord({ volume: 1, folder: "Test Story(01)", seriesDir: fx.dir });
+  one.store.sealVolume(1);
+  const two = openVolumeRecord({ volume: 2, folder: "Test Story(02)", seriesDir: fx.dir, previousVolume: 1, previousFolder: "Test Story(01)" });
+  try {
+    ok(one.ok && two.ok, "both fixture records open");
+    same(one.writtenForms.rowsFiled, 3, "volume 1 files 3 written forms (the 1-character reading is refused by the row guard)");
+    same(two.writtenForms.rowsFiled, 3, "and volume 3 more of its own");
+
+    // ── The order, on the volume-2 record that carries both books. ───────────────────────────────
+    const asked = readingsForFormsInRecord(two.store, { upToVolume: 2 });
+    ok(asked.ok, "the record answers the question");
+    same(asked.upToVolume, 2, "and answers it as of volume 2");
+    same(asked.totals.rowsInRange, 6, "over the 6 rows in range");
+    const byForm = new Map(asked.forms.map((entry) => [entry.form, entry.readings]));
+
+    const hero = byForm.get("如月雨露");
+    same(hero.map((entry) => entry.reading), ["主人公", "カグヤ"], "the habitual guide first and the one-off after it, even though the one-off is in the EARLIER volume");
+    same(hero.map((entry) => entry.occurrences), [21, 1], "with the count summed across the volumes this record carries (9 in volume 1 + 12 in volume 2)");
+    same(hero[0].firstVolume, 1, "naming the earliest volume that recorded the habitual guide");
+    same(hero[0].lastVolume, 2, "and the latest");
+    same(hero[0].volumes, [1, 2], "and every volume between");
+    same(hero[0].readingScript, "han", "carrying the harvest's own script label through untouched");
+
+    const violet = byForm.get("三色院菫子");
+    same(violet.map((entry) => entry.reading), ["すみれ", "スミレ"], "two guides tied on count are separated by the earliest volume that recorded each");
+    same(violet.map((entry) => entry.occurrences), [3, 3], "which is a genuine tie on the count, not the count order breaking");
+    same(violet.map((entry) => entry.firstVolume), [1, 2], "and the tie-break is the volume, named");
+
+    // The third rung — the reading string itself — cannot be produced by two books, so it is shown against
+    // the shipped fold directly, which is a pure function.
+    const tied = foldReadingsByForm([
+      { volume: 1, form: "word", reading: "b", readingScript: "latin", occurrences: 2, chapters: [] },
+      { volume: 1, form: "word", reading: "a", readingScript: "latin", occurrences: 2, chapters: [] },
+    ]);
+    same(tied.get("word").map((entry) => entry.reading), ["a", "b"], "and a tie on count AND volume is settled by the reading string, never by table order (gotcha 117's rule)");
+
+    // ── The bound. ───────────────────────────────────────────────────────────────────────────────
+    const forward = readingsForFormsInRecord(two.store, { upToVolume: 3 });
+    ok(!forward.ok, "asking a volume-2 record for volume 3's readings is refused");
+    same(forward.refusal.rule, "written-form-readings-cannot-look-forward", "by name");
+    same(forward.forms, [], "and it answers nothing");
+    same(forward.totals, null, "and counts nothing");
+
+    const atOne = readingsForFormsInRecord(two.store, { upToVolume: 1 });
+    ok(atOne.ok, "while the same record asked as of volume 1 answers");
+    const heroAtOne = atOne.forms.find((entry) => entry.form === "如月雨露").readings;
+    same(heroAtOne.map((entry) => entry.occurrences), [9, 1], "and the fold stops at volume 1: volume 1\u2019s own 9, not the 12 volume 2 printed");
+    same(atOne.forms.some((entry) => entry.form === "駱駝"), false, "and a written form only volume 2's book printed is not in the answer at all");
+    same(atOne.forms.find((entry) => entry.form === "三色院菫子").readings.map((entry) => entry.reading), ["すみれ"], "and a form guided two ways by volume 2's record is guided ONE way as of volume 1");
+
+    const undecided = readingsForFormsInRecord(two.store, { upToVolume: 0 });
+    ok(!undecided.ok, "a volume that is not a volume number is refused too");
+    same(undecided.refusal.rule, "written-form-readings-volume-undecided", "under its own name");
+
+    // ── `forms: []` is a question, and omitting `forms` is a different one. ──────────────────────
+    const none = readingsForFormsInRecord(two.store, { upToVolume: 2, forms: [] });
+    ok(none.ok, "an empty form list is an answer, not a refusal");
+    same(none.forms, [], "and it names no form");
+    same(none.totals.rowsInRange, 6, "while the rows in range are still counted — the caller asked for no LOOKUP, not for no rows");
+    const all = readingsForFormsInRecord(two.store, { upToVolume: 2 });
+    same(all.forms.map((entry) => entry.form).sort(), ["三色院菫子", "如月雨露", "駱駝"], "and omitting the key asks for every form this record carries");
+    const unknown = readingsForFormsInRecord(two.store, { upToVolume: 2, forms: ["存在しない"] });
+    ok(unknown.ok, "a form the record does not hold is answered, not refused");
+    same(unknown.forms, [{ form: "存在しない", readings: [] }], "with an empty reading list — which is what makes the published cell say the RECORD holds none");
+
+    // ── The named set: the forms this record shows guided more than one way. ─────────────────────
+    const several = formsCarryingSeveralReadingsInRecord(two.store, { upToVolume: 2 });
+    ok(several.ok, "and the set of forms guided more than one way is answerable from the same rows");
+    same(several.forms.map((entry) => entry.form).sort(), ["三色院菫子", "如月雨露"], "2 of the 3 forms this record carries");
+    same(several.totals.formsInRecord, 3, "asked against all 3");
+    same(several.totals.readings, 4, "carrying 4 guides between them");
+    same(several.totals.guidedOccurrences, 28, "and the 28 guided occurrences behind those guides");
+    same(several.totals.formsWithSeveralReadings, 2, "counted once, in the same words the fold uses");
+    const severalAtOne = formsCarryingSeveralReadingsInRecord(two.store, { upToVolume: 1 });
+    same(severalAtOne.forms.map((entry) => entry.form), ["如月雨露"], "the same question as of volume 1 names ONE form");
+    same(severalAtOne.forms[0].readings.map((entry) => entry.reading), ["主人公", "カグヤ"], "with the same order, at the volume the record is allowed to speak for");
+
+    // ── The query writes nothing, including when it refuses. ─────────────────────────────────────
+    /**
+     * Every table's row count in one record, so "writes nothing" is a comparison and not a claim.
+     * @param {Object} store @returns {string}
+     */
+    const digest = (store) =>
+      store.db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        .all()
+        .map((row) => `${row.name}=${store.db.prepare(`SELECT COUNT(*) c FROM ${row.name}`).get().c}`)
+        .join(";");
+    const before = digest(two.store);
+    readingsForFormsInRecord(two.store, {});
+    formsCarryingSeveralReadingsInRecord(two.store, {});
+    readingsForFormsInRecord(two.store, { upToVolume: 9 });
+    formsCarryingSeveralReadingsInRecord(two.store, { upToVolume: 9 });
+    same(digest(two.store), before, "and asking it — including the refused asks — writes no row into any table");
+  } finally {
+    one.store.close();
+    two.store.close();
+  }
+
+  console.log("  order pinned on all three rungs (count, then volume, then the string), 2 refusals, 1 empty-list answer, 1 unknown-form answer, 1 bound inside the named set, 0 rows written");
 }
 
 // ─── Run ──────────────────────────────────────────────────────────────────────
@@ -1266,6 +1595,7 @@ function scenarioWiringAtTheOpen() {
   scenarioNothingAdded();
   scenarioOneStoreDoorOntoTheHarvest();
   scenarioWiringAtTheOpen();
+  scenarioReadingQuery();
   console.log(`\nwritten forms: ${checks} checks, 0 model calls.`);
 })().catch((err) => {
   console.error(err);

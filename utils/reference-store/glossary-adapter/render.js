@@ -4,8 +4,8 @@
  * The renderer and its cell escaping. Deterministic by construction: the document's own prose first,
  * exactly as it was stored; sections in the order their prose sits in the document; rows in insertion
  * order; one row per term — the one in force at this volume — with the renderings it replaced folded
- * into the Notes cell and what research returned folded in beside them. Two runs over the same rows
- * are byte-identical.
+ * into the Notes cell, what research returned folded in beside them, and the pronunciation guides this
+ * record holds folded into the `Readings` cell. Two runs over the same rows are byte-identical.
  *
  * @module utils/reference-store/glossary-adapter/render
  */
@@ -13,8 +13,9 @@
 const { normalizeQuote } = require("../evidence");
 const { DOCUMENT_GLOSSARY, readDocumentProse } = require("../document-prose");
 const { researchNotesInRecord, mergeResearchNotes } = require("../research-notes");
-const { GLOSSARY_TITLE, GLOSSARY_HEADER } = require("./labels");
+const { GLOSSARY_TITLE, GLOSSARY_HEADER, GLOSSARY_NO_READING_CELL } = require("./labels");
 const { mergeRevisionHistory } = require("./history");
+const { glossaryReadingCellsForRows } = require("./readings");
 const { publishedGlossaryRowsInRecord } = require("./rows");
 require("../../../types"); // JSDoc type definitions
 
@@ -34,14 +35,51 @@ require("../../../types"); // JSDoc type definitions
  * stays one row, which is what keeps the cumulative gate matching it as carried and keeps the
  * translation stage's terminology law free of two answers to one term.
  *
+ * ## The fourth column (plan 09 slice 3b)
+ *
+ * `Readings` is filled by {@link glossaryReadingCellsForRows} — a query over the record's own
+ * `written_forms` rows, asked once for the whole table. It is a query and not a column on the row because
+ * a pronunciation guide is a fact about one book's harvest while the row it is printed beside was published
+ * by a different volume, and a published row is never edited. The bound is the same one the rows use:
+ * `upToVolume` is the volume being rendered, so volume 1's file cannot print a guide volume 1's book never
+ * printed. A term the record holds no guide for prints {@link GLOSSARY_NO_READING_CELL} rather than a blank.
+ *
  * @param {ReferenceStore} store
  * @param {{volume?: number, title?: string}} [opts] - `title` is only used when the store holds
  *   no prose of its own; a store that imported a titled file renders that title.
  * @returns {string} The file content, ending in a newline.
+ * @throws {Error} when the reading column cannot be asked — a render volume later than the record is
+ *   refused rather than published with a silently missing column.
  */
 function renderGlossary(store, { volume, title = GLOSSARY_TITLE } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
   const rows = publishedGlossaryRowsInRecord(store, { volume: vol });
+  // The reading column, asked once for the whole table rather than once per row. The re-render gate asks
+  // the same call against the same store, so the door that writes the cell and the door that checks it
+  // cannot hold two opinions about what a row's readings are.
+  const readings = glossaryReadingCellsForRows(store, { volume: vol });
+  if (!readings.ok) {
+    throw new Error(
+      `renderGlossary could not fill the ${GLOSSARY_HEADER[2]} column for volume ${vol}: ` +
+        `${readings.refusal.rule} — ${readings.refusal.because}`
+    );
+  }
+  const readingCells = readings.cells;
+  // The one case where an empty reading column is not a fact about the books. A record written before
+  // schema 12 has no `written_forms` table at all, and a file that printed "no reading recorded" on every
+  // row of it — with nothing saying so — reads exactly like a series whose author never guided a word.
+  // Named here because this is the only door that turns a record into a published glossary, and the doors
+  // that render an unmigrated record (the translation stage's terminology law, the settlement pass's render
+  // of the series-root file) do not print anything about the column themselves.
+  if (readings.totals && readings.totals.tablePresent === false) {
+    console.warn(
+      `[glossary] volume ${vol}: this record has no \`written_forms\` table, so its ${GLOSSARY_HEADER[2]} column ` +
+        `prints "${GLOSSARY_NO_READING_CELL}" on all ${readings.totals.rows} row(s). That is a fact about the record ` +
+        `(it predates the table), not about the books. Open it through the store's own door — ` +
+        `npx gulp glossary, npm run extract-voice, or npm run re-render-glossary after a stage run — and the ` +
+        `guides the extraction harvested reach it.`
+    );
+  }
   // What research returned for a term, looked up once per term rather than once per row. The merge is a
   // render-time join only: the row's own `body` in the record is never rewritten, because a published row
   // is not edited (AGENTS.md rule 5) and because a note folded into the body would come back through the
@@ -75,7 +113,13 @@ function renderGlossary(store, { volume, title = GLOSSARY_TITLE } = {}) {
     // the history of a term and the notes filed against its term live in their own rows and meet here.
     const withHistory = mergeRevisionHistory(row.notes, row.superseded, { rendering });
     const notes = mergeResearchNotes(withHistory, notesByTerm.get(normalizeQuote(term)) || []);
-    sections.get(section).items.push({ term, rendering, notes });
+    const cell = readingCells.get(normalizeQuote(term));
+    sections.get(section).items.push({
+      term,
+      rendering,
+      reading: cell ? cell : GLOSSARY_NO_READING_CELL,
+      notes,
+    });
   }
 
   // Sections are ordered by where their prose sits in the document, because every section the
@@ -103,7 +147,9 @@ function renderGlossary(store, { volume, title = GLOSSARY_TITLE } = {}) {
       out.push(`| ${GLOSSARY_HEADER.join(" | ")} |`);
       out.push(`|${GLOSSARY_HEADER.map(() => "---").join("|")}|`);
       for (const item of items) {
-        out.push(`| ${escapeCell(item.term)} | ${escapeCell(item.rendering)} | ${escapeCell(item.notes)} |`);
+        // The cells are written in the order the header names them, and the order is one list rather than
+        // four hand-written interpolations, so a header line and a data row cannot drift apart by one column.
+        out.push(`| ${[item.term, item.rendering, item.reading, item.notes].map(escapeCell).join(" | ")} |`);
       }
     }
     out.push("");

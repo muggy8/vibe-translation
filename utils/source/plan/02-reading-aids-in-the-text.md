@@ -1,14 +1,18 @@
 # Plan 09 — the extraction keeps every reading aid in the text
 
-Plan of record. Written 2026-10-16. Status: **slices 0, 1, 1b and 2 BUILT 2026-10-16** (slice 0: the converter, both
+Plan of record. Written 2026-10-16. Status: **slices 0, 1, 1b, 2, 3a and 3b BUILT 2026-10-16** (slice 0: the converter, both
 paths, bundle schema 8 → 9; slice 1: the guide-free search surface on every door that reads chapter text, the
 two new extraction checks, the forged-quote rung closed, bundle schema **9 → 10**; slice 1b: the **mixed**
 splice — a quote that pastes some of a line's guides and leaves others as markup — closed on the same rung,
 §2.7; slice 2: plan 08 slice 0's per-chapter reading table is **deleted** — the file, its suite, its 12 barrel
 exports and its **three** call sites are gone, the prompt is taught the markup, and a term that arrives wearing
-the markup is refused at the filing door, §2.8); **slices 3–6 not built**.
-Slice 0's own measurement is §2.5, slice 1's is §2.6, slice 1b's is §2.7 and slice 2's is §2.8, and each corrected
-figures this plan had published — the corrections are in the sections themselves, not buried in the slice table.
+the markup is refused at the filing door, §2.8; slice 3a: the readings the book printed are filed into every
+volume record by `ensureVolumeWrittenFormsInRecord`, inside `openVolumeRecord`, reusing plan 07's `written_forms`
+rather than building a new table; slice 3b: the published glossary's **`Readings`** column, filled by one query
+over those rows, §2.9); **slices 4–6 not built**.
+Slice 0's own measurement is §2.5, slice 1's is §2.6, slice 1b's is §2.7, slice 2's is §2.8 and slice 3b's is
+§2.9, and each corrected figures this plan had published — the corrections are in the sections themselves, not
+buried in the slice table.
 
 This plan **supersedes plan 08 slice 0** (the per-chapter reading table, built 2026-10-16 and committed as
 `9116904`) and **absorbs plan 08 slices 1–4**, which are re-numbered here. Plan 08 stays as the record of why
@@ -417,6 +421,110 @@ wearing markup costs nothing today; whether it should also be refused is written
 (`/tmp/opencode/plan09-slice2-questions.md`). And the published glossary still has no reading column — that is
 slice 3, and until it lands the guide the model was told to read is information the record cannot keep.
 
+### 2.9 What slice 3b measured (2026-10-16) — the column, and the record that could not answer it
+
+All numbers below were produced in the slice's own runs: `/tmp/opencode/p09s3b-v1-render-measure.js` (the column,
+through the shipped doors, over **copies** of all 17 records), `-v5-gate.js` (the re-render gate against planted
+damages), `-v6-agenda-shape.js` (what slice 4's agenda would look like), `-v7-unmigrated.js` (the crash, before and
+after), `-v8-settled-door.js` (the three doors that render the settled record), `-v2-guard-honesty.js` (the empty
+cell's sentence), `-p09s3b-loop-main-2.log` / `-loop-chunked-2.log` (the offline loops), `-verify-npmtest-2.log`
+and `-verify-npmtest-final.log` (the gate: **89 suites ran of 89, 89 passed, 0 failed**, 68,102 ms then 68,334 ms
+after the docs were corrected), `-verify-digest-before2.tsv` → `-after2.tsv` (the corpus), and
+`-v9-section-probe.js` / `-v9-section.log` (the section-heading claim, proved on its own). **0 model calls,
+0 corpus writes, 0 corpus `series.db` opens.**
+
+**The first finding is that the shipped renderer throws on every real record.** `renderGlossary` asks the reading
+query before it writes a row, and the query needed a table none of the 17 records has: every corpus `series.db` is
+still at **schema 8**, a record is migrated only when something opens it through `openReferenceStore` /
+`copyForwardStore`, and `openDatabase` — the door `utils/translate/settled-glossary.js` opens the settled record
+through, on purpose, to stay clear of gotcha 124 — **runs no DDL**. Measured before anything was changed:
+**17 of 17 records threw `no such table: written_forms`**, and `withSettledRecord` turns any throw into a
+**structural** refusal, so the column would have refused the translation stage's terminology law, the drift report
+beside it and the settlement pass's publish of the series-root file — over a column none of them needs in order to
+translate. The door now **answers and names which empty it is**: `totals.tablePresent: false`, every form with no
+readings, and `renderGlossary` prints one warning per render naming the record rather than the books. Re-measured
+after the fix: **17 of 17 renders succeed, 17 warnings printed**, and the three settled-record doors run end to end
+(`settledGlossaryRecord` → `readSettledGlossary` → `compareSettledGlossary`): **1,028 terms, 380,602 bytes, a
+four-column header, and the drift comparison produces its findings**. Refusing a table-less record was measured as
+an option and **rejected** for that cost — the fork is written up in `/tmp/opencode/plan09-slice3b-questions.md`
+rather than decided here.
+
+**The column, measured through the shipped doors on copies whose records have been filed.** 17 record-opens file
+**8,910 written-form rows**; rendering each volume's own copy gives **11,219 rows on disk → 11,219 rendered, 0
+lost, 0 gained, 0 term cells moved, 0 rendering / notes / section cells moved, 0 sections lost**, and the reading
+column is filled on **2,058 of 11,219 rows (18.34 %)**, with **9,161 printing `no reading recorded`** and **186
+carrying more than one guide**. The gate's own verdicts over those 11,219 rows: **0 `invented`, 0 `lost`, 2,058
+`added`** — every change the render would make is a guide the record holds and the published file does not yet
+print, which is the only answer the gate lets through. The named set §0 decision 5 asks for — written forms this
+record shows guided **more than one way** — is **183 of the 3,417 distinct forms** the cumulative record carries,
+**394 guides over 8,690 guided occurrences**.
+
+**The gate, measured against planted damage rather than read.** 13 cases: **10 refused, 3 published**. The six
+rules that refuse are `glossary-render-has-no-rows`, `glossary-render-would-lose-rows`,
+`glossary-render-would-change-rows` (a row appears, or a rendering / notes / section cell moves),
+`glossary-render-invents-readings`, `glossary-render-loses-readings` and
+`glossary-render-will-not-overwrite-an-artifact`. The three that publish are the two correct ones — a render that
+**adds** guides the record holds, and a document whose **title and preamble were rewritten** (`proseLost: 2
+proseGained: 2`) — and the named limit where the caller never asked the record, so `invented` cannot be answered
+and the result says `readingsAsked: false`. **This corrects §5's slice-6 row of plan 07 and four docs**: a render
+that cannot reproduce the file's own title and preamble **was never a refusal**. Case 12 of that run was labelled
+"empty section vanishes" and **refused** — it removed a heading whose section held a row, so a row was re-sectioned
+and `glossary-render-would-change-rows` fired, which is the right answer for a row moving. The claim that a heading
+vanishing **while no row moves** is reported rather than refused is therefore **not** what that run proved; it was
+proved separately (`/tmp/opencode/p09s3b-v9-section-probe.js`, 0 model calls, fixtures only): a document whose `## Interlude`
+heading is removed while its prose line and every row stay put **publishes**, with `sectionsLost: ["## Interlude"]`
+reported and the replaced file kept as `glossary.md.rejected`. The comparison is three-way — the
+published file, the render, and the record the render came from, asked through the same helper the renderer used —
+which is what stops a renderer that mis-queries the record from publishing a guide the record does not hold while
+the file looks self-consistent.
+
+**The honest half: the corpus files do not have the column, and the door now says why.** `npm run
+re-render-glossary -- --all` fills **0 reading cells on all 17 volumes**, because the copy it renders is migrated
+but holds **no `written_forms` rows** — filing them is `ensureVolumeWrittenFormsInRecord`, inside
+`openVolumeRecord`, and this door does not call it; filing them into the corpus records is the owner's corpus act.
+The report now prints, beside every volume whose column would publish empty, **how many guide rows that volume's own
+harvest holds** (934 for volume 01, 368 for volume 17), so an empty column cannot be read as "these books guided
+nothing". Read off the disk: all 17 published volume glossaries still print **three** columns
+(`Original | Translated | Notes`), and the series-root `glossary.md` (**358,436 bytes**) still prints the
+**pre-rename** `Japanese | English | Notes` — it is the settlement pass's render, and re-rendering it by hand would
+edit a file outside the door that owns it (§6 item 3).
+
+**The acceptance line's contradiction clause is not met, and the reason is measured.** "A wording that
+contradicts a printed reading is filed and named" needs a rule that can tell a **pronunciation** from a **meaning
+written over a word**, without naming a language. Over the **185** filled rows of volume 17's cumulative render the
+candidate rules were run: exact-match-with-a-different-reading **0**, a guide equal to the rendering **0**, a guide
+that is a substring of the rendering **0**, a guide and a rendering sharing no script at all **185**, a guide that
+is the rendering romanised **0**, and a guide sharing ≥ 2 characters with the rendering **130**. The one rule that
+fires on everything is the one that says nothing, and **all 215 distinct guide strings in those rows are non-Latin**
+while every published rendering is Latin, so any rule that separates them is a rule about which alphabet this
+series translates into — the shape `test/test-no-language-axis-list.js` exists to keep out of this repository.
+**"Not computable" is the reported outcome**, and no romanisation rule was invented to fill the clause.
+
+**What slice 4's agenda would actually be, measured before it is built.** The shipped probe
+(`/tmp/opencode/p09s3b-v6-agenda-shape.js`, re-run twice with identical output) resolves the **183** multi-reading
+forms to **26** published glossary terms; **25** of them have a written form of 2 or more characters; **39** of the
+183 are guided two ways **inside one volume only**; **19** are published terms where **one volume disagrees with
+another**; **18** are that cross-volume shape with the 2-character floor; **21** are published, 2+ characters and
+recorded in **2 or more volumes** — against `SETTLEMENT_MAX_TERMS_PER_RUN = 24`. So the reading half fits inside the
+existing bound on either narrowing. **The breakdown this row used to carry — 19 "adds a reading", 12 "drops one",
+22 "symmetric" — is withdrawn:** no script this slice ran prints those three counts, and re-running the probe
+reproduces only the numbers above. §5's slice-4 row's **266 / 129** is corrected here too: that pair counted
+something else (it predates the widening of the filing scope that 3a made), and the number the shipped query
+produces is **183 forms → 26 terms**.
+
+**What moved, and what did not.** Both offline loops are unmoved in cost — **82 calls / 0 on the second pass** and
+**28 / 0**, **17** and **6** prompt kinds, prompt audit **23 checks / 0 findings**. What moved is the size of two
+prompts, and it moved because the **glossary text** a model is shown is now wider, not because any prompt file
+changed: `glossary-extract` **12,485 → 12,758** (chunked **12,762 → 13,035**) and `audit-agent` **12,123 → 12,418**.
+`acceptance` stays **12,103 / 12,916**, `voice-extract` stays **16,964 / 16,898**, `intake` **20,163 / 20,299**, and
+the translate-stage prompts are unmoved because `glossaryText` is parsed and hashed there, not pasted.
+`npm test` is green at **89 suites, 0 failed, 68,102 ms**; `test/test-written-forms.js` **258 → 332** checks
+(scenarios 13–14) and `test/test-glossary-re-render.js` **186 → 276** (11 → 13 scenarios). `SCHEMA_VERSION` stays
+**13**, `COUNTED_TABLES` **21**, the level table **72 kinds**, the freeze doors **12**, `BUNDLE_SCHEMA_VERSION`
+**10**; no new table, column, finding kind, level, freeze door, command, setting, knob or prompt kind. The 17
+`series.db` digests and all **34/34** `-wal` / `-shm` sidecars are identical before and after, and the books'
+repository still shows **273** modified files.
+
 ---
 
 ## 3. What this replaces, and what it leaves alone
@@ -527,8 +635,8 @@ taken before trusting it, and both are the reason the act is safe rather than me
 | **1b** | **The same rung, the shape slice 1 missed: a quote that splices SOME of a line's guides and leaves the others as markup.** **BUILT 2026-10-16 — measured in §2.7.** It was found by running the built guard against a real chapter, not by reading the guard. | The mixed quote above, against the real volume 08 chapter 1 line, is **refused**, both ways round and as a short quote; every honest citation on that same line is **unchanged**; `matchPreparedLine` still answers the mixed shape `skeleton` (the fast path is untouched, and that is asserted); the strict A/B over **22,469 published evidence items** reports **0 verdict changes** and the guard fires on **0** of the 424 skeleton matches; over the real books it refuses **10,773 of 10,773** planted mixed forgeries and **0 of 972,327** legitimate substrings. **0 model calls, 0 corpus writes.** → `test/test-guide-free-search.js` (now 12 scenarios, **124 checks**), gotcha 178. |
 | **2** | **The glossary read pass reads the hints from the text, and the table is deleted.** **BUILT 2026-10-16 — measured in §2.8.** It was dispatched as a deletion and turned out to need a filing rule as well: with the markup in the text, a term can come back **wearing** the markup, and nothing refused it. | `glossary/extract/reading-block.js` (441 lines), its suite (794 lines), its **12** barrel exports and its **three** call sites are **gone**; `system-prompts/glossary-terms.md` names the markup and says the term is the word without the tags; a `term` carrying `<ruby>` is **refused at the filing door** and named in the stage log; **0 new model calls**, both loop baselines unmoved (**82 / 17** and **28 / 6**, **0 on the second pass in both**). **One clause of this row was wrong and the build corrected it:** the prompt does **not** return to its pre-table size — it lands **+371 characters** above it, because teaching the markup costs the rule that replaces the table. **0 model calls, 0 corpus writes.** → `test/test-glossary-store-unconditional.js` scenario 11, `test/test-written-forms.js` scenario 12 (the harvest-access pin, relocated), §2.8. |
 | **3a** | **The readings the book printed are filed into the volume's record, by the door every stage already comes through.** **BUILT 2026-10-16 — every clause met, measured below.** It was dispatched as "wire the door" and its first finding was that the plan's own premise was wrong: **no new table is needed**, because plan 07 slice 1's `written_forms` already holds exactly these rows. | `ensureVolumeWrittenFormsInRecord` runs inside `openVolumeRecord`, beside `ensureVolumeGlossaryInRecord`, for the reason gotcha 103 records: the glossary stage finished for all 17 volumes before the store existed and skips a volume whose accepted `glossary.md` is on disk, so a stage-side wiring would file **nothing** for any of them without re-paying every call. **No new table, no new column, no schema bump** (`SCHEMA_VERSION` stays **13**), `COUNTED_TABLES` stays **21**, the level table stays **72 kinds**, the freeze doors **12**, `BUNDLE_SCHEMA_VERSION` **10**, no command, no setting, no knob, no prompt kind. Measured on **copies** of all 17 real records (`/tmp/opencode/p09s3a-measure-wiring.js`, 0 model calls, 0 corpus writes): **8,910 rows filed / 41,710 occurrences** — plan 07 §6.7's numbers reproduced exactly through the pipeline's own door — volume 01 **825**, volume 08 **978**, volume 17 **329** of its own and **8,910** cumulative; a **second walk files 0** and reports all 8,910 as already filed; volume 17's copy goes **6,217,728 → 7,569,408 bytes** carrying all 17 volumes' rows (**+1,351,680**), and its own 329 rows alone are **+184,320** on a copy that files nothing else. A volume with **no** harvest files nothing and says so; a harvest file that does not read is **named and not fatal** — the open succeeds and the record is left as it was. **0 corpus `series.db` opens**: all 17 digests and all 34 `-wal` / `-shm` sidecars identical before and after, and the books' repository still shows **273** modified files. Both offline loops unmoved (**82 / 17** and **28 / 6**, **0 on the second pass in both**, prompt audit **23 / 0**), **every prompt size unmoved**. → `test/test-written-forms.js` scenario 13 (the wiring, end to end) and scenario 11 re-pinned (**215 → 258 checks**). |
-| **3b** | **The published glossary gains its reading column, read out of the rows 3a filed.** NOT BUILT. | `GLOSSARY_HEADER` gains the fourth column and all three readers still drop the header by position; the re-render door's comparison still refuses a lost row, a moved cell and an empty render, measured over **copies** of all 17 records; a term the book never guided records nothing and says so; a wording that contradicts a printed reading is **filed and named** in the report the grader reads. **The premise this row used to carry — a new insert-only row kind at `SCHEMA_VERSION` 14 — is dropped**: 3a measured that `written_forms` already holds every row the column needs, and a second table holding the same 8,910 pairs is a second thing to keep in step for no added answer. |
-| **4** | **"The reading changed" becomes the forward half of the terminology review.** | A query over the recorded readings replaces `FORWARD_REVEAL_SHAPES`; on copies of the 17 records, 0 model calls, it finds the measured **266 / 129** classes and ranks them inside the existing 24-call bound; a fixture where a later volume guides a form differently puts that term on the agenda with **no phrase matching at all**; the phrase path stays for records that predate the column and the coverage report names which half produced the agenda. |
+| **3b** | **The published glossary gains its reading column, read out of the rows 3a filed.** **BUILT 2026-10-16 — measured in §2.9.** It was dispatched as "add the column" and its first finding was that the shipped renderer **throws on all 17 real records**, because none of them has the table yet. | `GLOSSARY_HEADER` is **`Original` / `Translated` / `Readings` / `Notes`** (one constant, `glossary-adapter/labels.js`) and **2 of the 3 readers of the file changed** — `glossary-adapter/parse.js` (**191 → 234 lines**) and `glossary/carry-forward/table.js` (**265 → 300**) both used to drop empty cells while splitting a row, which shifts every column left once a fourth exists; `utils/translate/terminology.js` already split positionally, only ever reads the first two columns, and needed nothing (`git diff` on it is empty). The two readers that changed take the column count from the table's own header row, so a three-column file still imports and still counts. The cell is filled by **one query** (`written-forms/readings.js`, reached through `glossary-adapter/readings.js`), asked **once per render** and bounded by the volume being rendered; a term the record holds no guide for prints `no reading recorded` rather than a blank. Measured on **copies** of all 17 records: **11,219 rows → 11,219 rendered, 0 lost, 0 gained, 0 cells moved, 0 sections lost**, **2,058 cells filled (18.34 %)**, **186 carrying more than one guide**, gate verdicts **0 invented / 0 lost / 2,058 added**. The re-render gate became **three-way** (file / render / record) and gained two refusals while keeping `added` allowed: **13 planted cases, 10 refused, 3 published**. **Two clauses of this row were wrong and the build says so:** the gate never refused a render that could not reproduce the file's own title and preamble (it **reports** that and publishes — four docs repeated the false claim and are corrected), and **"a wording that contradicts a printed reading is filed and named" is not built**, because no language-neutral rule separates a pronunciation from a meaning written over a word (§2.9, §6 item 5). **0 model calls, 0 corpus writes, 0 corpus `series.db` opens**; `SCHEMA_VERSION` **13**, `COUNTED_TABLES` **21**, level table **72 kinds**, freeze doors **12**, `BUNDLE_SCHEMA_VERSION` **10**, no new table, column, finding kind, level, command, setting or knob. → §2.9, `test/test-written-forms.js` scenarios 13–14 (**258 → 332 checks**), `test/test-glossary-re-render.js` (**11 → 13 scenarios, 186 → 276 checks**), `/tmp/opencode/plan09-slice3b-questions.md`. **The premise this row used to carry — a new insert-only row kind at `SCHEMA_VERSION` 14 — stays dropped**: 3a measured that `written_forms` already holds every row the column needs, and a second table holding the same 8,910 pairs is a second thing to keep in step for no added answer. |
+| **4** | **"The reading changed" becomes the forward half of the terminology review.** NOT BUILT. | A query over the recorded readings replaces `FORWARD_REVEAL_SHAPES`; on copies of the 17 records, 0 model calls, it finds the measured **183 forms → 26 published terms** (§2.9 — the **266 / 129** this row carried counted a different thing and predates the filing scope 3a widened) and ranks them inside the existing 24-call bound (**21** of the 26 are published, 2+ characters and recorded in **2 or more volumes**, and **18** are the narrower cross-volume-disagreement shape with that floor, so the half fits either way); a fixture where a later volume guides a form differently puts that term on the agenda with **no phrase matching at all**; the phrase path stays for records that predate the column and the coverage report names which half produced the agenda. |
 | **5** | **The revision door stops assuming newer is better** for a change in how a name is spoken. | A planted revision that contradicts a reading the book prints **repeatedly** is **named, not settled**; a planted genuine correction still settles; both outcomes print the guide and the choice side by side; 0 published rows edited. |
 | **6** | **A published translation never carries the markup.** | The translator is still shown the annotated source; the translation, verify, retranslate and polish outputs are checked for ruby tags and a stray tag is a finding; the paragraph-alignment check is unmoved; the published artifacts of the offline loops contain **0** tags. |
 
@@ -608,8 +716,12 @@ it is a decision about an existing guard, not an addition.
 2. **Whether the other stages' prompts are taught the markup** in this plan or left to read it cold. The wiki,
    the style guide and the character-voice pass all read the same chapter files and will see the tags whether
    they are told about them or not.
-3. **Whether the fourth glossary column also reaches the series-root `glossary.md`** (284,687 bytes, the
-   settlement pass's render, which still prints the old headings).
+3. **Whether the fourth glossary column also reaches the series-root `glossary.md`** (**358,436 bytes**, measured
+   2026-10-16; the settlement pass's render, which still prints the **pre-rename** `Japanese | English | Notes`
+   headings and has no fourth column). Re-rendering it by hand edits a file outside the door that owns it; the two
+   honest routes are running the settlement pass again (which is a paid act — it asks the model about its agenda)
+   or giving `glossary/settlement/publish.js` the same fourth column and letting the next settlement run write it.
+   **Slice 3b chose neither and left the file as it is.** `/tmp/opencode/plan09-slice3b-questions.md` question 7.
 4. **Whether the translation stage is shown the markup at all.** Decision 2 chose the form written into the
    files; showing it to the call that produces the published translation is a separate question, and slice 6
    only guards the output.
@@ -659,6 +771,28 @@ it is a decision about an existing guard, not an addition.
     as the record's own reading notebook — was **not** given it, because those rows are never rendered and a
     candidate wearing markup costs nothing today. Options and costs: `/tmp/opencode/plan09-slice2-questions.md`
     question 1. **Slice 2 chose "not today", and says so in §2.8 rather than leaving it as a silent asymmetry.**
+11. **Whether a reading that contradicts the published rendering is refused, named, or left alone** (slice 3b's
+    unmet acceptance clause, 2026-10-16). The clause says "filed and named"; nothing is filed and nothing is named,
+    because the rule that would decide it does not exist in a language-neutral form: over the 185 filled rows of
+    volume 17's cumulative render every candidate rule fires on **0** rows except "the guide and the rendering share
+    no script at all", which fires on **all 185** and says nothing, and **all 215 distinct guide strings are
+    non-Latin** while every rendering is Latin. Options and costs — a per-series declared script pair (the shape the
+    register block uses), a structural-only rule, or leaving the column as a fact with no verdict — are in
+    `/tmp/opencode/plan09-slice3b-questions.md` question 5. **Slice 3b chose "leave it, and say so"**, because the
+    alternative was inventing a romanisation rule the repository's own guard exists to refuse.
+12. **Whether the re-render door should file the harvest before it renders** (opened by slice 3b, 2026-10-16). The
+    door renders a **copy** of the record and that copy holds **0 `written_forms` rows**, so `npm run
+    re-render-glossary` fills **0 reading cells on all 17 volumes** and its report now has to explain itself with
+    the harvest counts beside it (934 for volume 01, 368 for volume 17). Filing inside the door would make the
+    column publishable without a stage run — and it would make a door whose header promises to read a copy **write**
+    rows into it, on a scratch database, under a flag that says "rehearsal". The alternative shipped is the honest
+    report. `/tmp/opencode/plan09-slice3b-questions.md` question 2.
+13. **Whether a re-render should be allowed to lose the document's own prose** (found while measuring the gate,
+    2026-10-16). Four docs and plan 07's slice-6 row claimed a render that cannot reproduce the file's title and
+    preamble is refused. **It is not**: the gate reports `proseLinesLost` / `proseLinesGained` / `sectionsLost` and
+    publishes, keeping the file it replaced as `glossary.md.rejected`. Adding a seventh refusal would be the narrow
+    fix; the docs have been corrected to what the code does, and whether the gap should be closed is the owner's.
+    `/tmp/opencode/plan09-slice3b-questions.md` question 8.
 
 ---
 

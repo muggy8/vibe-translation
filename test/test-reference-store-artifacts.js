@@ -326,9 +326,38 @@ function scenarioParsersAreIndependent() {
 
   // The header WORDS are pinned in `test/test-glossary-re-render.js`, which also proves every reader of a
   // published glossary drops the header row by position. What belongs here is the shape this round trip
-  // depends on: three columns, one per cell the parsers split.
-  assert.strictEqual(GLOSSARY_HEADER.length, 3, "the glossary table has the three columns the parsers split");
+  // depends on: four columns, one per cell the parsers split (plan 09 slice 3b added the fourth).
+  assert.strictEqual(GLOSSARY_HEADER.length, 4, "the glossary table has the four columns the parsers split");
+  assert.strictEqual(GLOSSARY_HEADER[2], "Readings", "and the new one is the third, before the free-text column");
   assert.strictEqual(VOICE_SECTION, "Characters");
+
+  // The leak this column could have caused, checked against BOTH independent readers rather than one of
+  // them: a guide must never come back as a term, as part of a term, or as part of the Notes cell — and the
+  // Notes cell is what the carry-forward gate reads as the evidence that a renamed entry is the same entry.
+  const fourCol = [
+    "# Glossary",
+    "",
+    "## Characters",
+    `| ${GLOSSARY_HEADER.join(" | ")} |`,
+    "|---|---|---|---|",
+    "| 試験 | Test | けんし ×12; てすと | A note that must stay the note |",
+    "",
+  ].join("\n");
+  const oursFour = parseGlossaryMarkdown(fourCol).rows[0];
+  const theirsFour = parseGlossaryTableTerms(fourCol)[0];
+  for (const [name, row] of [["the store's reader", oursFour], ["the carry-forward reader", theirsFour]]) {
+    assert.strictEqual(row.term, "試験", `${name}: the term cell is the word, not the guide`);
+    assert.strictEqual(row.rendering, "Test", `${name}: the rendering is the second column`);
+    assert.strictEqual(row.reading, "けんし ×12; てすと", `${name}: the guide is read as its own column`);
+    assert.strictEqual(row.notes, "A note that must stay the note", `${name}: the guide did not ride into the Notes cell`);
+  }
+  // And the third reader, the one that writes the translator's terminology law: it reads cells 0 and 1 and
+  // nothing else, so a guide cannot become a rendering.
+  const { parseGlossaryTerms } = require("../utils/translate/terminology");
+  const lawRows = parseGlossaryTerms(fourCol);
+  assert.strictEqual(lawRows.length, 1, "the terminology reader sees one row");
+  assert.strictEqual(lawRows[0].term, "試験", "keyed on the word");
+  assert.strictEqual(lawRows[0].rendering, "Test", "and the guide is not its rendering");
 
   console.log("reference-store artifacts: the store's parsers are its own, so the round trip is a real cross-check");
 }

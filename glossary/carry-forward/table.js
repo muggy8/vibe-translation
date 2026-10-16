@@ -14,6 +14,25 @@
 const { stripRubyMarkup } = require("../../utils/reference-store/ruby-markup");
 
 /**
+ * Split one Markdown table row into cells, **positionally** — the shells off the ends, every cell inside
+ * kept, including an empty one in the middle.
+ *
+ * The same rule `utils/translate/terminology.js` and `glossary-adapter/parse.js` use, for the same reason:
+ * filtering empty cells out shifts every later column one place left, and `| ソラ |  | AI agent of the
+ * institute |` comes back with the wrong rendering. With a `Readings` column in the middle of the row, a
+ * reader that filtered empties would move the Notes into the reading column and the reading into the notes.
+ *
+ * @param {string} line - A line starting with "|".
+ * @returns {string[]} The cells in column order (empty cells preserved).
+ */
+function splitGlossaryRow(line) {
+  const cells = String(line).split("|");
+  if (cells.length > 0 && cells[0].trim() === "") cells.shift();
+  if (cells.length > 0 && cells[cells.length - 1].trim() === "") cells.pop();
+  return cells.map((cell) => cell.trim());
+}
+
+/**
  * Parse the source-language terms out of a glossary Markdown file.
  *
  * Walks the table rows and keeps the FIRST column, tracking the `## `
@@ -25,10 +44,17 @@ const { stripRubyMarkup } = require("../../utils/reference-store/ruby-markup");
  * `glossaryTermSpans` below applies: a guide is not part of the word, and a cell that carried one is the
  * same entry as the cell that did not.
  *
+ * **The columns are read by position, and how many there are comes from the table's own header row**
+ * (plan 09 slice 3b). A three-column table reads exactly as it always has; a four-column table reads its
+ * `Readings` cell at its own position and the Notes from the column after it, so the readings a published
+ * glossary now prints cannot ride into the Notes cell and be mistaken for a note — which matters here more
+ * than anywhere else, because the Notes cell is what the carry-forward gate reads as the evidence that a
+ * renamed entry is still the same entry.
+ *
  * @param {string} markdown - The glossary file content.
- * @returns {Array<{term: string, rendering: string, section: string}>} One entry
+ * @returns {Array<{term: string, rendering: string, reading: string, notes: string, section: string}>} One entry
  *   per term row, in file order. `rendering` is the target-language column
- *   (empty when the row has none).
+ *   (empty when the row has none). `reading` is the pronunciation column ("" for a table that has none).
  */
 function parseGlossaryTableTerms(markdown) {
   if (!markdown || typeof markdown !== "string") return [];
@@ -36,12 +62,11 @@ function parseGlossaryTableTerms(markdown) {
   let section = "";
   let tableRows = [];
   const flushTable = () => {
-    // Row 0 = header, row 1 = separator — data starts at row 2.
+    // Row 0 = header, row 1 = separator — data starts at row 2. The header is also the table's own
+    // declaration of how many columns it has.
+    const declared = tableRows.length ? splitGlossaryRow(tableRows[0]).length : 0;
     for (let ri = 2; ri < tableRows.length; ri++) {
-      const cells = tableRows[ri]
-        .split("|")
-        .map((c) => c.trim())
-        .filter((c) => c !== "");
+      const cells = splitGlossaryRow(tableRows[ri]);
       if (cells.length === 0) continue;
       let term = cells[0].trim();
       term = term.replace(/^`+|`+$/g, "").trim();
@@ -58,12 +83,17 @@ function parseGlossaryTableTerms(markdown) {
         .replace(/^\*+|\*+$/g, "")
         .replace(/^_+|_+$/g, "")
         .trim();
-      // The Notes column rides along (everything past the rendering). The
+      // The reading column (column 2 of a four-column table) rides along for the same reason the rendering
+      // does — a reader that cannot see a column is a reader that puts its contents somewhere else. It is
+      // deliberately NOT folded into `glossaryRowText`, which is the rename evidence: a guide the author
+      // wrote over a word is not a spelling the entry is documented under.
+      const reading = declared >= 4 ? (cells[2] || "").trim() : "";
+      // The Notes column rides along (everything past the last named column). The
       // carry-forward gate needs it to tell a RENAMED entry from a deleted one:
       // "also written <the old spelling>" recorded in the Notes is the evidence
       // that the entry survived having its term column rewritten.
-      const notes = cells.slice(2).join(" | ").trim();
-      entries.push({ term, rendering, notes, section });
+      const notes = cells.slice(declared >= 4 ? 3 : 2).join(" | ").trim();
+      entries.push({ term, rendering, reading, notes, section });
     }
     tableRows = [];
   };
@@ -130,6 +160,11 @@ function glossaryTermSpans(term) {
  *
  * The carry-forward gate used to read only the term column, which is what made
  * a legitimate rename look like a deletion (see compareGlossaryCarryForward).
+ *
+ * **The `Readings` column is deliberately not in it** (plan 09 slice 3b). This text is the evidence the gate
+ * accepts that an entry is still documented under a new spelling, and a pronunciation guide the author wrote
+ * over a word is not a spelling the entry is documented under — folding it in would let a guide answer a
+ * question about a name.
  *
  * @param {{term: string, rendering: string, notes: string}} entry - One parsed row.
  * @returns {string} The row's columns joined by " | ".

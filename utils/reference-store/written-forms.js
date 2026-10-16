@@ -24,6 +24,12 @@
  *     `render.js` puts that guide over one piece of text in the one markup shape
  *     `utils/reference-store/ruby-markup.js` owns, and `chapter.js` bolts the two together into the door a
  *     caller would use. It reads the rows this layer already filed — it is not a second reader of the harvest.
+ *   - `written-forms/readings.js` — the **reading column's query** (plan 09 slice 3b): the readings this
+ *     record holds for a written form, folded across the volumes it carries, in the order the published
+ *     glossary prints them (most-guided first), plus the named set of forms guided more than one way.
+ *     `glossary-adapter/render.js` is its only caller outside this layer, and
+ *     `test/test-written-forms.js` scenario 11 pins that as exactly one file and proves the pin fires by
+ *     planting a second caller.
  *
  * ## What the two reports are, in one line each
  *
@@ -70,11 +76,15 @@
  * **no verb** to the store, **no finding kind** (the level table stays at 70 kinds), **no setting**, **no
  * command**, **no freeze door** and **no declared artifact**.
  *
- * **Nothing published reads it yet, on purpose.** No renderer, audit rule, presence matcher, coverage
- * rule, chapter-facts query or validator query reads `written_forms` — plan 07 §5's slice-1 acceptance
- * line, and `test/test-written-forms.js` greps the tree to prove the count is zero. That is how the
- * account owner's asymmetry (*filing is easy to extend and effectively impossible to undo*) is honoured
- * while the shape is still being argued.
+ * **Nothing published read it until plan 09 slice 3b.** Plan 07 slice 1 shipped with **no** reader outside
+ * the layer — no renderer, audit rule, presence matcher, coverage rule, chapter-facts query or validator
+ * query — because that is how the owner's asymmetry (*filing is easy to extend and effectively impossible
+ * to undo*) was honoured while the shape was still being argued. Plan 09 slice 3a wired the **filing** door
+ * into the record-open, and slice 3b opened the **reading** half on purpose: `glossary-adapter/render.js`
+ * asks `written-forms/readings.js` for the fourth column of the published `glossary.md`. That is one named
+ * caller, pinned by path in `test/test-written-forms.js` scenario 11, and the rest of the ban still holds:
+ * no stage, no audit rule, no presence matcher, no coverage rule and no chapter-facts query reads the table,
+ * and nothing outside this layer selects from `written_forms` itself.
  *
  * **The door is wired, and that answers plan 07 §6 item 3 (2026-10-16, plan 09 slice 3a).** The account
  * owner chose to reuse this table for the glossary's readings rather than build a second one, so the door
@@ -103,6 +113,7 @@ const reportRecords = require("./written-forms/reports/records");
 const viewSelect = require("./written-forms/view/select");
 const viewRender = require("./written-forms/view/render");
 const viewChapter = require("./written-forms/view/chapter");
+const readings = require("./written-forms/readings");
 
 module.exports = {
   // The pure half: the roster's answer, and the spelling-shape report.
@@ -170,4 +181,14 @@ module.exports = {
   annotatedFormsForVolume: viewSelect.annotatedFormsForVolume,
   annotateChapterText: viewRender.annotateChapterText,
   annotatedChapterView: viewChapter.annotatedChapterView,
+
+  // The reading column's query (plan 09 slice 3b): the readings this record holds for a written form, and
+  // the forms it shows guided more than one way. A read: it files nothing and publishes nothing itself.
+  // `writtenFormsTablePresent` travels with it because the two empty answers are different facts — a record
+  // that holds no written-form rows and a record that predates the table — and only this layer may tell them
+  // apart.
+  writtenFormsTablePresent: readings.writtenFormsTablePresent,
+  foldReadingsByForm: readings.foldReadingsByForm,
+  readingsForFormsInRecord: readings.readingsForFormsInRecord,
+  formsCarryingSeveralReadingsInRecord: readings.formsCarryingSeveralReadingsInRecord,
 };

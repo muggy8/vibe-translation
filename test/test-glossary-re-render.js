@@ -39,6 +39,15 @@
  *      and no model call anywhere in the layer.
  *  10. **no production reader matches on the old label text** — the three readers drop the header by
  *      position, and a scan over the pipeline's own source proves nobody kept an opinion about the words.
+ *  11. **the freeze gate is asked, and it bites** — the door uses the `glossary` door that already exists,
+ *      a published translation stops `--apply`, and a rehearsal only reports.
+ *  12. **the `Readings` column is a gate too** (plan 09 slice 3b) — a render that drops a guide, drops the
+ *      whole column, or prints a guide its own record does not hold is refused; a render that only **adds**
+ *      guides the record holds is the one change the door exists to make, and it is allowed. The comparison
+ *      is three-way — the file, the render, and the record — and the limit of asking only two is named.
+ *  13. **the round trip with the guides filled** — render → parse → file → render is byte-identical with a
+ *      two-guide cell in place, no guide leaks into the term, the rendering or the Notes, and a record that
+ *      files no written forms is refused rather than allowed to empty the column.
  *
  * Fixtures only, under `/tmp/opencode/series-fixtures`. Nothing here reads the real 17 volumes or any file
  * under the series folder, and nothing here reaches a model (AGENTS.md rule 8, gotcha 69, gotcha 124).
@@ -66,11 +75,17 @@ const { MANIFEST_SCHEMA } = require("../intake/config");
 const {
   GLOSSARY_HEADER,
   GLOSSARY_TITLE,
+  GLOSSARY_READING_COLUMN,
+  GLOSSARY_NO_READING_CELL,
   openReferenceStore,
   openDatabase,
   renderGlossary,
+  renderReadingCell,
+  readingsFromCell,
+  glossaryReadingCellsForRows,
   parseGlossaryMarkdown,
   importGlossary,
+  fileVolumeWrittenForms,
   SCHEMA_VERSION: STORE_SCHEMA,
 } = rs;
 const { parseGlossaryTableTerms } = require("../glossary/carry-forward");
@@ -136,18 +151,63 @@ const GLOSSARY_01 = [
   "## Places",
   "",
   `| ${GLOSSARY_HEADER.join(" | ")} |`,
-  "|---|---|---|",
-  "| Замок | The Castle | The building on the hill; the whole prologue happens in it. |",
-  "| Зеркало | The Mirror | The one in the castle, old and dark. |",
-  "| Призрак | The Ghost | A figure this volume's book never actually prints. |",
+  `|${GLOSSARY_HEADER.map(() => "---").join("|")}|`,
+  "| Замок | The Castle |  | The building on the hill; the whole prologue happens in it. |",
+  "| Зеркало | The Mirror |  | The one in the castle, old and dark. |",
+  "| Призрак | The Ghost |  | A figure this volume's book never actually prints. |",
   "",
   "## Characters",
   "",
   `| ${GLOSSARY_HEADER.join(" | ")} |`,
-  "|---|---|---|",
-  "| Она | She | The narrator of the prologue. |",
+  `|${GLOSSARY_HEADER.map(() => "---").join("|")}|`,
+  "| Она | She |  | The narrator of the prologue. |",
   "",
 ].join("\n");
+
+/**
+ * The fixture's own pronunciation-guide harvest: what volume 1's book printed over its own words.
+ *
+ * Cyrillic written forms, Latin readings — which is what lets the store's row guard (a guided reading
+ * shares **no character** with the written form) be exercised rather than skipped, and keeps the fixture
+ * in no language the old column headings named. `Замок` is guided two ways so the multi-guide cell shape,
+ * and the count that separates a habitual guide from a one-off, are both in the fixture.
+ */
+const HARVEST_01 = {
+  volume: 1,
+  guides: [
+    { word: "Замок", reading: "zamok", count: 7, readingScript: "latin", chapters: ["ch0"] },
+    { word: "Замок", reading: "krepost", count: 2, readingScript: "latin", chapters: ["ch0"] },
+    { word: "Зеркало", reading: "zerkalo", count: 3, readingScript: "latin", chapters: ["ch0"] },
+  ],
+};
+
+/** The cell the record says `Замок`'s `Readings` column holds: most-guided first, each with its count. */
+const ZAMOK_CELL = "zamok ×7; krepost ×2";
+
+/**
+ * The same document with the `Readings` column taken out.
+ *
+ * Two shapes need this, and they are not the same event: the real corpus today (every published glossary
+ * predates the column), and a renderer that stopped asking the record. Both produce a three-column table,
+ * and the gate has to tell them apart from a document that never had a fourth column at all.
+ *
+ * @param {string} markdown @returns {string}
+ */
+function withoutReadingColumn(markdown) {
+  return String(markdown)
+    .split("\n")
+    .map((line) => {
+      if (!line.startsWith("|")) return line;
+      const parts = line.split("|").map((cell) => cell.trim());
+      if (parts.length > 0 && parts[0] === "") parts.shift();
+      if (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
+      if (parts.length < 4) return line;
+      if (parts.every((cell) => /^:?-{2,}:?$/.test(cell))) return "|---|---|---|";
+      const kept = [parts[0], parts[1], ...parts.slice(3)];
+      return `| ${kept.join(" | ")} |`;
+    })
+    .join("\n");
+}
 
 /**
  * Lay a two-volume fixture series, Cyrillic, with a plan of record.
@@ -267,15 +327,59 @@ const PIPELINE_SCAN_SKIP = new Set([
   "node_modules", "test", "docs", "plan", "epub_source", "hooks", "calibration", "test-series",
 ]);
 
+/**
+ * Which files in a list **call** the re-render door, by the call shape, on code lines only.
+ *
+ * Parameterised on the file list so the same scan can be run against a tree with a caller planted in it:
+ * a caller pin that has never been seen to fail is a sentence rather than a guard.
+ *
+ * @param {string[]} files - Absolute paths.
+ * @param {Set<string>} allowed - Paths (relative to ROOT) that ARE the door and are not callers of it.
+ * @param {RegExp} pattern - The call shapes.
+ * @returns {string[]} Matching paths relative to ROOT, sorted.
+ */
+function findDoorCallers(files, allowed, pattern) {
+  const callers = [];
+  for (const file of files) {
+    const rel = path.relative(ROOT, file);
+    if (allowed.has(rel)) continue;
+    // Only code lines. A module that says "the re-render gate asks the same question" in a doc comment is
+    // not a caller, and a scan that counts prose reports a pipeline full of callers that do not exist.
+    const code = fs
+      .readFileSync(file, "utf8")
+      .split("\n")
+      .filter((line) => {
+        const trimmed = line.trim();
+        return !(trimmed.startsWith("*") || trimmed.startsWith("//") || trimmed.startsWith("/*"));
+      })
+      .join("\n");
+    if (pattern.test(code)) callers.push(rel);
+  }
+  return callers.sort();
+}
+
 // ─── 1. the labels ────────────────────────────────────────────────────────────
 
 {
   console.log("1. the glossary labels are the owner's wording, and they name no language");
 
-  same(GLOSSARY_HEADER, ["Original", "Translated", "Notes"], "the one constant the owner's wording names");
+  same(
+    GLOSSARY_HEADER,
+    ["Original", "Translated", "Readings", "Notes"],
+    "the one constant the owner's wording names, plus the fourth column plan 09 slice 3b added"
+  );
   const named = GLOSSARY_HEADER.filter((label) => OLD_HEAD_ASSERTIONS.includes(label));
   same(named, [], "and no column is named after a language any more");
   ok(GLOSSARY_HEADER.every((label) => label === label.trim() && label.length > 0), "every header is a usable cell");
+  // The fourth label is checked by the same rule that caught the old pair, in this file rather than by
+  // trusting the scan to be run elsewhere: a column named for one language's speech is the defect.
+  same(
+    GLOSSARY_HEADER.filter((label) => /japanese|english|korean|chinese|pronunciation|polite|formal/i.test(label)),
+    [],
+    "and `Readings` is not a language's name either — it says what the cell holds, which is the guides this book printed"
+  );
+  same(GLOSSARY_HEADER.indexOf("Notes"), 3, "the free-text column stays last: it carries the `Earlier rendering:` history line");
+  same(GLOSSARY_READING_COLUMN, GLOSSARY_HEADER.indexOf("Readings"), "and the renderer's column index is the header's own position, not a second number");
 
   // One door writes it.
   const renderLayer = readModuleLayer(ROOT, "utils/reference-store/glossary-adapter/render.js");
@@ -285,16 +389,46 @@ const PIPELINE_SCAN_SKIP = new Set([
 
   // The three readers drop the header by POSITION: the same table under either heading parses the same.
   const oldShape = ["## Places", "", "| Japanese | English | Notes |", "|---|---|---|", "| Замок | The Castle | a row |", "| Зеркало | The Mirror | another |", ""].join("\n");
-  const newShape = oldShape.replace("| Japanese | English | Notes |", `| ${GLOSSARY_HEADER.join(" | ")} |`);
+  const threeCol = oldShape.replace("| Japanese | English | Notes |", "| Original | Translated | Notes |");
+  // The shape the renderer writes now: the same two rows, with an empty cell where the guides go.
+  const fourCol = oldShape
+    .replace("| Japanese | English | Notes |", `| ${GLOSSARY_HEADER.join(" | ")} |`)
+    .replace("|---|---|---|", `|${GLOSSARY_HEADER.map(() => "---").join("|")}|`)
+    .replace("| Замок | The Castle | a row |", "| Замок | The Castle |  | a row |")
+    .replace("| Зеркало | The Mirror | another |", "| Зеркало | The Mirror |  | another |");
+  const fourColFilled = fourCol
+    .replace("| Замок | The Castle |  | a row |", "| Замок | The Castle | замок ×7 | a row |")
+    .replace("| Зеркало | The Mirror |  | another |", "| Зеркало | The Mirror | зеркало ×3 | another |");
+
   const storeReader = (text) => parseGlossaryMarkdown(text).rows.map((row) => [row.term, row.rendering, row.notes, row.section]);
   const carryForwardReader = (text) => parseGlossaryTableTerms(text).map((row) => [row.term, row.rendering, row.notes, row.section]);
   const stageReader = (text) => parseGlossaryTerms(text).map((row) => [row.term, row.rendering, row.section]);
+  const newShape = fourCol;
   same(storeReader(newShape), storeReader(oldShape), "reader 1 (parseGlossaryMarkdown) drops the header by position");
   same(carryForwardReader(newShape), carryForwardReader(oldShape), "reader 2 (parseGlossaryTableTerms / glossaryTermSpans) drops it by position");
   same(stageReader(newShape), stageReader(oldShape), "reader 3 (parseGlossaryTerms, the translator's reader) drops it by position");
   same(stageReader(newShape).length, 2, "and none of the three reads a header row as a term");
 
-  console.log("  GLOSSARY_HEADER = Original | Translated | Notes; 3 readers, 0 of them matching on the words");
+  // A three-column file — every glossary this repository published before this change, and the whole real
+  // corpus today — still reads exactly as it did. That is what "the column count comes from the table" is
+  // for: a reader told the new shape is four columns would put the Notes in the reading column.
+  same(storeReader(threeCol), storeReader(oldShape), "reader 1 reads a three-column table exactly as it always did");
+  same(carryForwardReader(threeCol), carryForwardReader(oldShape), "so does reader 2");
+  same(stageReader(threeCol), stageReader(oldShape), "so does reader 3");
+
+  // And the guide stays in its own column: the term, the rendering and the notes of a filled row are the
+  // same four values they are when the cell is empty.
+  const filledStore = parseGlossaryMarkdown(fourColFilled).rows;
+  const filledCarry = parseGlossaryTableTerms(fourColFilled);
+  const filledStage = parseGlossaryTerms(fourColFilled);
+  same(storeReader(fourColFilled), storeReader(fourCol), "a filled reading cell moves no other cell, in reader 1");
+  same(carryForwardReader(fourColFilled), carryForwardReader(fourCol), "nor in reader 2 — the Notes cell is what the carry-forward gate reads as rename evidence, and a guide is not that");
+  same(filledStage.map((row) => row.rendering), ["The Castle", "The Mirror"], "and reader 3 never takes a guide for a rendering");
+  same(filledStore.map((row) => row.reading), ["замок ×7", "зеркало ×3"], "reader 1 reads the guide as its own column");
+  same(filledCarry.map((row) => row.reading), ["замок ×7", "зеркало ×3"], "and so does reader 2");
+  same(parseGlossaryMarkdown(fourCol).rows.map((row) => row.reading), ["", ""], "a three-cell-in-a-four-column table is not guessed at: the empty cell is empty");
+
+  console.log("  GLOSSARY_HEADER = Original | Translated | Readings | Notes; 3 readers, 0 of them matching on the words, and a 3-column file still reads as a 3-column file");
 }
 
 // ─── 2. a non-Japanese glossary renders, parses back, and re-renders identically ─
@@ -403,8 +537,8 @@ const PIPELINE_SCAN_SKIP = new Set([
     "## Places",
     "",
     `| ${GLOSSARY_HEADER.join(" | ")} |`,
-    "|---|---|---|",
-    "| Зазамокмок | The Castle | A row written against the text the OLD converter produced. |",
+    `|${GLOSSARY_HEADER.map(() => "---").join("|")}|`,
+    "| Зазамокмок | The Castle |  | A row written against the text the OLD converter produced. |",
     "",
   ].join("\n");
   fs.writeFileSync(path.join(volumeDir, "glossary.md"), splitFile, "utf8");
@@ -414,7 +548,7 @@ const PIPELINE_SCAN_SKIP = new Set([
 
   const diff = door.compareGlossaryRender({
     onDisk: splitFile,
-    rendered: "# Glossary — Render Proof\n\n## Places\n\n" + `| ${GLOSSARY_HEADER.join(" | ")} |\n|---|---|---|\n| Замок | The Castle | the guide-free word |\n\n`,
+    rendered: "# Glossary — Render Proof\n\n## Places\n\n" + `| ${GLOSSARY_HEADER.join(" | ")} |\n|${GLOSSARY_HEADER.map(() => "---").join("|")}|\n| Замок | The Castle |  | the guide-free word |\n\n`,
     volumeDir,
     volume: 1,
     guideSplitForms: forms,
@@ -436,7 +570,8 @@ const PIPELINE_SCAN_SKIP = new Set([
     const volumeDir = series.volumes[0].dir;
     fs.writeFileSync(path.join(volumeDir, "glossary.md"), GLOSSARY_01, "utf8");
 
-    const losingRender = GLOSSARY_01.replace("| Призрак | The Ghost | A figure this volume's book never actually prints. |\n", "");
+    const ghostRow = "| Призрак | The Ghost |  | A figure this volume's book never actually prints. |";
+    const losingRender = GLOSSARY_01.replace(`${ghostRow}\n`, "");
     const comparison = door.compareGlossaryRender({ onDisk: GLOSSARY_01, rendered: losingRender, volumeDir, volume: 1 });
     const refused = await door.publishGlossaryRender({ volumeDir, markdown: losingRender, comparison, artifactPresent: true, moveAside: true });
     ok(!refused.ok, "a render that drops a row is refused");
@@ -445,7 +580,7 @@ const PIPELINE_SCAN_SKIP = new Set([
     ok(fs.existsSync(path.join(volumeDir, "glossary.md")), "the published file is still there");
     ok(!fs.existsSync(path.join(volumeDir, "glossary.md.rejected")), "and nothing was moved aside by a refusal");
 
-    const added = `${GLOSSARY_01}\n## Bridges\n\n| ${GLOSSARY_HEADER.join(" | ")} |\n|---|---|---|\n| Мост | The Bridge | a row the published file does not hold |\n`;
+    const added = `${GLOSSARY_01}\n## Bridges\n\n| ${GLOSSARY_HEADER.join(" | ")} |\n|${GLOSSARY_HEADER.map(() => "---").join("|")}|\n| Мост | The Bridge |  | a row the published file does not hold |\n`;
     const comparisonAdded = door.compareGlossaryRender({ onDisk: GLOSSARY_01, rendered: added, volumeDir, volume: 1 });
     same(comparisonAdded.gainedRows.length, 1, "the comparison sees the extra row");
     const refusedAdded = await door.publishGlossaryRender({ volumeDir, markdown: added, comparison: comparisonAdded, artifactPresent: true, moveAside: true });
@@ -510,32 +645,66 @@ const PIPELINE_SCAN_SKIP = new Set([
     const store = openFixtureStore(series, "re-render-quarantine", 1);
     importGlossary(store, GLOSSARY_01);
     const rendered = renderGlossary(store, { volume: 1, title: fixtureTitle("01") });
+    // The third text the gate compares, taken from the same store the render came from.
+    const expected = glossaryReadingCellsForRows(store, { volume: 1 });
     store.close();
+    same(expected.ok, true, "the record can be asked what its reading column holds");
+    same(expected.totals.rows, 3, "it answers for the 3 rows this record publishes (the refused row is not one)");
+    same(expected.totals.rowsFilled, 0, "and fills none of them: this fixture files no written-form rows");
+    same(expected.totals.rowsEmpty, 3, "so every row prints the empty marker, and the marker is counted rather than invisible");
+    same(expected.totals.tablePresent, true, "and the report says the table is there, which is what separates \"no guides\" from \"no table\"");
 
     const comparison = door.compareGlossaryRender({ onDisk: GLOSSARY_01, rendered, volumeDir, volume: 1 });
     ok(comparison.lostRows.length === 1, "this render WOULD lose the row the record refused");
     const refusedPublish = await door.publishGlossaryRender({ volumeDir, markdown: rendered, comparison, artifactPresent: true, moveAside: true });
     ok(!refusedPublish.ok && refusedPublish.refusal.rule === "glossary-render-would-lose-rows", "so the door refuses it rather than publishing a smaller glossary");
 
-    // The lossless case, built the way the corpus actually is: the published file IS a render of the
-    // record, made when the renderer still wrote the old headings. Replacing those headings in the file
-    // on disk and rendering the record again must produce the same bytes.
+    // ── The two shapes a re-render now has to answer, both of them real. ────────────────────────
     const headerLine = `| ${GLOSSARY_HEADER.join(" | ")} |`;
-    const publishedUnderOldLabels = rendered.split(headerLine).join("| Japanese | English | Notes |");
-    fs.writeFileSync(path.join(volumeDir, "glossary.md"), publishedUnderOldLabels, "utf8");
-    const losslessComparison = door.compareGlossaryRender({ onDisk: publishedUnderOldLabels, rendered, volumeDir, volume: 1 });
-    ok(losslessComparison.onlyHeaderLinesDiffer, "a header-only rename is provably lossless: every other line is byte-identical");
-    same(losslessComparison.lostRows, [], "0 rows lost");
-    same(losslessComparison.gainedRows, [], "0 rows added");
-    same(losslessComparison.changedRows, [], "0 cells rewritten");
-    same(door.withoutTableHeaders(publishedUnderOldLabels), door.withoutTableHeaders(rendered), "and the proof is the text with the headers taken out: identical");
+    const separatorLine = `|${GLOSSARY_HEADER.map(() => "---").join("|")}|`;
 
-    const wrote = await door.publishGlossaryRender({ volumeDir, markdown: rendered, comparison: losslessComparison, artifactPresent: true, moveAside: true });
+    // (a) A header-only rename is still provably lossless, and the guard for it still fires. The words in
+    //     the header change; every cell of every row stands.
+    const renamedHeader = rendered.split(headerLine).join("| Original | Translated | Guides | Notes |");
+    const renameComparison = door.compareGlossaryRender({ onDisk: renamedHeader, rendered, volumeDir, volume: 1 });
+    ok(renameComparison.onlyHeaderLinesDiffer, "a header-only rename is provably lossless: every other line is byte-identical");
+    same(renameComparison.lostRows, [], "0 rows lost");
+    same(renameComparison.gainedRows, [], "0 rows added");
+    same(renameComparison.changedRows, [], "0 cells rewritten");
+    same(renameComparison.readingChanges, [], "and the reading column reports nothing, because both files print the same guides");
+    same(door.withoutTableHeaders(renamedHeader), door.withoutTableHeaders(rendered), "and the proof is the text with the headers taken out: identical");
+
+    // (b) The case the real corpus is in: the published file is a THREE-column render of this same record,
+    //     and the render is four. This is not a header-only change — the separator line and every data row
+    //     gain a cell — so `onlyHeaderLinesDiffer` is false and the row-level gate is what carries the
+    //     proof. It has to say: no row lost, no row added, no rendering/note/section moved, no guide
+    //     invented, no guide lost.
+    const publishedThreeColumns = rendered
+      .split(headerLine).join("| Original | Translated | Notes |")
+      .split(separatorLine).join("|---|---|---|")
+      .split(` | ${GLOSSARY_NO_READING_CELL} | `).join(" | ");
+    fs.writeFileSync(path.join(volumeDir, "glossary.md"), publishedThreeColumns, "utf8");
+    const legacyComparison = door.compareGlossaryRender({
+      onDisk: publishedThreeColumns,
+      rendered,
+      volumeDir,
+      volume: 1,
+      expectedReadingCells: expected.cells,
+    });
+    ok(!legacyComparison.onlyHeaderLinesDiffer, "adding a column is not a rename, and the lossless-by-headers proof does not cover it");
+    ok(legacyComparison.readingColumnOnDisk === false, "the published file declares three columns");
+    ok(legacyComparison.readingColumnRendered === true, "and the render declares four — the column is a fact about the table's header, not about whether any cell is filled");
+    same(legacyComparison.readingChanges, [], "and the column still reports no change: an absent column and a column of empty markers are the same answer");
+    same(legacyComparison.lostRows, [], "0 rows lost");
+    same(legacyComparison.gainedRows, [], "0 rows added");
+    same(legacyComparison.changedRows, [], "0 rendering, note or section cells moved — the guide did not ride into the Notes cell");
+
+    const wrote = await door.publishGlossaryRender({ volumeDir, markdown: rendered, comparison: legacyComparison, artifactPresent: true, moveAside: true });
     ok(wrote.ok, "and the door publishes that one");
     ok(fs.existsSync(path.join(volumeDir, "glossary.md")), "the new glossary stands");
     const kept = path.join(volumeDir, "glossary.md.rejected");
     ok(fs.existsSync(kept), "and the file it replaced is kept beside it");
-    same(fs.readFileSync(kept, "utf8"), publishedUnderOldLabels, "byte-for-byte the file that was there");
+    same(fs.readFileSync(kept, "utf8"), publishedThreeColumns, "byte-for-byte the file that was there");
 
     const presentNames = new Set(fs.readdirSync(volumeDir));
     const reading = classifyVolumeQuarantine({
@@ -562,7 +731,7 @@ const PIPELINE_SCAN_SKIP = new Set([
     ok(damageReading.damage, "and the same file name beside NO glossary is the refusal shape (gotcha 141)");
     same(damageReading.severity, "HIGH", "at HIGH, blocking the volume");
 
-    console.log("  glossary.md.rejected kept beside glossary.md → LOW; beside nothing → HIGH; 1 refusal, 1 publish");
+    console.log("  glossary.md.rejected kept beside glossary.md → LOW; beside nothing → HIGH; 1 refusal, 1 publish; and the two shapes a re-render answers: a header-only rename, and a 3-column file gaining a 4th column");
   }
 
   // ─── 7. the corpus record is never opened ───
@@ -739,14 +908,27 @@ const PIPELINE_SCAN_SKIP = new Set([
     // the pattern: it is a pre-existing export of the store barrel that a dozen modules already use,
     // and counting it here would report the whole pipeline as a caller of a door nothing calls.
     const DOOR_NAMES = /glossary\/re-render|renderGlossaryFromRecordCopy|publishGlossaryRender|compareGlossaryRender|copyRecordForReading|withoutTableHeaders|GLOSSARY_RENDER_PUBLISH_RULES/;
-    const callers = [];
-    for (const file of files) {
-      const rel = path.relative(ROOT, file);
-      if (allowed.has(rel)) continue;
-      const text = fs.readFileSync(file, "utf8");
-      if (DOOR_NAMES.test(text)) callers.push(rel);
-    }
+    const callers = findDoorCallers(files, allowed, DOOR_NAMES);
     same(callers, [], "no stage, no step, no prompt and no other module calls the door");
+
+    // The scan is proven by running it against a tree with a caller planted in it. A pin nobody has seen
+    // fail is a sentence, and this one just had its matching rule narrowed — which is exactly when a pin
+    // needs to be seen firing.
+    const plantedDir = path.join(FIXTURES_ROOT, "re-render-planted-caller");
+    fs.rmSync(plantedDir, { recursive: true, force: true });
+    fs.mkdirSync(plantedDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(plantedDir, "planted-stage.js"),
+      "// glossary/re-render is mentioned here in prose only, and must not be reported.\n" +
+        'const door = require("../glossary/re-render");\n' +
+        "function run(store) { return door.publishGlossaryRender({ volumeDir: store, markdown: '', comparison: null, artifactPresent: false }); }\n" +
+        "module.exports = { run };\n",
+      "utf8"
+    );
+    const planted = findDoorCallers([...files, path.join(plantedDir, "planted-stage.js")], allowed, DOOR_NAMES);
+    same(planted.length, callers.length + 1, "and the scan fires: a stage that requires the door is named beside the real tree");
+    ok(planted.some((rel) => rel.endsWith("planted-stage.js")), "by its own path");
+    fs.rmSync(plantedDir, { recursive: true, force: true });
 
     // The command rehearses by default: `--apply` is the only word that publishes, and it is not a default.
     const cli = fs.readFileSync(path.join(ROOT, "re-render-glossary.js"), "utf8");
@@ -872,5 +1054,173 @@ const PIPELINE_SCAN_SKIP = new Set([
     console.log("  12 freeze doors, 0 new ones; 1 pass with nothing published, 1 refusal that writes nothing, 1 rehearsal that reports, 1 series-wide refusal");
   }
 
+  // ─── 12. the reading column is a gate too (plan 09 slice 3b) ─────────────────
+  {
+    console.log("12. a render that invents a guide, or drops one, is refused; one that only adds guides the record holds is not");
+
+    const series = laySeries("re-render-readings");
+    const volumeDir = series.volumes[0].dir;
+    const store = openFixtureStore(series, "re-render-readings", 1);
+    importGlossary(store, GLOSSARY_01);
+    const filed = fileVolumeWrittenForms(store, { volume: 1, harvests: [HARVEST_01] });
+    same(filed.rowsFiled, 3, "the fixture's three written forms are filed through the store's own door");
+
+    const filled = renderGlossary(store, { volume: 1, title: fixtureTitle("01") });
+    const expected = glossaryReadingCellsForRows(store, { volume: 1 });
+    ok(expected.ok, "and the record can be asked what its reading column holds");
+    same(expected.totals.rows, 3, "it answers for the 3 rows the record publishes");
+    same(expected.totals.rowsFilled, 2, "filling two of them");
+    same(expected.totals.rowsEmpty, 1, "and marking the third as holding no guide");
+    same(expected.totals.rowsWithSeveralReadings, 1, "one of them guided two ways");
+    ok(filled.includes(`| Замок | The Castle | ${ZAMOK_CELL} |`), "and the render prints that cell: most-guided first, each with its count");
+    ok(filled.includes("| Зеркало | The Mirror | zerkalo |"), "while a single guide prints bare, with no count");
+    ok(filled.includes(`| Она | She | ${GLOSSARY_NO_READING_CELL} |`), "and a term with no guide says the RECORD holds none, not that the author guided nothing");
+
+    // (a) A render that drops ONE of the two guides the record holds.
+    const dropped = filled.replace(`| Замок | The Castle | ${ZAMOK_CELL} |`, "| Замок | The Castle | zamok |");
+    const droppedComparison = door.compareGlossaryRender({
+      onDisk: filled, rendered: dropped, volumeDir, volume: 1, expectedReadingCells: expected.cells,
+    });
+    same(droppedComparison.readingChanges.length, 1, "the comparison sees exactly one row's readings change");
+    same(droppedComparison.readingChanges[0].kind, "lost", "and calls it lost");
+    same(droppedComparison.readingChanges[0].lost, ["krepost"], "naming the guide that would vanish");
+    const refusedDropped = await door.publishGlossaryRender({ volumeDir, markdown: dropped, comparison: droppedComparison, artifactPresent: false, moveAside: true });
+    ok(!refusedDropped.ok, "and the door refuses it");
+    same(refusedDropped.refusal.rule, "glossary-render-loses-readings", "by name");
+    ok(refusedDropped.refusal.because.includes("krepost"), "naming the guide rather than only counting the rows");
+
+    // (b) A render that drops the WHOLE column from a file that prints it — the shape a regression takes,
+    //     and the shape every glossary in the real corpus is in until this column is published.
+    const columnGone = withoutReadingColumn(filled);
+    ok(!columnGone.includes("Readings"), "the rewritten file names no reading column");
+    const goneComparison = door.compareGlossaryRender({
+      onDisk: filled, rendered: columnGone, volumeDir, volume: 1, expectedReadingCells: expected.cells,
+    });
+    ok(goneComparison.readingColumnOnDisk, "the published file declares four columns");
+    ok(!goneComparison.readingColumnRendered, "and the render declares three");
+    same(goneComparison.lostRows, [], "no ROW is lost — the three rows are still there");
+    same(goneComparison.changedRows, [], "and no rendering, note or section cell moved: the guide did not ride into the Notes");
+    same(goneComparison.readingChangesByKind.lost, 2, "but 2 rows lose the guides the published file prints");
+    const refusedGone = await door.publishGlossaryRender({ volumeDir, markdown: columnGone, comparison: goneComparison, artifactPresent: false, moveAside: true });
+    ok(!refusedGone.ok, "so that render is refused too");
+    same(refusedGone.refusal.rule, "glossary-render-loses-readings", "under the same name a single dropped guide gets");
+
+    // (c) A render that prints a guide the record does NOT hold.
+    const invented = filled.replace("| Зеркало | The Mirror | zerkalo |", "| Зеркало | The Mirror | zerkalo; стекло |");
+    const inventedComparison = door.compareGlossaryRender({
+      onDisk: filled, rendered: invented, volumeDir, volume: 1, expectedReadingCells: expected.cells,
+    });
+    same(inventedComparison.changedRows, [], "the other cells are untouched, so this is the column's own refusal");
+    same(inventedComparison.readingChanges.length, 1, "one row's readings change");
+    same(inventedComparison.readingChanges[0].kind, "invented", "and the comparison calls it invented");
+    same(inventedComparison.readingChanges[0].invented, ["стекло"], "naming the guide no book of this series ever printed");
+    const refusedInvented = await door.publishGlossaryRender({ volumeDir, markdown: invented, comparison: inventedComparison, artifactPresent: false, moveAside: true });
+    ok(!refusedInvented.ok, "and the door refuses it");
+    same(refusedInvented.refusal.rule, "glossary-render-invents-readings", "by name");
+    ok(/worse than no reading column/.test(refusedInvented.refusal.because), "and says why a column that can lie is worse than no column");
+
+    // (d) The one answer that is NOT refused: a guide the record holds and the published file lacks. That
+    //     is the entire content of the change this column exists to make, and refusing it would mean no
+    //     published glossary could ever gain a guide without re-deriving its volume from its book.
+    fs.writeFileSync(path.join(volumeDir, "glossary.md"), columnGone, "utf8");
+    const adding = door.compareGlossaryRender({
+      onDisk: columnGone, rendered: filled, volumeDir, volume: 1, expectedReadingCells: expected.cells,
+    });
+    same(adding.readingChangesByKind.added, 2, "2 rows gain a guide the record already holds");
+    same(adding.readingChangesByKind.invented, undefined, "and none of them is invented");
+    same(adding.readingChangesByKind.lost, undefined, "and none of them loses one");
+    same(adding.lostRows, [], "0 rows lost");
+    same(adding.gainedRows, [], "0 rows gained");
+    same(adding.changedRows, [], "0 rendering, note or section cells moved");
+    const wroteAdding = await door.publishGlossaryRender({ volumeDir, markdown: filled, comparison: adding, artifactPresent: true, moveAside: true });
+    ok(wroteAdding.ok, "so the door publishes it");
+    same(fs.readFileSync(path.join(volumeDir, "glossary.md"), "utf8"), filled, "and what stands is the render, guides and all");
+    ok(fs.existsSync(path.join(volumeDir, "glossary.md.rejected")), "with the three-column file it replaced kept beside it");
+
+    // (e) The named limit: without the record asked, the `invented` answer cannot be given, and the result
+    //     says that instead of reporting a clean comparison.
+    const notAsked = door.compareGlossaryRender({ onDisk: filled, rendered: invented, volumeDir, volume: 1 });
+    ok(!notAsked.readingsAsked, "the comparison says it did not ask the record");
+    same(notAsked.readingChanges[0].kind, "added", "so a guide the record does not hold reads as an addition — the honest limit of a two-text comparison");
+    same(notAsked.readingChanges[0].expected, null, "and the row records that the third text was absent");
+
+    store.close();
+    console.log("  3 refusals (a guide dropped, the column dropped, a guide invented), 1 allowed change (a guide the record holds), 1 named limit; 0 rows lost in the allowed one");
+  }
+
+  // ─── 13. the round trip, with the readings actually filled ───────────────────
+  {
+    console.log("13. render → parse → file → render, with guides in the column and none of them leaking");
+
+    const series = laySeries("re-render-readings-round-trip");
+    const volumeDir = series.volumes[0].dir;
+    const store = openFixtureStore(series, "re-render-readings-round-trip", 1);
+    importGlossary(store, GLOSSARY_01);
+    fileVolumeWrittenForms(store, { volume: 1, harvests: [HARVEST_01] });
+    const first = renderGlossary(store, { volume: 1, title: fixtureTitle("01") });
+    ok(first.includes(ZAMOK_CELL), "the first render carries the two-guide cell");
+
+    // Parse it back. The acceptance line: a reading never comes back as a term, part of a term, or part
+    // of the notes.
+    const parsed = parseGlossaryMarkdown(first);
+    const byTerm = new Map(parsed.rows.map((row) => [row.term, row]));
+    same(byTerm.get("Замок").reading, ZAMOK_CELL, "the guide cell is read as its own column");
+    same(byTerm.get("Замок").term, "Замок", "and the term is the word, not the word plus its guide");
+    same(byTerm.get("Замок").rendering, "The Castle", "and the rendering is the rendering");
+    same(
+      byTerm.get("Замок").notes,
+      "The building on the hill; the whole prologue happens in it.",
+      "and the Notes cell is the notes, unchanged — the guide did not ride into it"
+    );
+    same(readingsFromCell(byTerm.get("Замок").reading).map((entry) => entry.reading), ["zamok", "krepost"], "the cell reads back into the two guides, in the order the column printed them");
+    same(readingsFromCell(byTerm.get("Замок").reading).map((entry) => entry.occurrences), [7, 2], "each with the count the record gave it");
+    same(readingsFromCell(byTerm.get("Зеркало").reading), [{ reading: "zerkalo", occurrences: 0 }], "a bare cell reads back as one guide with no count");
+    same(readingsFromCell(byTerm.get("Она").reading), [], "and the empty marker reads back as no guides, which is the honest answer");
+    same(parsed.annotatedRows, [], "0 rows carry pronunciation MARKUP — the column is text, not tags");
+    same(parsed.shortRows, [], "and 0 rows are short for the width their own table declares");
+
+    // File the parsed document into a SECOND record carrying the same written-form rows, and render that.
+    const second = laySeries("re-render-readings-round-trip-b");
+    const store2 = openFixtureStore(second, "re-render-readings-round-trip-b", 1);
+    const reimported = importGlossary(store2, first);
+    same(reimported.refused.length, 0, "re-importing the render refuses nothing: the row the book never printed is not in it");
+    fileVolumeWrittenForms(store2, { volume: 1, harvests: [HARVEST_01] });
+    const again = renderGlossary(store2, { volume: 1, title: fixtureTitle("01") });
+    same(again, first, "render → parse → file → render is byte-identical WITH the guides in place");
+
+    // And the gate calls that pair clean.
+    const diff = door.compareGlossaryRender({
+      onDisk: first, rendered: again, volumeDir, volume: 1,
+      expectedReadingCells: glossaryReadingCellsForRows(store, { volume: 1 }).cells,
+    });
+    ok(diff.identical, "identical");
+    same(diff.readingChanges, [], "0 reading changes");
+    ok(diff.readingColumnOnDisk && diff.readingColumnRendered, "both declare the column");
+
+    // The negative half, which is the half that matters: a record that files NO written forms renders the
+    // same three rows with the empty marker. Row by row that is a clean re-render, and the gate calls it a
+    // loss instead of publishing a glossary whose guides silently emptied.
+    const third = laySeries("re-render-readings-round-trip-c");
+    const store3 = openFixtureStore(third, "re-render-readings-round-trip-c", 1);
+    importGlossary(store3, first);
+    const emptied = renderGlossary(store3, { volume: 1, title: fixtureTitle("01") });
+    const emptiedComparison = door.compareGlossaryRender({
+      onDisk: first, rendered: emptied, volumeDir, volume: 1,
+      expectedReadingCells: glossaryReadingCellsForRows(store3, { volume: 1 }).cells,
+    });
+    same(emptiedComparison.lostRows, [], "no row is lost — the same three rows");
+    same(emptiedComparison.changedRows, [], "no rendering or note moved");
+    same(emptiedComparison.readingChangesByKind.lost, 2, "but 2 rows lose the guides the published file prints");
+    const refusedEmptied = await door.publishGlossaryRender({
+      volumeDir, markdown: emptied, comparison: emptiedComparison, artifactPresent: false, moveAside: true,
+    });
+    ok(!refusedEmptied.ok, "and that render is refused");
+    same(refusedEmptied.refusal.rule, "glossary-render-loses-readings", "under the same name a dropped guide gets");
+
+    store.close();
+    store2.close();
+    store3.close();
+    console.log(`  ${parsed.rows.length} rows survive render → parse → file → render byte-for-byte WITH guides; 0 leak into term / rendering / notes; 1 emptied render refused`);
+  }
   console.log(`\nOK: ${checks} checks on re-rendering a published glossary from its own record, and on the labels it writes.`);
 })();

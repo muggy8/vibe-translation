@@ -46,6 +46,18 @@ const { GLOSSARY_HEADER } = require("../utils/reference-store/glossary-adapter")
 const GLOSSARY_TABLE_HEADER = `| ${GLOSSARY_HEADER.join(" | ")} |`;
 
 /**
+ * The separator line that belongs under {@link GLOSSARY_TABLE_HEADER}.
+ *
+ * Built from the same constant, for the same reason: a fixture that hand-writes `|---|---|---|` beside a
+ * header the store writes with four cells is a fixture whose data rows are one cell short of its own table,
+ * and the reader is then correct to report it as short.
+ */
+const GLOSSARY_TABLE_SEPARATOR = `|${GLOSSARY_HEADER.map(() => "---").join("|")}|`;
+
+/** What a fixture row's `Readings` cell says when the fixture record files no written-form rows. */
+const NO_READING = "no reading recorded";
+
+/**
  * Where these fixtures live. Each suite passes its own label so they cannot collide, and
  * `test/runner.js` gives each suite a root of its own so a reused label cannot collide either.
  * See `test/fixture-guard.js` for the rule and `test/fixture-series.js` for why the override exists.
@@ -115,6 +127,13 @@ const SOURCE_02 = {
  *
  * Every term in it occurs in volume 01's source, so a clean import is possible; the suites
  * add a row that does NOT occur to exercise the refusal.
+ *
+ * **Every `Readings` cell is the empty marker**, because no fixture here files a `written_forms` row, and
+ * `assertCleanRoundTrip` compares this text against what the record renders — which is the marker on every
+ * row. A fixture that printed a guide here would be a fixture whose round trip fails for a reason that has
+ * nothing to do with what it is testing. The filled case is exercised where a record is actually given
+ * written-form rows: `test/test-glossary-re-render.js` scenario 12 and `test/test-written-forms.js`
+ * scenario 14.
  */
 const GLOSSARY_01 = `# Glossary
 
@@ -123,28 +142,28 @@ _Canonical renderings for the fixture series._
 ## Characters
 
 ${GLOSSARY_TABLE_HEADER}
-|---|---|---|
-| 如月雨露 | Kisaragi Amatsuyu | Protagonist; the narrator |
-| 大賀太陽 | Oga Taiyo | Best friend since junior high |
-| 三色院菫子 | Sanshokuin Sumireko | Library committee |
+${GLOSSARY_TABLE_SEPARATOR}
+| 如月雨露 | Kisaragi Amatsuyu | ${NO_READING} | Protagonist; the narrator |
+| 大賀太陽 | Oga Taiyo | ${NO_READING} | Best friend since junior high |
+| 三色院菫子 | Sanshokuin Sumireko | ${NO_READING} | Library committee |
 
 ## Nicknames
 
 ${GLOSSARY_TABLE_HEADER}
-|---|---|---|
-| ジョーロ | Joro | Nickname of Kisaragi Amatsuyu |
+${GLOSSARY_TABLE_SEPARATOR}
+| ジョーロ | Joro | ${NO_READING} | Nickname of Kisaragi Amatsuyu |
 
 ## Terms
 
 Parodies and coinages are indexed here by their in-story form.
 
 ${GLOSSARY_TABLE_HEADER}
-|---|---|---|
-| 会計担当 | The Accounting Person | The book says it plainly: 「山田は会計の人である。」 |
+${GLOSSARY_TABLE_SEPARATOR}
+| 会計担当 | The Accounting Person | ${NO_READING} | The book says it plainly: 「山田は会計の人である。」 |
 `;
 
 /** A glossary row whose term is nowhere in the book: the refusal case. */
-const GLOSSARY_UNVERIFIABLE_ROW = "| 存在しない用語 | Not In The Book | This term is never printed |";
+const GLOSSARY_UNVERIFIABLE_ROW = `| 存在しない用語 | Not In The Book | ${NO_READING} | This term is never printed |`;
 
 /**
  * The canonical character-voice reference (the shape `renderVoice` writes).
@@ -382,6 +401,9 @@ module.exports = {
   VOLUMES,
   SOURCE_01,
   SOURCE_02,
+  GLOSSARY_TABLE_HEADER,
+  GLOSSARY_TABLE_SEPARATOR,
+  GLOSSARY_NO_READING_CELL: NO_READING,
   GLOSSARY_01,
   GLOSSARY_UNVERIFIABLE_ROW,
   VOICE_01,

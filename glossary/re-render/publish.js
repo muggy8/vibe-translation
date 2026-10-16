@@ -10,6 +10,11 @@
  *     already named by {@link compareGlossaryRender};
  *   - a render that changes a row's rendering, notes or section, or adds a row the file does not hold, is
  *     refused for the same reason from the other side;
+ *   - a render that prints a pronunciation guide its own record does not hold is refused
+ *     (`glossary-render-invents-readings`), and one that drops a guide the published file or the record
+ *     holds is refused (`glossary-render-loses-readings`) — plan 09 slice 3b. A guide the record holds and
+ *     the file does not yet print is the one reading change it lets through, because that is what the
+ *     column exists to do.
  *   - a render that is not byte-identical to the file it replaces is written only when the caller says the
  *     file may be moved aside, and the file it replaces survives as `glossary.md.rejected` — the shape
  *     `classifyVolumeQuarantine` reads as the copy a re-render replaced (LOW), not as a gate refusal.
@@ -129,6 +134,65 @@ async function publishGlossaryRender({ volumeDir, markdown, comparison, artifact
         }),
       };
     }
+
+    // The `Readings` column (plan 09 slice 3b). The gate is three-way — the published file, the render, and
+    // the record the render came from — and the only answer it lets through is a guide the record holds and
+    // the file does not yet print. That is the whole content of the change this column exists to make.
+    const readingChanges = comparison.readingChanges || [];
+    const invented = readingChanges.filter((change) => change.kind === "invented");
+    const lostReadings = readingChanges.filter((change) => change.kind === "lost");
+    if (invented.length) {
+      return {
+        ok: false,
+        written: null,
+        moved: null,
+        unchanged: false,
+        asideSlot: 0,
+        keptAside: [],
+        measured,
+        refusal: refusal({
+          verb: "re_render_glossary",
+          rule: "glossary-render-invents-readings",
+          because:
+            `this render prints a pronunciation guide its own record does not hold on ${invented.length} row(s): ` +
+            invented
+              .slice(0, 5)
+              .map((change) => `${JSON.stringify(change.term)} → ${change.invented.map((r) => JSON.stringify(r)).join(", ")}`)
+              .join("; ") +
+            (invented.length > 5 ? ` (and ${invented.length - 5} more row(s))` : "") +
+            ". A reading column that can print a guide the book never printed is worse than no reading column.",
+          fix: "the guide has to be in the volume record (written_forms) before any document may print it.",
+        }),
+      };
+    }
+    if (lostReadings.length) {
+      return {
+        ok: false,
+        written: null,
+        moved: null,
+        unchanged: false,
+        asideSlot: 0,
+        keptAside: [],
+        measured,
+        refusal: refusal({
+          verb: "re_render_glossary",
+          rule: "glossary-render-loses-readings",
+          because:
+            `this render drops a pronunciation guide on ${lostReadings.length} row(s) — a guide the published ` +
+            `file prints, or the record holds, that the render does not print: ` +
+            lostReadings
+              .slice(0, 5)
+              .map((change) => `${JSON.stringify(change.term)} → ${change.lost.map((r) => JSON.stringify(r)).join(", ")}`)
+              .join("; ") +
+            (lostReadings.length > 5 ? ` (and ${lostReadings.length - 5} more row(s))` : "") +
+            ". A guide the author printed is not a formatting detail a re-render may lose.",
+          fix: "the record's written-form rows have to reach the render before the file is replaced.",
+        }),
+      };
+    }
+    // `added` is NOT refused, and that is a decision rather than an oversight: putting a guide the record
+    // holds into a file that does not print one is the entire purpose of this column, and refusing it would
+    // mean a published glossary could never gain a guide without re-deriving the volume from its book.
   }
 
   const existing = artifactPresent ? fs.readFileSync(target, "utf8") : null;

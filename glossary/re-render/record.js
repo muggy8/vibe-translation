@@ -21,7 +21,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { openReferenceStore } = require("../../utils/reference-store");
-const { renderGlossary } = require("../../utils/reference-store/glossary-adapter");
+const { renderGlossary, glossaryReadingCellsForRows } = require("../../utils/reference-store/glossary-adapter");
 const { readRubyGuideFile } = require("../../utils/source/ruby-guides");
 const { deriveBase } = require("../../utils/reference-store/source-chapters");
 require("../../types"); // JSDoc type definitions
@@ -105,7 +105,11 @@ async function readHarvestRows(volumeDir) {
  * @param {string} opts.scratchSeriesDir - Where the copy goes.
  * @param {string} opts.title - The title block the stage renders with, so the render reproduces the
  *   document the stage published rather than a bare `# Glossary`.
- * @returns {Promise<{ok: boolean, markdown: string|null, refusal: {rule: string, because: string, fix: string}|null, copied: string[]}>}
+ * @returns {Promise<{ok: boolean, markdown: string|null, readingCells: Map<string, string>, readingTotals: Object|null, refusal: {rule: string, because: string, fix: string}|null, copied: string[]}>}
+ *   `readingCells` is what the record says each row's `Readings` cell holds, keyed on
+ *   `normalizeQuote(term)` — asked through the same helper {@link renderGlossary} used, against this same
+ *   store, so the comparison gate checks the render against the record rather than against the render's own
+ *   opinion of itself.
  */
 async function renderGlossaryFromRecordCopy({ volume, folder, seriesDir, scratchSeriesDir, title }) {
   const volumeDir = path.join(seriesDir, folder);
@@ -115,6 +119,8 @@ async function renderGlossaryFromRecordCopy({ volume, folder, seriesDir, scratch
     return {
       ok: false,
       markdown: null,
+      readingCells: new Map(),
+      readingTotals: null,
       copied: [],
       refusal: {
         rule: "glossary-record-copy-failed",
@@ -127,6 +133,8 @@ async function renderGlossaryFromRecordCopy({ volume, folder, seriesDir, scratch
     return {
       ok: false,
       markdown: null,
+      readingCells: new Map(),
+      readingTotals: null,
       copied: [],
       refusal: {
         rule: "reference-record-not-found",
@@ -142,11 +150,31 @@ async function renderGlossaryFromRecordCopy({ volume, folder, seriesDir, scratch
   try {
     store = openReferenceStore({ seriesDir: scratchSeriesDir, volume, folder, create: false, stage: "merge" });
     const markdown = renderGlossary(store, { volume, title });
-    return { ok: true, markdown, refusal: null, copied: copy.copied };
+    // The gate needs to know what the record says the reading column holds. Asked here, from this store,
+    // through the same helper the renderer just used — a gate that re-derived the answer a different way
+    // would be a second opinion about one fact, which is the disagreement this store keeps paying to avoid.
+    const readings = glossaryReadingCellsForRows(store, { volume });
+    if (!readings.ok) {
+      return {
+        ok: false,
+        markdown: null,
+        readingCells: new Map(),
+        readingTotals: null,
+        copied: copy.copied,
+        refusal: {
+          rule: readings.refusal.rule,
+          because: readings.refusal.because,
+          fix: readings.refusal.fix,
+        },
+      };
+    }
+    return { ok: true, markdown, readingCells: readings.cells, readingTotals: readings.totals, refusal: null, copied: copy.copied };
   } catch (err) {
     return {
       ok: false,
       markdown: null,
+      readingCells: new Map(),
+      readingTotals: null,
       copied: copy.copied,
       refusal: {
         rule: "glossary-record-unreadable",

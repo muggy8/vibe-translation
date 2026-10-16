@@ -42,15 +42,25 @@ function glossaryTermSpans(cell) {
 }
 
 /**
- * One Markdown table row, as cells.
+ * One Markdown table row, as cells, **positionally**.
+ *
+ * The shells outside the row (the pieces before the first pipe and after the last) are dropped; every cell
+ * inside it is kept, **including an empty one in the middle**. The filter this function used to carry is the
+ * column-shift bug `utils/translate/terminology.js` documents in its own copy of this rule:
+ * `| ソラ |  | AI agent of the institute |` came back with the canonical rendering
+ * "AI agent of the institute", because the empty cell had been deleted and everything after it slid left.
+ * A four-column table makes that damage worse rather than better — a missing `Readings` cell would drag the
+ * Notes into the reading column and the reading into the notes — so all three readers of a glossary now
+ * split the same way.
+ *
  * @param {string} line
- * @returns {string[]}
+ * @returns {string[]} The cells in column order (empty cells preserved).
  */
 function splitTableRow(line) {
-  return String(line)
-    .split("|")
-    .map((cell) => cell.trim())
-    .filter((cell) => cell !== "");
+  const cells = String(line).split("|");
+  if (cells.length > 0 && cells[0].trim() === "") cells.shift();
+  if (cells.length > 0 && cells[cells.length - 1].trim() === "") cells.pop();
+  return cells.map((cell) => cell.trim());
 }
 
 /**
@@ -71,14 +81,29 @@ function isSeparatorRow(cells) {
  * verbatim including their blank lines, because a renderer that drops them cannot claim to
  * reproduce the document (review 05 §3.4).
  *
+ * ## How many columns a table has is read from the table
+ *
+ * The header row is the declaration. A three-column table (every glossary this repository published before
+ * plan 09 slice 3b, and every fixture written since) reads exactly as it always did — term, rendering, and
+ * everything past them rejoined as the Notes. A four-column table reads the `Readings` cell at its own
+ * position and the Notes from the column after it, so **a reading can never come back as a term, part of a
+ * term, or part of the notes** — which is the leak plan 09 §5 names as the acceptance line for this change.
+ * The reader is never told which shape it is looking at, because a constant naming the column count in two
+ * readers is two constants that can disagree.
+ *
  * @param {string} markdown
- * @returns {{rows: Array<{term: string, rendering: string, notes: string, section: string}>, title: string|null, preamble: string[], proseBlocks: Array<{section: string|null, kind?: "title", lines: string[]}>, unplacedProse: Array<{section: string, text: string}>, annotatedRows: Array<{term: string, section: string, columns: string[]}>}}
+ * @returns {{rows: Array<{term: string, rendering: string, reading: string, notes: string, section: string}>, title: string|null, preamble: string[], proseBlocks: Array<{section: string|null, kind?: "title", lines: string[]}>, unplacedProse: Array<{section: string, text: string}>, annotatedRows: Array<{term: string, section: string, columns: string[]}>, shortRows: Array<{term: string, section: string, cells: number, declared: number}>}}
  *   `unplacedProse` is prose the file carries AFTER a section's table: this renderer has nowhere
  *   to put it, so it is reported instead of quietly dropped.
  *   `annotatedRows` names every row that carries pronunciation markup and which of its columns carry it
  *   (plan 07 §4.6): the cells are kept verbatim because a renderer that rewrites a published row is doing
  *   the thing this parser exists to notice, and a row that carried markup without being named is the
- *   "no finding and no count that moves" failure the plan warns about.
+ *   "no finding and no count that moves" failure the plan warns about. The `Readings` column is one of the
+ *   columns it checks (plan 09 slice 3b) — a guide written as markup inside the reading column is named,
+ *   not stripped, for the same reason.
+ *   `shortRows` names every data row carrying fewer cells than its own table's header declares. The row is
+ *   still read (its missing cells are taken to be at the END, which is what a short Markdown row means), so
+ *   this is a report, not a refusal.
  */
 function parseGlossaryMarkdown(markdown) {
   const rows = [];
@@ -86,6 +111,8 @@ function parseGlossaryMarkdown(markdown) {
   const unplacedProse = [];
   /** @type {Array<{term: string, section: string, columns: string[]}>} */
   const annotatedRows = [];
+  /** @type {Array<{term: string, section: string, cells: number, declared: number}>} */
+  const shortRows = [];
   let currentBlock = { section: null, lines: [], closed: false };
   let tablePhase = false;
   let title = null;
@@ -114,25 +141,41 @@ function parseGlossaryMarkdown(markdown) {
   };
 
   const flush = () => {
-    // Row 0 is the column header, row 1 the separator; data starts after them.
-    const data = tableRows.filter((cells) => !isSeparatorRow(cells)).slice(1);
+    // Row 0 is the column header, row 1 the separator; data starts after them. The header is also the
+    // table's own declaration of how many columns it has, which is the only way this reader can tell a
+    // three-column glossary (every file this repository published before plan 09 slice 3b) from a
+    // four-column one without being told, and without a second constant it could disagree with.
+    const table = tableRows.filter((cells) => !isSeparatorRow(cells));
+    const declared = table.length ? table[0].length : 0;
+    const data = table.slice(1);
     for (const cells of data) {
       const term = cells[0] || "";
       if (!term || isSeparatorRow([term])) continue;
       const rendering = cells[1] || "";
-      const notes = cells.slice(2).join(" | ").trim();
+      // A row with FEWER cells than its table declares has empty cells at the END of it — that is what a
+      // short Markdown row means, and it is what every Markdown renderer assumes. Filling from the left is
+      // therefore the reading that cannot move a guide into the Notes; guessing that a short row in a
+      // four-column table is really an old three-column row would put the reading in the notes cell, which
+      // is the one leak this rule exists to close. The shortness is still named.
+      if (declared > 0 && cells.length < declared) shortRows.push({ term, section, cells: cells.length, declared });
+      const reading = declared >= 4 ? cells[2] || "" : "";
+      // Everything past the last named column belongs to the Notes cell, rejoined the way the file wrote
+      // it. A notes cell holding an unescaped pipe is a hand-edit, not a rendered row, and this is the shape
+      // that has always absorbed it rather than inventing a column.
+      const notes = cells.slice(declared >= 4 ? 3 : 2).join(" | ").trim();
       // The cells are kept exactly as the file wrote them. What is reported is which of them carry
       // pronunciation markup, so a row that reaches a published glossary with a guide inside it is named
       // in the import result instead of being silently rewritten or silently dropped.
       const markupColumns = [
         ["term", term],
         ["rendering", rendering],
+        ["reading", reading],
         ["notes", notes],
       ]
-        .filter(([, value]) => hasRubyMarkup(value))
+        .filter(([, value]) => value && hasRubyMarkup(value))
         .map(([name]) => name);
       if (markupColumns.length) annotatedRows.push({ term, section, columns: markupColumns });
-      rows.push({ term, rendering, notes, section });
+      rows.push({ term, rendering, reading, notes, section });
     }
     tableRows = [];
   };
@@ -182,7 +225,7 @@ function parseGlossaryMarkdown(markdown) {
   const opening = proseBlocks.find((block) => block.section === null) || { section: null, lines: [] };
   const preamble = title === null ? opening.lines : opening.lines.slice(1);
 
-  return { rows, title, preamble, proseBlocks, unplacedProse, annotatedRows };
+  return { rows, title, preamble, proseBlocks, unplacedProse, annotatedRows, shortRows };
 }
 
 module.exports = {

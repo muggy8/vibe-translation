@@ -648,8 +648,8 @@ function scenarioTheGlossarysOwnRowResolvesThePronoun() {
   store.registerChaptersFromSource();
 
   const narratorGlossary = GLOSSARY_01.replace(
-    "| 如月雨露 | Kisaragi Amatsuyu | Protagonist; the narrator |",
-    "| 如月雨露 | Kisaragi Amatsuyu | Protagonist. Narrator: switches between 僕 and 俺 |"
+    "Protagonist; the narrator |",
+    "Protagonist. Narrator: switches between 僕 and 俺 |"
   );
   const imported = importVolumeArtifacts(store, { glossaryMarkdown: narratorGlossary });
   assert.ok(imported.glossary, JSON.stringify(imported));
@@ -722,11 +722,11 @@ function scenarioTwoNarratorsRefuseToBePickedBetween() {
   store.registerChaptersFromSource();
 
   const twoNarrators = GLOSSARY_01.replace(
-    "| 如月雨露 | Kisaragi Amatsuyu | Protagonist; the narrator |",
-    "| 如月雨露 | Kisaragi Amatsuyu | Protagonist. Narrator: switches between 僕 and 俺 |"
+    "Protagonist; the narrator |",
+    "Protagonist. Narrator: switches between 僕 and 俺 |"
   ).replace(
-    "| 大賀太陽 | Oga Taiyo | Best friend since junior high |",
-    "| 大賀太陽 | Oga Taiyo | The other narrator: this chapter is told in 俺 |"
+    "Best friend since junior high |",
+    "The other narrator: this chapter is told in 俺 |"
   );
   const imported = importVolumeArtifacts(store, { glossaryMarkdown: twoNarrators });
   const glossary = imported.glossary;

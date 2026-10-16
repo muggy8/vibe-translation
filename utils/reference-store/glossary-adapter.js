@@ -27,9 +27,9 @@
  *
  *     ## <Section>
  *
- *     | Original | Translated | Notes |
- *     |---|---|---|
- *     | <term> | <rendering> | <notes> |
+ *     | Original | Translated | Readings | Notes |
+ *     |---|---|---|---|
+ *     | <term> | <rendering> | <readings> | <notes> |
  *
  * The title line and the preamble are stored in `document_prose` and rendered back verbatim
  * (review 05 §3.4): the real glossary opens with a title and two style-policy paragraphs, and
@@ -37,9 +37,16 @@
  * column headers come from `GLOSSARY_HEADER` in `glossary-adapter/labels.js` — the one place
  * they are written — and are named for what each column holds rather than for one language,
  * because the pipeline works from a source language the intake works out per series. Every
- * reader of the file takes the columns **by position**, so a glossary published before the
- * rename still imports and still counts: `utils/delivery-verify` counts the file's sections
- * and terms and `parseGlossaryTerms` reads it back.
+ * reader of the file takes the columns **by position** and learns how many there are from the table's own
+ * header row, so a glossary published before the rename **and** a glossary published with three columns
+ * both still import and still count: `utils/delivery-verify` counts the file's sections and terms and
+ * `parseGlossaryTerms` reads it back.
+ *
+ * The `Readings` cell is the one column not stored on the row. It is a query over the record's
+ * `written_forms` rows (`utils/reference-store/written-forms/readings.js`), asked once per render by
+ * `glossary-adapter/readings.js`, because a pronunciation guide is a fact about one volume's harvest while
+ * the row it is printed beside may have been published by another volume — and a published row is never
+ * edited.
  *
  * ## Where the code lives
  *
@@ -53,7 +60,10 @@
  * already holds, and which row of a `supersedes` chain is in force at one volume), `import-document.js`
  * (importing a published glossary file into the record), `revision.js` (the door that replaces a
  * published rendering by filing a new row beside it), `history.js` (the `Earlier rendering:` line and
- * its idempotent merge), `render.js` (the published file and its cell escaping) and
+ * its idempotent merge), `render.js` (the published file and its cell escaping), `readings.js` (the
+ * `Readings` column: the query over the record's own written-form rows, plus the cell's shape — written and
+ * read back in the same file, so the renderer and the re-render gate cannot hold two opinions about one
+ * row's readings) and
  * `import-extraction.js` (filing what the read pass found as published rows). This file is the public
  * surface of the glossary layer and the only thing another module should require; the evidence rule and
  * the term identity every door matches on stay inside this folder, which is a banned patch path for the
@@ -71,6 +81,7 @@ const importDocument = require("./glossary-adapter/import-document");
 const revision = require("./glossary-adapter/revision");
 const history = require("./glossary-adapter/history");
 const render = require("./glossary-adapter/render");
+const readings = require("./glossary-adapter/readings");
 const importExtraction = require("./glossary-adapter/import-extraction");
 
 // The public surface, unchanged from the single file.
@@ -98,4 +109,13 @@ module.exports = {
   mergeRevisionHistory: history.mergeRevisionHistory,
   renderGlossary: render.renderGlossary,
   escapeCell: render.escapeCell,
+  // The reading column: the query that fills it, and the cell's own shape (written and read back in one
+  // file, so the renderer and the re-render gate cannot hold two opinions about one row's readings).
+  GLOSSARY_READING_COLUMN: labels.GLOSSARY_READING_COLUMN,
+  GLOSSARY_NO_READING_CELL: labels.GLOSSARY_NO_READING_CELL,
+  READING_CELL_SEPARATOR: readings.READING_CELL_SEPARATOR,
+  READING_COUNT_MARK: readings.READING_COUNT_MARK,
+  renderReadingCell: readings.renderReadingCell,
+  readingsFromCell: readings.readingsFromCell,
+  glossaryReadingCellsForRows: readings.glossaryReadingCellsForRows,
 };
