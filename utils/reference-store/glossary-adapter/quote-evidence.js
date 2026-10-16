@@ -16,6 +16,7 @@
  */
 
 const { normalizeQuote, matchQuoteOnLine } = require("../evidence");
+const { hasRubyMarkup } = require("../ruby-markup");
 const { readChapterLines } = require("../source-chapters");
 const { glossaryTermSpans } = require("./parse");
 require("../../../types"); // JSDoc type definitions
@@ -77,7 +78,12 @@ function searchSpans(volumeDir, chapters, volume, spans, kind) {
       for (let i = 0; i < lines.length; i += 1) {
         const matched = matchQuoteOnLine(lines[i], span);
         if (!matched) continue;
-        return { evidence: [{ volume, chapter: chapter.id, line: i + 1, quote: span, kind, matched }], matched, span };
+        return {
+          evidence: [{ volume, chapter: chapter.id, line: i + 1, quote: span, kind, matched }],
+          matched,
+          span,
+          markupStripped: hasRubyMarkup(span),
+        };
       }
     }
   }
@@ -137,14 +143,17 @@ function findRowEvidence(volumeDir, chapters, volume, row) {
  * @param {Array<{id: string, file: string}>} chapters
  * @param {number} volume
  * @param {string} quote - The line the answer quoted.
- * @returns {{evidence: Array<Object>|null, matched: string|null, span: string}}
+ * @returns {{evidence: Array<Object>|null, matched: string|null, span: string, markupStripped: boolean}}
+ *   `markupStripped` is true when the line the answer quoted carried pronunciation markup that the evidence
+ *   rule removed before comparing it (plan 07 §4.6). The stored quote keeps what the answer quoted; the
+ *   comparison is what the book prints.
  */
 function findQuoteEvidence(volumeDir, chapters, volume, quote) {
   const span = String(quote || "").trim();
-  if (!normalizeQuote(span)) return { evidence: null, matched: null, span };
+  if (!normalizeQuote(span)) return { evidence: null, matched: null, span, markupStripped: hasRubyMarkup(span) };
   const hit = searchSpans(volumeDir, chapters, volume, [span], "quote");
-  if (!hit) return { evidence: null, matched: null, span };
-  return { evidence: hit.evidence, matched: hit.matched, span };
+  if (!hit) return { evidence: null, matched: null, span, markupStripped: hasRubyMarkup(span) };
+  return { evidence: hit.evidence, matched: hit.matched, span, markupStripped: hit.markupStripped };
 }
 
 module.exports = {

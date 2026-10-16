@@ -5,8 +5,13 @@
  * comparing, and the compact index an amend agent is handed instead of being told to page
  * through a 473 KB file it cannot read whole.
  * 
- * Everything here is pure: no file reads, no model call.
+ * Everything here is pure: no file reads, no model call. The one thing it requires is
+ * `utils/reference-store/ruby-markup.js`, the store's own leaf for HTML ruby, so that the two independent
+ * readers of a glossary file cannot disagree about what a spelling is once a pronunciation guide is sitting
+ * in one (plan 07 §4.6). That leaf requires nothing, so this stays a leaf and no cycle closes (gotcha 85).
  */
+
+const { stripRubyMarkup } = require("../../utils/reference-store/ruby-markup");
 
 /**
  * Parse the source-language terms out of a glossary Markdown file.
@@ -15,6 +20,10 @@
  * section each row belongs to. For each maximal run of consecutive table
  * rows, the first row (header) and the second row (separator, e.g.
  * `|---|---|---|`) are skipped. Emphasis-wrapped cells are normalized.
+ *
+ * Ruby markup comes off a term cell before anything else is done with it, the same rule
+ * `glossaryTermSpans` below applies: a guide is not part of the word, and a cell that carried one is the
+ * same entry as the cell that did not.
  *
  * @param {string} markdown - The glossary file content.
  * @returns {Array<{term: string, rendering: string, section: string}>} One entry
@@ -98,7 +107,11 @@ function parseGlossaryTableTerms(markdown) {
  */
 function glossaryTermSpans(term) {
   if (!term || typeof term !== "string") return [];
-  return term
+  // Ruby markup comes off BEFORE the cell is split, for the same reason the store's own reader does it
+  // (`utils/reference-store/glossary-adapter/parse.js`): a `<ruby>` unit survives a `/` split only if the
+  // split happens after the markup is gone, and two readers of one glossary that disagree about what a
+  // spelling is is the carry-forward gate calling an unchanged row a lost one.
+  return stripRubyMarkup(term)
     .split("/")
     .map((span) =>
       span

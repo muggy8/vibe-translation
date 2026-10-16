@@ -33,6 +33,7 @@
  */
 
 const { normalizeQuote, matchQuoteOnLine } = require("./evidence");
+const { stripRubyMarkup, hasRubyMarkup } = require("./ruby-markup");
 const { EXTRACTION_SOURCE_STAGE } = require("./schema");
 const { currentClaimSql } = require("./facts");
 const { readChapterLines } = require("./source-chapters");
@@ -115,16 +116,39 @@ function voicePersonaTag(heading) {
 /**
  * Read a voice reference into characters and their bullets.
  *
+ * ## It is taught to survive ruby markup (plan 07 §4.6, taught before any published file may carry it)
+ *
+ * Plan 07 slice 5 puts the author's pronunciation guides back in front of a model as an annotated view of a
+ * chapter. That view is never published, but a claim, a heading or a note can still reach this parser with
+ * markup on it — a model echoing what it was shown, or a later slice deciding to print a guide in the
+ * reference itself. Three rules, all of them **naming** what they saw, because the failure this parser is
+ * taught to avoid is the one with no finding and no count that moves:
+ *
+ *   1. **a heading is the word, not the guide.** `### <ruby>蒲<rt>かま</rt></ruby>田` names the character
+ *      蒲田, so the section keys onto the roster entry the guide-free book measures.
+ *   2. **a markup-bearing line after the first bullet is not glued onto that bullet's body.** The
+ *      continuation rule exists because a wrapped claim body comes back on one line, and a guide is not a
+ *      continuation of a claim: gluing one produced `"Addresses the man … <ruby>…<rt>…</rt></ruby>"` as a
+ *      published claim body. Such a line is recorded in `annotatedLines` instead, the way
+ *      `parseGlossaryMarkdown` reports prose it has nowhere to put.
+ *   3. **a bullet whose body carries markup is kept verbatim and named.** Rewriting a published claim's body
+ *      is the damage this slice is told not to do; the evidence rule already strips markup before it compares
+ *      (see `utils/reference-store/evidence.js`), so the claim still verifies while the markup stays visible
+ *      in the import result.
+ *
  * @param {string} markdown
- * @returns {{characters: Array<{display: string, key: string, persona: string|null, lead: string[], entries: Array<{label: string, body: string}>}>, title: string|null, preamble: string[]}}
+ * @returns {{characters: Array<{display: string, key: string, persona: string|null, lead: string[], entries: Array<{label: string, body: string}>}>, title: string|null, preamble: string[], annotatedLines: Array<{section: string|null, kind: string, line: string, label?: string}>}}
  *   `title` and `preamble` are the document's own opening, kept verbatim (blank lines included)
  *   so `renderVoice` can put them back (review 05 §3.4). A character section that has prose
  *   before its first bullet keeps it in `lead`, for the same reason: nothing in the file is
- *   dropped on the way in.
+ *   dropped on the way in. `annotatedLines` is every line that carried pronunciation markup and
+ *   what this parser did with it — empty for every document this repository has ever published.
  */
 function parseVoiceMarkdown(markdown) {
   const characters = [];
   const proseBlocks = [];
+  /** @type {Array<{section: string|null, kind: string, line: string, label?: string}>} */
+  const annotatedLines = [];
   let currentBlock = { section: null, kind: "title", lines: [] };
   let title = null;
   let current = null;
@@ -142,8 +166,12 @@ function parseVoiceMarkdown(markdown) {
 
     const heading = trimmed.match(/^###\s+(.+)$/);
     if (heading) {
-      const display = heading[1].replace(/\*\*?/g, "").replace(/`/g, "").trim();
+      // The guide is not part of the name: an annotated heading keys onto the same roster entry the
+      // guide-free book would measure, and the markup it carried is named rather than swallowed.
+      const headingCarriesMarkup = hasRubyMarkup(heading[1]);
+      const display = stripRubyMarkup(heading[1]).replace(/\*\*?/g, "").replace(/`/g, "").trim();
       if (!display || /^:?-{3,}:?$/.test(display)) continue;
+      if (headingCarriesMarkup) annotatedLines.push({ section: display, kind: "heading", line: trimmed });
       closeBlock(display);
       current = {
         display,
@@ -158,6 +186,7 @@ function parseVoiceMarkdown(markdown) {
 
     if (!current) {
       if (title === null && /^#\s/.test(trimmed)) title = line;
+      if (hasRubyMarkup(trimmed)) annotatedLines.push({ section: null, kind: "preamble", line: trimmed });
       currentBlock.lines.push(line);
       continue;
     }
@@ -169,7 +198,19 @@ function parseVoiceMarkdown(markdown) {
       if (current.lead.length) {
         proseBlocks.push({ section: current.display, lines: current.lead });
       }
+      if (hasRubyMarkup(trimmed)) {
+        annotatedLines.push({ section: current.display, kind: "bullet", line: trimmed, label: bullet[1].trim() });
+      }
       current.entries.push({ label: bullet[1].trim(), body: bullet[2].trim() });
+      continue;
+    }
+    // A markup-bearing line is NOT a continuation of the bullet above it. This is the shape plan 07 §4.6
+    // names: the continuation rule is for a claim body that wrapped, and a guide sitting on its own line is
+    // not part of anybody's claim. Glued, it became a published claim body with markup welded onto the end
+    // of it, with no finding and no count that moved. Named instead, the way the glossary parser reports
+    // prose it has nowhere to put.
+    if (trimmed && hasRubyMarkup(trimmed)) {
+      annotatedLines.push({ section: current.display, kind: "line-not-glued", line: trimmed });
       continue;
     }
     // A continuation line belongs to the bullet above it. The store holds one body string,
@@ -181,14 +222,17 @@ function parseVoiceMarkdown(markdown) {
     }
     // Prose under a heading and before any bullet: it belongs to that character, not to the
     // document, so it is kept where it was rather than folded into the preamble.
-    if (trimmed) current.lead.push(line);
+    if (trimmed) {
+      if (hasRubyMarkup(trimmed)) annotatedLines.push({ section: current.display, kind: "lead", line: trimmed });
+      current.lead.push(line);
+    }
   }
 
   closeBlock(null);
   const opening = proseBlocks.find((block) => block.section === null) || { section: null, lines: [] };
   const preamble = title === null ? opening.lines : opening.lines.slice(1);
 
-  return { characters, title, preamble, proseBlocks };
+  return { characters, title, preamble, proseBlocks, annotatedLines };
 }
 
 /**

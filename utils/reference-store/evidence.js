@@ -36,6 +36,17 @@
  * point — goes through this same function. A rule adopted at import but not at re-verification
  * reports every furiganed row as a HIGH finding the second time the store is looked at.
  *
+ * **And a quote is stripped of pronunciation markup before any of this runs** (plan 07 §4.6, first bullet,
+ * 2026-10-15). Plan 07 slice 5 puts the author's guides back in front of a *model* as an annotated view of
+ * a chapter, which means a quote can now be copied out of text that carries `<ruby>蒲<rt>かま</rt></ruby>`
+ * while the book on disk says 蒲田. `normalizeQuote` removes the markup, so the annotated view and the
+ * guide-free archive are the same string to this rule and the evidence check still verifies. It is in
+ * `normalizeQuote` and not at the call sites because every citation door in this repository — the two
+ * revision doors, the confirmation door, the span-close door, `insertFact`, `verifyStoredEvidence` —
+ * already shares this one normaliser, and a strip that lived at one door would make the same quote evidence
+ * in one place and a forgery in another. `prepareQuoteForSearch` and `verifyEvidenceItem` report
+ * `markupStripped`, so "it matched" and "it matched after its guides came off" stay two reportable facts.
+ *
  * @module utils/reference-store/evidence
  */
 
@@ -45,6 +56,7 @@ const { listVolumeChapters, readChapterLines } = require("./source-chapters");
 // term. `glossary/carry-forward/table.js` is a pure leaf — it requires nothing — so reaching it
 // from `utils/` closes no require cycle (gotcha 85).
 const { glossaryTermSkeleton, GLOSSARY_SKELETON_MIN_CHARS } = require("../../glossary/carry-forward/table");
+const { stripRubyMarkup, hasRubyMarkup } = require("./ruby-markup");
 const { EVIDENCE_KINDS, EVIDENCE_MATCHES } = require("./schema");
 require("../../types"); // JSDoc type definitions
 
@@ -52,14 +64,22 @@ require("../../types"); // JSDoc type definitions
 const LOCATIONS_TO_REPORT = 3;
 
 /**
- * A quote compared without whitespace, so a line that wraps a phrase differently is still
- * the same phrase.
+ * A quote compared without whitespace **and without pronunciation markup**, so a line that wraps a phrase
+ * differently is still the same phrase, and a quote copied out of an annotated chapter is still the string
+ * the book prints.
+ *
+ * The ruby half is plan 07 §4.6's first bullet, and it is here rather than at each call site because this
+ * function is the store's one quote normaliser: `insertFact`'s citation check, `verifyStoredEvidence`'s
+ * re-check, the revision doors' quote rule, the confirmation door, the span-close door and the already-filed
+ * claim comparisons all go through it. A rule that stripped markup at one door and not at another would let
+ * the same quote be evidence in one place and a forgery in another — the exact asymmetry this file's own
+ * header exists to prevent (review 05 §2.5).
  *
  * @param {string} text
  * @returns {string}
  */
 function normalizeQuote(text) {
-  return String(text === undefined || text === null ? "" : text).replace(/\s+/g, "");
+  return stripRubyMarkup(text).replace(/\s+/g, "");
 }
 
 /**
@@ -71,7 +91,10 @@ function normalizeQuote(text) {
  * @returns {string} "" for a string with no Han characters (a pure-kana term has no skeleton).
  */
 function quoteSkeleton(text) {
-  return glossaryTermSkeleton(text);
+  // Stripped first, because a reading written in Han characters is not part of the word: the skeleton of
+  // `<ruby>達<rt>強制終了</rt></ruby>` is 達, and a skeleton of 達強制終了 is a different claim about the
+  // book than the book makes.
+  return glossaryTermSkeleton(stripRubyMarkup(text));
 }
 
 /**
@@ -93,12 +116,22 @@ function prepareLineForQuoteSearch(line) {
 /**
  * One quote, prepared once so it can be searched across a whole volume.
  *
+ * `markupStripped` says whether the quote arrived carrying pronunciation markup that this rule removed.
+ * It is reported rather than assumed, because "the quote matched" and "the quote matched after its guides
+ * were taken off" are different facts, and a report that cannot tell them apart cannot tell an annotated
+ * quote from a forged one.
+ *
  * @param {string} quote - The quoted text, or a name to search for.
- * @returns {{needle: string, skeleton: string, usable: boolean}}
+ * @returns {{needle: string, skeleton: string, usable: boolean, markupStripped: boolean}}
  */
 function prepareQuoteForSearch(quote) {
   const needle = normalizeQuote(quote);
-  return { needle, skeleton: quoteSkeleton(quote), usable: needle.length > 0 };
+  return {
+    needle,
+    skeleton: quoteSkeleton(quote),
+    usable: needle.length > 0,
+    markupStripped: hasRubyMarkup(quote),
+  };
 }
 
 /**
@@ -212,7 +245,7 @@ function locateQuote(volumeDir, chapters, quote, { limit = LOCATIONS_TO_REPORT }
 function verifyEvidenceItem(item, resolveVolume) {
   const shape = evidenceShape(item);
   if (!shape.ok) {
-    return { ok: false, item, problem: shape.problem, found: [] };
+    return { ok: false, item, problem: shape.problem, markupStripped: false, found: [] };
   }
 
   const resolved = resolveVolume(item.volume);
@@ -223,6 +256,7 @@ function verifyEvidenceItem(item, resolveVolume) {
       problem:
         `volume ${item.volume}'s source text is not available to this store` +
         (resolved && resolved.error ? `: ${resolved.error}` : ""),
+      markupStripped: false,
       found: [],
     };
   }
@@ -236,6 +270,7 @@ function verifyEvidenceItem(item, resolveVolume) {
       problem:
         `volume ${item.volume} has no chapter "${item.chapter}". ` +
         `The chapters this volume's extraction names are: ${known}.`,
+      markupStripped: false,
       found: [],
     };
   }
@@ -246,6 +281,7 @@ function verifyEvidenceItem(item, resolveVolume) {
       ok: false,
       item,
       problem: `volume ${item.volume} chapter ${item.chapter}: the chapter file "${chapter.file}" could not be read.`,
+      markupStripped: false,
       found: [],
     };
   }
@@ -256,6 +292,7 @@ function verifyEvidenceItem(item, resolveVolume) {
       item,
       problem:
         `volume ${item.volume} chapter ${item.chapter} has ${lines.length} lines; the evidence cites line ${item.line}.`,
+      markupStripped: false,
       found: locateQuote(resolved.volumeDir, resolved.chapters, item.quote),
     };
   }
@@ -266,7 +303,13 @@ function verifyEvidenceItem(item, resolveVolume) {
     // these items verbatim, and `verifyStoredEvidence` re-reads them through this same
     // function — so the rule that let a row in is the rule that keeps it in (review 05 §2.5).
     const stamped = { ...item, kind: item.kind || "quote", matched };
-    return { ok: true, item: stamped, problem: null, found: [{ chapter: item.chapter, line: item.line, matched }] };
+    return {
+      ok: true,
+      item: stamped,
+      problem: null,
+      markupStripped: hasRubyMarkup(item.quote),
+      found: [{ chapter: item.chapter, line: item.line, matched }],
+    };
   }
 
   // Not on the cited line. Say where it is, because "wrong line" and "wrong chapter"
@@ -282,6 +325,7 @@ function verifyEvidenceItem(item, resolveVolume) {
       `volume ${item.volume} chapter ${item.chapter} line ${item.line} does not contain the quoted evidence. ` +
       `That line reads: ${JSON.stringify(String(lines[item.line - 1]).slice(0, 120))}. ` +
       `The quote is at: ${where}.`,
+    markupStripped: hasRubyMarkup(item.quote),
     found,
   };
 }
@@ -321,7 +365,7 @@ function verifyEvidence(items, resolveVolume) {
     const result = verifyEvidenceItem(item, resolveVolume);
     checked.push(result.item);
     if (!result.ok) {
-      problems.push({ index, item: result.item, problem: result.problem, found: result.found });
+      problems.push({ index, item: result.item, problem: result.problem, markupStripped: result.markupStripped, found: result.found });
     }
   });
   return { ok: problems.length === 0, items: checked, problems };

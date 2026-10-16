@@ -19,6 +19,11 @@
  *     builds the two chapter-scoped shapes and the one discriminator, `variant.js` and `guidance.js` are
  *     the two doors, and `records.js` is where they may write and where they are refused. A submodule that
  *     outgrew itself splitting the same way, inside its own folder.
+ *   - `written-forms/view/` — the **annotated chapter view** (plan 07 slice 5): `select.js` answers which
+ *     written forms this volume's record may show a model with the author's own guide over them,
+ *     `render.js` puts that guide over one piece of text in the one markup shape
+ *     `utils/reference-store/ruby-markup.js` owns, and `chapter.js` bolts the two together into the door a
+ *     caller would use. It reads the rows this layer already filed — it is not a second reader of the harvest.
  *
  * ## What the two reports are, in one line each
  *
@@ -29,9 +34,10 @@
  * and さんしよくいん**すれみ**こ in volume 17 chapter 5). Everything else it counts and sorts, because plan 07
  * §2.11(b) measured that a name the author guides 76 times in one chapter is a name, not a defect.
  *
- * Neither report is wired: **no stage, step, command or door calls either one**, and `test/test-written-forms.js`
- * greps the tree to prove it. Neither files a row, marks anything, adds a finding kind, adds a level, adds a
- * freeze door, declares an artifact, or writes a published file.
+ * Neither report is wired, and neither is the view: **no stage, step, command or door calls any of them**, and
+ * `test/test-written-forms.js` and `test/test-annotated-view.js` grep the tree to prove it. None files a row,
+ * marks anything, adds a finding kind, adds a level, adds a freeze door, declares an artifact, or writes a
+ * published file.
  *
  * ## What this layer is, in one line
  *
@@ -84,6 +90,9 @@ const collisions = require("./written-forms/reports/collisions");
 const variantReport = require("./written-forms/reports/variant");
 const guidanceReport = require("./written-forms/reports/guidance");
 const reportRecords = require("./written-forms/reports/records");
+const viewSelect = require("./written-forms/view/select");
+const viewRender = require("./written-forms/view/render");
+const viewChapter = require("./written-forms/view/chapter");
 
 module.exports = {
   // The pure half: the roster's answer, and the spelling-shape report.
@@ -142,4 +151,12 @@ module.exports = {
   renderGuidanceLog: reportRecords.renderGuidanceLog,
   describeVariantSpellingReport: reportRecords.describeVariantSpellingReport,
   describeGuidanceReport: reportRecords.describeGuidanceReport,
+
+  // The annotated chapter view (plan 07 slice 5): which forms may be shown, and the markup over one chapter.
+  // A view: it files nothing, publishes nothing, reaches no model, and no stage calls it.
+  VIEW_MAX_USES_PER_VOLUME: viewSelect.VIEW_MAX_USES_PER_VOLUME,
+  printedOccurrences: viewSelect.printedOccurrences,
+  annotatedFormsForVolume: viewSelect.annotatedFormsForVolume,
+  annotateChapterText: viewRender.annotateChapterText,
+  annotatedChapterView: viewChapter.annotatedChapterView,
 };

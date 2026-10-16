@@ -26,8 +26,20 @@ moved them, see below). **Slice 4 is BUILT (2026-10-15)** — the extraction con
 fourth kind in the chapter call that already runs, its certainty computed by code through the §4.4 ladder,
 filed by `utils/reference-store/relations/contract.js` through the door slice 3 built, from one producer
 outside the layer (the rebuild door), at **0 extra model calls** and with no new table, level, door, command,
-setting or knob; `test/test-relation-contract.js` (**144 checks**) joins `npm test`. **Slices 5–7 are not
-built.**
+setting or knob; `test/test-relation-contract.js` (**144 checks**) joins `npm test`. **Slice 5 is BUILT
+(2026-10-15)** — normalise, teach, then show: `utils/reference-store/ruby-markup.js` is the store's one rule
+about HTML ruby and its tag vocabulary is pinned against the converter's, the strip is wired into
+`normalizeQuote` / `quoteSkeleton` so every citation door compares guide-free text and reports
+`markupStripped`, the markdown parsers are taught before any published file may carry the markup
+(`annotatedLines`, `annotatedRows`, strip-before-split in both glossary readers), and only then the view —
+`written-forms/view/` (`select.js` / `render.js` / `chapter.js`), at **0 model calls**, **0 callers outside its
+layer**, and with no new table, level, finding kind, freeze door, command, setting or knob.
+`test/test-annotated-view.js` (**203 checks**) joins `npm test` and `test/measure-annotated-view.js` beside it.
+**§5's slice-5 verdict records that the acceptance line's own numbers do not reproduce** — the shipped door
+selects **4,497 pairs / 5,546 occurrences / +145,054 characters**, not §2.12's 4,808 / 6,739 / +192,251 — and
+names the three reasons, every one of them printed by `test/measure-annotated-view.js`, which recomputes
+§2.12's four rows from the 17 harvests and **fails its own run** if row 2 stops reproducing 4,808 / 6,739.
+**Slices 6–7 are not built.**
 **§6.7 is answered (2026-10-15): the door files
 every harvested row that passes the two row guards and the group question is answered by query**, which slice 1
 now does, and **slice 2 is built on it**.
@@ -478,6 +490,35 @@ word no more than twice. It is language-neutral, it costs 7.8% more text, and it
 catches the phrase glosses above. If the owner wants the third row instead, that is a bigger prompt and the
 same door.
 
+**Corrected 2026-10-15 by slice 5, which built this row and had to reproduce it.** `test/measure-annotated-view.js`
+now recomputes all four rows above from the 17 harvests and prices each with the markup shape the shipped
+renderer emits, so the table can be re-measured rather than remembered. Its output, over 10,005 harvest rows
+(9,663 (volume, form) pairs — one row guides a ruby with no word under it at all, and the store's filing door
+refuses it):
+
+| view | this plan's row | recomputed, same markup shape | reproduces? |
+|---|---|---|---|
+| the renames only | 202 / 1,033 / +31,630 | **202 / 1,033 / +28,033 (1.14%)** | forms and occurrences yes, characters no |
+| renames + always-guided and ≤ 2 | 4,808 / 6,739 / +192,251 | **4,808 / 6,739 / +176,271 (7.19%)** | forms and occurrences yes, characters no |
+| every always-guided form | 6,341 / 19,250 / +537,834 | **6,341 / 19,250 / +497,425 (20.30%)** | forms and occurrences yes, characters no |
+| every guide the converter set aside | 9,663 / 45,429 / ≈ +1,181,154 | **9,663 / 45,428 / +1,145,628 (46.75%)** | forms yes, occurrences off by the one form-less row, characters no |
+
+**Three corrections, then.** **(1)** No markup shape this repository could emit reproduces the character column:
+one annotation costs `<ruby></ruby>` + `<rt></rt>` = 22 characters plus the reading, which over 6,739 occurrences
+is **176,271**, not 192,251, and no model of per-occurrence / per-piece / per-reading-character cost fits all
+four rows. Every row is **cheaper** than this section claims. **(2)** "the series uses that word no more than
+twice" is not a series-wide count: counted **per volume** the always-guided-within-the-bound set is **4,712**
+pairs / 5,830 occurrences, or **4,606 / 5,706** once the 202 renames are taken out — which is where 4,808 comes
+from, as the union — while counted **across the whole series** it is **1,898** pairs (1,831 without the renames).
+The prose and the number describe different counts. **(3)** The row is missing the guard that makes "every
+single time" checkable: the extracted text records no guide **positions**, so the only way to know a form is
+guided every time it appears is to compare the guided count against the printed count in that volume's own text.
+Over the whole harvest **3,322 of the 9,663 pairs are guided fewer times than their book prints them** — 26,178
+guided against 100,354 printed, so annotating every printed place would invent **74,176 guides** the author never
+wrote; over the rows the store's own guards file, the same rule refuses **2,532 forms (21,082 guided against
+64,326 printed, 43,244 invented guides)**. With that guard the row is **4,497 pairs / 5,546 occurrences /
++145,054 characters (5.92%)**. The phrase glosses the section is worried about are still in the set.
+
 ### 2.13 "Each volume files only its own harvest" and "the union is 97 groups" cannot both be true
 
 Slice 1 was built and measured, and the acceptance line written for it — including the wording I amended
@@ -663,6 +704,21 @@ is not computable from this data — the forms guided every single time include 
 rare end actually contains is the author writing a **meaning** over a whole string, and that is the part a
 translator loses.
 
+**How the view was actually built (slice 5, 2026-10-15), and where it differs from the paragraph above.** It
+reads the record's own written-form rows, never a volume's harvest file — `written-forms/file.js` stays the one
+door in this store allowed to open `<base>-ruby-guides.json`. A (volume, form) is annotated when three things
+hold in **that volume's own copy**: the form has **exactly one** guided reading there, it is guided **as many
+times as the book prints it** there, and it is guided **no more than `VIEW_MAX_USES_PER_VOLUME` (2)** times
+there — unless the caller names that form a rename, which is the only way past the bound. The middle guard is
+the one §2.12 does not carry, and it is the one that keeps the view honest: the extracted text records no guide
+*positions*, so without it a view would print readings over words the author guides only sometimes, and measured
+against the real filing that means **43,244 invented guides** against 21,082 real ones. The bound is per volume,
+not series-wide. The result is **4,497 pairs / 5,546 occurrences / +145,054 characters (5.92%)**, not the
+4,808 / 6,739 / +192,251 this section was written with. The markup is one shape,
+`<ruby>蒲田<rt>かまた</rt></ruby>`, emitted by a single longest-match left-to-right scan that never reads its own
+output, so `stripRubyMarkup(annotate(text)) === text` holds on all 133 real chapters; a chapter already carrying
+ruby is refused rather than annotated twice. **No stage calls the view.**
+
 ### 4.6 Normalise before you compare, and teach the parsers first
 
 - A quote is stripped of ruby markup before it is checked against the book, and the extraction prompt says
@@ -670,6 +726,22 @@ translator loses.
 - `parseVoiceMarkdown`, `parseGlossaryMarkdown` and the render round trips are taught to survive ruby
   markup **before** any published file is allowed to contain it. The order matters: a parser that meets
   markup it does not understand produces a corrupted claim body with no finding and no count that moves.
+
+**How this was built (slice 5, 2026-10-15).** The strip is one function, `utils/reference-store/ruby-markup.js`,
+wired into `normalizeQuote` and `quoteSkeleton`, so every citation door in the repository inherits it —
+`insertFact`, `verifyStoredEvidence`, both revision doors, the confirmation door, the span-close door — and the
+search helpers report `markupStripped: true` when they used it, so "the quote needed stripping" is a fact on the
+record rather than an accident. The teaching is **behaviour-preserving by measurement**: no published file in the
+corpus contains a `<ruby>` tag today, so every parser change is proven by planting markup in a fixture and
+showing the old damage and the new answer side by side. The damage is specific — `parseVoiceMarkdown` treats any
+non-bullet line after the first bullet as a continuation of that bullet, so a guide standing on its own line
+under a heading was glued onto the claim above it and became part of a published claim's body. The taught rule
+refuses **only** a line carrying markup and still glues an ordinary wrapped line, which is what keeps it a rule
+about markup rather than a rule about line breaks. **What was not built is the prompt half of the first bullet**:
+no prompt file mentions ruby today (measured: 0 of the 43 files in `system-prompts/` and `user-prompts/`), and
+none needs to while
+every quote a model can produce comes out of guide-free extracted text. The instruction becomes necessary the
+moment a model is *shown* an annotated chapter — which is §6.6's decision, not this slice's.
 
 ### 4.7 The glossary labels
 
@@ -758,7 +830,8 @@ gotcha 121 is about exactly what happens when a spelling rule is allowed to deci
 | **3 — verdict** | **Met, and the acceptance line is the easy half.** The three things §5's row asked for are all pinned by a test that runs the real door against a real fixture record, and the measurement that matters is the one the acceptance line did not ask for: **what the table can be keyed on, on this corpus.** | The plan's line — "a planted development closes an earlier span in the later volume's copy and leaves the earlier volume's snapshot byte-identical" — is measured twice: once on a fixture pair built the way `copyForwardStore` builds one (`test/test-relations-table.js` scenario 6), and once against **two real records** (`test/measure-relations.js` §4): volume 16's copy is `e6a7f851b277` before and after everything volume 17's copy did. **What the plan did not say is that the door is unreachable on this corpus as it stands**, for the same reason slice 2's door was: all 17 corpus records hold **0 `relations` rows, 0 `cast_identities` rows and 0 `cast_identity_links` rows**, because neither door is wired into a stage. Reproducing §2.9's roster shape on a copy therefore means running the written-forms door (8,910 rows) and the identity door (71 links, 35 identity rows) on the copy **first** — and the honest corpus statement is "planted against a copy", not "read from the books". **The number that changes how slice 4 should be scoped:** 34 live identities over 196 roster entries means the relations door can key **88 names** and must name **108** as limits, so a reading pass that produces acts of address will have nowhere to put roughly half of them until §6.8 is answered. **And one thing the acceptance line asked for that the store's own shape refuses:** a party is a foreign key to `cast_identities`, so a name with no identity is not a party at all — the door could have widened the key to a roster key and filed it, and §4.3 says not to, so it files nothing and says so. |
 | **4** | **BUILT 2026-10-15 — an act of address is a kind in the chapter call that already runs.** `utils/reference-store/relations/contract.js` (651 lines) is the contract: the entry kind, the §4.4 ladder computed by code, and the pass that files through the door slice 3 built. It sits behind the existing `relations.js` cover (**117 → 142** lines, **35 → 44** exports, store barrel **452 → 461**) and is called from **one** place outside the layer — `utils/reference-store/rebuild/filing.js` (616), after the claims and after the confirmations, which is the door both the stage route and `rebuild-voice.js` walk through. `utils/reference-store/extraction-adapter.js` (565) recognises the kind and files nothing. `character-voice/stages.js` (345) carries the entry keys **13 → 18** (`channel` / `addresser` / `addressee` / `formUsed` / `statement`) and **`certainty` is deliberately not among them**; the answer schema stays open. `system-prompts/character-voice-extract.md` asks for the fourth kind in text only, and `character-voice/assemble.js` (326) prints what the pass reported. **No table, no schema bump (13), no new finding kind (70), no new freeze door (12), no command, no setting, no environment knob, no verb on the store's handle, nothing downstream reads the table.** `test/test-relation-contract.js` (10 scenarios / **144** checks) joins `npm test`; `test/test-relations-table.js` **264 → 265**, `test/test-relations-isolation.js` **199 → 205**, `test/test-answer-envelopes.js` **233 → 255**. | Pass 1 files relations, pass 2 over the same fixture pays 0 calls. A planted "the name in the quote is the addressee" case comes back `addressee-risk`, not `measured`. A chapter that names nobody files nothing and is named, not punished. |
 | **4 — verdict** | **Met, and the ladder is the finding** (measured 2026-10-15, `test/test-relation-contract.js`, 0 calls to the endpoint, fixtures only; the corpus numbers from a probe run against **a copy** of volume 17's record — gotcha 124). | The acceptance line is four numbers: pass 1 pays **4** chapter calls and files **6** relations, pass 2 pays **0 calls**, files **0**, reports **6 already filed**; the planted swap comes back **`addressee-risk`** and it is in the **table**, not only in the report (2 planted `spoken` acts → 1 `measured`, 1 `addressee-risk`); a chapter that names nobody still files its narration act and is **named** in the report — 1 chapter named for naming nobody, **3** named for reporting nothing, **0** findings, and re-filing the same act files nothing while the audit says exactly what it said before. **What the ladder turned out to require, and where it is stricter than §4.4's wording:** `measured` needs the cited line to name **exactly one** cast form, that form to resolve to the **addresser's** identity, and the addressee to be a **different** identity. §4.4 says only "it is not the person being spoken to", so a line whose one cast form belongs to a **third** person satisfies the plan's sentence and is refused by the build — planted, and it comes back `null` with the reason "neither party". A **self-address** whose two sides are already one identity therefore cannot be `measured` either: it reaches `reading-resolved` only if the book's markup states the link, and is otherwise named unlevelled. `addressee-risk` is checked **before** the guide rung, because a line whose one cast form belongs to the addressee is a wrong answer the markup cannot overrule, and the same failure seen from the other side — `formUsed` is itself a form of the addressee — is the same level with `via: "form"`. `reading-resolved` rests only on a link the record already holds, so it does **not** need a verified line, which is what the door's own precondition agrees with. Nothing firing is **not filed** and there is **no fallback level**: every failed rung is listed in order (3 of them in the planted case). The gap levels come straight from the entry shape — the ladder is never asked of `narration` or `withheld` — and all three file with a null addresser, naming a **party kind** instead of a name, with **0** roster entries and **0** identities invented. **The wall is slice 2's and slice 3's wall, now measured where a reading pass actually hits it:** on a copy of volume 17's record — 196 roster entries, **0** identities, 0 written forms, because the identity door is still unwired — 4 planted acts produce **1 filed** (the narration one, which needs no person), **1 named limit** (`relation-party-not-in-an-identity`, the addressee is on the roster and unlinked) and **2 unlevelled**, with `cast` 196 → 196, identities 0 → 0, links 0 → 0 and `facts` 2,063 → 2,063. On the corpus as it stands, **only an act that names no person can file**; every act naming a roster name is a named limit until §6.8 is answered and the identity door is wired (§10.9's question, the owner's). **The isolation guard had to be re-scoped, not widened**, and the re-scope is the honest one: 25 protected module layers keep the whole ban, while `rebuild.js` and `extraction-adapter.js` move into a named `RELATION_AWARE_MODULES` allow-list under a narrower whole-word ban, a ban on reaching inside `relations/rows.js` / `file.js` / `shapes.js`, and the table-read ban kept — with a **tree-wide scan** proving **0 unnamed producers** over 449 pipeline files, which is what stops the allow-list from being a loophole. **Nothing else notices:** two identical fixture records, the acts filed in one, come back with the same claims, characters, refusals and candidate copies, every table identical row for row except `relations`, a **byte-identical** published reference, identical audit findings and an identical known-facts block. **Every call baseline unmoved** — 82 / 17 and 28 / 6, **0 on the second pass in both**, prompt audit 23 / 0 — and all **17 corpus digests plus 17 + 17 sidecars unchanged**. What moved is prompt size: the largest `voice-extract` prompt **14,702 → 16,964** characters in the main loop and **14,636 → 16,898** in the chunked one, which is the price of asking for the act in the same call rather than paying for a second one; `acceptance` unmoved at 12,103 / 12,916. **One deviation from the slice's own brief, reported:** the reading pass already names a chapter that names nobody, so `character-voice/reading/volume.js` and `reading/read-report.js` were left untouched and the per-chapter relation facts come from the contract's own report plus a new `addressed —` line in `assemble.js` — a second place saying the same thing would be two places to keep in step. |
-| **5** | **Normalise, teach, then show.** Ruby stripping before quote comparison; the markdown parsers taught; only then the annotated view, built from **§2.12's second row** — the renames plus a guide the author applies every single time and the series uses at most twice. | The wrong order is proven to be the wrong order: a test shows a parser meeting un-taught markup glues a line onto a published claim's body, and shows the taught parser not doing so. The annotated view adds the §2.12 set (4,808 forms / 6,739 occurrences, +192,251 characters measured) and nothing else, and a quote copied out of an annotated chapter still verifies against the guide-free stored text. |
+| **5** | **BUILT 2026-10-15 — normalise, teach, then show, in that order.** `utils/reference-store/ruby-markup.js` is now the store's **one** rule about HTML ruby: strip (`<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>` → 蒲田, by guide-tag depth, so nested ruby works and an unbalanced tag keeps the word), build (the one shape `<ruby>蒲田<rt>かまた</rt></ruby>`, and `RUBY_MARKUP_OVERHEAD_CHARS` = 22 so a view's price is computable), recognise (`hasRubyMarkup` / `rubyMarkupUnitCount`). It is a **pure leaf** requiring nothing but the types, and its tag vocabulary is **pinned equal to the converter's** `RUBY_GUIDE_TAGS` by a test rather than imported, because `utils/source/html.js` loads `cheerio` at require time (gotcha 119's reason). **Normalise:** the strip is wired into `normalizeQuote` and `quoteSkeleton`, so every citation door in the repository — `insertFact`, `verifyStoredEvidence`, the two revision doors, the confirmation door, the span-close door — strips a guide before it compares, and `prepareQuoteForSearch` / `verifyEvidenceItem` / `verifyEvidence` / `searchSpans` / `findQuoteEvidence` all report **`markupStripped`**. **Teach:** `parseVoiceMarkdown` (a heading is the word, a guide on its own line is **not** a continuation of the claim above it, a markup-bearing bullet is kept verbatim and named → `annotatedLines`), `glossaryTermSpans` in **both** readers (`glossary-adapter/parse.js` and `glossary/carry-forward/table.js`, which now requires the leaf) stripping **before** splitting on `/`, and `parseGlossaryMarkdown` stripping a `## ` label and reporting `annotatedRows`. **Then show:** `written-forms/view/select.js` (`VIEW_MAX_USES_PER_VOLUME = 2`, three guards, the rename half supplied by the caller), `view/render.js` (one longest-match scan over the input, never over its own output), `view/chapter.js` (the door a caller would use). **No stage calls it** — 0 callers outside the layer, pinned by a tree walk — 0 model calls, no new table, no schema bump (13), no finding kind (70), no level, no freeze door (12), no command, no npm script, no setting, no knob, no verb on the store's handle. | The wrong order is proven to be the wrong order: a test shows a parser meeting un-taught markup gluing a line onto a published claim's body, and shows the taught parser not doing so. The annotated view adds the §2.12 set (4,808 forms / 6,739 occurrences, +192,251 characters measured) and nothing else, and a quote copied out of an annotated chapter still verifies against the guide-free stored text. |
+| **5 — verdict** | **Half met, and the acceptance line's own number is wrong** (measured 2026-10-15: `test/test-annotated-view.js` **203 checks**, `test/measure-annotated-view.js`, 0 model calls). **Met.** The wrong order is proven to be the wrong order: the suite prints the glued shape — a published claim body reading `「…！」 <ruby>蒲田<rt>かまた</rt></ruby> is named here with its guide.` — beside the taught parser recording that same line as `line-not-glued`, **and an ordinary wrapped line is still glued**, so the rule is about markup and not about continuation. A quote copied out of an annotated chapter verifies **verbatim** against the guide-free fixture chapter with `markupStripped: true`; a forged quote carrying markup is still refused; the wrong line number is still refused, with the right line named. `stripRubyMarkup(annotate(text)) === text` holds on **all 133 real chapters** (0 failures), and the corpus is untouched (17 digests unmoved, 34 sidecars intact, **0** written-forms rows in the corpus's own record, which is at schema 8 and has no such table). **Not met — and it is §2.12's row that needs correcting, in three places.** (1) **The character column is not reproducible from any markup shape this repository could emit.** One annotation costs `<ruby></ruby>` + `<rt></rt>` = 22 characters plus the reading; over §2.12's own 6,739 occurrences that is **176,271**, not 192,251, and a search over per-occurrence / per-piece / per-reading-character costs and six alternative markup shapes found **no** model fitting all four of §2.12's rows (best fit 20·occurrences + 2·characters, 1.7% worst error). (2) **"the series uses that word no more than twice" is not a series-wide count**: counted per volume the always-guided-within-the-bound set is **4,712** pairs / 5,830 occurrences — **4,606 / 5,706** once the 202 renames are taken out, which is where 4,808 comes from, as the union — while counted across the whole series it is **1,898** pairs (1,831 without the renames). (3) **The equality guard is load-bearing and §2.12 does not carry it.** The extracted text records no guide **positions**, so a form guided fewer times than the volume prints it cannot be annotated at every printed occurrence without inventing guides: **2,532 forms, 21,082 guided against 64,326 printed — annotating them all would print 43,244 guides the author never wrote** — over the whole harvest, before the store's row guards, the same rule is **3,322 of the 9,663 pairs, 26,178 guided against 100,354 printed, 74,176 invented** — and the clearest case is §2.12's own headline rename, 三色院菫子 guided パンジー 18 times against 646 printed, because a rename happens *at a point in the story*. **What the shipped door actually produces:** **4,497 (volume, form) pairs / 5,546 guided occurrences / +145,054 characters (5.92% of 2,450,316)**, of which **98 pairs / 123 occurrences** are renames the caller named; refusals **215 guided several ways / 2,532 not guided every time / 1,440 used more than twice**; the rendered set over 133 chapters equals the selected set exactly. **And the rename half is not a rule this layer holds.** §2.12's renames are "a Han word guided with a reading written in one particular foreign script", and only a **katakana**-keyed classification reproduces §2.12's 202 pairs / 1,033 occurrences — every script-neutral alternative selects 3,069–9,642 pairs — so the classification is **caller-supplied data** (`renameForms`), which the measurement supplies from the record's own `reading_script` column, while `select.js` names no writing system (pinned by a scan, and by `test/test-no-language-axis-list.js` at **0 findings** over 453 pipeline files). Whether that classification belongs to the plan of record, to a stage, or to nobody is **§6 question 11**, the owner's, and it is written in `/tmp/opencode/plan07-slice5-questions.md` rather than decided here. **And one bullet of §4.6 is not built:** no prompt file mentions ruby (0 of the 43 in `system-prompts/` and `user-prompts/`), so the instruction "quote the word as printed, without the reading" is not in any prompt — it becomes necessary only once a model is *shown* an annotated chapter, which is §6.6's decision. **Every number in this verdict is printed by `test/measure-annotated-view.js`**, which now recomputes §2.12's four rows from the 17 harvests, prices each with the markup shape the renderer emits, and **fails its own run** if row 2 stops reproducing 4,808 / 6,739 (1.4 s, 0 model calls, 17 digests unmoved). |
 | **6** | **The glossary labels, and a render-only door.** Rename the heading to **`Original` / `Translated`** (the owner's wording), add the door that re-renders a published glossary from its record with 0 model calls, and re-render the 17 files. | The render is compared against what is on disk **before** anything is replaced, and every row that disappears is named with the rule that refused it. No sealed row is edited. The freeze gate is not asked to excuse anything. |
 | **7** | **Source-language notes, and the re-taught agenda.** Built and pinned; not run for real. | A fixture glossary renders with source-language notes. The settlement agenda still finds its candidates against source-language notes — measured, not assumed. The paid run is explicitly not taken. |
 
@@ -791,6 +864,9 @@ only of descriptions and first-person pronouns is an identity link (**record the
 what to do with the 79 unselected groups (**note the 25 spelling variants, judge the 54 case by case, file
 nothing**); and how wide the roster match has to be (**not widened at all** — the three near misses are a
 small-kana fold the store already has and already reports, missing one table entry, §2.11).
+**Slice 5 built the view this paragraph answers and corrected its arithmetic** (§2.12's correction, §5's
+slice-5 verdict): the decision stands, the numbers in it do not, and the built row is 4,497 pairs / 5,546
+occurrences / +145,054 characters.
 
 Still open:
 
@@ -841,6 +917,24 @@ Still open:
    アリーヴェデルチ → さよなら). The chosen rule catches them, but they are not pronunciation, and showing
    them as ruby is a different thing from showing a reading. Markup, note, or nothing, is worth deciding
    before slice 5 is built.
+   **Slice 5 is built (2026-10-15), and it settles the cost while leaving the destination open.** The markup
+   exists — `renderAnnotatedChapter` prints `<ruby>form<rt>reading</rt></ruby>` over a chapter — and **no stage
+   calls it** (0 callers outside the layer, pinned by a tree walk), so the translator is shown nothing today and
+   "as what" is still the owner's to answer. What the slice measured is what each option costs. The shipped rule
+   annotates a written form **only where the author guides that form every single time it appears in that
+   volume**: **4,497 (volume, form) pairs, 5,546 occurrences, +145,054 characters — 5.92% of the 2,450,316 the
+   series holds** (§2.12 printed 4,808 / 6,739 / +192,251 = 7.8%; the gap is measured and named in §5's slice-5
+   verdict, and it is a correction to this plan's arithmetic, not to the rule). Of that price, **122,012
+   characters are the markup itself** (5,546 annotations × 22) and **23,042 are the readings the author wrote**
+   — 0.94% of the source. The phrase glosses §2.12 is
+   worried about **are in that set** — they are exactly the always-guided, at-most-twice forms — and what the
+   markup cannot do is tell a **reading** from a **meaning**: the tag is the same tag, and the only thing that
+   can is the rename list, which is item 11. So the honest options are: **(A)** the view as built, available to
+   a person and wired to nothing; **(B)** wire it into the translator's chapter block, which pays +5.92% on
+   every chapter prompt and prints a gloss as if it were a pronunciation; **(C)** wire it only for the
+   caller-named renames — **98 pairs / 123 occurrences** on this corpus today, which is **2,706 markup
+   characters plus the readings** across the whole series, the narrowest thing that still tells the translator
+   "this name means this" and the option this slice recommends.
 7. **ANSWERED 2026-10-15 — what the written-forms door files: every guide row, and the group question by
    query.** Slice 1 was built on the narrowest reading — each volume files its own harvest's candidate groups — and
    §2.13 measures what that costs: **240 rows / 57 groups**, against the **634 rows / 97 groups** the
@@ -915,3 +1009,20 @@ Still open:
    concrete:** wiring the identity door is no longer a question about a table nothing reaches — it is the
    difference between the acts of address a run already pays to read being filed and being thrown away. It is
    still the owner's, and it is still item 3's / item 8's.
+11. **Who owns the rename list — the one rule in this layer that names a writing system.** Slice 5's view needs
+   to know which guided forms are **renames** (a name the author changes by writing a reading over it — 三色院菫子
+   → パンジー, 玄武 → ジヨーロ) rather than ordinary pronunciation guides, because a rename is the only case where
+   "at most twice" is the wrong bound: 三色院菫子 is guided 18 times series-wide and 16 of them sit in volume 15.
+   The obvious rule — *the reading is written in a different script from the form it sits on* — is the only one
+   measured that reproduces §2.12's rename half (**202 (volume, form) pairs / 1,033 occurrences**), and it is a
+   rule about **katakana**, which is why this slice did not put it in code: `test/test-no-language-axis-list.js`
+   exists to keep a language out of the pipeline, and every other rule in this layer is script-neutral (the same
+   view runs on a Cyrillic fixture). So the classification is **supplied by the caller** through
+   `renameForms`, and `test/measure-annotated-view.js` derives it from each row's own `reading_script` and hands
+   it in. The options: **(A)** what is built — the caller supplies the list, the door names no script, and a
+   series in another writing system supplies its own; **(B)** put the script test in `view/select.js`, which is
+   one function that names katakana inside a layer 453 files are scanned for never naming a language; **(C)**
+   replace the bound itself — annotate every form guided every time regardless of count — which needs no rename
+   list at all and costs the 1,440 (volume, form) pairs the bound refuses. **Recommendation: keep A**, and if the
+   list should be derived rather than typed, derive it in the **measurement** and keep the door script-neutral;
+   (C) is the option to reach for if the owner wants the view wired without ever maintaining a list.

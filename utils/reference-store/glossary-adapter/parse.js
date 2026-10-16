@@ -14,6 +14,8 @@
 
 require("../../../types"); // JSDoc type definitions
 
+const { stripRubyMarkup, hasRubyMarkup } = require("../ruby-markup");
+
 /**
  * Split a term cell into the spellings it names.
  *
@@ -22,11 +24,18 @@ require("../../../types"); // JSDoc type definitions
  * had to learn to compare at this resolution (gotcha 64). The importer keeps the cell as
  * written and searches each spelling for the evidence.
  *
+ * **Ruby markup is taken off before the cell is split** (plan 07 §4.6). A closing tag carries a `/` of its
+ * own, so splitting first cuts the unit to pieces:
+ * `<ruby>偽物<rt>にせもの</rt></ruby> / 偽者` becomes `<ruby>偽物<rt>にせもの<`, `rt><`, `ruby>` and `偽者`,
+ * and three of those are not spellings of anything — they are fragments of a tag pair, which the evidence
+ * rule would then search for as if they were words. Stripping first gives the two spellings the cell actually
+ * names.
+ *
  * @param {string} cell
  * @returns {string[]}
  */
 function glossaryTermSpans(cell) {
-  return String(cell || "")
+  return stripRubyMarkup(cell)
     .split("/")
     .map((span) => span.replace(/^`+|`+$/g, "").replace(/^\*+|\*+$/g, "").replace(/^_+|_+$/g, "").trim())
     .filter((span) => span.length > 0);
@@ -63,14 +72,20 @@ function isSeparatorRow(cells) {
  * reproduce the document (review 05 §3.4).
  *
  * @param {string} markdown
- * @returns {{rows: Array<{term: string, rendering: string, notes: string, section: string}>, title: string|null, preamble: string[], proseBlocks: Array<{section: string|null, kind?: "title", lines: string[]}>, unplacedProse: Array<{section: string, text: string}>}}
+ * @returns {{rows: Array<{term: string, rendering: string, notes: string, section: string}>, title: string|null, preamble: string[], proseBlocks: Array<{section: string|null, kind?: "title", lines: string[]}>, unplacedProse: Array<{section: string, text: string}>, annotatedRows: Array<{term: string, section: string, columns: string[]}>}}
  *   `unplacedProse` is prose the file carries AFTER a section's table: this renderer has nowhere
  *   to put it, so it is reported instead of quietly dropped.
+ *   `annotatedRows` names every row that carries pronunciation markup and which of its columns carry it
+ *   (plan 07 §4.6): the cells are kept verbatim because a renderer that rewrites a published row is doing
+ *   the thing this parser exists to notice, and a row that carried markup without being named is the
+ *   "no finding and no count that moves" failure the plan warns about.
  */
 function parseGlossaryMarkdown(markdown) {
   const rows = [];
   const proseBlocks = [];
   const unplacedProse = [];
+  /** @type {Array<{term: string, section: string, columns: string[]}>} */
+  const annotatedRows = [];
   let currentBlock = { section: null, lines: [], closed: false };
   let tablePhase = false;
   let title = null;
@@ -104,12 +119,20 @@ function parseGlossaryMarkdown(markdown) {
     for (const cells of data) {
       const term = cells[0] || "";
       if (!term || isSeparatorRow([term])) continue;
-      rows.push({
-        term,
-        rendering: cells[1] || "",
-        notes: cells.slice(2).join(" | ").trim(),
-        section,
-      });
+      const rendering = cells[1] || "";
+      const notes = cells.slice(2).join(" | ").trim();
+      // The cells are kept exactly as the file wrote them. What is reported is which of them carry
+      // pronunciation markup, so a row that reaches a published glossary with a guide inside it is named
+      // in the import result instead of being silently rewritten or silently dropped.
+      const markupColumns = [
+        ["term", term],
+        ["rendering", rendering],
+        ["notes", notes],
+      ]
+        .filter(([, value]) => hasRubyMarkup(value))
+        .map(([name]) => name);
+      if (markupColumns.length) annotatedRows.push({ term, section, columns: markupColumns });
+      rows.push({ term, rendering, notes, section });
     }
     tableRows = [];
   };
@@ -120,7 +143,10 @@ function parseGlossaryMarkdown(markdown) {
     if (heading) {
       flush();
       closeBlock();
-      section = heading[1].replace(/\*\*/g, "").trim();
+      // A section heading is a label, and a guide over a label is not part of the label: the section name
+      // the rows are filed under is the guide-free one, so a markup-bearing heading cannot split one
+      // section into two.
+      section = stripRubyMarkup(heading[1]).replace(/\*\*/g, "").trim();
       currentBlock = { section, lines: [], closed: false };
       tablePhase = false;
       continue;
@@ -156,7 +182,7 @@ function parseGlossaryMarkdown(markdown) {
   const opening = proseBlocks.find((block) => block.section === null) || { section: null, lines: [] };
   const preamble = title === null ? opening.lines : opening.lines.slice(1);
 
-  return { rows, title, preamble, proseBlocks, unplacedProse };
+  return { rows, title, preamble, proseBlocks, unplacedProse, annotatedRows };
 }
 
 module.exports = {
