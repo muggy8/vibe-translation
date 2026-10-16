@@ -366,7 +366,7 @@ function materializeBundle(meta, { originalPath, volumeDir, cacheHit }) {
     imagesDir: (meta.images || []).length > 0 ? path.join(volumeDir, "images") : null,
     wholeChars: meta.wholeChars || 0,
     scriptMix: meta.scriptMix || null,
-    // The pronunciation guides this volume's extraction set aside (utils/source/ruby-guides.js).
+    // The pronunciation guides this volume's conversion annotated (utils/source/ruby-guides.js).
     // `rubyGuidesPath` is the file to open to ask "what did the author say this word is read as";
     // null on a plain-text source or a cache written before schema 7.
     rubyGuidesPath: meta.rubyGuides && meta.rubyGuides.file ? path.join(volumeDir, meta.rubyGuides.file) : null,

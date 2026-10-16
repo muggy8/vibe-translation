@@ -105,7 +105,7 @@ function renderVolumeReport(record) {
     `**${c.HIGH > 0 ? "HIGH FINDINGS" : c.MEDIUM > 0 ? "MEDIUM FINDINGS" : "CLEAN"}** — ` +
       `${c.HIGH} HIGH, ${c.MEDIUM} MEDIUM · ${c.chapters} chapter(s), ${c.packaging} packaging group(s), ` +
       `${c.characters.toLocaleString("en-US")} characters, ${c.guides.toLocaleString("en-US")} pronunciation ` +
-      `guide(s) set aside, ` +
+      `guide(s) kept in the text, ` +
       `${c.images} image(s)`
   );
   lines.push("");
@@ -253,7 +253,7 @@ function renderSeriesSummary({ records, seriesName }) {
       `${records.length} volume(s), ${totals.chapters} chapter(s), ${totals.packaging} packaging group(s), ` +
       `${totals.characters.toLocaleString("en-US")} characters, ${totals.guides.toLocaleString("en-US")} ` +
       `pronunciation guide(s) ` +
-      `set aside, ${totals.images} image(s) · ${totals.HIGH} HIGH, ${totals.MEDIUM} MEDIUM` +
+      `kept in the text, ${totals.images} image(s) · ${totals.HIGH} HIGH, ${totals.MEDIUM} MEDIUM` +
       (totals.failed ? `, ${totals.failed} volume(s) could not be read` : "")
   );
   lines.push("");

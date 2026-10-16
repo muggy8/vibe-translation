@@ -40,10 +40,10 @@ const { writeRubyGuideFile, findRubyGuideSplitForms } = require("./ruby-guides")
  * @property {string} heading - The page's OWN heading, kept separate from the fallback chain.
  * @property {string} bodyClass
  * @property {boolean} declaresPackaging - The page declaring what it IS (cover plate, contents, notice, colophon).
- * @property {number} textChars - Characters of story text (Markdown markup excluded).
+ * @property {number} textChars - Characters of story text (Markdown markup and pronunciation guides excluded).
  * @property {boolean} declaredInNav - Whether the book's contents list named this page.
  * @property {string} md
- * @property {RubyGuide[]} guides - The pronunciation guides this page's conversion set aside.
+ * @property {RubyGuide[]} guides - The pronunciation guides this page's conversion wrote over its words.
  */
 
 /**
@@ -51,7 +51,7 @@ const { writeRubyGuideFile, findRubyGuideSplitForms } = require("./ruby-guides")
  * @property {string} title
  * @property {string} body
  * @property {boolean} syntheticTitle - True when the title is ours rather than the book's.
- * @property {RubyGuide[]} guides - The guides the pages in this group had set aside.
+ * @property {RubyGuide[]} guides - The guides the pages in this group carried.
  * @property {boolean} declaresPackaging - True when EVERY page in this group declared itself packaging
  *   (a cover plate, an inserted illustration, the colophon). Under the normal path a group like this is
  *   never a chapter, so it is false for every chapter the pipeline normally produces; it is true only on
@@ -91,9 +91,9 @@ async function readSections(opened, registry) {
     const zipPath = item.zipPath;
     const html = await zip.file(zipPath).async("string");
     const $ = cheerio.load(html);
-    // The guides this page's conversion removes, collected BY the conversion. A second walk of
+    // The guides this page's conversion wrote over its words, collected BY the conversion. A second walk of
     // the same page looking for <ruby> would be a second rule about what a guide is, and the two
-    // would drift; the harvest is whatever the converter actually took out.
+    // would drift; the harvest is whatever the converter actually annotated.
     /** @type {RubyGuide[]} */
     const guides = [];
     // The page's OWN heading, kept separate from the fallback chain: a group the contents list did
@@ -374,12 +374,17 @@ async function writeChapterFiles(base, volumeDir, chapterGroups) {
     // for "kanji followed by hiragana", which fires on ordinary Japanese constantly — is what makes the
     // check exact. The answer is persisted on the segment so the audit can report it without opening the
     // book again, and so a cache hit re-reports the same answer for free.
+    //
+    // SINCE PLAN 09 THE CONVERTER CANNOT PRODUCE THIS STRING: the base is written as one contiguous run, so
+    // 蒲かま田た is never assembled. What the tripwire now catches is a chapter file that was edited by hand
+    // into the old shape, or a source that prints the split string as ordinary text — and it stays a HIGH
+    // because either one means the text the stages are reading is not the text the book prints.
     const splitForms = findRubyGuideSplitForms(content, chapterGroups[i].guides || []);
     if (splitForms.occurrences > 0) {
       console.warn(
         `[source] ${base} ${ids[i]} ("${title}"): ${splitForms.occurrences} guide-split string(s) are still ` +
-          `in this chapter's text (${splitForms.forms.slice(0, 3).join(", ")}) — the converter is pasting ` +
-          `pronunciation guides back into the words they annotate.`
+          `in this chapter's text (${splitForms.forms.slice(0, 3).join(", ")}) — a word and its own ` +
+          `pronunciation guide are printed as one string, which is not the shape this converter writes.`
       );
     }
     segments.push({
@@ -546,15 +551,15 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
 }
 
 /**
- * Say out loud what the converter took out, and where the record of it is.
+ * Say out loud what the converter kept, and where the record of it is.
  *
- * This is the line an operator sees when a bundle is re-extracted because the converter changed:
- * the amount of text the previous converter pasted into the words it was supposed to keep.
+ * This is the line an operator sees when a bundle is re-extracted because the converter changed: how much of
+ * this book's text is a pronunciation guide the author printed, and which file holds the queryable copy of it.
  *
  * @param {string} base - The source base name, for the log line.
  * @param {{file: string, totals: RubyGuideTotals}} harvest - What was written.
- * @param {number} guidesOnPages - Guides removed across every readable page, chapters or not.
- * @param {number} wholeChars - Characters of the whole-volume text this extraction produced.
+ * @param {number} guidesOnPages - Guides carried by every readable page, chapters or not.
+ * @param {number} wholeChars - Characters of the whole-volume text this extraction produced, markup included.
  * @returns {void}
  */
 function reportRubyGuides(base, harvest, guidesOnPages, wholeChars) {
@@ -562,19 +567,18 @@ function reportRubyGuides(base, harvest, guidesOnPages, wholeChars) {
   if (t.guides === 0) {
     if (guidesOnPages > 0) {
       console.warn(
-        `[source] ${base}: ${guidesOnPages} pronunciation guide(s) were removed but NONE landed in a ` +
+        `[source] ${base}: ${guidesOnPages} pronunciation guide(s) were annotated but NONE landed in a ` +
           `chapter — every page that carried one was classified as packaging.`
       );
     }
     return;
   }
-  const pasted = t.guideChars + wholeChars;
+  const share = wholeChars > 0 ? ((t.guideChars / wholeChars) * 100).toFixed(1) : "0.0";
   console.log(
-    `[source] ${base}: set aside ${t.guides} pronunciation guide(s) — ${t.guideChars} character(s), ` +
-      `${((t.guideChars / pasted) * 100).toFixed(1)}% of what this book's text used to be, that the ` +
-      `previous converter pasted into the words they annotate. ${t.distinctWords} distinct word(s) ` +
-      `(${t.wordsGuidedInKatakana} guided in katakana, ${t.wordsWithMoreThanOneReading} guided more ` +
-      `than one way) harvested to ${harvest.file}.`
+    `[source] ${base}: kept ${t.guides} pronunciation guide(s) in the text as ruby markup — ` +
+      `${t.guideChars} character(s) of reading, ${share}% of this book's ${wholeChars} characters. ` +
+      `${t.distinctWords} distinct word(s) (${t.wordsGuidedInKatakana} guided in katakana, ` +
+      `${t.wordsWithMoreThanOneReading} guided more than one way) harvested to ${harvest.file}.`
   );
   if (guidesOnPages > t.guides) {
     console.log(

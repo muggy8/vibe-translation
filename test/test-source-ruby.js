@@ -1,5 +1,6 @@
 /**
- * test/test-source-ruby.js — the pronunciation guide is not part of the word (no AI, no network).
+ * test/test-source-ruby.js — the pronunciation guide stays over the word, and the word stays whole
+ * (no AI, no network).
  *
  * A Japanese book marks how a word is read with a guide nested inside the word's own markup:
  *
@@ -8,19 +9,23 @@
  * The converter used to treat <ruby> as an ordinary container, so the extracted text read
  * 蒲かま田た — the word and its own guide as one string. Measured on the live series that is
  * 45,497 annotations and 146,352 characters, and 193 published glossary terms are already split
- * strings of that shape. These fixtures pin the five things that have to be true now:
+ * strings of that shape. The 2026-10-12 fix took the guide OUT; plan 09 (2026-10-16) puts it back in a
+ * shape that cannot split the word, and these fixtures pin the six things that have to be true now:
  *
- *   1. the word alone, in place, in BOTH converters — the intake measures one book and the stages
- *      read another if they disagree, which is the class of bug gotcha 119 records;
- *   2. every guide that was set aside is harvested beside the bundle, in a file a later query can
- *      answer "what did the author say this word is read as" from;
- *   3. the harvest records each annotation AS IT WAS ANNOTATED — 蒲 carrying かま, then 田 carrying た —
+ *   1. the word contiguous and the reading over it, in place, in BOTH converters — the intake measures
+ *      one book and the stages read another if they disagree, which is the class of bug gotcha 119 records;
+ *   2. the split string the old converter produced is written by NOTHING in this code, so it appears 0
+ *      times in a legitimate extraction;
+ *   3. every guide the conversion annotated is harvested beside the bundle, in a file a later query can
+ *      answer "what did the author say this word is read as" from — and the harvest is UNCHANGED by the
+ *      markup, because it is built by `splitRuby`, not by the renderer;
+ *   4. the harvest records each annotation AS IT WAS ANNOTATED — 蒲 carrying かま, then 田 carrying た —
  *      because the joined pair alone cannot say which character carried which reading, and without that
  *      answer nothing can rebuild 蒲かま田た in order to look for it. That is why the guide-split
  *      tripwire was deferred, and what harvest schema 2 un-defers;
- *   4. the extraction cache actually invalidates, because the converter's behaviour is NOT part of
+ *   5. the extraction cache actually invalidates, because the converter's behaviour is NOT part of
  *      the cache key — BUNDLE_SCHEMA_VERSION is the only thing that is;
- *   5. the new side file in the volume folder is never mistakable for a book.
+ *   6. the new side file in the volume folder is never mistakable for a book.
  *
  * Run: node test/test-source-ruby.js
  */
@@ -83,7 +88,12 @@ function bothWays(html) {
 }
 
 /**
- * Assert the two converters set aside the SAME guides from the SAME document, in the same order.
+ * Run one document through BOTH converters and assert they agree, guide for guide and word for word.
+ *
+ * Both halves are compared everywhere this helper is used: the ruby rule is stated once, and a test that
+ * only checked one converter would let the other drift. Since plan 09 the two texts are compared directly
+ * — both converters write the same ruby markup, so a disagreement is no longer something the comparison
+ * has to see through.
  *
  * @param {string} html
  * @param {string} label
@@ -91,7 +101,7 @@ function bothWays(html) {
 function assertConvertersAgree(html, label) {
   const a = bothWays(html);
   assert.deepStrictEqual(a.mdGuides, a.plainGuides, `${label}: the two converters harvested different guides`);
-  // The Markdown side carries markup the plain side does not; strip it to compare the TEXT.
+  // The Markdown side adds heading/list syntax and image references; the ruby markup must be identical.
   const mdText = a.md.replace(/^#{1,6}\s+.*$/gm, "").replace(/!?\[[^\]]*\]\([^)]*\)/g, "").trim();
   assert.strictEqual(mdText, a.plain.trim(), `${label}: the two converters produced different text`);
   return a;
@@ -101,7 +111,7 @@ function assertConvertersAgree(html, label) {
 
 {
   const a = assertConvertersAgree(`<html><body><p>${RUBY_SENTENCE}</p></body></html>`, "one sentence");
-  assert.strictEqual(a.md, "彼は蒲田を見た。", `the guide is gone and the word is not: ${a.md}`);
+  assert.strictEqual(a.md, "彼は<ruby>蒲田<rt>かまた</rt></ruby>を見た。", `the word is contiguous and the reading sits over it: ${a.md}`);
   assert.ok(!a.md.includes("蒲かま田た"), "the guide-split string the old converter produced is absent");
   assert.deepStrictEqual(
     a.mdGuides,
@@ -116,17 +126,21 @@ function assertConvertersAgree(html, label) {
         ],
       },
     ],
-    "the guide that was removed is reported, WITH the order it was annotated in"
+    "the guide the conversion annotated is reported, WITH the order it was annotated in"
   );
   assert.deepStrictEqual(
     a.mdGuides[0].annotated.map((u) => `${u.base}${u.reading}`).join(""),
     "蒲かま田た",
     "and the sequence is enough to rebuild the string the old converter produced — which is the whole point of recording it"
   );
-  ok("a guided word extracts as its base text only, in place, and is harvested as it was annotated");
+  ok("a guided word extracts as the whole word with its reading over it, and is harvested as it was annotated");
 
   const whole = assertConvertersAgree(RUBY_DOC, "multi-paragraph document");
-  assert.strictEqual(whole.md, "彼は蒲田を見た。\n\n上機嫌な三色院が笑った。", `every guide is out and every paragraph survives: ${whole.md}`);
+  assert.strictEqual(
+    whole.md,
+    "彼は<ruby>蒲田<rt>かまた</rt></ruby>を見た。\n\n<ruby>上機嫌<rt>じようきげん</rt></ruby>な<ruby>三色院<rt>パンジー</rt></ruby>が笑った。",
+    `every guide is over its own word and every paragraph survives: ${whole.md}`
+  );
   assert.strictEqual(whole.mdGuides.length, 3, "three guides, three reports");
   assert.deepStrictEqual(
     whole.mdGuides.map((g) => `${g.base}→${g.reading}`),
@@ -152,8 +166,8 @@ function assertConvertersAgree(html, label) {
 
   // A guide is inline: it must not split the sentence it sits inside.
   const inline = bothWays(`<html><body><p>前に<ruby>赤<rt>あか</rt></ruby>後に<ruby>青<rt>あお</rt></ruby></p></body></html>`);
-  assert.strictEqual(inline.md, "前に赤後に青", "a guided word stays glued to its sentence");
-  assert.strictEqual(inline.plain, "前に赤後に青", "and so it stays in the intake's text too");
+  assert.strictEqual(inline.md, "前に<ruby>赤<rt>あか</rt></ruby>後に<ruby>青<rt>あお</rt></ruby>", "a guided word stays glued to its sentence");
+  assert.strictEqual(inline.plain, "前に<ruby>赤<rt>あか</rt></ruby>後に<ruby>青<rt>あお</rt></ruby>", "and so it stays in the intake's text too");
   ok("a guide never breaks the paragraph it sits in");
 
   // ruby reached as a block-level child (not inside a <p>) takes the same rule.
@@ -161,7 +175,7 @@ function assertConvertersAgree(html, label) {
     `<html><body><div class="main"><ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby></div></body></html>`,
     "ruby as a block child"
   );
-  assert.strictEqual(blockish.md, "蒲田", "the block path applies the same rule");
+  assert.strictEqual(blockish.md, "<ruby>蒲田<rt>かまた</rt></ruby>", "the block path applies the same rule");
   ok("the rule holds whether the ruby is inline or a block-level child");
 
   // The other ruby subtags: <rb>/<rbc> are the word, <rt>/<rtc>/<rp> are the guide.
@@ -169,7 +183,7 @@ function assertConvertersAgree(html, label) {
     `<html><body><p>前<ruby><rb>蒲</rb><rb>田</rb><rt>かま</rt><rt>た</rt></ruby>後</p></body></html>`,
     "explicit ruby base"
   );
-  assert.strictEqual(full.md, "前蒲田後", "an explicit <rb> ruby base is the word");
+  assert.strictEqual(full.md, "前<ruby>蒲田<rt>かまた</rt></ruby>後", "an explicit <rb> ruby base is the word, and the reading goes over it");
   assert.strictEqual(full.mdGuides[0].reading, "かまた", "and the guides beside it are the reading");
   assert.deepStrictEqual(
     full.mdGuides[0].annotated,
@@ -180,23 +194,37 @@ function assertConvertersAgree(html, label) {
   ok("<rb>/<rbc> are the word; <rt>/<rtc>/<rp> are the guide");
 
   const paren = bothWays(`<html><body><p><ruby>蒲<rp>(</rp><rt>かま</rt><rp>)</rp></ruby></p></body></html>`);
-  assert.strictEqual(paren.md, "蒲", "the fallback brackets a browser would show are not text either");
-  ok("<rp> fallback punctuation is set aside too");
+  assert.strictEqual(paren.md, "<ruby>蒲<rt>(かま)</rt></ruby>", "the fallback brackets a browser would show are part of the reading, not of the word");
+  assert.strictEqual(paren.mdGuides[0].base, "蒲", "and the word is still the word");
+  ok("<rp> fallback punctuation belongs to the guide, not to the word");
 
-  // Malformed markup must not lose a word: a guide with no base is the only text there is.
+  // Malformed markup must not lose a word: a guide with no base is the only text there is, and an empty
+  // <ruby> is not markup — plan 09 §4.1 says so out loud.
   const orphan = bothWays(`<html><body><p>前<ruby><rt>だけ</rt></ruby>後</p></body></html>`);
-  assert.strictEqual(orphan.md, "前だけ後", "a ruby with no base keeps its guide rather than deleting it");
-  ok("a malformed ruby loses nothing");
+  assert.strictEqual(orphan.md, "前だけ後", "a ruby with no base emits its reading as plain text");
+  assert.ok(!orphan.md.includes("<ruby>"), "and writes no markup over nothing");
+  assert.strictEqual(orphan.plain, "前だけ後", "the intake's converter does the same");
+  ok("a malformed ruby loses nothing, and a guide with no base is plain text");
 
-  // A heading with a guide must match the body the converter produced, or the chapter file prints
-  // its own heading twice (stripRepeatedHeading compares them).
+  // A ruby base the author never guided: the word alone. `<ruby>蒲田<rt></rt></ruby>` is markup with
+  // nothing in it, which is a shape error, not a guide.
+  const unguided = bothWays(`<html><body><p><ruby><rb>蒲田</rb></ruby>を見た。</p></body></html>`);
+  assert.strictEqual(unguided.md, "蒲田を見た。", "a ruby with no guide is just the word");
+  assert.strictEqual(unguided.mdGuides.length, 1, "and the annotation is still reported");
+  assert.strictEqual(unguided.mdGuides[0].reading, "", "with no reading, which the harvest records as no reading");
+  ok("a ruby base the author never guided emits the bare word");
+
+  // A heading is a NAME, and three places compare it against the name the book's contents list gave the
+  // chapter (stripRepeatedHeading, writeChapterFiles' duplicate-heading strip, titleOfUnnamedSection).
+  // A name carrying markup matches no name that does not, so the heading stays guide-free — while the
+  // body under it keeps its guides.
   const headed = xhtmlToMarkdown(
     `<html><body><h1>【<ruby>俺<rt>おれ</rt></ruby>とあいつが出会うまで】</h1><p><ruby>俺<rt>おれ</rt></ruby>は行く。</p></body></html>`,
     (s) => s,
     () => {}
   );
-  assert.strictEqual(headed, "# 【俺とあいつが出会うまで】\n\n俺は行く。", "the heading is guide-free like the body under it");
-  ok("a chapter heading with a guide matches the body the converter produced");
+  assert.strictEqual(headed, "# 【俺とあいつが出会うまで】\n\n<ruby>俺<rt>おれ</rt></ruby>は行く。", "the heading is guide-free; the body under it keeps its guide");
+  ok("a chapter heading with a guide stays a name the contents list can be matched against");
 }
 
 // ─── 2. the harvest beside the bundle ────────────────────────────────────────
@@ -267,12 +295,15 @@ async function scenarioHarvest() {
 
   const meta = await extractEpubToBundle(path.join(volumeDir, sourceName), volumeDir, "ruby_series(1)");
 
-  // The text the stages read: no guides anywhere.
+  // The text the stages read: the words contiguous, the readings over them, the split string nowhere.
   const whole = await fs.promises.readFile(path.join(volumeDir, meta.wholeFile), "utf8");
-  assert.ok(whole.includes("蒲田"), "the word is there");
+  assert.ok(whole.includes("蒲田"), "the word is there, as one contiguous run");
+  assert.ok(whole.includes("<ruby>蒲田<rt>かまた</rt></ruby>"), "with the reading written over it");
+  assert.ok(whole.includes("<ruby>嬉<rt>うれ</rt></ruby>"), "and the same for a word guided in one piece");
   assert.ok(!whole.includes("蒲かま田た"), "the guide-split string is not");
   assert.ok(!whole.includes("嬉うれ"), "the guide was not pasted inside its own word");
-  ok("the bundle's text carries the words and none of the guides");
+  assert.strictEqual(meta.rubyGuides.splitForms, 0, "and the volume's own tripwire measurement says so");
+  ok("the bundle's text carries the words with their readings over them, and no split string");
 
   const file = rubyGuideFileName("ruby_series(1)");
   assert.strictEqual(file, "ruby_series(1)-ruby-guides.json");
@@ -485,10 +516,12 @@ async function scenarioSplitRule() {
 /**
  * The trap this scenario exists for: the bundle cache is keyed on the ARCHIVE's fingerprint plus
  * BUNDLE_SCHEMA_VERSION. The converter's behaviour is not in the key. Change the converter and
- * leave the version alone, and every volume keeps serving the guide-split text already on disk and
- * nothing about the change is visible anywhere.
+ * leave the version alone, and every volume keeps serving the guide-free text already on disk and
+ * nothing about the change is visible anywhere. That is exactly what happened on 2026-10-12 (gotcha 123),
+ * and it is why 8 → 9 is part of this slice rather than a detail.
  */
 async function scenarioCache() {
+  assert.strictEqual(BUNDLE_SCHEMA_VERSION, 9, "the bundle schema is 9: a schema-8 cache holds guide-free text, and the converter now writes markup");
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "ruby-cache-"));
   const volumeDir = path.join(dir, "Ruby Series(01)");
   await fs.promises.mkdir(volumeDir, { recursive: true });
@@ -540,16 +573,16 @@ async function scenarioCache() {
   assert.ok(staleLine, `the operator was told the cache was stale:\n${logs.join("\n")}`);
   assert.ok(staleLine.includes(`${BUNDLE_SCHEMA_VERSION - 1} → ${BUNDLE_SCHEMA_VERSION}`), `the line names both versions: ${staleLine}`);
   assert.ok(staleLine.includes(SCHEMA_CHANGE_NOTE), `the line names what changed: ${staleLine}`);
-  // The harvest line is matched on the volume's OWN name, not on the words "set aside": the staleness
-  // message quotes SCHEMA_CHANGE_NOTE, which says the same thing in the past tense. A test that looked
-  // for "set aside" found the wrong line and then asserted a character count against a sentence that
-  // has no number in it.
-  assert.ok(staleLine.includes("set aside"), "the staleness message says what changed, in the same words");
-  const guideLine = logs.find((l) => l.includes(`${sourceBase}: set aside`));
-  assert.ok(guideLine, `the operator was told how much text the guides were: ${logs.join("\n")}`);
-  assert.ok(/character\(s\)/.test(guideLine), `the line carries the character count: ${guideLine}`);
-  assert.ok(guideLine.includes("ruby_series(1)-ruby-guides.json"), `and names the file it went to: ${guideLine}`);
-  ok(`schema ${BUNDLE_SCHEMA_VERSION - 1} → ${BUNDLE_SCHEMA_VERSION} re-extracts, and the log says what that removed`);
+  // The staleness message quotes SCHEMA_CHANGE_NOTE, so it says the same thing as the harvest line in the
+  // volume's own log. The harvest line is matched on the volume's OWN name, not on the words it shares with
+  // the staleness message — matching on shared words found the wrong line once already.
+  assert.ok(staleLine.includes("ruby markup"), `the staleness message names the shape the guides are kept in: ${staleLine}`);
+  const guideLine = logs.find((l) => l.includes(`${sourceBase}: kept `));
+  assert.ok(guideLine, `the operator was told how many guides this book carries: ${logs.join("\n")}`);
+  assert.ok(/character\(s\) of reading/.test(guideLine), `the line carries the reading's character count: ${guideLine}`);
+  assert.ok(/% of this book's \d+ characters/.test(guideLine), `and its share of the text this extraction wrote: ${guideLine}`);
+  assert.ok(guideLine.includes("ruby_series(1)-ruby-guides.json"), `and names the file the queryable copy went to: ${guideLine}`);
+  ok(`schema ${BUNDLE_SCHEMA_VERSION - 1} → ${BUNDLE_SCHEMA_VERSION} re-extracts, and the log says what that changed`);
 
   // A harvest file deleted from a healthy cache is a reason to re-extract, not a silent gap.
   logs.length = 0;
@@ -617,9 +650,11 @@ async function scenarioPlainText() {
 
 /**
  * The chapter's NAME and the chapter's own printed heading are compared to each other
- * (stripRepeatedHeading), and both are compared against the text the converter produced. If any one
- * of the three keeps its pronunciation guides while another drops them, the chapter file prints its
- * own heading twice — which is why the nav reader strips guides too.
+ * (stripRepeatedHeading), and both are compared against the text the converter produced. Since plan 09 the
+ * body KEEPS its pronunciation guides, so the two NAMES have to be guide-free or nothing matches: a nav
+ * title carrying `<ruby>` matches no heading that does not, and the chapter file prints its own heading
+ * twice. That is why the nav reader strips guides, why the heading path renders a ruby as its word alone,
+ * and why `titleOfUnnamedSection` reads the guide-free line.
  */
 async function scenarioTitles() {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "ruby-titles-"));
@@ -653,14 +688,17 @@ async function scenarioTitles() {
   const chapterFile = await fs.promises.readFile(path.join(volumeDir, seg.file), "utf8");
   const printed = (chapterFile.match(/【俺とあいつが出会うまで】/g) || []).length;
   assert.strictEqual(printed, 1, `the chapter prints its own heading exactly once:\n${chapterFile}`);
-  assert.ok(!chapterFile.includes("俺おれ"), `no guide survives anywhere in the chapter file:\n${chapterFile}`);
-  ok("a chapter named by the contents list, by its own heading, and in its body all agree, guide-free");
+  assert.ok(!chapterFile.includes("俺おれ"), `no guide is pasted inside its own word:\n${chapterFile}`);
+  assert.ok(chapterFile.includes("<ruby>俺<rt>おれ</rt></ruby>"), "and the body keeps the guides the author printed");
+  assert.ok(!chapterFile.includes("<ruby>俺<rt>おれ</rt></ruby>とあいつが出会うまで】"), "the heading does not");
+  assert.strictEqual(seg.guideSplitForms, 0, "and this chapter's own tripwire measurement is 0");
+  ok("a chapter named by the contents list, by its own heading, and in its body all agree — the name guide-free, the prose annotated");
 
   await fs.promises.rm(dir, { recursive: true, force: true });
 }
 
 (async () => {
-  console.log("source-ruby: the pronunciation guide is set aside, and kept");
+  console.log("source-ruby: the pronunciation guide stays over the word, and the word stays whole");
   await scenarioHarvest();
   await scenarioAnnotationShapes();
   await scenarioSplitRule();

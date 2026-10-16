@@ -332,7 +332,7 @@ const { runVolumeWithModeFallback } = require("../utils/qa-loop");
     assert.strictEqual(stricter.chunked, true, "a stricter fraction sends the same volume chunked");
     delete process.env.SOURCE_CHUNK_SAFETY_FRACTION;
 
-    assert.strictEqual(BUNDLE_SCHEMA_VERSION, 8, "schema 8 records each annotation's own sequence, every chapter's guide-split count and every segment's packaging mark, so every cache written before it re-extracts");
+    assert.strictEqual(BUNDLE_SCHEMA_VERSION, 9, "schema 9 keeps every pronunciation guide in the chapter text as ruby markup, so every cache written under 8 — guide-free text — re-extracts");
   }
 
   // ─── 6b. the allowance a real volume is measured against, and what raising the reply cap costs ───

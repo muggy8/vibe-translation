@@ -21,6 +21,7 @@
 require("../../types"); // JSDoc type definitions
 
 const { UNDECLARED_SECTION_MIN_CHARS } = require("./config");
+const { guideFreeTextOf } = require("./html");
 
 /**
  * Classify a chapter title into a structural role. The patterns cover the
@@ -111,19 +112,27 @@ const PACKAGING_CLASS_RE =
 
 
 /**
- * Characters of actual TEXT in a converted page — headings and Markdown image
- * references removed, whitespace removed.
+ * Characters of actual TEXT in a converted page — headings, Markdown image
+ * references and pronunciation guides removed, whitespace removed.
  *
  * Counting the raw Markdown instead counts `![](images/img-0002-k001.jpg)` as
  * 33 characters of prose, and five illustration pages then look like a 165-char
  * section worth translating (observed: a run of cover plates plus a legal notice
  * became a phantom chapter that way).
  *
- * @param {string} md - Converted Markdown.
+ * THE GUIDE IS COUNTED THE SAME WAY SINCE PLAN 09. The converter now keeps each guide in the text as
+ * `<ruby>蒲田<rt>かまた</rt></ruby>`, and `<ruby>` / `<rt>` / the reading are 15 characters of MARKUP that
+ * are not the book's story. This function decides whether a page group is a chapter of the book or a piece
+ * of its packaging (`classifySectionGroup`), and a page of annotated front matter would start looking like
+ * a section worth translating for the same reason an image page does. Measuring the guide-free projection
+ * is what keeps that answer the same answer it gave before the markup existed — the words are the same
+ * words, only written with the tags taken off.
+ *
+ * @param {string} md - Converted Markdown, which may carry ruby markup.
  * @returns {number}
  */
 function textCharsOf(md) {
-  return (md || "")
+  return guideFreeTextOf(md)
     .replace(/^#{1,6}\s+.*$/gm, "")
     .replace(/!?\[[^\]]*\]\([^)]*\)/g, "")
     .replace(/\s+/g, "")
@@ -312,8 +321,14 @@ function classifySectionGroup(group, textChars = 0) {
  * prints no heading for a synthetic title) rather than given its opening
  * sentence as a name.
  *
+ * THE TITLE IS THE WORDS, NOT THE MARKUP. Since plan 09 the body line may carry a pronunciation guide
+ * over one of its words. A title is compared against the guide-free heading the converter writes for the
+ * same page (`stripRepeatedHeading`), and a title carrying `<ruby>…<rt>…</rt></ruby>` matches no heading
+ * that does not — the chapter would print its own title twice. The 60-character rule is the length of the
+ * NAME, so it measures the guide-free line too. The guide the title drops is still in the harvest.
+ *
  * @param {Array<string>} pageHeadings - Headings found in the group's pages, in order.
- * @param {string} body - The group's converted text.
+ * @param {string} body - The group's converted text, which may carry ruby markup.
  * @returns {{title: string, synthetic: boolean}}
  */
 function titleOfUnnamedSection(pageHeadings, body) {
@@ -322,7 +337,8 @@ function titleOfUnnamedSection(pageHeadings, body) {
   for (const line of (body || "").split("\n")) {
     const t = line.trim();
     if (!t || /^!?\[.*\]\(/.test(t)) continue;
-    if (t.length <= 60 && /[【［「『]/.test(t)) return { title: t, synthetic: false };
+    const plain = guideFreeTextOf(t).trim();
+    if (plain.length <= 60 && /[【［「『]/.test(plain)) return { title: plain, synthetic: false };
     break;
   }
   return { title: "", synthetic: true };

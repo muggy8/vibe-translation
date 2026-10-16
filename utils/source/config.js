@@ -60,11 +60,17 @@ const DEFAULT_CHUNK_THRESHOLD_CHARS = 120000;
  * string at HIGH; and every segment carries `declaresPackaging`, the book's own declaration read back
  * per segment, so an empty cover plate on the contents-list fallback path is a fact rather than a title
  * match (gotcha 126). Measured on the same 17 archives: 21,647 of the 45,429 harvested annotations carry
- * two or more annotated pieces, and 0 guide-split strings are present in the extracted text.)
+ * two or more annotated pieces, and 0 guide-split strings are present in the extracted text.; v9: the
+ * guide is back IN the text, in a shape that cannot split the word — <ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>
+ * extracts as <ruby>蒲田<rt>かまた</rt></ruby>, the base characters contiguous and the whole reading written
+ * over them (plan 09 decision 2). The harvest is unchanged by it: the same rows, the same counts and the same
+ * per-character `annotated` sequence, because the harvest is built by `splitRuby`, not by the renderer. A
+ * chapter heading and a chapter title stay guide-free, because a name carrying markup matches no name that
+ * does not.)
  *
  * @type {number}
  */
-const BUNDLE_SCHEMA_VERSION = 8;
+const BUNDLE_SCHEMA_VERSION = 9;
 
 /**
  * What the CURRENT schema changed, in the sentence an operator sees when a cached bundle is thrown
@@ -78,9 +84,9 @@ const BUNDLE_SCHEMA_VERSION = 8;
  * @type {string}
  */
 const SCHEMA_CHANGE_NOTE =
-  "pronunciation guides are now harvested as they were annotated (which base character carried which " +
-  "reading), every chapter is searched for a guide-split string the converter failed to set aside, and " +
-  "every segment records whether the book declared it packaging";
+  "pronunciation guides are now kept in the chapter text as ruby markup over the whole word " +
+  "(<ruby>蒲田<rt>かまた</rt></ruby>, the base characters contiguous), chapter headings and titles stay " +
+  "guide-free, and every segment is still searched for a guide-split string the converter must never write";
 
 
 /**

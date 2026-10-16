@@ -75,6 +75,7 @@ const SUITES = [
   suite("test-tokens", "test/test-tokens.js", []),
   suite("test-module-layer", "test/test-module-layer.js", []),
   suite("test-source-ruby", "test/test-source-ruby.js", []),
+  suite("test-source-ruby-markup", "test/test-source-ruby-markup.js", []),
   suite("test-source-audit", "test/test-source-audit.js", []),
   suite("test-guide-groups", "test/test-guide-groups.js", []),
   suite("test-extract-step", "test/test-extract-step.js", []),

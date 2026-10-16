@@ -1,19 +1,24 @@
 /**
- * The pronunciation guides the converter set aside, kept as a file the volume can be asked about.
+ * The pronunciation guides the conversion annotated, kept as a file the volume can be asked about.
  *
- * WHY THIS FILE EXISTS. utils/source/html.js renders `<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>`
- * as 蒲田, because the guide is not part of the word. But the guide is the AUTHOR SAYING how a
- * word is read, and that is information the pipeline cannot get back from the cleaned text.
- * Sometimes what the author says is not a reading at all but a name: 三色院菫子 is guided
- * パンジー, 秋野桜 is guided コスモス, 玄武 is guided ジヨーロ. Measured across the 17 archives
- * of the live series, 146 distinct words are guided with a foreign word written in katakana —
- * those are the ones a translator would otherwise invent. So the removal is recorded: the word it
- * sat on, the reading the author gave it, how many times, and which chapters it occurred in.
+ * WHY THIS FILE STILL EXISTS. utils/source/html.js now keeps `<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>` in
+ * the text it writes, as `<ruby>蒲田<rt>かまた</rt></ruby>` — the guide is over the word, and the word is
+ * whole. So the reading is no longer information only this file holds. What the file holds that a chapter
+ * cannot answer is the QUERY: which written form was guided which way, how many times, in which chapters,
+ * and in what order the annotation was made. "Was this name read differently in a later volume?" is a
+ * question over rows, and no chapter text can answer it.
  *
- * IT IS HARVESTED BY THE REMOVAL, NOT REPARSED. Both converters in utils/source/html.js hand
- * every guide they drop to their `onRubyGuide` callback; this module only aggregates what those
- * callbacks received. A second parser walking the archive for <ruby> would be a second rule
- * about what a guide is, and the two would drift the way the two QA loops used to.
+ * It also holds the author's overrides, which are the reason the guide is kept at all: 三色院菫子 is guided
+ * パンジー, 秋野桜 is guided コスモス, 玄武 is guided ジヨーロ. Measured across the 17 archives of the live
+ * series, 146 distinct words are guided with a foreign word written in katakana — those are the ones a
+ * translator would otherwise invent.
+ *
+ * IT IS HARVESTED BY THE CONVERSION, NOT REPARSED. Both converters in utils/source/html.js hand every
+ * annotation they render to their `onRubyGuide` callback; this module only aggregates what those callbacks
+ * received. A second parser walking the archive for <ruby> would be a second rule about what a guide is,
+ * and the two would drift the way the two QA loops used to. The harvest is built by `splitRuby`, not by the
+ * renderer, which is why plan 09 putting the guide back into the text leaves every row, every count and
+ * every `annotated` sequence exactly where it was.
  *
  * IT IS NOT IN THE BUNDLE META. `<base>-bundle.meta.json` is the extraction cache: it is keyed
  * on the archive's fingerprint and rewritten whenever the archive changes, and it describes the
@@ -304,10 +309,10 @@ async function writeRubyGuideFile({ volumeDir, base, sourceFile, bundleSchema, o
   const document = {
     schema: RUBY_GUIDE_SCHEMA,
     whatThisIs:
-      "Every pronunciation guide (ruby) this volume's converter set aside while extracting the " +
+      "Every pronunciation guide (ruby) this volume's conversion annotated while extracting the " +
       "text, in the form: this word, read this way, this many times, in these chapters, annotated in " +
-      "this order (which base character carried which reading). The extracted text keeps the word " +
-      "alone; the reading lives only here.",
+      "this order (which base character carried which reading). The extracted text carries the reading " +
+      "over the word as ruby markup; this file is the copy that can be asked about.",
     generatedBy: `utils/source/ruby-guides.js (bundle schema ${bundleSchema}, harvest schema ${RUBY_GUIDE_SCHEMA})`,
     sourceFile,
     totals,

@@ -64,6 +64,10 @@ const RUBY_BASE_TAGS = new Set(["rb", "rbc"]);
  * One pattern source, used fresh each time: a global regex kept as a module constant carries `lastIndex`
  * between calls, and a `test()` that sometimes misses is the kind of bug this file exists to prevent.
  *
+ * **Exported so the converter's copy of it can be pinned against this one.** `utils/source/html.js` restates
+ * the same string (neither module may require the other), and `test/test-source-ruby-markup.js` asserts the
+ * two are the same string and that the two strips agree on every shape either one can produce.
+ *
  * @type {string}
  */
 const RUBY_TAG_PATTERN_SOURCE = "<(\\/?)\\s*(ruby|rt|rtc|rp|rb|rbc)\\b[^>]*>";
@@ -189,6 +193,7 @@ function rubyMarkupAddedChars({ form, reading } = {}) {
 module.exports = {
   RUBY_BASE_TAGS,
   RUBY_GUIDE_TAGS,
+  RUBY_TAG_PATTERN_SOURCE,
   RUBY_MARKUP_OVERHEAD_CHARS,
   hasRubyMarkup,
   rubyMarkupUnitCount,

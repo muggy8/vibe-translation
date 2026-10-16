@@ -27,7 +27,7 @@
  *     is wrong. The marker the gulp wrapper writes is what lets `index.js` know the kind across the
  *     process boundary, and the runner stops before `glossary` is started.
  *   - **MEDIUM is recorded and printed**, and the run continues.
- *   - **The counts are not findings.** Chapters, characters, guides set aside, images, packaging
+ *   - **The counts are not findings.** Chapters, characters, guides kept in the text, images, packaging
  *     excluded: the measurement that turns "this ran" into "this ran, and here is what it saw".
  *
  * WHY IT AUDITS EVERY VOLUME BEFORE IT FAILS. A model stage stops at the first broken volume because
@@ -151,7 +151,7 @@ function printVolumeResult(record) {
   const c = record.counts;
   console.log(
     `[extract] Volume ${record.installment} · ${c.chapters} chapter(s), ${c.packaging} packaging ` +
-      `group(s), ${c.characters} characters, ${c.guides} guide(s) set aside, ${c.images} image(s)` +
+      `group(s), ${c.characters} characters, ${c.guides} guide(s) kept in the text, ${c.images} image(s)` +
       (c.findings === 0 ? " · audit clean" : ` · ${c.HIGH} HIGH, ${c.MEDIUM} MEDIUM`)
   );
   for (const f of record.findings) {

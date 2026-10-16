@@ -2,7 +2,7 @@
  * The candidate name-groups hiding in a volume's pronunciation-guide harvest.
  *
  * WHY THIS FILE EXISTS. `utils/source/ruby-guides.js` writes, beside every volume, one row per
- * (word, reading) pair the converter set aside — 10,005 rows and 45,429 occurrences across the 17
+ * (word, reading) pair the conversion annotated — 10,005 rows and 45,429 occurrences across the 17
  * books of the live series — and **nothing has ever read that file back**. `character-voice/plan/07`
  * §2 is the measurement of what is in it. The interesting shape is one reading the author printed
  * over two or more different written forms: 虹彩寺菫, 三色院菫子, 好きな女 and 主人公 all guided

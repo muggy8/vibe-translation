@@ -253,21 +253,28 @@ function auditGuideHarvest({ volume, bundle, names }) {
       EXTRACTION_STEP,
       volume.installmentNumber || null,
       findingFile(volume, expected),
-      `This volume's extraction set aside ${guides === null ? "an unknown number of" : guides} ` +
-        `pronunciation guide(s) and "${missing}" is not in the volume folder. The readings the author ` +
-        `wrote for those words exist nowhere else, and every later "how is this word read?" question ` +
-        `about this volume is answered by a translator guessing.`
+      `This volume's extraction kept ${guides === null ? "an unknown number of" : guides} ` +
+        `pronunciation guide(s) in its text and "${missing}" is not in the volume folder. The readings are ` +
+        `printed over the words, but nothing can be ASKED about them — which form was guided which way, how ` +
+        `often, and in which chapters — and every later "how is this word read?" question about this volume ` +
+        `is answered by a translator guessing.`
     ),
   ];
 }
 
 /**
- * Check 6 (HIGH) — a pronunciation guide is still pasted inside the word it annotates.
+ * Check 6 (HIGH) — a word and its own pronunciation guide are printed as one string.
  *
- * This is the regression tripwire for the 2026-10-12 fix (gotcha 123): `<ruby>蒲<rt>かま</rt>田<rt>た
- * </rt></ruby>` must extract as 蒲田, and the defect that made it extract as 蒲かま田た sat in all 17
+ * This was the regression tripwire for the 2026-10-12 fix (gotcha 123): `<ruby>蒲<rt>かま</rt>田<rt>た
+ * </rt></ruby>` had to stop extracting as 蒲かま田た, and the defect that made it do so sat in all 17
  * volumes of the live series unnoticed, splitting 193 published glossary terms and hiding character names
  * from the rule that looks for them.
+ *
+ * SINCE PLAN 09 IT IS A DIFFERENT GUARD, and it stays a HIGH. The converter writes the base as one
+ * contiguous run (`<ruby>蒲田<rt>かまた</rt></ruby>`), so it cannot assemble 蒲かま田た at all. What this
+ * check can still catch is a chapter file somebody edited into the old shape, or a source that prints the
+ * split string as ordinary text — and both mean the text the stages are reading is not the text the book
+ * prints, which is exactly what the check was ever for.
  *
  * It is EXACT, and only exactness makes it worth having. The string to look for is rebuilt from the
  * annotation's own sequence — the base characters and the reading each one carried, in the order the book
@@ -301,10 +308,12 @@ function auditGuideSplitSurvives({ volume, segments }) {
         findingFile(volume, segment.file),
         `Chapter "${segment.id}" ("${segment.title}") holds ${occurrences} guide-split string(s)` +
           `${examples.length ? ` — ${examples.join(", ")}` : ""} — in its text. That is the shape a ` +
-          `pronunciation guide used to take: the book writes 蒲田 read かまた and the converter pasted ` +
-          `the reading into the word, producing 蒲かま田た. Every word of this shape in the text is a word ` +
-          `the glossary will record wrongly and a name the character rules cannot see. The fix is in the ` +
-          `converter (utils/source/html.js), never in the extracted file.`
+          `pronunciation guide used to take: the book writes 蒲田 read かまた and the old converter pasted ` +
+          `the reading into the word, producing 蒲かま田た. The converter that writes this file cannot ` +
+          `produce that string any more (it writes the base as one contiguous run), so it arrived some other ` +
+          `way — a chapter file edited by hand into the old shape, or the source itself printing it. Either ` +
+          `way, every word of this shape in the text is a word the glossary will record wrongly and a name ` +
+          `the character rules cannot see.`
       )
     );
   }
