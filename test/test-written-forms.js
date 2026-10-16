@@ -54,6 +54,13 @@
  *      export list is compared against the store's barrel, because the barrel is a spread and a name a
  *      submodule forgets disappears from it silently (gotcha 151) — the widened door added one name,
  *      `eligibleWrittenFormRows`, and slice 2b's reports added 23 more.
+ *   12. **the store has exactly one door onto the harvest file** — `written-forms/file.js`, plan 07 §2.4.
+ *      This pin used to live in `test/test-glossary-reading-block.js` scenario 10; plan 09 slice 2 deleted
+ *      that suite with the reading block it tested, and the assertion moved here rather than going with it,
+ *      because plan 09 §2.6/§2.7 and the stated limit in `utils/reference-store/evidence.js` both rest on it.
+ *      It is a guard, not a sentence: the same scan is run against a scratch tree holding the real door plus
+ *      two planted ones — one calling the shipped reader, one hand-rolling the read to dodge it — and both
+ *      planted doors must come back named.
  *
  * The two row guards the door applies are pinned in scenario 2 beside the two group guards the fold still
  * applies to its own report, and the two tallies are asserted to agree field for field — the door's guards
@@ -103,6 +110,7 @@ const {
 } = rs;
 
 const { fixtureStoreSeries, assertInsideFixture } = require("./fixture-reference-store");
+const { resolveFixturesRoot } = require("./fixture-guard");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -862,6 +870,108 @@ function scenarioNothingAdded() {
   console.log("11. nothing added: 72 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 stage callers, 0 readers of the table, 1 reader of the grouping question (the identity door)");
 }
 
+// ─── 12. the store's one door onto the harvest file ───────────────────────────
+
+/**
+ * The code shapes that mean "this file opens a volume's pronunciation-guide harvest".
+ *
+ * Three, and each one is a **code** shape, not a mention:
+ *   - `readRubyGuideFile` — the shipped reader, called or imported;
+ *   - `RUBY_GUIDE_FILE_SUFFIX` — the file-name constant, which only a door that resolves the name needs;
+ *   - a `readFile`-family call naming `ruby-guides` on the same line — the hand-rolled read a door would
+ *     write to dodge the first two.
+ *
+ * A bare `ruby-guides` in prose is deliberately NOT one of them. Five files in this store say the file's
+ * name in a comment or in a message telling a person to run `npx gulp extract`, and a scan that called
+ * those readers would be a scan that fails on correct code and teaches nobody to trust it.
+ *
+ * @type {RegExp}
+ */
+const HARVEST_READER_SHAPE = /\breadRubyGuideFile\b|\bRUBY_GUIDE_FILE_SUFFIX\b|readFile\w*\([^)]*ruby-guides/;
+
+/**
+ * Which `.js` files under one folder open a harvest, by the shapes above.
+ *
+ * Pure and parameterised on the folder, so the same scan that reads the real store can be run against a
+ * scratch tree with a planted second door — which is the only way to show the pin is a guard and not a
+ * sentence nobody has ever seen fail.
+ *
+ * @param {string} dir - Folder to walk.
+ * @param {string} [root] - What reported paths are made relative to. Defaults to `dir`.
+ * @returns {string[]} Matching file paths, relative to `root`, sorted.
+ */
+function harvestReadersUnder(dir, root = dir) {
+  /** @type {string[]} */
+  const found = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "plan") continue;
+      found.push(...harvestReadersUnder(full, root));
+      continue;
+    }
+    if (!entry.name.endsWith(".js")) continue;
+    if (HARVEST_READER_SHAPE.test(fs.readFileSync(full, "utf8"))) found.push(path.relative(root, full));
+  }
+  return found.sort();
+}
+
+/**
+ * The pin, and the proof that it fires.
+ *
+ * Relocated here from `test/test-glossary-reading-block.js` scenario 10, which plan 09 slice 2 deleted
+ * along with the reading block it tested. The invariant is not the block's: it is plan 07 §2.4's, and
+ * plan 09 §2.6/§2.7 and `utils/reference-store/evidence.js`'s stated limit both rest on it, so the
+ * assertion had to move rather than go with the suite.
+ *
+ * @returns {void}
+ */
+function scenarioOneStoreDoorOntoTheHarvest() {
+  const storeDir = path.join(ROOT, "utils", "reference-store");
+  const onlyDoor = path.join("utils", "reference-store", "written-forms", "file.js");
+
+  const readers = harvestReadersUnder(storeDir, ROOT);
+  same(readers, [onlyDoor],
+    "a second door inside utils/reference-store/ started opening the pronunciation-guide harvest — " +
+      "`written-forms/file.js` is the one door this store may read it through (plan 07 §2.4)");
+
+  // The proof it fires: the same scan over a scratch tree that holds the real door plus two planted ones,
+  // one calling the shipped reader and one hand-rolling the read to dodge it.
+  const scratch = path.join(resolveFixturesRoot(), "harvest-pin-planted");
+  fs.rmSync(scratch, { recursive: true, force: true });
+  fs.mkdirSync(path.join(scratch, "written-forms"), { recursive: true });
+  fs.copyFileSync(path.join(storeDir, "written-forms", "file.js"), path.join(scratch, "written-forms", "file.js"));
+  fs.writeFileSync(
+    path.join(scratch, "planted-reader.js"),
+    'const { readRubyGuideFile } = require("../../utils/source/ruby-guides");\n' +
+      "async function openHarvest(volumeDir, base) { return readRubyGuideFile(volumeDir, base); }\n" +
+      "module.exports = { openHarvest };\n",
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(scratch, "planted-hand-rolled.js"),
+    "const fs = require(\"fs\");\nconst path = require(\"path\");\n" +
+      "function openHarvestRaw(volumeDir, base) {\n" +
+      "  return JSON.parse(fs.readFileSync(path.join(volumeDir, `${base}-ruby-guides.json`), \"utf8\"));\n" +
+      "}\nmodule.exports = { openHarvestRaw };\n",
+    "utf8"
+  );
+  const planted = harvestReadersUnder(scratch);
+  same(planted, ["planted-hand-rolled.js", "planted-reader.js", path.join("written-forms", "file.js")],
+    "the scan did not name both planted doors beside the real one — the pin is a comment, not a guard");
+  fs.rmSync(scratch, { recursive: true, force: true });
+
+  // And the shape is not a name-match: prose that only says the file's name is not a reader.
+  same(harvestReadersUnder(path.join(storeDir, "identity")), [],
+    "the identity door reads the record's rows, not the harvest (plan 07 slice 2), and its prose naming the " +
+      "file's name is not counted as opening it");
+  same(harvestReadersUnder(path.join(storeDir, "written-forms", "reports")), [],
+    "the source-quality reports print the harvest's file name in a fix-it message and open nothing");
+
+  console.log("12. the harvest has exactly one door inside the store, and the scan names two planted doors when they are planted");
+}
+
 // ─── Run ──────────────────────────────────────────────────────────────────────
 
 (async () => {
@@ -876,6 +986,7 @@ function scenarioNothingAdded() {
   await scenarioCrossVolumeGroup();
   scenarioInsertOnly();
   scenarioNothingAdded();
+  scenarioOneStoreDoorOntoTheHarvest();
   console.log(`\nwritten forms: ${checks} checks, 0 model calls.`);
 })().catch((err) => {
   console.error(err);

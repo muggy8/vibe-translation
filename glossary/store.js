@@ -183,6 +183,17 @@ function fileGlossaryTermRows(ctx, terms) {
         "`rendering` field."
     );
   }
+  if (filed.markupTerms && filed.markupTerms.length) {
+    console.error(
+      `Volume ${ctx.values.INSTALLMENT_NUMBER}: ${filed.markupTerms.length} term(s) came back from the read ` +
+        `pass with the book's pronunciation guides still inside the term and were NOT filed as glossary ` +
+        `rows: ${filed.markupTerms.slice(0, 12).join(", ")}` +
+        `${filed.markupTerms.length > 12 ? `, … ${filed.markupTerms.length - 12} more` : ""}. ` +
+        `The chapter prints those guides as <ruby>…<rt>…</rt></ruby> over the word; the glossary row is the ` +
+        `word with the tags taken off, and the published file is rendered from the term cell exactly as it ` +
+        `was filed. Fix: the extraction prompt's rule 3.`
+    );
+  }
   return filed;
 }
 

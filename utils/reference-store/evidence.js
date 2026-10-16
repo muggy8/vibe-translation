@@ -200,7 +200,7 @@ function matchPreparedLine(preparedLine, preparedQuote) {
  * **What this guard cannot do, and does not pretend to.** The OLD converter's shape (蒲かま田た) is not the
  * flattened shape of canonical markup (蒲田かまた): rebuilding it needs to know which character of the word
  * carried which piece of the reading, and canonical markup no longer says — only the pronunciation-guide
- * harvest the extraction writes beside the book does, and `test/test-glossary-reading-block.js` pins that
+ * harvest the extraction writes beside the book does, and `test/test-written-forms.js` scenario 12 pins that
  * exactly one door in this store may open it. So the interleaved shape is guarded where that harvest is in
  * reach — by `guide-split-in-text` in the extraction audit, which reads it at extraction time and is
  * unchanged — and this door guards the shapes markup alone can be spliced into. Two of them stay open and

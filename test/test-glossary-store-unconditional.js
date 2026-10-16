@@ -42,6 +42,14 @@
  *      for the two files that must name it.
  *  10. **The stage asks no setting** whether to open the record: `glossary/task.js` and
  *      `glossary/store.js` carry no store switch, and `configs/shared` exports none.
+ *  11. **A term filed with the book's own pronunciation markup is refused at filing** (plan 09 slice 2):
+ *      the chapter text now prints every guide as `<ruby>語<rt>reading</rt></ruby>`, the evidence rule
+ *      strips it before it searches, and the markup would ride into the published file through the term
+ *      cell. The guide-free spelling files; both markup shapes refuse and name the spelling to file
+ *      instead — including the markup form of a term the record already holds, which a refusal placed
+ *      after the carried check would report as "carried" and name nothing; the reading pasted into the
+ *      word is still refused by the evidence rule; and the rendered `glossary.md` carries no tags and the
+ *      parser reports no annotated row.
 
  * Every scenario runs in a throwaway fixture. Nothing here reads the real 17 volumes or any file
  * under the series folder (AGENTS.md rule 8, gotcha 69). No real model call: scenario 1 goes
@@ -71,6 +79,7 @@ const {
   DOCUMENT_SOURCE_STAGE,
 } = require("../utils/reference-store");
 const glossaryStore = require("../glossary/store");
+const { renderGlossary, parseGlossaryMarkdown } = require("../utils/reference-store/glossary-adapter");
 const {
   fixtureStoreSeries,
   assertInsideFixture,
@@ -613,6 +622,88 @@ function scenarioTheStageAsksNoSettingWhetherToOpenTheRecord() {
   console.log("glossary store unconditional: glossary/task.js opens and seals the record with no setting in front of it");
 }
 
+// ─── Scenario 11 ──────────────────────────────────────────────────────────────
+
+/**
+ * A term the read pass returned **with the book's pronunciation guides still inside it** is refused at
+ * filing, named, and never reaches the published file (plan 09 slice 2).
+ *
+ * Why this is a door rule and not an evidence rule. The chapter text now prints every guide as
+ * `<ruby>語<rt>reading</rt></ruby>` (plan 09 slice 0), and `glossaryTermSpans` strips that markup before
+ * it searches — so `<ruby>渋谷<rt>しぶや</rt></ruby>` finds 渋谷 on a real line, the evidence rule passes,
+ * and the markup rides into `examples[0]`, which `renderGlossary` prints verbatim. Measured before the
+ * guard existed: the published file carried the tags.
+ *
+ * Three shapes are asked, and the third is the one that would slip through a weaker rule: a markup-bearing
+ * term for a word the record **already holds**. `normalizeQuote` strips ruby, so `documentTermAlreadyStored`
+ * calls it the same term and a refusal placed after that check would report it as "carried" and say nothing.
+ *
+ * @returns {Promise<void>}
+ */
+async function scenarioATermCarryingTheBooksOwnMarkupIsRefusedAtFiling() {
+  const fx = fixtureStoreSeries("glossary-store-markup-term");
+  const { ctx } = openThroughTheStage(fx, 0);
+
+  // The fixture's book prints 渋谷 nowhere, and it prints no ruby at all. One line is appended to a
+  // chapter the store already lists, in the shape plan 09 slice 0's converter writes.
+  const chapterFile = path.join(fx.volumes[0].dir, `${fx.volumes[0].base}-ch1.md`);
+  const original = fs.readFileSync(chapterFile, "utf8");
+  fs.writeFileSync(chapterFile, `${original}<ruby>渋谷<rt>しぶや</rt></ruby>は駅である。\n`, "utf8");
+
+  const MARKUP_TERM = { term: "<ruby>渋谷<rt>しぶや</rt></ruby>", rendering: "Shibuya", note: "駅。", type: "place", query: "渋谷" };
+  // The sharper shape: a markup-bearing term for a word the record ALREADY holds. `normalizeQuote` strips
+  // ruby, so `documentTermAlreadyStored` calls it the same term — a refusal placed after that check would
+  // report it as "carried" and name nothing.
+  const ALREADY_HELD = { term: "<ruby>三色院菫子<rt>さんしよくいんすみれこ</rt></ruby>", rendering: "Sanshokuin Again", note: "すでに載っている。", type: "character", query: "三色院菫子" };
+  const GUIDE_FREE = { term: "渋谷", rendering: "Shibuya Station", note: "駅。", type: "place", query: "渋谷" };
+  const SPLICED = { term: "渋谷しぶや", rendering: "Reading Pasted In", note: "読みを語に貼った形。", type: "place", query: "渋谷しぶや" };
+
+  const found = glossaryStore.fileGlossaryTermRows(ctx, [GUIDE_FREE, MARKUP_TERM, ALREADY_HELD, SPLICED]);
+  assert.ok(found, "the stage's filing door did not run");
+
+  // The honest shape files.
+  assert.strictEqual(found.importedCount, 1, `expected only the guide-free term to be filed: ${JSON.stringify(found.imported)}`);
+  assert.ok(found.imported.some((row) => JSON.parse(row.examples)[0] === "渋谷"), "the guide-free term was not filed");
+
+  // Both markup shapes refuse, and the refusal names the guide-free spelling to file instead.
+  assert.deepStrictEqual(found.markupTerms, [MARKUP_TERM.term, ALREADY_HELD.term],
+    `the markup refusals are not the two planted shapes: ${JSON.stringify(found.markupTerms)}`);
+  for (const term of [MARKUP_TERM.term, ALREADY_HELD.term]) {
+    const refusal = found.refused.find((r) => r.term === term);
+    assert.ok(refusal, `the markup-bearing term ${JSON.stringify(term)} was not refused: ${JSON.stringify(found.refused)}`);
+    assert.match(refusal.because, /pronunciation guides still inside the term/, `the refusal does not name the shape: ${refusal.because}`);
+  }
+  assert.match(found.refused.find((r) => r.term === MARKUP_TERM.term).because, /File it as "渋谷/,
+    "the refusal does not name the spelling to file instead");
+  assert.ok(!found.carried.includes(ALREADY_HELD.term),
+    "the markup-bearing form of a term the record already holds was reported as carried, which names nothing");
+  assert.strictEqual(found.carried.length, 0, `the door carried something it should have refused: ${JSON.stringify(found.carried)}`);
+  // The reading-pasted-in shape is refused too — by the evidence rule, which is what it has always been.
+  const spliced = found.refused.find((r) => r.term === SPLICED.term);
+  assert.ok(spliced, `the reading pasted into the word was not refused: ${JSON.stringify(found.refused)}`);
+  assert.match(spliced.because, /source text/i, `the refusal does not say the book does not print it: ${spliced.because}`);
+
+  // Nothing markup-bearing reached the record, in any column of any row.
+  const markupRows = ctx.refStore.db
+    .prepare("SELECT COUNT(*) AS n FROM facts WHERE examples LIKE '%<ruby>%' OR examples LIKE '%<rt>%' OR body LIKE '%<ruby>%'")
+    .get().n;
+  assert.strictEqual(markupRows, 0, "a markup-bearing term reached the record anyway");
+
+  // And the published file is rendered from the rows that survived: no tags anywhere in it.
+  const rendered = renderGlossary(ctx.refStore, { volume: 1 });
+  assert.ok(rendered.includes("| 渋谷 | Shibuya Station |"), `the guide-free term is not in the published file: ${rendered}`);
+  assert.ok(!/<ruby>|<rt>|<\/ruby>|<\/rt>/.test(rendered), `the published glossary carries ruby markup:\n${rendered}`);
+  const back = parseGlossaryMarkdown(rendered);
+  assert.deepStrictEqual(back.annotatedRows, [], "the parser had to report an annotated row, so a guide reached the artifact");
+
+  fs.writeFileSync(chapterFile, original, "utf8");
+  ctx.refStore.close();
+  console.log(
+    "glossary store unconditional: a term filed with the book's own <ruby> markup is refused and named, the guide-free " +
+      "spelling is what files, and the published glossary prints no tags"
+  );
+}
+
 async function main() {
   await scenarioTheDefaultPathOpensFilesAndSealsTheRecord();
   await scenarioAFailingGradeLeavesTheRecordADraft();
@@ -624,6 +715,7 @@ async function main() {
   await scenarioTheDeletedFlagIsRefusedByName();
   await scenarioTheFlagNameIsGoneFromTheRepository();
   await scenarioTheStageAsksNoSettingWhetherToOpenTheRecord();
+  await scenarioATermCarryingTheBooksOwnMarkupIsRefusedAtFiling();
   console.log("\nOK: the glossary stage's reference record is unconditional, and the flag that used to switch it on is gone.");
 }
 

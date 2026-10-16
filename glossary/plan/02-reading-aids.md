@@ -1,7 +1,16 @@
 # Plan 08 — the book's own reading aids become part of what the pipeline knows
 
-Plan of record. Written 2026-10-16. Status: **slice 0 BUILT (2026-10-16)** — the reading block reaches
-the glossary read pass on both routes, 0 new model calls. **Slices 1–4 are not built.**
+Plan of record. Written 2026-10-16. Status: **slice 0 was BUILT (2026-10-16) and then DELETED the same day by
+plan 09 slice 2** — the reading block reached the glossary read pass on both routes with 0 new model calls, and
+plan 09 decision 3 removes it because the extracted chapter now carries every guide inline as
+`<ruby>蒲田<rt>かまた</rt></ruby>`, so the block is a second copy of a fact the text already holds. **Its
+measurements still stand** — they are what the corpus was priced with, and §5's verdict row is kept as the record
+of them, with the deletion noted beside it. **Slices 1–4 are not built as this plan numbers them.** Plan 09 absorbs
+them: its §5 says its **slices 3–5 are this plan's slices 1–3, re-numbered**, and its own slice 6 ("a published
+translation never carries the markup") is the nearest thing to this plan's slice 4 but is **not** the same ask —
+this plan's slice 4 re-opens the inline annotated view as a display option, and nothing in plan 09 does that. So
+this plan's slice 4 is **absorbed in claim but not in fact**, and that gap is stated here rather than counted as
+done. Where this plan and plan 09 disagree, plan 09 wins: `utils/source/plan/02-reading-aids-in-the-text.md`.
 
 ---
 
@@ -138,10 +147,14 @@ Any new reader of the harvest must go through it or that invariant is gone.
 `readRubyGuideFile` (`utils/source/ruby-guides.js`) — the **reader function** — already had three callers
 outside the store (`glossary/re-render/record.js`, `utils/source/guide-groups.js`, and since slice 0
 `glossary/extract/reading-block.js`). What the invariant actually protects is the **store**: no second door
-*inside `utils/reference-store/`* opens a harvest file, and `test/test-glossary-reading-block.js` scenario 10
-pins that at exactly one (`written-forms/file.js`). The stage's own reading pass reads the harvest directly
-because it is reading the book, not filing a row — the same direction `written-forms-cannot-look-forward`
-enforces on the filing door.
+*inside `utils/reference-store/`* opens a harvest file, and that is pinned at exactly one
+(`written-forms/file.js`) — **by `test/test-written-forms.js` scenario 12 since plan 09 slice 2 deleted
+`test/test-glossary-reading-block.js`, whose scenario 10 was the pin before it** (the scan moved rather than
+going with the suite, because deleting a suite must not delete a guard). The stage's own reading pass read the
+harvest directly because it was reading the book, not filing a row — the same direction
+`written-forms-cannot-look-forward` enforces on the filing door. **That stage-side reader is gone** (plan 09
+slice 2): the chapter text carries the guides, so the glossary read pass no longer needs the harvest at all, and
+the two remaining readers outside the store are `glossary/re-render/record.js` and `utils/source/guide-groups.js`.
 
 ### 2.5 What slice 0 actually costs, and where the cap sits (measured 2026-10-16)
 
@@ -301,7 +314,7 @@ identical to a correction. So:
 
 | # | Slice | Acceptance line |
 |---|---|---|
-| **0** | **BUILT (2026-10-16).** **The reading block reaches the glossary read pass.** Built from the volume's own harvest, through the one door that may read it. Every guide eligible; a named cap with the remainder printed. | A fixture chapter whose book guides a word two ways shows both to the model, and a fixture where the guide answers a reading the extraction would otherwise guess shows the guide, not the guess. **0 new model calls**; both offline loops' call counts unmoved; the `glossary-extract` prompt size measured before and after against the 8.5 % projection; the harvest still has exactly one reader in the store. **Met except one clause, and that clause is the lesson:** the acceptance line asked for the size "measured against the 8.5 % projection", and the shipped block is **12.88 %** on the chapter-by-chapter route — §2.3's 8.5 % was a projection of a **table**, and the block is a table plus a heading and two guidance paragraphs paid once per chapter. See §2.5 and gotcha 175. |
+| **0** | **BUILT (2026-10-16), then DELETED the same day by plan 09 slice 2.** **The reading block reached the glossary read pass.** Built from the volume's own harvest, through the one door that may read it. Every guide eligible; a named cap with the remainder printed. | A fixture chapter whose book guides a word two ways showed both to the model, and a fixture where the guide answers a reading the extraction would otherwise guess showed the guide, not the guess. **0 new model calls**; both offline loops' call counts unmoved; the `glossary-extract` prompt size measured before and after against the 8.5 % projection; the harvest still had exactly one reader in the store. **Met except one clause, and that clause is the lesson:** the acceptance line asked for the size "measured against the 8.5 % projection", and the shipped block was **12.88 %** on the chapter-by-chapter route — §2.3's 8.5 % was a projection of a **table**, and the block was a table plus a heading and two guidance paragraphs paid once per chapter. See §2.5 and gotcha 175. **Why it was deleted:** plan 09 decision 3 — the extracted chapter now prints every guide inline as `<ruby>…<rt>…</rt></ruby>`, so the block is a second copy of a fact the text carries, and two copies of one fact are two things that can disagree. |
 | **1** | **The reading is recorded beside the term.** Insert-only row, `COUNTED_TABLES`, copy-forward carries it, the published term row is never edited. | Filing a term that the book guided records the guide; a term the book never guided records nothing and says so; a second pass files 0; every content column of the term row compared and unmoved. `SCHEMA_VERSION` 13 → 14 and the pinned table-counting suites moved deliberately, with the reason written (gotcha 170). |
 | **2** | **"The reading changed" becomes the forward half of the review.** A query over the recorded guides, ranked, bounded by the existing 24-call bound. The 15 English shapes stay as the legacy path and the coverage report names which half produced the agenda. | On copies of the 17 records, 0 model calls: the query finds the measured 266 / 129 classes and ranks them inside the bound; a fixture where a later volume guides a form differently puts that term on the agenda with **no phrase matching at all**; a series whose records predate the field still gets the legacy half and reports it as legacy. |
 | **3** | **The revision door stops assuming newer is better** for a change in how a name is spoken. | A planted revision that contradicts a guide the book prints repeatedly is **named, not settled**; a planted genuine correction still settles; both outcomes print the guide and the choice side by side; 0 published rows edited. |
@@ -313,22 +326,38 @@ account owner's Decision 1 formally re-opens.
 
 ### Slice 0 — the verdict (measured 2026-10-16)
 
+**Superseded the same day.** The code this table measured is **gone** — plan 09 slice 2 deleted
+`glossary/extract/reading-block.js` (441 lines), its suite (794 lines), the **12** names `glossary/extract.js`
+re-exported from it (the row below said 13; the barrel held 12) and its **three** call sites
+(`glossary/chunked.js`, `glossary/task.js` `extractNewTerms`, `glossary/task.js` `dumpVolumePreview` — the row
+below counted two; the dry-run section is the one it missed). **The measurements are kept as measurements**: they
+are the numbers the corpus was priced with, and the lesson in the last two rows is not specific to the block. The
+harvest-access pin moved to `test/test-written-forms.js` scenario 12. Plan 09's own account is
+`utils/source/plan/02-reading-aids-in-the-text.md` §2.8.
+
 | Claim | Measured |
 |---|---|
-| The code | `glossary/extract/reading-block.js` (441 lines), reached from `glossary/chunked.js` (chapter-by-chapter route) and `glossary/task.js` (whole-installment route); `glossary/extract.js` re-exports 13 new names |
-| A two-way guide reaches the model on one line | `test/test-glossary-reading-block.js` scenario 1 — `虹彩寺菫 → こうさいじすみれ \| パンジー` on the wire |
+| The code | `glossary/extract/reading-block.js` (441 lines), reached from `glossary/chunked.js` (chapter-by-chapter route) and `glossary/task.js` (whole-installment route), plus `glossary/task.js` `dumpVolumePreview` (the `--dry-run` section); `glossary/extract.js` re-exported **12** names from it. **All deleted by plan 09 slice 2** |
+| A two-way guide reaches the model on one line | `test/test-glossary-reading-block.js` scenario 1 — `虹彩寺菫 → こうさいじすみれ \| パンジー` on the wire. **The suite is deleted**; the shape it pinned is now the chapter text's own markup |
 | The guide beats the guess | Scenario 2 — `亜茶花 → あさか` is on the wire, with the prompt's own "the guide is not the word" rule beside it |
-| 0 new model calls | Main offline loop **82 requests / 17 kinds** (was 82 / 17), chunked loop **28 / 6** (was 28 / 6), **0 on the second pass in both**; prompt audit **23 checks, 0 findings** |
-| Prompt size, before and after | `glossary-extract` **12,114 → 12,530** (main) and **12,391 → 12,807** (chunked). Every other kind unmoved. The move is the **416-character floor line**, not a real block: the offline fixtures' books are plain text with no harvest, so the block's real size is **not observable in the loops at all** — it is measured against the 17 real books through the shipped builder instead (**+315,646 characters, 12.88 %** on the chapter-by-chapter route, **+220,632, 9.00 %** on the whole-installment route; §2.5) |
-| The harvest still has one reader in the store | Scenario 10 pins `utils/reference-store/**` at exactly one file that opens a harvest (`written-forms/file.js`). **The acceptance line's wording is narrower than the fact**: `readRubyGuideFile` has three callers outside the store (see §2.4) |
+| 0 new model calls | Main offline loop **82 requests / 17 kinds** (was 82 / 17), chunked loop **28 / 6** (was 28 / 6), **0 on the second pass in both**; prompt audit **23 checks, 0 findings** — **and still exactly these numbers after the deletion** (plan 09 §2.8) |
+| Prompt size, before and after | `glossary-extract` **12,114 → 12,530** (main) and **12,391 → 12,807** (chunked). Every other kind unmoved. The move is the **416-character floor line**, not a real block: the offline fixtures' books are plain text with no harvest, so the block's real size is **not observable in the loops at all** — it is measured against the 17 real books through the shipped builder instead (**+315,646 characters, 12.88 %** on the chapter-by-chapter route, **+220,632, 9.00 %** on the whole-installment route; §2.5). **After the deletion: 12,485 / 12,762** — below the table era, **not** back to 12,114 / 12,391, because the prompt rule that replaces the table costs **+371 characters** |
+| The harvest still has one reader in the store | Scenario 10 pinned `utils/reference-store/**` at exactly one file that opens a harvest (`written-forms/file.js`) — **now `test/test-written-forms.js` scenario 12**. **The acceptance line's wording is narrower than the fact**: `readRubyGuideFile` had three callers outside the store (see §2.4); it has **two** now |
 | The corpus is untouched | 17 record digests identical to the pinned baseline, **34 / 34** write-ahead sidecars still present, 0 database opens by this slice |
-| Nothing else moved | `SCHEMA_VERSION` **13**, `COUNTED_TABLES` **21**, level table **70 kinds**, freeze doors **12**, 0 new commands, 0 new prompt files, 0 new settings or knobs, `system-prompts/glossary-terms.md` byte-identical (pinned by digest) |
-| What did move, and why | `test/test-module-layer.js` **417 → 424** checks and **60 → 63** nested layer files (one new file inside a layer scanned three times); `test/test-no-language-axis-list.js` scans **459 → 460** pipeline files, **81 checks, 0 findings** |
+| Nothing else moved | `SCHEMA_VERSION` **13**, `COUNTED_TABLES` **21**, level table **70 kinds** (72 since plan 09 slice 1), freeze doors **12**, 0 new commands, 0 new prompt files, 0 new settings or knobs, `system-prompts/glossary-terms.md` byte-identical (pinned by digest) — **the prompt is no longer byte-identical**: plan 09 slice 2 rewrote its rule 3 to teach the markup |
+| What did move, and why | `test/test-module-layer.js` **417 → 424** checks and **60 → 63** nested layer files (one new file inside a layer scanned three times); `test/test-no-language-axis-list.js` scans **459 → 460** pipeline files, **81 checks, 0 findings**. **Both moved back on the deletion: 424 → 417 checks, 63 → 60 nested files, 460 → 459 files** — the same three-times-counted layer, in reverse |
 
 
 ---
 
 ## 6. Open decisions, for the account owner
+
+**Items 1, 5 and 9 are moot as written** — they are questions about the per-chapter reading block, and plan 09
+slice 2 deleted it on 2026-10-16 (the chapter text carries the guides now). Item 1's real question survives in a
+different form: plan 09 §6 item 4 asks whether the **translation stage is shown the markup at all**, and the
+character-voice stage already reads annotated text. Items 5 and 9 have no subject: `READING_BLOCK_MAX_LINES` no
+longer exists, and there is no block to truncate or record. The rest are open, and plan 09 §6 is where the live
+list is.
 
 1. **Does the reading block go to the character-voice reading pass and the translation stage too**, or
    only to the glossary? The voice stage reads chapter by chapter and the translator reads the chapter;

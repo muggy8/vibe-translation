@@ -6,7 +6,9 @@
  * `importNewTerms`: that door files `source_stage = 'extract'` candidates which are deliberately NOT
  * rendered, and this one files the published half under the handle's own document stage. The evidence
  * rule is the same `findRowEvidence` `importGlossary` runs, and a row whose rendering column would be
- * empty is refused rather than published as a word on a list.
+ * empty is refused rather than published as a word on a list. So is a term cell that still carries the
+ * book's pronunciation markup — the chapter text prints those guides as `<ruby>…<rt>…</rt></ruby>` now
+ * (plan 09 slice 0), and the published file is rendered from the term cell verbatim.
  *
  * @module utils/reference-store/glossary-adapter/import-extraction
  */
@@ -15,6 +17,7 @@ const { EXTRACTION_TYPE_TO_SECTION, EXTRACTION_FALLBACK_SECTION, GLOSSARY_CHARAC
 const { glossaryTermSpans } = require("./parse");
 const { findRowEvidence } = require("./quote-evidence");
 const { documentTermAlreadyStored } = require("./rows");
+const { hasRubyMarkup } = require("../ruby-markup");
 require("../../../types"); // JSDoc type definitions
 
 /**
@@ -57,7 +60,7 @@ function glossaryRowFromExtraction(entry) {
  * is a record that can answer "what did the read pass find, and what did the glossary publish?" — and
  * the difference between the two numbers is the audit's, not a validator agent's.
  *
- * Three rules it will not bend:
+ * Four rules it will not bend:
  *
  *   - **The same evidence rule.** A row is filed only when one of its spellings, its rendering, or a
  *     passage its note quotes is a line this volume's own chapter files print. `findRowEvidence` is the
@@ -67,6 +70,11 @@ function glossaryRowFromExtraction(entry) {
  *     row that cannot fill it is a term on a list, and publishing it as a glossary entry would let the
  *     stage report success while shipping a table with an empty column. The refusal names the read pass
  *     as the thing that owes the rendering, because that is who has to fix it.
+ *   - **A term cell carrying pronunciation markup is refused, not filed and not rewritten** (plan 09
+ *     slice 2). The chapter text prints every guide as `<ruby>語<rt>reading</rt></ruby>` now, and the
+ *     evidence rule alone cannot catch the annotated shape: `glossaryTermSpans` strips the markup before
+ *     it searches, so the guide-free word is found and the markup rides along into `examples[0]`, which
+ *     `renderGlossary` prints verbatim. The refusal names the guide-free spelling to file instead.
  *   - **A term the record already holds is carried, not amended.** Same door as `importGlossary`
  *     (`documentTermAlreadyStored`), same reason: a row belongs to the volume that wrote it, and after
  *     that volume is sealed it is contested or superseded, never edited.
@@ -74,7 +82,7 @@ function glossaryRowFromExtraction(entry) {
  * @param {ReferenceStore} store - Opened with a document-scoped handle, which is what a rendered row needs.
  * @param {Array<Object>} entries - The parsed `glossary-new-terms.json` array.
  * @param {{volume?: number}} [opts]
- * @returns {{ok: boolean, imported: Array<Object>, importedCount: number, carried: Array<string>, refused: Array<{row: Object|null, term: string, because: string}>, castRegistered: number, missingRendering: Array<string>}}
+ * @returns {{ok: boolean, imported: Array<Object>, importedCount: number, carried: Array<string>, refused: Array<{row: Object|null, term: string, because: string}>, castRegistered: number, missingRendering: Array<string>, markupTerms: Array<string>}}
  */
 function importGlossaryExtraction(store, entries, { volume } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -85,12 +93,38 @@ function importGlossaryExtraction(store, entries, { volume } = {}) {
   const refused = [];
   const carried = [];
   const missingRendering = [];
+  const markupTerms = [];
   let castRegistered = 0;
 
   for (const entry of Array.isArray(entries) ? entries : []) {
     const row = glossaryRowFromExtraction(entry);
     if (!row) {
       refused.push({ row: null, term: "", because: "the new-terms file contained an entry with no term." });
+      continue;
+    }
+    // **A term cell carrying pronunciation markup is refused, not filed and not rewritten** (plan 09
+    // slice 2). The chapter text now prints every guide as `<ruby>語<rt>reading</rt></ruby>` (plan 09
+    // slice 0), so a read pass that copies the annotated span into `term` is copying markup, and
+    // `renderGlossary` prints the term cell verbatim — the tags would land in the published file, where
+    // `parseGlossaryMarkdown` would report them in `annotatedRows` but nothing could undo them. The
+    // evidence rule cannot catch this shape on its own: `glossaryTermSpans` strips the markup before it
+    // searches, so `<ruby>渋谷<rt>しぶや</rt></ruby>` finds 渋谷 in the book and files the markup with it.
+    // Refused rather than stripped, for the same reason `parseGlossaryMarkdown` keeps a markup-bearing row
+    // verbatim: a door that rewrites the answer it was given is a door whose output no longer matches
+    // what the pass asked for. The refusal names the guide-free form the door wanted, so the fix is a
+    // spelling, not a guess.
+    if (hasRubyMarkup(row.term)) {
+      const guideFree = glossaryTermSpans(row.term).join(" / ");
+      markupTerms.push(row.term);
+      refused.push({
+        row,
+        term: row.term,
+        because:
+          `"${row.term}" came back from this volume's read pass with its pronunciation guides still inside ` +
+          `the term cell. The book prints the guides as markup over the word; the word is what a glossary ` +
+          `row names. File it as ${guideFree ? `"${guideFree}"` : "the word with the tags taken off"} — ` +
+          "not the markup, and not the reading pasted into the word.",
+      });
       continue;
     }
     if (documentTermAlreadyStored(store, row.term)) {
@@ -161,6 +195,7 @@ function importGlossaryExtraction(store, entries, { volume } = {}) {
     refused,
     castRegistered,
     missingRendering,
+    markupTerms,
   };
 }
 

@@ -35,7 +35,7 @@ const { chapterSegmentNote } = require("../utils/source");
 
 const { researchVolumeTerms } = require("./research");
 const { fileGlossaryExtraction, fileGlossaryTermRows, fileGlossaryRevisions, renderGlossaryArtifact } = require("./store");
-const { truncateGlossary, readTermList, termsResponseFormat, showReadingAidsForCall } = require("./extract");
+const { truncateGlossary, readTermList, termsResponseFormat } = require("./extract");
 const { guardCarryForwardAgainst } = require("./carry-forward");
 
 /**
@@ -130,16 +130,10 @@ async function extractChapterTerms(ctx, segment, si) {
       `${si + 1}/${bundle.segments.length} — extracting terms...`
   );
   const messages = [{ file: path.join(volumeDir, segment.file), name: segment.file }];
-  // **The readings the book itself printed** (plan 08 slice 0), beside the chapter they were printed over.
-  // The converter took them out of the text (gotcha 123) and this is where they go back in: as a table the
-  // pass reads, not as markup pasted into the words. Built from this volume's own harvest, which is read
-  // once for the volume and reused for every chapter.
-  const readingAids = await showReadingAidsForCall({
-    ctx,
-    chapters: [segment],
-    label: `Volume ${values.INSTALLMENT_NUMBER} chapter ${segment.id}`,
-  });
-  messages.push({ text: readingAids.text });
+  // The readings the book prints are IN the chapter file now, as `<ruby>…<rt>…</rt></ruby>` over each
+  // annotated word (plan 09 slice 0), so there is no side table to build beside it. Plan 08 slice 0's
+  // `showReadingAidsForCall` block was a copy of a fact the artifact was missing; plan 09 decision 3
+  // deletes the copy rather than keeping two things that can disagree.
   const stateFile = si === 0 ? previousGlossaryFile : glossaryOutputFile;
   if (stateFile) {
     // The truncation is ranked by what THIS chapter actually contains (see truncateGlossary), so the

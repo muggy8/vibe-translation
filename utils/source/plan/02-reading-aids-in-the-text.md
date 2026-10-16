@@ -1,12 +1,14 @@
 # Plan 09 — the extraction keeps every reading aid in the text
 
-Plan of record. Written 2026-10-16. Status: **slices 0, 1 and 1b BUILT 2026-10-16** (slice 0: the converter, both
+Plan of record. Written 2026-10-16. Status: **slices 0, 1, 1b and 2 BUILT 2026-10-16** (slice 0: the converter, both
 paths, bundle schema 8 → 9; slice 1: the guide-free search surface on every door that reads chapter text, the
 two new extraction checks, the forged-quote rung closed, bundle schema **9 → 10**; slice 1b: the **mixed**
 splice — a quote that pastes some of a line's guides and leaves others as markup — closed on the same rung,
-§2.7); **slices 2–6 not built**.
-Slice 0's own measurement is §2.5, slice 1's is §2.6 and slice 1b's is §2.7, and each corrected figures this
-plan had published — the corrections are in the sections themselves, not buried in the slice table.
+§2.7; slice 2: plan 08 slice 0's per-chapter reading table is **deleted** — the file, its suite, its 12 barrel
+exports and its **three** call sites are gone, the prompt is taught the markup, and a term that arrives wearing
+the markup is refused at the filing door, §2.8); **slices 3–6 not built**.
+Slice 0's own measurement is §2.5, slice 1's is §2.6, slice 1b's is §2.7 and slice 2's is §2.8, and each corrected
+figures this plan had published — the corrections are in the sections themselves, not buried in the slice table.
 
 This plan **supersedes plan 08 slice 0** (the per-chapter reading table, built 2026-10-16 and committed as
 `9116904`) and **absorbs plan 08 slices 1–4**, which are re-numbered here. Plan 08 stays as the record of why
@@ -231,8 +233,9 @@ spelling stays a match, because flattening a line with no markup changes nothing
 **The limit that guard has, and it is pinned rather than hidden.** The **old converter's** interleaved shape
 `蒲かま田た` is **not** the flattening of canonical markup (`蒲田かまた`): rebuilding it needs to know which
 character of the word carried which piece of the reading, and canonical markup no longer says. Only the
-pronunciation-guide harvest says, and `test/test-glossary-reading-block.js` pins that **exactly one door** in
-`utils/reference-store/` may open that harvest. So the interleaved shape is guarded where the harvest is in
+pronunciation-guide harvest says, and `test/test-written-forms.js` scenario 12 pins that **exactly one door** in
+`utils/reference-store/` may open that harvest (the pin lived in `test/test-glossary-reading-block.js` until plan
+09 slice 2 deleted that suite). So the interleaved shape is guarded where the harvest is in
 reach — by `guide-split-in-text` in the extraction audit, unchanged — and the citation door guards the flattened
 shape, which is the one a citation can actually be forged into from an annotated chapter. `matchQuoteOnLine(
 "<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>を見た。", "蒲田かまたを見た。")` still returns `skeleton`, and
@@ -323,6 +326,99 @@ knob, prompt kind or prompt byte. `test/test-guide-free-search.js` went **11 sce
 
 ---
 
+### 2.8 What slice 2 measured (2026-10-16) — deleting the table exposes a shape nothing refused
+
+Slice 2 is the deletion plan 08 slice 0 was always meant to be paid back: `glossary/extract/reading-block.js`
+(441 lines), `test/test-glossary-reading-block.js` (794 lines), the **12** names `glossary/extract.js` re-exported
+from it, and its **three** call sites — `glossary/chunked.js` `extractChapterTerms` (the chapter-by-chapter route),
+`glossary/task.js` `extractNewTerms` (the whole-installment route), and `glossary/task.js` `dumpVolumePreview`
+(the `--dry-run` section that printed the block under a `CODE —` heading). **The plan's own row counted two call
+sites and 13 exports; the build found three and 12.** The dry-run section is the one the row missed, and it is the
+one that made the block visible to a person reading a dry run rather than to the model.
+
+**The finding the deletion produced.** With the guides inside the chapter text, the model is now shown markup, and
+a term can come back **wearing** it. Nothing refused that. `/tmp/opencode/p09s2-measure-markup-term.js` asked four
+terms through the real doors (`parseTermAnswer` → `fileGlossaryTermRows` → `renderGlossary`), 0 model calls, a
+fixture under `/tmp/opencode`, no corpus read:
+
+| The term the read pass answered with | Before this slice | After |
+|---|---|---|
+| `<ruby>渋谷<rt>しぶや</rt></ruby>` | **filed**, matched `verbatim` against the guide-free line, and printed into the published `glossary.md` with its tags | **refused**, named in the stage log |
+| `渋谷しぶや` (the reading pasted into the word) | refused — by the **evidence** rule, which is the wrong reason and says so in the wrong words | refused, by the markup rule |
+| `渋谷` (the honest one) | filed | filed |
+| `<ruby>三色院菫子<rt>さんしよくいんすみれこ</rt></ruby> / 三色院董子` | **filed**, and published with its tags | **refused** |
+
+Before: **2 filed / 1 carried / 1 refused**, and the published file carried **2 lines with ruby markup**, which
+`parseGlossaryMarkdown` then read back as **2 `annotatedRows`**. After: **1 filed / 0 carried / 3 refused**, **0**
+markup lines published, **0** `annotatedRows`. The reason the markup form matched at all is that
+`glossaryTermSpans` strips ruby **before splitting the cell on `/`** (plan 07 slice 5), so the guide-free spelling
+is what the evidence rule sees — the row proves a real line and is filed under a string the book never prints.
+
+**Refuse, not strip.** The alternative was to take the tags off on the way in. It was rejected: the door's own
+style is to refuse what arrives in the wrong shape (`rendering` absent is dropped, rule 4), and the store's other
+markup rule — `parseGlossaryMarkdown` — **reports** markup rather than rewriting it (plan 07 slice 5). A strip
+here would publish a spelling the read pass never wrote, and the extraction prompt's rule 3 would be a suggestion
+instead of a rule with a consequence. The refusal names the spelling to file it under: *File it as "渋谷" — not the
+markup, and not the reading pasted into the word.*
+
+**The guard sits before the already-held check, and that placement is a measurement, not a style choice.**
+`normalizeQuote` strips ruby (slice 1), so the markup form of a term the record already holds **matches the row it
+is already in**. `/tmp/opencode/p09s2-measure-carried.js`, run against the committed tree and against the working
+tree: file `渋谷`, then file `<ruby>渋谷<rt>しぶや</rt></ruby>`. Against `HEAD` the second pass reports
+**`carried=1`, `refused=0`** — the markup spelling is accepted as "already held" and the log prints it as a term
+carried from earlier volumes. Against the working tree it reports **`carried=0`, `refused=1`**. A guard placed after
+`documentTermAlreadyStored` would report the markup form of a term the record holds as silently carried, which is
+the failure mode this repository calls "a check that never runs".
+
+**What the prompt costs, and the plan's own promise about it is false.** The row for slice 2 said the offline
+loops' `glossary-extract` prompt "returns to its pre-table size". It does not, and it should not: the table was
+719 characters of prompt rule replaced by nothing, while the markup rule that replaces it is **+371 characters**
+over the rule it rewrote (348 → 719). Measured from the two loop logs:
+
+| `glossary-extract`, largest prompt in the loop | Before plan 08 | With the table (plan 08 slice 0) | After slice 2 |
+|---|---|---|---|
+| main loop | 12,114 | 12,530 | **12,485** |
+| chunked loop | 12,391 | 12,807 | **12,762** |
+
+So the deletion **does** land below the table-era size, and it does **not** return to the pre-table size. Every
+other prompt kind is unmoved (`intake` 20163 / 20299, `acceptance` 12103 / 12916, `voice-extract` 16964 / 16898,
+`glossary-settlement` 2745, `audit-agent` 12123, `wiki-author` 21638, `wiki-validator` 24162, `translate` 7585,
+`verify` 13795, `retranslate` 7914, `polish` 7175, `polish-audit` 9671, `style-*`, `calibration-probe` 1017).
+
+**Every call baseline is unmoved**: **82 calls / 17 prompt kinds** in the main loop and **28 / 6** in the chunked
+one, **0 calls on the second pass in both**, prompt audit **23 checks / 0 findings** in both. Both glossary routes
+still run and still file terms (the main loop prints `extracted 9 new term(s)`, the chunked one files from
+`chapter part-01`), and **no harvest file is reached anywhere in either loop's log** — which is the point of the
+slice: the readings now travel in the chapter the call is already shown.
+
+**The pin that lived in the deleted suite had to move rather than go with it.** `test/test-glossary-reading-block.js`
+scenario 10 was the door that proved **exactly one** module inside `utils/reference-store/` opens a
+`<base>-ruby-guides.json` (plan 07 §2.4). Deleting the suite would have deleted the guard, so the scan moved to
+`test/test-written-forms.js` scenario 12 — the suite that already owns the question "which door may ask the
+harvest's grouping question". It re-proves itself by planting two readers beside a copy of the real door, one
+calling `readRubyGuideFile` and one hand-rolling `fs.readFileSync(…-ruby-guides.json)` to dodge it, and names all
+three. `test/test-written-forms.js` went **211 → 215** checks.
+
+**What moved, and what did not.** `npm test` **90 invocations → 89** (a suite removed means its `test/suites.js`
+entry removed in the same change, gotcha 169), and the run is green at **68,487 ms** against **70,645 ms** before.
+`test/test-module-layer.js` **424 → 417** checks and its nested-file count **63 → 60**: `glossary/` is scanned as
+three separate layers (`glossary.js`, `glossary/extract.js`, `glossary/carry-forward.js`), so the deleted file was
+counted three times. `test/test-no-language-axis-list.js` **460 → 459** files scanned, 81 checks, 0 findings.
+`test/test-glossary-store-unconditional.js` gained scenario 11 (**+92 lines**) and pins the refusal end to end.
+`SCHEMA_VERSION` stays **13**, `COUNTED_TABLES` **21**, the level table **72 kinds** (STOP 19 / MAJOR 31 / MINOR 16
+/ NOTE 6), the freeze doors **12**, `BUNDLE_SCHEMA_VERSION` **10**. No new table, column, finding kind, level,
+freeze door, command, setting, knob or prompt kind. The 17 `series.db` digests are identical before and after
+(`/tmp/opencode/p09s2-corpus-before.tsv` → `p09s2-corpus-after.tsv`) and **34/34** `-wal` / `-shm` sidecars are
+present — no corpus record was opened.
+
+**What slice 2 did not do.** The **extraction candidate** door (`importVolumeExtraction`, the rows filed under
+`source_stage: 'extract'`) was **not** given the markup refusal. Those rows are never rendered, so a candidate
+wearing markup costs nothing today; whether it should also be refused is written up rather than decided
+(`/tmp/opencode/plan09-slice2-questions.md`). And the published glossary still has no reading column — that is
+slice 3, and until it lands the guide the model was told to read is information the record cannot keep.
+
+---
+
 ## 3. What this replaces, and what it leaves alone
 
 | Stays | Changes |
@@ -330,7 +426,7 @@ knob, prompt kind or prompt byte. `test/test-guide-free-search.js` went **11 sce
 | The harvest file `<base>-ruby-guides.json`, and `written_forms` filing from it | The extracted chapter carries the guides as markup, so the harvest is the record and the text is the display |
 | `stripRubyMarkup` as the store's one ruby rule | It becomes the rule **every text-searching door uses**, not only the citation doors — **six doors in `utils/translate/` and `utils/reference-store/attribution/` had no ruby rule at all** (§2.6) |
 | The `guide-split-in-text` tripwire (HIGH) | It stays, and reports **0** on all 17 books while still firing on a planted split string. It gained the two companions §3 promised: `ruby-markup-not-canonical` (HIGH) and `ruby-markup-count-mismatch` (HIGH) |
-| Plan 08 slice 0's reading table | **Deleted**, with its suite, its 13 barrel exports and its two call sites |
+| Plan 08 slice 0's reading table | **Deleted** by slice 2, with its suite, its **12** barrel exports and its **three** call sites (`glossary/chunked.js`, `glossary/task.js` `extractNewTerms`, and `glossary/task.js` `dumpVolumePreview` — the `--dry-run` section, which the plan's row did not count) |
 | `BUNDLE_SCHEMA_VERSION` 8 | **9**, because the converter's behaviour is not part of the bundle cache key (gotcha 123) and leaving it serves guide-free text forever |
 | `BUNDLE_SCHEMA_VERSION` 9 | **10**, because the extraction now records its own ruby-markup measurements per chapter and per volume, and a schema-9 cache carries none of them — the two new checks would be silent on every book. Measured first: **133 of 133 chapter files byte-identical** under the new conversion, so the bump costs the books a cache miss and nothing else |
 | The glossary's answer shape (`{"terms": […], "revisions": […]}`, closed) | The prompt teaches the markup: the term is the word **without** the tags |
@@ -429,7 +525,7 @@ taken before trusting it, and both are the reason the act is safe rather than me
 | **0** | **The converter keeps the guides, canonically, and the bundle schema moves.** Both converter paths, one shape. **BUILT 2026-10-16 — every clause met, measured in §2.5.** Two figures this plan carried into §2.2 were corrected by the build, and one wording choice (§4.1's "every reading aid") is narrower in practice than it reads: headings and titles stay guide-free. | A fixture whose source annotates a word piece by piece extracts as `<ruby>蒲田<rt>かまた</rt></ruby>` with the base contiguous; the split string appears **0** times; the harvest rows and counts are **identical** to what the same fixture produced before the change; `BUNDLE_SCHEMA_VERSION` **8 → 9** and a cached bundle under 8 is refused rather than reused; a guide with no base emits plain text; the six extraction audits run over markup-bearing text and the split tripwire still reports 0 on legitimate fixtures. **0 model calls, 0 corpus writes.** |
 | **1** | **Every door that searches chapter text searches the guide-free projection.** **BUILT 2026-10-16 — every clause met, measured in §2.6.** It was dispatched as "two doors" and turned out to be **six**, and it also had to close a rung rather than only widen a search. | On a fixture chapter carrying canonical ruby: a name the book annotates as a whole is found; a name the book annotates **piece by piece across two elements** is found; a phrase spanning two annotated words is found; a planted quote that only exists with the markup inside it is **refused**; `cast_presence_match` and the chapter-facts query report the same characters with and without the markup. The extraction audit gains a canonical-shape check and a markup-count check. **0 model calls.** → `test/test-guide-free-search.js` (11 scenarios, **93 checks**), `test/test-source-audit.js` (the two new checks), `test/test-source-ruby-markup.js` (the shape scan, and the split tripwire still firing). Measured on the real corpus: **0 findings across all 17 books** from the eight checks, **0 verdict changes** over **22,469 published facts**, `guide-split-in-text` still **0** and still firing on a planted string. |
 | **1b** | **The same rung, the shape slice 1 missed: a quote that splices SOME of a line's guides and leaves the others as markup.** **BUILT 2026-10-16 — measured in §2.7.** It was found by running the built guard against a real chapter, not by reading the guard. | The mixed quote above, against the real volume 08 chapter 1 line, is **refused**, both ways round and as a short quote; every honest citation on that same line is **unchanged**; `matchPreparedLine` still answers the mixed shape `skeleton` (the fast path is untouched, and that is asserted); the strict A/B over **22,469 published evidence items** reports **0 verdict changes** and the guard fires on **0** of the 424 skeleton matches; over the real books it refuses **10,773 of 10,773** planted mixed forgeries and **0 of 972,327** legitimate substrings. **0 model calls, 0 corpus writes.** → `test/test-guide-free-search.js` (now 12 scenarios, **124 checks**), gotcha 178. |
-| **2** | **The glossary read pass reads the hints from the text, and the table is deleted.** | `glossary/extract/reading-block.js`, its suite, its 13 barrel exports and its two call sites are **gone**; `system-prompts/glossary-terms.md` names the markup and says the term is the word without the tags; the offline loops' `glossary-extract` prompt returns to its pre-table size on plain-text fixtures; **0 new model calls**, both loop baselines unmoved. |
+| **2** | **The glossary read pass reads the hints from the text, and the table is deleted.** **BUILT 2026-10-16 — measured in §2.8.** It was dispatched as a deletion and turned out to need a filing rule as well: with the markup in the text, a term can come back **wearing** the markup, and nothing refused it. | `glossary/extract/reading-block.js` (441 lines), its suite (794 lines), its **12** barrel exports and its **three** call sites are **gone**; `system-prompts/glossary-terms.md` names the markup and says the term is the word without the tags; a `term` carrying `<ruby>` is **refused at the filing door** and named in the stage log; **0 new model calls**, both loop baselines unmoved (**82 / 17** and **28 / 6**, **0 on the second pass in both**). **One clause of this row was wrong and the build corrected it:** the prompt does **not** return to its pre-table size — it lands **+371 characters** above it, because teaching the markup costs the rule that replaces the table. **0 model calls, 0 corpus writes.** → `test/test-glossary-store-unconditional.js` scenario 11, `test/test-written-forms.js` scenario 12 (the harvest-access pin, relocated), §2.8. |
 | **3** | **The reading is recorded beside the term, and the published glossary gains its column.** | A new **insert-only** row kind at `SCHEMA_VERSION` **14**; filing a term the book guided records every reading that volume guided for that form; a term the book never guided records nothing and says so; a second pass files 0; every content column of the published term row compared and **unmoved**; `GLOSSARY_HEADER` gains the fourth column and all three readers still drop the header by position; the re-render door's comparison still refuses a lost row, a moved cell and an empty render, measured over **copies** of all 17 records; a wording that contradicts a printed reading is **filed and named** in the report the grader reads. |
 | **4** | **"The reading changed" becomes the forward half of the terminology review.** | A query over the recorded readings replaces `FORWARD_REVEAL_SHAPES`; on copies of the 17 records, 0 model calls, it finds the measured **266 / 129** classes and ranks them inside the existing 24-call bound; a fixture where a later volume guides a form differently puts that term on the agenda with **no phrase matching at all**; the phrase path stays for records that predate the column and the coverage report names which half produced the agenda. |
 | **5** | **The revision door stops assuming newer is better** for a change in how a name is spoken. | A planted revision that contradicts a reading the book prints **repeatedly** is **named, not settled**; a planted genuine correction still settles; both outcomes print the guide and the choice side by side; 0 published rows edited. |
@@ -529,8 +625,9 @@ it is a decision about an existing guard, not an addition.
    **+23.4 %** as a measurement.
 7. **Whether the harvest's pairing may ever reach the citation door** (opened by slice 1, 2026-10-16). The one
    shape the new guard cannot refuse — `蒲かま田た` — is rebuildable **only** from `<base>-ruby-guides.json`,
-   and `test/test-glossary-reading-block.js` pins that exactly **one** door in `utils/reference-store/` may open
-   that file. Widening the citation door to read the harvest closes the last forged shape and breaks that pin;
+   and `test/test-written-forms.js` scenario 12 pins that exactly **one** door in `utils/reference-store/` may open
+   that file (the pin moved there from `test/test-glossary-reading-block.js` when slice 2 deleted that suite).
+   Widening the citation door to read the harvest closes the last forged shape and breaks that pin;
    leaving it means the interleaved shape is guarded at extraction time and not at filing time. Options and
    costs: `/tmp/opencode/plan09-slice1-questions.md` question 1. **Slice 1 chose "leave it", and pinned the
    limit as a test assertion rather than hiding it.**
@@ -548,11 +645,18 @@ it is a decision about an existing guard, not an addition.
    whole annotated word with its whole guide, so `牡丹一華ぼたん` — the word plus the **first four characters** of
    the reading it is guided with — still matches by skeleton and is filed as evidence that the book prints a string
    it does not print. Closing it means deciding **where a reading ends**, which is a claim about what one language's
-   script looks like; this repository is language-neutral by policy (`test/test-no-language-axis-list.js` scans 460
-   files for exactly that mistake and reports 0 findings), so the door that closes it without inventing a reading
+   script looks like; this repository is language-neutral by policy (`test/test-no-language-axis-list.js` scans 459
+   files for exactly that mistake and reports 0 findings — 460 before plan 09 slice 2 deleted a file), so the door
+   that closes it without inventing a reading
    shape is the one in item 7 — letting the evidence door read the harvest's pairing. **Slice 1b chose "leave it",
    and pinned the limit as a test assertion rather than hiding it.** `/tmp/opencode/plan09-slice1b-questions.md`
    question 1.
+10. **Whether the extraction *candidate* door must refuse a markup-bearing term too** (opened by slice 2,
+    2026-10-16). The refusal slice 2 built sits in the door that files the rows `renderGlossary` publishes. The
+    sibling door — `importVolumeExtraction`, which files the same read pass's output under `source_stage: 'extract'`
+    as the record's own reading notebook — was **not** given it, because those rows are never rendered and a
+    candidate wearing markup costs nothing today. Options and costs: `/tmp/opencode/plan09-slice2-questions.md`
+    question 1. **Slice 2 chose "not today", and says so in §2.8 rather than leaving it as a silent asymmetry.**
 
 ---
 

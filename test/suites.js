@@ -148,7 +148,6 @@ const SUITES = [
   suite("test-glossary-re-render", "test/test-glossary-re-render.js", []),
   suite("test-lookup-reliability", "test/test-lookup-reliability.js", []),
   suite("test-glossary-extraction-reads", "test/test-glossary-extraction-reads.js", []),
-  suite("test-glossary-reading-block", "test/test-glossary-reading-block.js", []),
   suite("test-glossary-revisions", "test/test-glossary-revisions.js", []),
   suite("test-glossary-settlement", "test/test-glossary-settlement.js", []),
   suite("test-settlement-agenda-coverage", "test/test-settlement-agenda-coverage.js", []),
