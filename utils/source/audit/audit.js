@@ -3,7 +3,7 @@
  *
  * Pure: no file reads, no model, no agent, no writes. Give it the plan of record's volume entry, the
  * bundle `resolveSourceBundle` returned for it, and the volume folder's file listing, and it answers the
- * six questions the extraction layer is able to answer about itself.
+ * eight questions the extraction layer is able to answer about itself.
  *
  * WHY IT IS A FUNCTION AND NOT A STEP (yet). `utils/source/plan/01-extraction-step.md` slice 1 is the
  * audit; slice 2 is the `extract` step that runs it over every volume and writes the reports. Building
@@ -26,6 +26,8 @@ const {
   auditGuideSplitSurvives,
   auditTitlesAreTitles,
   auditGuideHarvest,
+  auditRubyMarkupIsCanonical,
+  auditRubyMarkupCount,
 } = require("./checks");
 
 /** @typedef {import("../../postmortem").PostMortemFinding} PostMortemFinding */
@@ -80,6 +82,8 @@ function auditExtractedVolume({ volume, bundle, volumeFiles }) {
     ...auditHasUsableChapter({ volume, segments }),
     ...auditEmptyChapters({ volume, segments, packagingTitles }),
     ...auditGuideSplitSurvives({ volume, segments }),
+    ...auditRubyMarkupIsCanonical({ volume, segments }),
+    ...auditRubyMarkupCount({ volume, segments }),
     ...auditTitlesAreTitles({ volume, bundle, segments }),
     ...auditGuideHarvest({ volume, bundle, names }),
   ];

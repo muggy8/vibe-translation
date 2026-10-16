@@ -11,10 +11,20 @@
  * coverage rule and the copy-forward guard are built on that rule answering the same question everywhere
  * (gotcha 121). It fires on 1 of the 4 cast entries both real records measure absent, and 0 of the other 3.
  *
+ * **What plan 09 changed about it (2026-10-16).** That measurement was taken against the extraction that
+ * was on disk then, which pasted the guide into the word. The extraction no longer does that: the guide is
+ * markup over a word that stays whole, and the guide-free projection of `<ruby>蒲田<rt>かまた</rt></ruby>`
+ * is 蒲田 — which the store's own rule now matches on its **verbatim** rung, the one with no minimum length.
+ * So the case this probe was written for is closed by the extraction, not by this file. What the probe is
+ * for now is the shape the extraction cannot close: a name short enough that only the skeleton rung could
+ * find it *inside* a longer run of characters. And it searches the guide-free projection, for the same
+ * reason `presence.js` does — see `readingAidSpan`.
+ *
  * @module utils/reference-store/attribution/reading-aids
  */
 
 const { namesForEntry } = require("../presence");
+const { stripRubyMarkup } = require("../ruby-markup");
 const { volumeChapterLines } = require("./lines");
 require("../../../types"); // JSDoc type definitions
 
@@ -49,13 +59,24 @@ const READING_AID_MAX_GAP = 4;
 /**
  * Find one name in one line when the book has written its reading aids between its kanji.
  *
- * @param {string} line
+ * **The line is stripped first** (plan 09 slice 1, 2026-10-16). This probe explains a verdict
+ * `presence.js` reached on the guide-free projection, so it has to look at the same projection; a
+ * probe that reads the raw file answers a different question than the measurement it is meant to
+ * explain. Measured on the 17 real books, 0 model calls: searching the raw line is **blind** to a name
+ * whose kanji are separated by markup (`<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>` — the between-text is
+ * `<rt>かま</rt>`, which `onlyReadingAids` refuses), and it is **not inert** either: 5 of the 13 harvest
+ * readings with two or more Han characters (脅迫, 強制終了, 金属バツト→金属, 緊急事態, 劇場) are "found" in a
+ * volume by the raw search and found **nowhere** by the guide-free one, because those characters are a
+ * reading written over someone's head, not a word the book prints. Both directions are the probe
+ * answering about the markup instead of about the book.
+ *
+ * @param {string} line - One physical line of the chapter's source text, as the file holds it.
  * @param {string[]} kanji - The name's Han characters, in order.
  * @returns {{span: string, gap: number}|null}
  */
 function readingAidSpan(line, kanji) {
   if (kanji.length < 2) return null;
-  const text = String(line || "").replace(/\s+/g, "");
+  const text = stripRubyMarkup(line).replace(/\s+/g, "");
   let at = 0;
   let start = -1;
   let gap = 0;

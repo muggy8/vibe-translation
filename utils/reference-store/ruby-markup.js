@@ -181,6 +181,33 @@ function rubyMarkupFor({ form, reading } = {}) {
 }
 
 /**
+ * The line as it would read if the markup were flattened: tags gone, every character kept, in document
+ * order.
+ *
+ * `<ruby>蒲田<rt>かまた</rt></ruby>` → `蒲田かまた`. A piece-by-piece ruby — the shape the OLD converter
+ * left, `<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>` → `蒲かま田た`, which is gotcha 123's split string.
+ *
+ * **This is not a projection this repository writes or stores. It is the shape a quote is forged into.**
+ * A model that reads `<ruby>蒲田<rt>かまた</rt></ruby>` and quotes it as `蒲田かまた` has produced a string
+ * the book prints in neither form: not as the store compares it (guide-free, 蒲田) and not as the file
+ * holds it (with the tags). The Han-character skeleton rung used to accept it, because 蒲田 is the
+ * skeleton of both. `utils/reference-store/evidence.js` builds this line to prove that is the only place
+ * the quote occurs, and refuses the citation.
+ *
+ * It is the tag list applied once, with no text moved: the flattening is what the tags alone contribute,
+ * so the guard can say "this quote exists only once the guides are pasted into the word" without claiming
+ * anything about which character carried which reading.
+ *
+ * @param {string|null|undefined} text - Text that may carry ruby markup.
+ * @returns {string} The same text with every ruby-family tag removed and every character kept.
+ */
+function guideSplicedTextOf(text) {
+  const raw = String(text === undefined || text === null ? "" : text);
+  if (!raw.includes("<")) return raw;
+  return raw.replace(rubyTagMatcher(), "");
+}
+
+/**
  * How many characters one annotation adds to a chapter.
  *
  * @param {{form: string, reading: string}} unit
@@ -198,6 +225,7 @@ module.exports = {
   hasRubyMarkup,
   rubyMarkupUnitCount,
   stripRubyMarkup,
+  guideSplicedTextOf,
   rubyMarkupFor,
   rubyMarkupAddedChars,
 };

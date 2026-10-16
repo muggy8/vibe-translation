@@ -206,6 +206,207 @@ function guideFreeTextOf(text) {
 }
 
 /**
+ * Whether one annotation is written as markup, or as plain text.
+ *
+ * The three plain shapes are `rubyTextFor`'s own: a word with no guide, a guide with no word, and a half
+ * carrying `<` or `>`. Plus the one shape no annotation text explains: a guide on a CHAPTER HEADING, which
+ * the heading path renders as the word alone because a heading is compared against the name the contents
+ * list carries. `displayed` is stamped where that decision is made (`renderRuby` / `inlineTextOf`), so the
+ * extraction can ask "how many annotations did this chapter turn into markup?" without re-deriving the
+ * heading rule somewhere else — which is the drift `ruby-guides.js` and `chapters.js` exist to avoid.
+ *
+ * @param {{base?: string, reading?: string}|null|undefined} annotation
+ * @returns {boolean} True when this annotation becomes `<ruby>…<rt>…</rt></ruby>` in the text.
+ */
+function rubyWritesMarkup(annotation) {
+  const base = String((annotation && annotation.base) || "");
+  const reading = String((annotation && annotation.reading) || "");
+  if (!base || !reading) return false;
+  return !RUBY_MARKUP_UNSAFE_RE.test(base) && !RUBY_MARKUP_UNSAFE_RE.test(reading);
+}
+
+/**
+ * How many `<ruby>` units a piece of extracted text carries.
+ *
+ * **This is `utils/reference-store/ruby-markup.js`'s `rubyMarkupUnitCount`, restated for the same reason
+ * the strip is restated** — the store's leaf must not sit behind a converter and a converter must not sit
+ * behind a database module. `test/test-source-ruby-markup.js` runs the same markup through both and fails
+ * if the two counts ever disagree.
+ *
+ * @param {string|null|undefined} text - Extracted text.
+ * @returns {number} The number of `<ruby>` elements opened in it.
+ */
+function rubyUnitCountOf(text) {
+  const raw = String(text === undefined || text === null ? "" : text);
+  if (!raw.includes("<")) return 0;
+  let count = 0;
+  for (const match of raw.matchAll(rubyTagMatcher())) {
+    if (String(match[2]).toLowerCase() === "ruby" && match[1] !== "/") count += 1;
+  }
+  return count;
+}
+
+/**
+ * The inside of every top-level `<ruby>` element in a piece of text, in document order.
+ *
+ * Depth-counted rather than matched as a whole unit, for the same reason `guideFreeTextOf` is: a nested
+ * ruby is a shape error, and a scanner that matched `<ruby>…<\/ruby>` greedily would read the inner one as
+ * part of the outer one's word and report the wrong element.
+ *
+ * The inner keeps every tag the element's own children carry, EXACTLY as written — only the element's own
+ * `<ruby>` / `</ruby>` pair is left out. That is what makes the shape scan able to answer its questions:
+ * a guide run whose `</rt>` is missing is unbalanced, and a nested `<ruby>` or a stray `<rb>` is markup the
+ * converter never writes. Rebuilding the tags from the match instead of keeping them is what made every
+ * element in the real corpus look unbalanced — the closing `</rt>` was dropped, so no guide ever closed.
+ *
+ * @param {string} raw - Text that may carry ruby markup.
+ * @returns {Array<{inner: string, unbalanced: boolean}>} One entry per `<ruby>` element.
+ */
+function rubyUnitInners(raw) {
+  /** @type {Array<{inner: string, unbalanced: boolean}>} */
+  const units = [];
+  let depth = 0;
+  let inner = "";
+  let cursor = 0;
+  for (const match of raw.matchAll(rubyTagMatcher())) {
+    const tag = String(match[2]).toLowerCase();
+    const closing = match[1] === "/";
+    const between = raw.slice(cursor, match.index);
+    cursor = match.index + match[0].length;
+    if (tag === "ruby" && !closing) {
+      // Opening the element we are measuring: the text before it is OUTSIDE it and is not part of the
+      // inner. Opening a NESTED ruby: its own tag is markup the converter never writes, so it stays.
+      inner = depth === 0 ? "" : inner + between + match[0];
+      depth += 1;
+      continue;
+    }
+    if (depth === 0) continue;
+    if (tag === "ruby" && closing) {
+      inner += between;
+      depth -= 1;
+      if (depth === 0) {
+        units.push({ inner, unbalanced: false });
+        inner = "";
+      } else {
+        inner += match[0];
+      }
+      continue;
+    }
+    inner += between + match[0];
+  }
+  if (depth > 0) units.push({ inner, unbalanced: true });
+  return units;
+}
+
+/**
+ * What one `<ruby>` element's own markup says it is, measured against the canonical shape.
+ *
+ * Canonical is `<ruby>${base}<rt>${reading}</rt></ruby>`: the base contiguous, exactly one guide run, a
+ * word and a reading that are both there. Everything else is a defect with a name, and the names are the
+ * shapes the extraction audit reports — `base-not-contiguous` (text after the guide, which is the old
+ * converter's interleaving), `multiple-guide-runs`, `empty-guide`, `empty-base`, `nested-markup` (a tag
+ * inside the ruby that is not a guide: a nested `<ruby>`, or a `<rb>` / `<b>` / `<i>` the converter never
+ * writes), `unbalanced-markup`.
+ *
+ * Structural, not pattern-matched on the reading: nothing here asks what a reading looks like, because a
+ * rule about the shape of a Japanese reading fires on ordinary Japanese (plan 01 §3 measured 666 of them).
+ *
+ * @param {string} inner - The inside of one `<ruby>` element, tags for its own children included.
+ * @param {boolean} [unbalanced] - True when the element was never closed.
+ * @returns {{reasons: string[], base: string, reading: string}} The defects found (empty when canonical).
+ */
+function rubyUnitShapeOf(inner, unbalanced = false) {
+  const raw = String(inner === undefined || inner === null ? "" : inner);
+  /** @type {Array<{guide: boolean, text: string}>} */
+  const chunks = [];
+  let guideDepth = 0;
+  let guideRuns = 0;
+  let nestedTags = 0;
+  let cursor = 0;
+  const pushChunk = (text) => {
+    if (!text) return;
+    chunks.push({ guide: guideDepth > 0, text });
+  };
+  for (const match of raw.matchAll(new RegExp(RUBY_TAG_PATTERN_SOURCE, "gi"))) {
+    pushChunk(raw.slice(cursor, match.index));
+    cursor = match.index + match[0].length;
+    const tag = String(match[2]).toLowerCase();
+    const closing = match[1] === "/";
+    if (RUBY_GUIDE_TAGS.has(tag)) {
+      if (!closing) {
+        if (guideDepth === 0) guideRuns += 1;
+        guideDepth += 1;
+      } else {
+        guideDepth = Math.max(0, guideDepth - 1);
+      }
+      continue;
+    }
+    if (!closing) nestedTags += 1;
+  }
+  pushChunk(raw.slice(cursor));
+
+  const baseChunks = chunks.filter((c) => !c.guide);
+  const guideChunks = chunks.filter((c) => c.guide);
+  const base = baseChunks.map((c) => c.text).join("");
+  const reading = guideChunks.map((c) => c.text).join("");
+
+  let baseAfterGuide = false;
+  let sawGuide = false;
+  for (const c of chunks) {
+    if (c.guide) sawGuide = true;
+    else if (sawGuide) baseAfterGuide = true;
+  }
+
+  /** @type {string[]} */
+  const reasons = [];
+  if (unbalanced || guideDepth > 0) reasons.push("unbalanced-markup");
+  if (nestedTags > 0) reasons.push("nested-markup");
+  if (guideRuns > 1) reasons.push("multiple-guide-runs");
+  if (guideRuns > 0 && baseAfterGuide) reasons.push("base-not-contiguous");
+  // An annotation with guide tags and no reading inside them is `<ruby>word<rt></rt></ruby>` — markup with
+  // nothing in it, which `rubyTextFor` refuses to write, so finding one in the text means something else
+  // wrote it.
+  if (guideRuns > 0 && !reading) reasons.push("empty-guide");
+  if (guideRuns > 0 && !base) reasons.push("empty-base");
+  return { reasons, base, reading };
+}
+
+/**
+ * Scan the ruby markup a conversion wrote and report every unit that is not the canonical shape.
+ *
+ * This is the measurement the extraction records on each chapter (`segment.rubyUnits` /
+ * `segment.rubyShapeDefects` / `segment.rubyShapeExamples`) so `utils/source/audit/` can answer "did the
+ * converter write what the canonical rule says it writes?" without opening the book again — the same
+ * arrangement the guide-split tripwire already uses (plan 01 §3), and for the same reason: the audit is a
+ * pure function over a bundle.
+ *
+ * @param {string|null|undefined} text - Extracted chapter text.
+ * @returns {{units: number, defects: number, reasons: string[], examples: string[]}} `units` counts every
+ *   `<ruby>` element; `defects` counts the ones that are not canonical; `examples` quotes up to three of
+ *   them so a report can show what it means.
+ */
+function canonicalRubyShapeScan(text) {
+  const raw = String(text === undefined || text === null ? "" : text);
+  const units = rubyUnitCountOf(raw);
+  if (units === 0) return { units: 0, defects: 0, reasons: [], examples: [] };
+  let defects = 0;
+  /** @type {string[]} */
+  const reasons = [];
+  /** @type {string[]} */
+  const examples = [];
+  for (const unit of rubyUnitInners(raw)) {
+    const shape = rubyUnitShapeOf(unit.inner, unit.unbalanced);
+    if (shape.reasons.length === 0) continue;
+    defects += 1;
+    for (const reason of shape.reasons) reasons.push(reason);
+    if (examples.length < 3) {
+      examples.push(`${shape.reasons.join(", ")}: <ruby>${unit.inner}${unit.unbalanced ? "" : "</ruby>"}`);
+    }
+  }
+  return { units, defects, reasons: [...new Set(reasons)], examples };
+}
+
+/**
  * Open one annotation unit in the sequence: the base the book printed, and the guide that sat on it.
  *
  * THE SEQUENCE IS THE POINT. `<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>` annotates 蒲 with かま and 田
@@ -310,6 +511,11 @@ function splitRuby($, rubyEl) {
  */
 function renderRuby($, rubyEl, imageRef, onRubyGuide, rubyAsWord = false) {
   const guide = splitRuby($, rubyEl);
+  // `displayed` records what this render actually WROTE, which is the only answer the extraction audit's
+  // count check can trust: a heading annotation is harvested and not displayed, a guide with no word under
+  // it is displayed as plain text, and a chapter whose markup count disagrees with its own harvested
+  // annotations is the finding. Stamped here, at the one place the decision is made.
+  guide.displayed = rubyAsWord ? false : rubyWritesMarkup(guide);
   if (onRubyGuide && (guide.base || guide.reading)) onRubyGuide(guide);
   // A heading is a NAME: it is compared against the name the book's contents list gave the chapter, and
   // markup in a name matches no name that does not. The guide is still harvested, only not displayed.
@@ -605,7 +811,7 @@ function inlineTextOf(node, onRubyGuide, rubyAsWord = false) {
         pending = "";
         continue;
       }
-      const own = inlineTextOf(child, onRubyGuide);
+      const own = inlineTextOf(child, onRubyGuide, rubyAsWord);
       base += own;
       pending += own;
     }
@@ -616,6 +822,10 @@ function inlineTextOf(node, onRubyGuide, rubyAsWord = false) {
       annotations,
       annotated,
     };
+    // The same `displayed` stamp `renderRuby` puts on the markdown converter's guide: what this render
+    // actually wrote, not what it was asked to write. The two converters must answer the count question
+    // the same way (gotcha 119).
+    entry.displayed = rubyAsWord ? false : rubyWritesMarkup(entry);
     if (onRubyGuide && (entry.base || entry.reading)) onRubyGuide(entry);
     if (rubyAsWord) return entry.base || entry.reading;
     return rubyTextFor(entry);
@@ -702,6 +912,9 @@ module.exports = {
   RUBY_MARKUP_UNSAFE_RE,
   canonicalRubyMarkup,
   rubyTextFor,
+  rubyWritesMarkup,
+  rubyUnitCountOf,
+  canonicalRubyShapeScan,
   rubyTagMatcher,
   guideFreeTextOf,
   normalizeSpaces,

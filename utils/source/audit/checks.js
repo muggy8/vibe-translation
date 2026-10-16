@@ -1,5 +1,5 @@
 /**
- * utils/source/audit/checks.js — the six questions the extraction layer can answer about itself.
+ * utils/source/audit/checks.js — the eight questions the extraction layer can answer about itself.
  *
  * The five `utils/source/plan/01-extraction-step.md` §3 measured as computable from what extraction
  * already produces, plus the guide-split tripwire §3 deferred — deferred because the harvest could not
@@ -7,6 +7,14 @@
  * so the broken string could not be rebuilt). The harvest now records each annotation's own sequence
  * (`RubyGuide.annotated`, harvest schema 2), which is what made the sixth check writable. The other
  * deferral still stands: "is this a character name?" has no roster to ask at extraction time.
+ *
+ * Checks 7 and 8 are plan 09 slice 1, and they exist because check 6 changed what it guards. Once the
+ * converter writes the guides INTO the chapter (`<ruby>蒲田<rt>かまた</rt></ruby>`) it can no longer
+ * assemble the split string, so `guide-split-in-text` can only fire on a file somebody edited or a source
+ * that prints the split shape as ordinary text. Two questions become answerable and were not before:
+ * **is every ruby element in the file the one shape the converter writes** (7), and **does the file hold as
+ * many of them as the conversion harvested** (8). Both are counts over measurements the extraction records
+ * on each segment, so neither costs a file read or a model call.
  *
  * Every check is a pure function over `{volume, bundle, names, segments, packagingTitles}` returning
  * `PostMortemFinding[]`. No file reads, no model, no writes, no agent — the plan's §4 is explicit that
@@ -320,6 +328,127 @@ function auditGuideSplitSurvives({ volume, segments }) {
   return findings;
 }
 
+/**
+ * Check 7 (HIGH) — a `<ruby>` in a chapter file is not the shape this converter writes.
+ *
+ * The canonical shape is `<ruby>蒲田<rt>かまた</rt></ruby>`: the word in one contiguous run, exactly one
+ * guide over it, both halves present. Plan 09 chose that shape for a specific reason (decision 2): the
+ * book's own per-piece markup — `<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>` — puts tags *inside* the word,
+ * which is how gotcha 123's split string gets back into the text, and 21,445 occurrences of it are in these
+ * 17 books. So the shape is not cosmetics: it is the thing that makes "the word is whole" a property of the
+ * file rather than a hope.
+ *
+ * The converter cannot produce a non-canonical element. Every reason this check can name is therefore a
+ * different cause, and the message names it:
+ *   - `base-not-contiguous` — base text after the guide, which is the old converter's interleaving wearing
+ *     the new file's name, or a hand edit into it;
+ *   - `multiple-guide-runs` — two guides over one word, which `rubyTextFor` never writes;
+ *   - `empty-guide` / `empty-base` — markup with a half missing, which `rubyTextFor` refuses to write;
+ *   - `nested-markup` / `unbalanced-markup` — a structure the converter mapped badly, or somebody's edit.
+ *
+ * It is STRUCTURAL, never a pattern over the reading. `utils/source/plan/01-extraction-step.md` §3 measured
+ * 666 strings that look like "a word followed by its own reading" on the 17 real books and are ordinary
+ * prose (出だ inside 思い出だ, 言い inside 言い訳); a rule about what a Japanese READING looks like fires on
+ * legitimate text the same way, so nothing here asks what a reading is.
+ *
+ * Like check 6, it READS the extraction's own measurement (`segment.rubyShapeDefects`, written by
+ * `utils/source/extract.js` as it writes each chapter file) rather than re-reading the book: the audit is
+ * pure, and a cache hit re-reports the same answer for free. A segment with no recorded measurement — a
+ * bundle cached before the schema that records it, or a plain-text source the extraction never converts —
+ * is not reported as clean; it is not answerable.
+ *
+ * @param {{volume: TranslationTargetVolume, segments: SourceSegment[]}} p
+ * @returns {PostMortemFinding[]} One HIGH finding per chapter whose text carries a non-canonical ruby element.
+ */
+function auditRubyMarkupIsCanonical({ volume, segments }) {
+  const findings = [];
+  for (const segment of segments) {
+    const defects = Number.isFinite(segment.rubyShapeDefects) ? segment.rubyShapeDefects : null;
+    if (defects === null || defects === 0) continue;
+    const units = Number.isFinite(segment.rubyUnits) ? segment.rubyUnits : null;
+    const reasons = Array.isArray(segment.rubyShapeReasons) ? segment.rubyShapeReasons : [];
+    const examples = (Array.isArray(segment.rubyShapeExamples) ? segment.rubyShapeExamples : []).slice(0, 3);
+    findings.push(
+      finding(
+        "HIGH",
+        "ruby-markup-not-canonical",
+        EXTRACTION_STEP,
+        volume.installmentNumber || null,
+        findingFile(volume, segment.file),
+        `Chapter "${segment.id}" ("${segment.title}") holds ${defects} ruby element(s) that are not the ` +
+          `shape this converter writes${units === null ? "" : ` (of ${units} it carries)`}` +
+          `${reasons.length ? ` — ${reasons.join(", ")}` : ""}` +
+          `${examples.length ? `: ${examples.join(" | ")}` : ""}. The one shape it writes is ` +
+          `<ruby>蒲田<rt>かまた</rt></ruby>: the word in one contiguous run, one guide over it, both halves ` +
+          `there. It cannot produce anything else, so this arrived as a chapter file edited into the shape ` +
+          `the OLD converter left (a word with its own pronunciation guide pasted inside it), or from a page ` +
+          `structure the conversion mapped badly. Either way the text this volume's stages are reading is not ` +
+          `the text the book prints, and every quote later filed against it is checked against that text.`
+      )
+    );
+  }
+  return findings;
+}
+
+/**
+ * Check 8 (HIGH) — a chapter's ruby markup and its own harvested guides disagree about how many readings it prints.
+ *
+ * The identity is exact and it is checkable for free: every pronunciation guide the conversion harvested
+ * from a chapter's pages either became `<ruby>…<rt>…</rt></ruby>` in that chapter's file, or it was written
+ * as plain text for a reason the converter records (`displayed === false`: a guide on a CHAPTER HEADING,
+ * which stays guide-free because a name carrying markup matches no name that does not, or a guide with no
+ * word under it). So `rubyUnits + rubyUndisplayed === rubyAnnotations`, chapter by chapter.
+ *
+ * A disagreement names one of two holes, and the message says which:
+ *   - **more harvested than written** — a reading the author printed over a word that the translator never
+ *     sees. That is the exact defect plan 09 exists to remove: 亜茶花 is guided あさか 32 times across six
+ *     volumes, volume 3 published "Atsuka" with the note "the reading was inferred", and volume 14 later
+ *     paid a revision call to rediscover what had been printed over the word since volume 3.
+ *   - **more written than harvested** — markup in the file with no annotation behind it, which is somebody
+ *     typing a reading the book does not print, or a conversion harvesting from a page it did not write.
+ *
+ * It is a COUNT, not a judgement about any particular guide: nothing here decides whether a guide means
+ * anything, which is plan 09 decision 1 ("we cannot tell whether an annotation means anything, therefore we
+ * keep"). Deciding that is what the harvest file is for, later.
+ *
+ * Same purity rule as checks 6 and 7: it reads the measurements the extraction recorded on the segment.
+ *
+ * @param {{volume: TranslationTargetVolume, segments: SourceSegment[]}} p
+ * @returns {PostMortemFinding[]} One HIGH finding per chapter whose markup count and harvest count disagree.
+ */
+function auditRubyMarkupCount({ volume, segments }) {
+  const findings = [];
+  for (const segment of segments) {
+    const units = Number.isFinite(segment.rubyUnits) ? segment.rubyUnits : null;
+    const harvested = Number.isFinite(segment.rubyAnnotations) ? segment.rubyAnnotations : null;
+    if (units === null || harvested === null) continue;
+    const plain = Number.isFinite(segment.rubyUndisplayed) ? segment.rubyUndisplayed : 0;
+    const written = units + plain;
+    if (written === harvested) continue;
+    const missing = harvested - written;
+    findings.push(
+      finding(
+        "HIGH",
+        "ruby-markup-count-mismatch",
+        EXTRACTION_STEP,
+        volume.installmentNumber || null,
+        findingFile(volume, segment.file),
+        `Chapter "${segment.id}" ("${segment.title}") was harvested with ${harvested} pronunciation ` +
+          `guide(s) but its text carries ${units} ruby element(s) and ${plain} guide(s) written as plain ` +
+          `text — ${written} accounted for, ${missing} not. ` +
+          (missing > 0
+            ? `That many readings the book printed over a word are NOT in the text this volume's stages ` +
+              `read, so a translator has to infer them and the harvest file is the only place they exist.`
+            : `That many ruby elements in the text have no annotation behind them, so a reading is in the ` +
+              `chapter that this volume's own conversion never harvested — a guide somebody typed, or a ` +
+              `page the conversion read without writing.`) +
+          ` Either way this chapter's text and this volume's pronunciation-guide record disagree.`
+      )
+    );
+  }
+  return findings;
+}
+
 module.exports = {
   auditSourceIsArchive,
   auditHasUsableChapter,
@@ -327,4 +456,6 @@ module.exports = {
   auditTitlesAreTitles,
   auditGuideHarvest,
   auditGuideSplitSurvives,
+  auditRubyMarkupIsCanonical,
+  auditRubyMarkupCount,
 };

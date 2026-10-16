@@ -735,7 +735,7 @@ function fileThroughTheStageRoute(fixture, entries) {
   console.log("8. no new finding kind, no knob, no new door onto a sealed row");
 
   const kinds = Object.keys(FINDING_LEVELS);
-  same(kinds.length, 70, "the finding level table is still 70 kinds — plan 06 §4.3 guards 3 and 4 are still unbuilt (§10.12)");
+  same(kinds.length, 72, "the finding level table is 72 kinds — plan 06 §4.3 guards 3 and 4 are still unbuilt (§10.12), and the two that moved it are plan 09 slice 1's extraction checks");
   same(kinds.filter((kind) => /axis|register/i.test(kind)), [],
     "and this slice added no kind that names an axis or the register layer");
 

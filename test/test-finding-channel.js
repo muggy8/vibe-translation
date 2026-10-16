@@ -386,7 +386,7 @@ async function testTheDoorsRefusals() {
  * @returns {Promise<void>}
  */
 async function testTheChannelIsGenericAndTheTableIsUnmoved() {
-  same(Object.keys(FINDING_LEVELS).length, 70, "the level table is 70 kinds — the two the character-voice reading pass reports are declared, and this file adds none");
+  same(Object.keys(FINDING_LEVELS).length, 72, "the level table is 72 kinds — the two the character-voice reading pass reports are declared, and this file adds none");
   same(FINDING_LEVELS[KIND].level, "MAJOR", `${KIND} is still MAJOR`);
 
   const generic = ["utils/postmortem/channel.js", "utils/postmortem/run.js", "utils/series-run/loop.js", "utils/series-run/findings.js"];

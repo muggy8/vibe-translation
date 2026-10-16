@@ -1,5 +1,5 @@
 /**
- * test/test-source-audit.js — the extraction audit: six checks, each one fired and each one kept
+ * test/test-source-audit.js — the extraction audit: eight checks, each one fired and each one kept
  * silent, on fixtures (no AI, no network, no real volume).
  *
  * The audit (`utils/source/audit.js` + `utils/source/audit/`) is the check that was missing when four
@@ -9,7 +9,7 @@
  * fixture book built with jszip, run through the real `resolveSourceBundle`, and audited — the same
  * bundle the nine pipeline stages would have received.
  *
- * Each of the six checks gets two fixtures: one planted so it fires at the right severity with the
+ * Each of the eight checks gets two fixtures: one planted so it fires at the right severity with the
  * right `kind`, and one clean so it stays silent. A check that only has the firing fixture is a check
  * that can be made to fire on anything.
  *
@@ -243,7 +243,7 @@ async function cleanBook() {
 }
 
 /**
- * The clean fixture: every one of the five checks stays silent, and the audit writes nothing.
+ * The clean fixture: every one of the eight checks stays silent, and the audit writes nothing.
  */
 async function scenarioCleanBook() {
   const fx = await cleanBook();
@@ -262,7 +262,7 @@ async function scenarioCleanBook() {
   assertFindings(result, [], "a clean book");
   assert.strictEqual(result.counts.chapters, 3, "the audit reports what the bundle holds");
   assert.strictEqual(result.counts.packaging, 3, "including the pages the book declares as packaging");
-  ok("a clean book produces no findings at all — six checks, zero hits");
+  ok("a clean book produces no findings at all — eight checks, zero hits");
 
   // The empty pages are the book's OWN packaging, and they are the reason the empty-chapter check has
   // an exemption: 表紙 / 目次 / 奥付 hold no story text and are not missing chapters.
@@ -749,7 +749,147 @@ async function scenarioGuideSplitInText() {
   await fs.promises.rm(clean.seriesDir, { recursive: true, force: true });
 }
 
-// ─── 8. the packaging mark: a cover plate named after its own file ────────────
+// ─── 8. the ruby markup checks: the shape a chapter's guides take, and how many there are ──
+
+/**
+ * A book whose chapter text prints ruby markup as LITERAL TEXT — `<p>&lt;ruby&gt;蒲&lt;rt&gt;かま&lt;/rt&gt;田&lt;/ruby&gt;</p>`.
+ *
+ * This is the shape both new checks exist for, and it is reachable end to end: the conversion copies the
+ * text through untouched, so the chapter file ends up carrying markup no annotation of this volume's
+ * produced, in a shape that splits the word. A hand edit of a chapter file into the old interleaved shape
+ * lands in exactly the same place, and the audit cannot tell them apart — which is fine, because the
+ * finding is the same: the text is not the text the converter writes.
+ *
+ * @returns {Promise<{seriesDir: string, volumeDir: string, volume: Object, bundle: SourceBundle, logs: string[]}>}
+ */
+async function literalRubyBook() {
+  return fixtureVolume("literal-ruby", {
+    title: "Literal Ruby Series",
+    sourceName: "literal(1).epub",
+    pages: [
+      {
+        file: "p-001.xhtml",
+        pageTitle: "第一章",
+        navTitle: "第一章",
+        body:
+          `<p>第一章</p><p>彼は&lt;ruby&gt;蒲&lt;rt&gt;かま&lt;/rt&gt;田&lt;/ruby&gt;を見た。</p>${prose("第一章")}`,
+      },
+      { file: "p-002.xhtml", pageTitle: "第二章", navTitle: "第二章", body: `<p>第二章</p>${prose("第二章")}` },
+    ],
+  });
+}
+
+/**
+ * Check 7 (`ruby-markup-not-canonical`) and check 8 (`ruby-markup-count-mismatch`), fired and kept silent.
+ */
+async function scenarioRubyMarkupChecks() {
+  const fx = await literalRubyBook();
+  const chapter = await fs.promises.readFile(path.join(fx.volumeDir, `${fx.bundle.base}-ch1.md`), "utf8");
+  assert.ok(chapter.includes("<ruby>蒲<rt>かま</rt>田</ruby>"), `the chapter file carries the literal markup: ${chapter.slice(0, 120)}`);
+
+  const result = auditExtractedVolume({ volume: fx.volume, bundle: fx.bundle, volumeFiles: await listingOf(fx.volumeDir) });
+  assertFindings(
+    result,
+    [
+      { severity: "HIGH", kind: "ruby-markup-not-canonical" },
+      { severity: "HIGH", kind: "ruby-markup-count-mismatch" },
+    ],
+    "a chapter whose text prints ruby markup the conversion never wrote"
+  );
+  const shape = result.findings.find((f) => f.kind === "ruby-markup-not-canonical");
+  assert.strictEqual(shape.file, "Literal Ruby Series(01)/literal(1)-ch1.md", `the finding points at the chapter file: ${shape.file}`);
+  assert.ok(shape.message.includes("base-not-contiguous"), `the finding names the shape: ${shape.message}`);
+  assert.strictEqual(shape.levelDeclared, true, "its level is a row in the table, not the default");
+  const count = result.findings.find((f) => f.kind === "ruby-markup-count-mismatch");
+  assert.ok(count.message.includes("no annotation behind them"), `and the count finding says which way it disagrees: ${count.message}`);
+
+  // The measurements are on the segment, recorded as the file was written — the audit read them, it did
+  // not re-derive them.
+  const seg = fx.bundle.segments[0];
+  assert.strictEqual(seg.rubyUnits, 1, "one element opened in the file");
+  assert.strictEqual(seg.rubyShapeDefects, 1, "one of them is not canonical");
+  assert.deepStrictEqual(seg.rubyShapeReasons, ["base-not-contiguous"], "named by the scan that measured it");
+  assert.strictEqual(seg.rubyAnnotations, 0, "and this volume's conversion harvested no guide for it");
+  assert.strictEqual(fx.bundle.segments[1].rubyShapeDefects, 0, "the other chapter is clean");
+  assert.strictEqual(fx.bundle.rubyGuides.rubyShapeDefects, 1, "the volume total is the sum of the chapters");
+  ok("ruby markup that is not the shape the converter writes is HIGH, named by its shape, on that chapter only");
+
+  // The silent counterpart: the same ruby, marked up the way the book marks it up, converted correctly.
+  const clean = await fixtureVolume("ruby-clean", {
+    title: "Clean Ruby Series",
+    sourceName: "clean(1).epub",
+    pages: [
+      {
+        file: "p-001.xhtml",
+        pageTitle: "第一章",
+        navTitle: "第一章",
+        body: `<p>第一章</p><p>彼は<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>を見た。<ruby>三色院<rt>パンジー</rt></ruby>も見た。</p>${prose("第一章")}`,
+      },
+      { file: "p-002.xhtml", pageTitle: "第二章", navTitle: "第二章", body: `<p>第二章</p>${prose("第二章")}` },
+    ],
+  });
+  const cleanAudit = auditExtractedVolume({ volume: clean.volume, bundle: clean.bundle, volumeFiles: await listingOf(clean.volumeDir) });
+  assertFindings(cleanAudit, [], "a book whose guides are marked up the way the book marks them up");
+  for (const s of clean.bundle.segments) {
+    assert.strictEqual(s.rubyShapeDefects, 0, `${s.id}: the converter's own output is not a defect`);
+    assert.strictEqual(
+      s.rubyUnits + s.rubyUndisplayed,
+      s.rubyAnnotations,
+      `${s.id}: markup + plain-text guides = harvested guides`
+    );
+  }
+  assert.strictEqual(clean.bundle.rubyGuides.rubyUnits, 2, "two annotated words in the volume");
+  assert.strictEqual(clean.bundle.rubyGuides.guides, 2, "two harvested guides");
+  assert.strictEqual(
+    clean.bundle.rubyGuides.rubyUnits + clean.bundle.rubyGuides.rubyUndisplayed,
+    clean.bundle.rubyGuides.guides,
+    "and the volume's identity holds"
+  );
+  ok("both checks are silent on a legitimate book, and the identity markup + plain = harvested holds chapter by chapter");
+
+  // A bundle that never recorded the measurements (a cache written before the schema that records them)
+  // is NOT answered: silence here is the documented limit, and the schema bump is what closes it.
+  const unmeasured = {
+    ...clean.bundle,
+    segments: clean.bundle.segments.map(({ rubyUnits, rubyShapeDefects, rubyShapeReasons, rubyShapeExamples, rubyAnnotations, rubyUndisplayed, ...rest }) => rest),
+  };
+  assertFindings(
+    auditExtractedVolume({ volume: clean.volume, bundle: unmeasured, volumeFiles: await listingOf(clean.volumeDir) }),
+    [],
+    "a bundle with no recorded ruby measurements"
+  );
+  ok("a segment with no recorded ruby measurement is not answered — which is why schema 10 is part of these checks");
+
+  // A harvested guide that never reached the text: the reading is missing from what every later stage reads.
+  const volume = { installmentNumber: "01", folder: "Gap(01)", sourceFile: "Gap(01)/gap(1).epub" };
+  const gap = {
+    format: "epub",
+    originalPath: "/fixture/Gap(01)/gap(1).epub",
+    base: "gap(1)",
+    volumeDir: "/fixture/Gap(01)",
+    segments: [
+      { id: "ch1", file: "gap(1)-ch1.md", title: "第一章", empty: false, bodyChars: 4000, rubyUnits: 2, rubyShapeDefects: 0, rubyAnnotations: 5, rubyUndisplayed: 1 },
+      { id: "ch2", file: "gap(1)-ch2.md", title: "第二章", empty: false, bodyChars: 4000, rubyUnits: 3, rubyShapeDefects: 0, rubyAnnotations: 3, rubyUndisplayed: 0 },
+    ],
+    packaging: [],
+    rubyGuides: { file: "gap(1)-ruby-guides.json", guides: 8 },
+  };
+  const gapAudit = auditExtractedVolume({ volume, bundle: gap, volumeFiles: ["gap(1).epub", "gap(1)-ruby-guides.json"] });
+  assertFindings(gapAudit, [{ severity: "HIGH", kind: "ruby-markup-count-mismatch" }], "a chapter missing 2 of its 5 harvested guides");
+  assert.ok(gapAudit.findings[0].message.includes("5 pronunciation"), gapAudit.findings[0].message);
+  assert.ok(gapAudit.findings[0].message.includes("2 not"), `and says how many are unaccounted for: ${gapAudit.findings[0].message}`);
+  assert.ok(
+    gapAudit.findings[0].message.includes("NOT in the text"),
+    `naming the direction: a reading the book printed is missing from what the stages read: ${gapAudit.findings[0].message}`
+  );
+  assert.strictEqual(gapAudit.findings[0].file, "Gap(01)/gap(1)-ch1.md", "and only the chapter that disagrees is reported");
+  ok("a chapter whose text holds fewer guides than its own pages were harvested with is HIGH, and says which way");
+
+  await fs.promises.rm(fx.seriesDir, { recursive: true, force: true });
+  await fs.promises.rm(clean.seriesDir, { recursive: true, force: true });
+}
+
+// ─── 9. the packaging mark: a cover plate named after its own file ────────────
 
 /**
  * The blind spot gotcha 126 recorded, reproduced. The live series titles five of its packaging pages
@@ -850,13 +990,15 @@ async function scenarioGuarantees() {
     "auditHasUsableChapter",
     "auditEmptyChapters",
     "auditGuideSplitSurvives",
+    "auditRubyMarkupIsCanonical",
+    "auditRubyMarkupCount",
     "auditTitlesAreTitles",
     "auditGuideHarvest",
   ]) {
     const fn = require("../utils/source")[name];
     assert.strictEqual(typeof fn, "function", `${name} is reachable from the source barrel`);
   }
-  ok("all six checks are reachable from the source barrel");
+  ok("all eight checks are reachable from the source barrel");
   // A volume entry with no installment number still produces findings the post-mortem can read: the
   // `volume` field is null (its documented shape for a finding that is not about one installment), never
   // undefined.
@@ -899,7 +1041,7 @@ async function scenarioGuarantees() {
 }
 
 (async () => {
-  console.log("source-audit: six deterministic checks over an extracted volume");
+  console.log("source-audit: eight deterministic checks over an extracted volume");
   await scenarioCleanBook();
   await scenarioSourceNotArchive();
   await scenarioNoUsableChapter();
@@ -907,6 +1049,7 @@ async function scenarioGuarantees() {
   await scenarioTitleIsFilename();
   await scenarioGuideHarvest();
   await scenarioGuideSplitInText();
+  await scenarioRubyMarkupChecks();
   await scenarioPackagingMark();
   await scenarioGuarantees();
   console.log(`\nsource-audit: all ${passed} checks passed.`);

@@ -817,7 +817,7 @@ scenario("no table, no schema bump, no finding kind, no level, no freeze door, n
   same(SCHEMA_VERSION, 13, `SCHEMA_VERSION moved to ${SCHEMA_VERSION}`);
   same(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], "a migration was added");
   ok(!COUNTED_TABLES.includes("settlement_markers") && !COUNTED_TABLES.includes("forward_markers"), "a table was added for the declared markers");
-  same(Object.keys(FINDING_LEVELS).length, 70, `the finding level table is ${Object.keys(FINDING_LEVELS).length} kinds`);
+  same(Object.keys(FINDING_LEVELS).length, 72, `the finding level table is ${Object.keys(FINDING_LEVELS).length} kinds`);
   same(frozenDoors().length, 12, `the freeze gate has ${frozenDoors().length} doors`);
 
   const layer = readModuleLayer(ROOT, "glossary/settlement.js");

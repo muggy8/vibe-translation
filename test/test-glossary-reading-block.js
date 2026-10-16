@@ -708,12 +708,13 @@ function scenarioTheBlockNamesNoLanguageAndThePromptFileIsUnchanged() {
 function scenarioNothingElseMoved() {
   same(SCHEMA_VERSION, 13, "the slice bumped the record schema (that is plan 08 slice 1)");
   same(COUNTED_TABLES.length, 21, "the slice added a table copy-forward has to carry");
-  same(Object.keys(FINDING_LEVELS).length, 70, "the slice added a finding kind to the level table");
+  same(Object.keys(FINDING_LEVELS).length, 72, "the level table moved 70 → 72, and it moved for plan 09 slice 1's two extraction kinds, not for this block");
   same(Object.keys(FINDING_LEVELS).filter((kind) => /reading-block|reading-aid/i.test(kind)), [],
     "a reading-block finding kind appeared in the level table");
-  // The two guide-shaped kinds that were already there belong to the extraction audit, not to this block.
+  // The guide-shaped kinds belong to the extraction audit, not to this block. Plan 09 slice 1 added two
+  // beside `guide-split-in-text`; neither is named for a reading block.
   same(Object.keys(FINDING_LEVELS).filter((kind) => /guide|ruby/i.test(kind)).sort(),
-    ["guide-split-in-text", "ruby-harvest-missing"],
+    ["guide-split-in-text", "ruby-harvest-missing", "ruby-markup-count-mismatch", "ruby-markup-not-canonical"],
     "the extraction audit's own guide kinds moved, or this slice added one beside them");
   same(Object.keys(FREEZE_DOORS).length, 12, "the slice added a freeze door");
 
@@ -762,7 +763,7 @@ function scenarioNothingElseMoved() {
   const promptFiles = fs.readdirSync(path.join(ROOT, "system-prompts")).filter((f) => /reading|ruby/i.test(f));
   same(promptFiles, [], "the slice added a prompt file for the reading block");
 
-  console.log("10/10: schema 13, 21 counted tables, 70 finding kinds, 12 freeze doors, 1 store door onto the harvest, 0 new commands or prompt files");
+  console.log("10/10: schema 13, 21 counted tables, 72 finding kinds (plan 09 slice 1's two extraction kinds), 12 freeze doors, 1 store door onto the harvest, 0 new commands or prompt files");
 }
 
 // ─── Runner ───────────────────────────────────────────────────────────────────

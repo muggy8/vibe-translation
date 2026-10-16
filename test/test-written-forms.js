@@ -801,7 +801,7 @@ function pipelineSourceFiles(dir = ROOT, out = []) {
 /** Scenario 11. @returns {void} */
 function scenarioNothingAdded() {
   const kinds = Object.keys(FINDING_LEVELS);
-  same(kinds.length, 70, "the finding level table is still 70 kinds — this slice added none");
+  same(kinds.length, 72, "the finding level table is 72 kinds — this slice added none");
   same(kinds.filter((kind) => /written|form/i.test(kind)), [], "and none of them is a written-form kind: a volume whose harvest produced no candidate group is a fact about that book, not a defect");
 
   same(Object.keys(FREEZE_DOORS).length, 12, "the freeze gate is still 12 doors — this slice added none (measured against `utils/prereqs/freeze/doors.js`; `AGENTS.md` still says 15, which is stale)");
@@ -859,7 +859,7 @@ function scenarioNothingAdded() {
   ok(/__writtenForms/.test(barrelText), "and the store's barrel re-exports the cover");
   same(RUBY_GUIDE_FILE_SUFFIX, "-ruby-guides.json", "the file name the door scans for is the name the extraction writes");
 
-  console.log("11. nothing added: 70 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 stage callers, 0 readers of the table, 1 reader of the grouping question (the identity door)");
+  console.log("11. nothing added: 72 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 stage callers, 0 readers of the table, 1 reader of the grouping question (the identity door)");
 }
 
 // ─── Run ──────────────────────────────────────────────────────────────────────

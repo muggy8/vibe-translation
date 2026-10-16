@@ -701,7 +701,7 @@ const PIPELINE_SCAN_SKIP = new Set([
     same(SCHEMA_VERSION, 13, "SCHEMA_VERSION stays 13");
     same(STORE_SCHEMA, 13, "the same number through the store barrel");
     same(MIGRATIONS.map((m) => m.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], "MIGRATIONS stays 1…13 with nothing inserted in the middle");
-    same(Object.keys(FINDING_LEVELS).length, 70, "the level table stays 70 kinds");
+    same(Object.keys(FINDING_LEVELS).length, 72, "the level table stays at its 72 kinds — this door added none");
     same(frozenDoors().length, 12, "the freeze gate stays 12 doors — this door asks the glossary door it already owns");
     ok(frozenDoors().includes("glossary"), "and that door is in the table");
     ok(!frozenDoors().includes("re-render-glossary"), "and no new door was added for this one");
@@ -761,7 +761,7 @@ const PIPELINE_SCAN_SKIP = new Set([
     ok(!/require\(["']\.\/release-translation/.test(cli), "the command does not require the release door");
     ok(!/recordTranslationRelease|grantFreezeRelease|releaseCovering/.test(cli), "and it never records a release of its own");
 
-    console.log(`  schema 13, 13 migrations, 70 finding kinds, 12 freeze doors, 0 row writes, 0 model reach, 0 callers outside the door (${files.length} files scanned)`);
+    console.log(`  schema 13, 13 migrations, 72 finding kinds, 12 freeze doors, 0 row writes, 0 model reach, 0 callers outside the door (${files.length} files scanned)`);
   }
 
   // ─── 10. no production reader matches on the old label text ───

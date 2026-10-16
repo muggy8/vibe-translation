@@ -56,7 +56,7 @@ const { listVolumeChapters, readChapterLines } = require("./source-chapters");
 // term. `glossary/carry-forward/table.js` is a pure leaf — it requires nothing — so reaching it
 // from `utils/` closes no require cycle (gotcha 85).
 const { glossaryTermSkeleton, GLOSSARY_SKELETON_MIN_CHARS } = require("../../glossary/carry-forward/table");
-const { stripRubyMarkup, hasRubyMarkup } = require("./ruby-markup");
+const { stripRubyMarkup, hasRubyMarkup, guideSplicedTextOf } = require("./ruby-markup");
 const { EVIDENCE_KINDS, EVIDENCE_MATCHES } = require("./schema");
 require("../../types"); // JSDoc type definitions
 
@@ -150,21 +150,84 @@ function matchPreparedLine(preparedLine, preparedQuote) {
 }
 
 /**
+ * Whether a quote exists in a line ONLY as the flattened markup — the guides pasted into the word.
+ *
+ * THE HOLE THIS CLOSES. The skeleton rung compares Han characters alone, because two furiganed spellings
+ * of one term (秋野桜 and 秋野あきの桜) are the same term and the store must not refuse a citation for
+ * writing the reading out. But Han characters alone are also what a *fabricated* quote keeps: a model that
+ * reads `<ruby>蒲田<rt>かまた</rt></ruby>` and quotes it as `蒲田かまたを見た` has written a string the book
+ * prints in NEITHER form — not guide-free (蒲田を見た), which is what the store compares, and not with the
+ * tags, which is what the file holds. Its skeleton is 蒲田, which is the line's skeleton, so the rung used
+ * to accept it, and the store recorded a citation to a line that does not contain it.
+ *
+ * The test is therefore: the quote is not in the line as the file holds it, and it IS in the line with the
+ * ruby tags removed and every reading kept where it was written. That is the flattened shape, and it is
+ * the only shape left.
+ *
+ * **What this guard cannot do, and does not pretend to.** The OLD converter's shape (蒲かま田た) is not the
+ * flattened shape of canonical markup (蒲田かまた): rebuilding it needs to know which character of the word
+ * carried which piece of the reading, and canonical markup no longer says — only the pronunciation-guide
+ * harvest the extraction writes beside the book does, and `test/test-glossary-reading-block.js` pins that
+ * exactly one door in this store may open it. So the interleaved shape is guarded where that harvest is in
+ * reach — by `guide-split-in-text` in the extraction audit, which reads it at extraction time and is
+ * unchanged — and this door guards the flattened shape, which is the one a citation can actually be forged
+ * into from an annotated chapter.
+ *
+ * Inert on a line with no markup: flattening changes nothing, so the guard cannot refuse a legitimate
+ * furiganed citation such as 秋野桜 against 秋野あきの桜.
+ *
+ * @param {string} line - One physical line of the chapter's source text, as the file holds it.
+ * @param {{needle: string}} preparedQuote - From `prepareQuoteForSearch`.
+ * @returns {boolean} True when the quote occurs in the line only as flattened markup.
+ */
+function quoteExistsOnlyAsGuideSplice(line, preparedQuote) {
+  if (!preparedQuote || !preparedQuote.usable) return false;
+  const raw = String(line === undefined || line === null ? "" : line);
+  const spliced = guideSplicedTextOf(raw);
+  if (spliced === raw) return false;
+  const needle = preparedQuote.needle;
+  if (squashForMarkupCheck(raw).includes(needle)) return false;
+  return squashForMarkupCheck(spliced).includes(needle);
+}
+
+/**
+ * Whitespace removed, nothing else — the comparison `quoteExistsOnlyAsGuideSplice` needs, which keeps the
+ * markup tags in the raw side and the readings in the flattened side.
+ *
+ * Deliberately NOT `normalizeQuote`: that strips the guides, and the whole question is whether the guides
+ * are what the quote is made of.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function squashForMarkupCheck(text) {
+  return String(text === undefined || text === null ? "" : text).replace(/\s+/g, "");
+}
+
+/**
  * Whether one quote matches one source line, and BY WHICH RULE.
  *
  * Verbatim first, always: it is the stronger claim and the cheaper test. The skeleton rule
  * only runs on a skeleton long enough to mean something — `GLOSSARY_SKELETON_MIN_CHARS`, the
  * carry-forward gate's guard, carried over deliberately (review 05 §3.1 condition 1).
  *
- * This is the convenience wrapper over `matchPreparedLine`, and it is the same rule: a search that
- * used a second copy of this logic could report a line as evidence and presence as absence.
+ * This is the convenience wrapper over `matchPreparedLine`, and it is the same rule — plus the one thing
+ * the prepared-line fast path deliberately does not do: `quoteExistsOnlyAsGuideSplice`, which refuses a
+ * citation that exists only as flattened markup. It lives HERE and not in `matchPreparedLine` because it
+ * is a rule about a QUOTATION. `presence.js`, `chapter-facts.js` and the confirmation door search a NAME
+ * through the prepared fast path, thousands of times a chapter, and a name is not a claim that a line
+ * prints a passage.
  *
  * @param {string} line - One physical line of the chapter's source text.
  * @param {string} quote - The quoted evidence.
  * @returns {"verbatim"|"skeleton"|null} How it matched, or null when it did not.
  */
 function matchQuoteOnLine(line, quote) {
-  return matchPreparedLine(prepareLineForQuoteSearch(line), prepareQuoteForSearch(quote));
+  const preparedLine = prepareLineForQuoteSearch(line);
+  const preparedQuote = prepareQuoteForSearch(quote);
+  const matched = matchPreparedLine(preparedLine, preparedQuote);
+  if (matched !== "skeleton") return matched;
+  return quoteExistsOnlyAsGuideSplice(line, preparedQuote) ? null : "skeleton";
 }
 
 /**
@@ -318,13 +381,26 @@ function verifyEvidenceItem(item, resolveVolume) {
   const where = found.length
     ? found.map((f) => `volume ${item.volume} chapter ${f.chapter} line ${f.line} (${f.matched})`).join(", ")
     : "it does not occur anywhere in this volume's source text, verbatim or by Han-character skeleton";
+  const citedLine = String(lines[item.line - 1]);
+  // The one refusal that is not "wrong line". A quote made by pasting a pronunciation guide into the word
+  // it annotates has the line's own Han characters, so the skeleton rung used to accept it and the store
+  // recorded a citation to a line that does not print it. Say which shape the quote is, because the fix
+  // is not "find the right line" — it is "quote the line".
+  const preparedQuote = prepareQuoteForSearch(item.quote);
+  const splicedShape = quoteExistsOnlyAsGuideSplice(citedLine, preparedQuote)
+    ? `The quote is the shape this line's word takes when its pronunciation guide is pasted into it: ` +
+      `this line, with the ruby tags removed and every reading kept where it was written, reads ` +
+      `${JSON.stringify(guideSplicedTextOf(citedLine).slice(0, 120))}, and the line as the book prints it ` +
+      `reads ${JSON.stringify(stripRubyMarkup(citedLine).slice(0, 120))}. Quote the line, not the reading.`
+    : "";
   return {
     ok: false,
     item,
     problem:
       `volume ${item.volume} chapter ${item.chapter} line ${item.line} does not contain the quoted evidence. ` +
-      `That line reads: ${JSON.stringify(String(lines[item.line - 1]).slice(0, 120))}. ` +
-      `The quote is at: ${where}.`,
+      `That line reads: ${JSON.stringify(citedLine.slice(0, 120))}. ` +
+      `The quote is at: ${where}.` +
+      (splicedShape ? ` ${splicedShape}` : ""),
     markupStripped: hasRubyMarkup(item.quote),
     found,
   };
@@ -411,6 +487,7 @@ module.exports = {
   prepareQuoteForSearch,
   matchPreparedLine,
   matchQuoteOnLine,
+  quoteExistsOnlyAsGuideSplice,
   evidenceShape,
   locateQuote,
   verifyEvidenceItem,

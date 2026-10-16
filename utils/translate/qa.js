@@ -8,9 +8,20 @@
  * space-separated sources (Korean) and substring for CJK.
  *
  * Part of the translate.js layer (split out of the original single file).
+ *
+ * **The source side of the QA gate is the guide-free projection** (plan 09 slice 1, 2026-10-16): the
+ * residue check reads the draft, and the draft carries no markup, but the length ratio and the
+ * glossary-term check read the source, and the source file now carries the author's pronunciation
+ * guides as `<ruby>`. The planner's part ceiling deliberately keeps measuring the RAW text, because
+ * that is what is put into a prompt; this gate measures what the chapter *says*, which is not what
+ * the file costs to send.
  */
 
 const { requireLanguageName } = require("../../configs/shared");
+// The store's one rule about HTML ruby (plan 07 slice 5). The source side of every measurement in
+// `checkTranslationQa` is the guide-free projection, because a pronunciation guide is not text the
+// draft renders — see the note on `src` there.
+const { stripRubyMarkup } = require("../reference-store/ruby-markup");
 
 /**
  * The floor below which a chapter's SOURCE counts as having nothing in it
@@ -242,7 +253,16 @@ function checkTranslationQa({ sourceText, draftText, terms = [], sourceLanguage,
   const errors = [];
   const warnings = [];
   const draft = (draftText || "").trim();
-  const src = (sourceText || "").trim();
+  // The source side of every measurement here is the GUIDE-FREE projection (plan 09 slice 1, 2026-10-16).
+  // The chapter file now carries the author's pronunciation guides as `<ruby>` markup, and a guide is
+  // not text the draft renders. Left on the raw file, the length band moved with the extraction: the
+  // 133 real chapters are 3,595,944 raw characters over 2,450,316 guide-free ones, a per-chapter
+  // inflation of median ×1.334 / p90 ×1.973 / max ×2.358, and at that inflation **34 of the 133
+  // chapters** turn a draft whose true JA→ZH ratio is 0.80 — the band's own minimum — into a number
+  // under the 0.50 truncation floor, which is a HARD failure: a complete translation reported as cut
+  // off, quarantined and translated again. The term check below has the same shape in the other
+  // direction (see `selectTermsForChapter` in `terminology.js` for the measured counts).
+  const src = stripRubyMarkup(sourceText || "").trim();
   const residue = residueRatio(draft, sourceLang, targetLang);
   const band = lengthBands(sourceLang, targetLang);
   const wordBoundary = isSpaceSeparated(sourceLang);
@@ -278,7 +298,7 @@ function checkTranslationQa({ sourceText, draftText, terms = [], sourceLanguage,
   const missingTerms = [];
   for (const t of terms) {
     if (!t || !t.term || !t.rendering) continue;
-    if (countOccurrences(sourceText || "", t.term, { wordBoundary }) === 0) continue; // not used in this chapter
+    if (countOccurrences(src, t.term, { wordBoundary }) === 0) continue; // not used in this chapter
     if (!draft.includes(t.rendering)) missingTerms.push({ term: t.term, rendering: t.rendering });
   }
   if (missingTerms.length > 0) {

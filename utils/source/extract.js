@@ -28,7 +28,7 @@ require("../../types"); // JSDoc type definitions
 
 const { BUNDLE_SCHEMA_VERSION, EMPTY_SEGMENT_CHARS } = require("./config");
 const { PACKAGING_CLASS_RE, PACKAGING_TITLE_RE, assignSegmentIds, classifySectionGroup, groupSpineIntoChapters, stripRepeatedHeading, textCharsOf, titleOfUnnamedSection } = require("./chapters");
-const { firstHeadingText, normalizeSpaces, xhtmlToMarkdown } = require("./html");
+const { firstHeadingText, normalizeSpaces, xhtmlToMarkdown, canonicalRubyShapeScan } = require("./html");
 const { normalizeZipPath, openEpub } = require("./epub");
 const { ImageRegistry } = require("./images");
 const { writeRubyGuideFile, findRubyGuideSplitForms } = require("./ruby-guides");
@@ -387,6 +387,38 @@ async function writeChapterFiles(base, volumeDir, chapterGroups) {
           `pronunciation guide are printed as one string, which is not the shape this converter writes.`
       );
     }
+    // THE MARKUP SHAPE AND COUNT, measured at the moment the text is written, for the same reason the
+    // tripwire above is measured here: the audit is a pure function over a bundle and must not open the
+    // book again. Two questions, both answerable only from the text this conversion just produced:
+    //   - is every `<ruby>` in the file the ONE shape this converter writes (`rubyShapeDefects`)? A
+    //     `base-not-contiguous` element is the old interleaved converter's output wearing the new file's
+    //     name; `nested-markup` / `unbalanced-markup` / `empty-*` are a hand edit or a structure the
+    //     converter mapped badly.
+    //   - does the count of markup elements agree with the count of guides this chapter's pages were
+    //     harvested with (`rubyUnits` + `rubyUndisplayed` against the harvest)? A guide that was harvested
+    //     and never written is a reading only the harvest file knows, and a markup element with no
+    //     annotation behind it is markup somebody put there.
+    // `rubyUndisplayed` is the harvested-but-plain half: a guide on a CHAPTER HEADING (a heading is a name,
+    // and markup in a name matches no name that does not) and a guide with no word under it. The converter
+    // stamps `displayed` where it makes that decision — see utils/source/html.js.
+    const guides = chapterGroups[i].guides || [];
+    const ruby = canonicalRubyShapeScan(content);
+    const rubyUndisplayed = guides.filter((guide) => guide && guide.displayed === false).length;
+    if (ruby.defects > 0) {
+      console.warn(
+        `[source] ${base} ${ids[i]} ("${title}"): ${ruby.defects} of this chapter's ${ruby.units} ruby ` +
+          `markup element(s) are not the shape this converter writes (${ruby.reasons.join(", ")}): ` +
+          `${ruby.examples.join(" | ")}`
+      );
+    }
+    if (ruby.units + rubyUndisplayed !== guides.length) {
+      console.warn(
+        `[source] ${base} ${ids[i]} ("${title}"): ${guides.length} pronunciation guide(s) were harvested ` +
+          `from this chapter's pages but its text carries ${ruby.units} ruby element(s) and ` +
+          `${rubyUndisplayed} guide(s) written as plain text — the text and the harvest do not agree about ` +
+          `how many readings this chapter prints.`
+      );
+    }
     segments.push({
       id: ids[i],
       file,
@@ -407,6 +439,15 @@ async function writeChapterFiles(base, volumeDir, chapterGroups) {
       // examples are what a report can quote. See utils/source/ruby-guides.js.
       guideSplitForms: splitForms.occurrences,
       guideSplitExamples: splitForms.forms.slice(0, 3),
+      // The ruby-markup measurements (see the block above). Recorded on the segment so
+      // `utils/source/audit/` can answer "is the markup in this file the markup this converter writes, and
+      // is all of it there?" without opening the chapter again — the same arrangement the tripwire uses.
+      rubyUnits: ruby.units,
+      rubyShapeDefects: ruby.defects,
+      rubyShapeReasons: ruby.reasons,
+      rubyShapeExamples: ruby.examples,
+      rubyAnnotations: guides.length,
+      rubyUndisplayed,
     });
     contents.push(content.trim());
     for (const guide of chapterGroups[i].guides || []) {
@@ -511,6 +552,17 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
   // not in any chapter, so they are not in the harvest. Counting them is what makes the harvest's
   // coverage answerable instead of assumed.
   const guidesOnPages = sections.reduce((n, s) => n + (s.guides ? s.guides.length : 0), 0);
+  // This volume's ruby-markup accounting, summed from the per-chapter measurements `writeChapterFiles`
+  // recorded. The identity the extraction audit checks is `rubyUnits + rubyUndisplayed === guides`: every
+  // guide the harvest holds is either markup in a chapter's text or a guide that chapter wrote as plain
+  // text, and nothing else.
+  const markup = {
+    rubyUnits: segments.reduce((n, s) => n + (s.rubyUnits || 0), 0),
+    rubyShapeDefects: segments.reduce((n, s) => n + (s.rubyShapeDefects || 0), 0),
+    rubyAnnotations: segments.reduce((n, s) => n + (s.rubyAnnotations || 0), 0),
+    rubyUndisplayed: segments.reduce((n, s) => n + (s.rubyUndisplayed || 0), 0),
+    rubyShapeChapters: segments.filter((s) => (s.rubyShapeDefects || 0) > 0).length,
+  };
   const harvest = await writeRubyGuideFile({
     volumeDir,
     base,
@@ -518,7 +570,7 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
     bundleSchema: BUNDLE_SCHEMA_VERSION,
     occurrences: guideOccurrences,
   });
-  reportRubyGuides(base, harvest, guidesOnPages, whole.length);
+  reportRubyGuides(base, harvest, guidesOnPages, whole.length, markup);
 
   return {
     format: "epub",
@@ -546,6 +598,10 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
       guidesOnPackagingPages: guidesOnPages - guideOccurrences.length,
       splitForms: segments.reduce((n, s) => n + (s.guideSplitForms || 0), 0),
       splitFormChapters: segments.filter((s) => (s.guideSplitForms || 0) > 0).length,
+      // This volume's ruby-markup accounting, summed from the per-chapter measurements `writeChapterFiles`
+      // recorded (see the `markup` block above): every guide the harvest holds is either markup in a
+      // chapter's text or a guide that chapter wrote as plain text, and nothing else.
+      ...markup,
     },
   };
 }
@@ -560,9 +616,10 @@ async function extractEpubToBundle(epubPath, volumeDir, base) {
  * @param {{file: string, totals: RubyGuideTotals}} harvest - What was written.
  * @param {number} guidesOnPages - Guides carried by every readable page, chapters or not.
  * @param {number} wholeChars - Characters of the whole-volume text this extraction produced, markup included.
+ * @param {{rubyUnits: number, rubyShapeDefects: number, rubyAnnotations: number, rubyUndisplayed: number, rubyShapeChapters: number}} markup - This volume's ruby-markup accounting, summed from the per-chapter measurements.
  * @returns {void}
  */
-function reportRubyGuides(base, harvest, guidesOnPages, wholeChars) {
+function reportRubyGuides(base, harvest, guidesOnPages, wholeChars, markup = {}) {
   const t = harvest.totals;
   if (t.guides === 0) {
     if (guidesOnPages > 0) {
@@ -580,6 +637,23 @@ function reportRubyGuides(base, harvest, guidesOnPages, wholeChars) {
       `${t.distinctWords} distinct word(s) (${t.wordsGuidedInKatakana} guided in katakana, ` +
       `${t.wordsWithMoreThanOneReading} guided more than one way) harvested to ${harvest.file}.`
   );
+  // The accounting line: what the text actually carries, against what the harvest says it should.
+  // `+ N written as plain text` is the honest half — a guide on a chapter heading is harvested and kept
+  // out of the name, and a guide with no word under it is written as the reading alone.
+  const units = Number(markup.rubyUnits) || 0;
+  const plain = Number(markup.rubyUndisplayed) || 0;
+  const harvested = Number(markup.rubyAnnotations) || 0;
+  console.log(
+    `[source] ${base}: the chapter files carry ${units} ruby element(s) + ${plain} guide(s) written as ` +
+      `plain text = ${units + plain} of ${harvested} harvested guide(s)` +
+      `${units + plain === harvested ? " (the text and the harvest agree)" : " (THEY DO NOT AGREE)"}.`
+  );
+  if ((Number(markup.rubyShapeDefects) || 0) > 0) {
+    console.warn(
+      `[source] ${base}: ${markup.rubyShapeDefects} ruby element(s) across ${markup.rubyShapeChapters} ` +
+        `chapter(s) are not the shape this converter writes.`
+    );
+  }
   if (guidesOnPages > t.guides) {
     console.log(
       `[source] ${base}: ${guidesOnPages - t.guides} further guide(s) sat on pages the book declares ` +

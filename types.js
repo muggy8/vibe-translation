@@ -63,6 +63,21 @@
  * @property {boolean} [declaresPackaging] — True when every page this segment was built from declared itself the book's packaging (cover plate, inserted illustration, notice, colophon). Produced only by the contents-list fallbacks, where a packaging page has to become a chapter because the book named none. undefined on a bundle cached before schema 8.
  * @property {number} [guideSplitForms] — How many times a string this volume's own pronunciation guides would have interleaved into the text (蒲かま田た) still appears in this segment's file. 0 is the answer for a correct extraction; the field is absent on a bundle cached before schema 8, which is when the audit cannot answer the question.
  * @property {string[]} [guideSplitExamples] — Up to a few of those strings, so a report can quote what it found instead of only counting it.
+ * @property {number} [rubyUnits] — How many `<ruby>` elements this segment's file carries. 0 on a plain-text
+ *   segment and on a chapter whose book prints no guides. Absent on a bundle cached before the schema that
+ *   records it, which is when the audit cannot answer the question.
+ * @property {number} [rubyShapeDefects] — How many of those `<ruby>` elements are NOT the canonical shape
+ *   (`<ruby>蒲田<rt>かまた</rt></ruby>`: the word contiguous, one guide run, both halves present). 0 is the
+ *   answer for a correct conversion.
+ * @property {string[]} [rubyShapeReasons] — The names of the shapes found (up to a few examples in
+ *   `rubyShapeExamples`): `base-not-contiguous`, `multiple-guide-runs`, `empty-guide`, `empty-base`,
+ *   `nested-markup`, `unbalanced-markup`.
+ * @property {string[]} [rubyShapeExamples] — Up to three of the non-canonical elements, quoted.
+ * @property {number} [rubyAnnotations] — How many pronunciation guides this segment's pages were harvested
+ *   with, whether or not they reached the text.
+ * @property {number} [rubyUndisplayed] — How many of those were harvested but NOT written as markup (a guide
+ *   on a chapter heading, a guide with no word under it). `rubyUnits + rubyUndisplayed` is what the volume's
+ *   harvest total has to equal.
  * @property {string} [path] — Absolute path (set by materializeBundle).
  */
 
@@ -85,7 +100,7 @@
  * @property {string|null} rubyGuidesPath — epub bundles only: the file holding every pronunciation
  *   guide this volume's extraction set aside (utils/source/ruby-guides.js). null for a plain-text
  *   source, and for a bundle cached under a schema older than the one that harvests them.
- * @property {{file: string, guides: number, guideChars: number, distinctWords: number, rows: number, chapters: number}|null} rubyGuides — The same harvest's totals, so a stage can report "this volume guides N words" without opening the file.
+ * @property {{file: string, guides: number, guideChars: number, distinctWords: number, rows: number, chapters: number, rubyUnits: number, rubyShapeDefects: number, rubyAnnotations: number, rubyUndisplayed: number}|null} rubyGuides — The same harvest's totals plus this volume's own ruby-markup accounting (how many guides reached the text as markup, how many did not, how many elements in the text are not the canonical shape), so a stage or a report can answer "is what is in the text what the harvest says should be?" without opening either file.
  */
 
 // ─── Pronunciation guides (utils/source/ruby-guides.js) ─────────────────────
@@ -109,6 +124,12 @@
  * @property {RubyGuideAnnotation[]} annotated — The same annotation as it was annotated: each base piece
  *   and the reading it carried, in document order. This is what makes the guide-split string
  *   reconstructable; the joined pair alone cannot say which character carried which reading.
+ * @property {boolean} [displayed] — True when this annotation became `<ruby>…<rt>…</rt></ruby>` in the text
+ *   the extraction wrote, false when it was harvested but written as plain text: a guide on a CHAPTER HEADING
+ *   (a name is compared against the name the contents list carries), or a half with no word under it.
+ *   Stamped by the converter at the one place the decision is made, so "how many of this chapter's guides are
+ *   in its text?" is answerable without re-deriving the heading rule elsewhere. Absent on an annotation
+ *   harvested before plan 09 slice 1.
  */
 
 /**

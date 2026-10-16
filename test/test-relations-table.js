@@ -855,9 +855,9 @@ function pipelineSourceFiles(dir = ROOT, out = []) {
 /** Scenario 12. @returns {void} */
 function scenarioNothingAdded() {
   const kinds = Object.keys(FINDING_LEVELS);
-  same(kinds.length, 70, "the finding level table is still 70 kinds — this slice added none");
+  same(kinds.length, 72, "the finding level table is 72 kinds — this slice added none");
   same(kinds.filter((kind) => /relation|address|span/i.test(kind)), [], "and none of them is a relation kind: a volume whose cast addressed nobody in a form the record could place is a fact about that book, not a defect");
-  same(Object.values(FINDING_LEVELS).filter((entry) => entry && entry.level === "STOP").length, 18, "and the level counts are unmoved");
+  same(Object.values(FINDING_LEVELS).filter((entry) => entry && entry.level === "STOP").length, 19, "and the level counts are unmoved by this slice — STOP is 19 because plan 09 slice 1's `ruby-markup-not-canonical` sits beside `guide-split-in-text`");
 
   same(Object.keys(FREEZE_DOORS).length, 12, "the freeze gate is still 12 doors — this slice added none");
   same(Object.keys(FREEZE_DOORS).filter((door) => /relation/i.test(door)), [], "and no door is named for a relation");
@@ -926,7 +926,7 @@ function scenarioNothingAdded() {
   same(rel.RELATION_CERTAINTY_LEVELS.length, 6, "6 certainty levels");
   same(rel.ADDRESSER_KINDS.length, 4, "4 addresser kinds");
   same(rel.ADDRESSEE_KINDS.length, 2, "2 addressee kinds");
-  console.log("12. nothing added: 70 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 new prompt, 0 handle verbs, 0 stage callers, 0 readers of the table, 0 environment knobs, 0 CJK characters in the layer");
+  console.log("12. nothing added: 72 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 new prompt, 0 handle verbs, 0 stage callers, 0 readers of the table, 0 environment knobs, 0 CJK characters in the layer");
 }
 
 // ─── Run ──────────────────────────────────────────────────────────────────────

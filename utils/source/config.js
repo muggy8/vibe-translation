@@ -66,11 +66,20 @@ const DEFAULT_CHUNK_THRESHOLD_CHARS = 120000;
  * over them (plan 09 decision 2). The harvest is unchanged by it: the same rows, the same counts and the same
  * per-character `annotated` sequence, because the harvest is built by `splitRuby`, not by the renderer. A
  * chapter heading and a chapter title stay guide-free, because a name carrying markup matches no name that
- * does not.)
+ * does not.; v10: the extraction RECORDS what it wrote — every segment now carries its own ruby-markup
+ * measurements (`rubyUnits`, `rubyShapeDefects`, `rubyShapeReasons`, `rubyShapeExamples`, `rubyAnnotations`,
+ * `rubyUndisplayed`) and the bundle's `rubyGuides` block carries the volume's totals, which is what lets the
+ * extraction audit answer two questions it could not answer before: is every `<ruby>` in a chapter file the
+ * one shape this converter writes, and does the file hold as many of them as the conversion harvested
+ * (plan 09 slice 1). The chapter files themselves are UNCHANGED by it — measured by re-converting all 17
+ * archives of the live series into a scratch folder: 133 of 133 chapter files byte-identical to the ones on
+ * disk, 45,428 ruby elements + 1 guide written as plain text = 45,429 harvested, 0 non-canonical elements,
+ * 0 findings. The version moves anyway, for the reason this constant exists: a schema-9 cache carries none of
+ * the measurements, so the two new checks would be silent on every book the pipeline reads.)
  *
  * @type {number}
  */
-const BUNDLE_SCHEMA_VERSION = 9;
+const BUNDLE_SCHEMA_VERSION = 10;
 
 /**
  * What the CURRENT schema changed, in the sentence an operator sees when a cached bundle is thrown
@@ -84,9 +93,10 @@ const BUNDLE_SCHEMA_VERSION = 9;
  * @type {string}
  */
 const SCHEMA_CHANGE_NOTE =
-  "pronunciation guides are now kept in the chapter text as ruby markup over the whole word " +
-  "(<ruby>蒲田<rt>かまた</rt></ruby>, the base characters contiguous), chapter headings and titles stay " +
-  "guide-free, and every segment is still searched for a guide-split string the converter must never write";
+  "every chapter now records its own ruby-markup measurements (how many `<ruby>` elements its file carries, " +
+  "how many are not the shape the converter writes, how many harvested guides never reached the text), so " +
+  "the extraction audit can check the markup in a chapter against the guides that chapter was harvested " +
+  "with; the chapter text itself is unchanged by it";
 
 
 /**

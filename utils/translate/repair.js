@@ -7,8 +7,20 @@
  * cannot be trusted the shortcut is REFUSED and the whole-chapter pass runs; a wrong
  * mapping deletes good text and inserts text that does not belong.
  *
+ * **And the quote is matched against the guide-free projection of the source** (plan 09 slice 1,
+ * 2026-10-16). The chapter file now carries the author's pronunciation guides as `<ruby>` markup
+ * (plan 09 decision 2), while the findings quote what the verifier *read*, which is the word without
+ * its guides. Measured on the real volume 01 chapter 1: 159 of 979 guide-free quotes sampled out of
+ * the 133 real chapters cannot be found in the raw paragraphs at all, so every one of those findings
+ * was filed as "chapter-wide" and the whole chapter was translated again to fix one sentence.
+ * `utils/reference-store/ruby-markup.js` is the one rule about that markup, and this door uses it
+ * rather than restating it — the translate layer already reaches the reference store for its
+ * terminology (`settled-glossary.js`), and a second copy of a strip rule is two rules.
+ *
  * Part of the translate.js layer (split out of the original single file).
  */
+
+const { stripRubyMarkup } = require("../reference-store/ruby-markup");
 
 /**
  * Split a text into paragraph blocks, losslessly (blocks joined by "\n\n"
@@ -68,16 +80,27 @@ function parseFindingItems(findingsText) {
  * spaces), and the search runs over the joined paragraphs so a quote that spans
  * two of them still resolves — to BOTH of them.
  *
- * @param {string[]} sourceBlocks - Source paragraphs in order.
- * @param {string} quote - The verbatim quote to find.
+ * **And the ruby markup comes off both sides first** (plan 09 slice 1). The paragraph is the file's
+ * own text, which carries `<ruby>蒲田<rt>かまた</rt></ruby>`; the quote is what a grader wrote about
+ * it, which is 蒲田. Squashing whitespace alone makes the two different strings and the quote is
+ * reported as "not in the source", which is not a refusal — it is a *chapter-wide* finding, and a
+ * chapter-wide finding is injected into every passage pass, so the shortcut this module exists for
+ * quietly stops working on every annotated chapter. A quote that only exists with the reading pasted
+ * into the word (`蒲田かまた`) is still not found, and that is the correct answer: it is the forged
+ * shape `utils/reference-store/evidence.js` refuses at the citation door, and it is not located here
+ * either.
+ *
+ * @param {string[]} sourceBlocks - Source paragraphs in order, as the chapter file holds them.
+ * @param {string} quote - The verbatim quote to find, guide-free or carrying the markup.
  * @returns {{start: number, end: number}|null} The paragraph range, or null when the quote is not in the source.
  */
 function locateQuoteRange(sourceBlocks, quote) {
-  // Whitespace is removed on BOTH sides. A quote copied out of a findings list
-  // rarely keeps the source's line breaks, and source-language text (Japanese,
-  // Chinese) has no word spaces at all — joining paragraphs with a space would
-  // make a quote that crosses a paragraph boundary impossible to find.
-  const squash = (t) => (t || "").replace(/\s+/g, "");
+  // Whitespace is removed on BOTH sides, and so is every pronunciation guide. A quote copied out of
+  // a findings list rarely keeps the source's line breaks, source-language text (Japanese, Chinese)
+  // has no word spaces at all — joining paragraphs with a space would make a quote that crosses a
+  // paragraph boundary impossible to find — and the guide is not part of the word the quote quotes
+  // (gotcha 123, plan 09 decision 2).
+  const squash = (t) => stripRubyMarkup(t).replace(/\s+/g, "");
   const q = squash(quote);
   if (!q) return null;
   let joined = "";
@@ -178,7 +201,14 @@ function planTargetedRepair({ sourceText, draftText, findingsText, maxCoverage =
     };
   }
   for (const b of merged) {
-    const srcLen = sourceBlocks.slice(b.start, b.end + 1).join(" ").length;
+    // The source side of the ratio is measured on the guide-free projection. This ratio asks whether
+    // a draft paragraph looks like a rendering of a source paragraph, and a pronunciation guide is
+    // not something the draft renders — it is an annotation over the word. Left on the raw text the
+    // band silently moved when the extraction grew: the 133 real chapters carry 3,595,944 raw
+    // characters over 2,450,316 guide-free ones (+46.75 %; per chapter, median ×1.334, p90 ×1.973,
+    // max ×2.358), so a passage whose true ratio sits at the low end of the band reads as too short
+    // for a translation and the repair is refused for a reason the book does not support.
+    const srcLen = sourceBlocks.slice(b.start, b.end + 1).map(stripRubyMarkup).join(" ").length;
     const draftLen = draftBlocks.slice(b.start, b.end + 1).join(" ").length;
     const ratio = draftLen / Math.max(1, srcLen);
     if (ratio < 0.25 || ratio > 5) {

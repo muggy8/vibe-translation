@@ -269,7 +269,7 @@ through `parseVoiceMarkdown` as the same **2 claims plus 1 lead line** with no b
 counterfactual — the same line moved below the bullets — still parses as 2 claims with **nothing announcing the
 damage**, while the second claim's body becomes `"Addresses the man she reports to with vos… _Earlier in this record
 — …"`, which is a published claim rewritten by a render. Every
-call baseline is unmoved (82 / 17 and 28 / 6, 0 on the second pass in both), the level table is still 70 kinds, the
+call baseline is unmoved (82 / 17 and 28 / 6, 0 on the second pass in both), the level table was still 70 kinds then (it is 72 since plan 09 slice 1, 2026-10-16), the
 freeze door table is still 12 doors (the gate's own suite is 15 scenarios / 210 checks), and no published
 file on the real corpus changes, **measured over copies of all 17 records** (gotcha 124):
 their `facts` tables hold **22,469 rows and every one of them is `aspect = 'term_usage'`** — the published
@@ -306,7 +306,7 @@ already filed, and the same observation told as claims files **2 claims / 0 conf
 becomes a bullet (the render's bullet counts are identical with and without), never reaches the chapter's
 known-facts block (byte-identical), never reaches the axis queries, and the coverage answer and audit findings are
 identical either way. **Every call baseline is unmoved** (82 / 17 and 28 / 6, 0 on the second pass in both), the
-level table is still 70 kinds, no new setting, no new command, no new store verb. **What moved is prompt size**:
+level table was still 70 kinds then (it is 72 since plan 09 slice 1, 2026-10-16), no new setting, no new command, no new store verb. **What moved is prompt size**:
 the largest `voice-extract` prompt **13,244 → 14,702** characters in the main loop and **13,178 → 14,636** in the
 chunked one, paid on every chapter whether or not anything is confirmed. →
 `utils/reference-store/confirmations/`, `test/test-voice-confirmations.js`, gotcha 158,
@@ -324,7 +324,7 @@ prints in one volume is recorded and the run continues, a name it prints in two 
 built from what the record already measures. **The half of the owner's rule that could not be computed is printed as
 not run** (`speakerTestRun: false` plus the sentence naming why), and the accepted blind spot is printed beside it.
 **The demotion it carries:** `reference-voice-mention-not-covered` went **MAJOR → NOTE** in `utils/postmortem/levels.js`
-(the table is now 18 STOP / 30 MAJOR / 16 MINOR / 6 NOTE over the same 70 kinds), so the per-book mention no longer
+(the table was 18 STOP / 30 MAJOR / 16 MINOR / 6 NOTE over the same 70 kinds at that slice; it is 19 / 31 / 16 / 6 over 72 kinds since plan 09 slice 1), so the per-book mention no longer
 pauses a run at the volume boundary; the hard half, `reference-voice-covers-fewer-characters`, is untouched at MAJOR.
 → `character-voice/reconcile/`, `test/test-cast-reconciliation.js`, gotchas 159–160.
 

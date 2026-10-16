@@ -681,7 +681,7 @@ function pipelineSourceFiles(dir = ROOT, out = []) {
 /** Scenario 10. @returns {void} */
 function scenarioNothingAdded() {
   const kinds = Object.keys(FINDING_LEVELS);
-  same(kinds.length, 70, "the finding level table is still 70 kinds — this slice added none");
+  same(kinds.length, 72, "the finding level table is 72 kinds — this slice added none");
   same(kinds.filter((kind) => /source-quality|spelling|guidance|transpos/i.test(kind)), [], "and none of them is a source-quality kind: plan 07 §6.5 is asked, not made");
   same(Object.keys(FREEZE_DOORS).length, 12, "the freeze gate is still 12 doors");
   same(Object.keys(FREEZE_DOORS).filter((door) => /source|quality/i.test(door)), [], "and no door is named for a source-quality report");
@@ -734,7 +734,7 @@ function scenarioNothingAdded() {
 
   same(Object.keys(rs).filter((name) => /variantSpellingReport|inconsistentGuidanceReport/.test(name)).length, 2, "both doors are reachable through the store's barrel");
 
-  console.log("10. nothing added: 70 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 callers, 0 readers of the two files");
+  console.log("10. nothing added: 72 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 callers, 0 readers of the two files");
 }
 
 // ─── Run ──────────────────────────────────────────────────────────────────────

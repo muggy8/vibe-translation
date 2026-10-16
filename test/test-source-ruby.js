@@ -124,6 +124,9 @@ function assertConvertersAgree(html, label) {
           { base: "蒲", reading: "かま" },
           { base: "田", reading: "た" },
         ],
+        // What this render WROTE, stamped where the decision is made: an annotated word in body text
+        // becomes markup, so the extraction can count markup elements against harvested guides.
+        displayed: true,
       },
     ],
     "the guide the conversion annotated is reported, WITH the order it was annotated in"
@@ -218,13 +221,29 @@ function assertConvertersAgree(html, label) {
   // chapter (stripRepeatedHeading, writeChapterFiles' duplicate-heading strip, titleOfUnnamedSection).
   // A name carrying markup matches no name that does not, so the heading stays guide-free — while the
   // body under it keeps its guides.
+  const headedGuides = [];
   const headed = xhtmlToMarkdown(
     `<html><body><h1>【<ruby>俺<rt>おれ</rt></ruby>とあいつが出会うまで】</h1><p><ruby>俺<rt>おれ</rt></ruby>は行く。</p></body></html>`,
     (s) => s,
-    () => {}
+    (g) => headedGuides.push(g)
   );
   assert.strictEqual(headed, "# 【俺とあいつが出会うまで】\n\n<ruby>俺<rt>おれ</rt></ruby>は行く。", "the heading is guide-free; the body under it keeps its guide");
-  ok("a chapter heading with a guide stays a name the contents list can be matched against");
+  // `displayed` is the stamp the extraction's count check reads, and this is the one shape where the two
+  // halves come apart: the heading's guide is HARVESTED (it is a real reading the author printed) and is
+  // NOT DISPLAYED (a name carrying markup matches no name that does not). `rubyUnits + rubyUndisplayed ===
+  // rubyAnnotations` is only exact because this stamp is made where the decision is made.
+  assert.strictEqual(headedGuides.length, 2, "both guides are harvested, the heading's included");
+  assert.deepStrictEqual(
+    headedGuides.map((g) => g.displayed),
+    [false, true],
+    "the heading's guide is harvested and not written as markup; the body's is written as markup"
+  );
+  assert.strictEqual(
+    headedGuides.filter((g) => g.displayed === false).length,
+    (headed.match(/<ruby>/g) || []).length === 1 ? 1 : 0,
+    "the undisplayed count is exactly the harvested guide the text does not carry"
+  );
+  ok("a chapter heading with a guide stays a name the contents list can be matched against, and says so in `displayed`");
 }
 
 // ─── 2. the harvest beside the bundle ────────────────────────────────────────
@@ -521,7 +540,7 @@ async function scenarioSplitRule() {
  * and it is why 8 → 9 is part of this slice rather than a detail.
  */
 async function scenarioCache() {
-  assert.strictEqual(BUNDLE_SCHEMA_VERSION, 9, "the bundle schema is 9: a schema-8 cache holds guide-free text, and the converter now writes markup");
+  assert.strictEqual(BUNDLE_SCHEMA_VERSION, 10, "the bundle schema is 10: a schema-9 cache carries the annotated text but no measurement of it, so the markup checks would be silent on it");
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "ruby-cache-"));
   const volumeDir = path.join(dir, "Ruby Series(01)");
   await fs.promises.mkdir(volumeDir, { recursive: true });
@@ -576,7 +595,7 @@ async function scenarioCache() {
   // The staleness message quotes SCHEMA_CHANGE_NOTE, so it says the same thing as the harvest line in the
   // volume's own log. The harvest line is matched on the volume's OWN name, not on the words it shares with
   // the staleness message — matching on shared words found the wrong line once already.
-  assert.ok(staleLine.includes("ruby markup"), `the staleness message names the shape the guides are kept in: ${staleLine}`);
+  assert.ok(staleLine.includes("ruby-markup measurements"), `the staleness message names what the new schema records: ${staleLine}`);
   const guideLine = logs.find((l) => l.includes(`${sourceBase}: kept `));
   assert.ok(guideLine, `the operator was told how many guides this book carries: ${logs.join("\n")}`);
   assert.ok(/character\(s\) of reading/.test(guideLine), `the line carries the reading's character count: ${guideLine}`);

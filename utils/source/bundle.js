@@ -357,6 +357,16 @@ function materializeBundle(meta, { originalPath, volumeDir, cacheHit }) {
       // undefined on a cache written before schema 8 — the audit then cannot answer, and says so.
       guideSplitForms: s.guideSplitForms,
       guideSplitExamples: s.guideSplitExamples,
+      // The extraction's own ruby-markup measurements for this chapter (plan 09 slice 1): how many
+      // `<ruby>` elements the file carries, how many of them are not the shape the converter writes, and
+      // how many of the guides its pages were harvested with never reached the text at all. undefined on a
+      // cache written before the schema that records them — the two new audit checks then cannot answer.
+      rubyUnits: s.rubyUnits,
+      rubyShapeDefects: s.rubyShapeDefects,
+      rubyShapeReasons: s.rubyShapeReasons,
+      rubyShapeExamples: s.rubyShapeExamples,
+      rubyAnnotations: s.rubyAnnotations,
+      rubyUndisplayed: s.rubyUndisplayed,
       // Persisted by the extraction (schema 6). null on an older cache — the
       // token rule then falls back to the character rule and says so.
       scriptMix: s.scriptMix || null,

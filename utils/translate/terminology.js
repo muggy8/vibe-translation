@@ -10,6 +10,9 @@
  */
 
 const { countOccurrences } = require("./qa");
+// The store's one rule about HTML ruby (plan 07 slice 5), used here rather than restated: the chapter
+// text this door searches is the extraction's own file, which carries the author's guides as markup.
+const { stripRubyMarkup } = require("../reference-store/ruby-markup");
 
 /**
  * The wording a superseded rendering arrives in, inside a term's Notes cell.
@@ -218,8 +221,18 @@ function glossaryBlockMaxChars() {
  * Substring matching is the right test for Japanese / Chinese / Korean (no
  * word boundaries): "黒鋼さん" contains the glossary term "黒鋼".
  *
+ * **And the text it searches is the guide-free projection** (plan 09 slice 1, 2026-10-16). The chapter
+ * file now carries the author's pronunciation guides as `<ruby>` markup, and a guide is not part of the
+ * word: a term printed across two separately annotated words (`<ruby>三色院<rt>…</rt></ruby><ruby>菫子
+ * <rt>…</rt></ruby>`) is not a substring of the raw file at all. Measured over the 17 real volumes and
+ * their own published glossaries — 83,966 (chapter, term) checks — the raw search **misses 450** terms
+ * the book prints (the translator is never told the term exists) and **finds 67** that occur only
+ * inside a reading, i.e. injects a terminology constraint on evidence the book does not print as a
+ * word. Both directions are wrong, and both are fixed by searching the same projection every citation
+ * door in this repository already searches.
+ *
  * @param {Array<{term: string, rendering: string, section: string}>} terms - The cumulative glossary terms.
- * @param {string} sourceText - The chapter's source text.
+ * @param {string} sourceText - The chapter's source text, as the chapter file holds it.
  * @param {{maxChars?: number}} [opts] - Character budget for the block (default: glossaryBlockMaxChars()).
  * @returns {{terms: Array<{term: string, rendering: string, section: string}>, usedChars: number, present: number, dropped: number}}
  *   `terms` in glossary order, capped by the budget. `present` counts the terms
@@ -229,9 +242,8 @@ function glossaryBlockMaxChars() {
 function selectTermsForChapter(terms, sourceText, { maxChars } = {}) {
   const all = Array.isArray(terms) ? terms : [];
   const budget = Math.max(0, maxChars ?? glossaryBlockMaxChars());
-  const present = all.filter(
-    (t) => t && t.term && countOccurrences(sourceText || "", t.term) > 0
-  );
+  const searchable = stripRubyMarkup(sourceText || "");
+  const present = all.filter((t) => t && t.term && countOccurrences(searchable, t.term) > 0);
   const kept = [];
   let usedChars = 0;
   for (const t of present) {

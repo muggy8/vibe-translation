@@ -861,14 +861,14 @@ console.log("\n=== 9. what this slice did not add ===");
   const layer = readModuleLayer(path.join(__dirname, ".."), "character-voice/reconcile.js");
 
   // The level table is the only pinned count this slice moves, and it moves by one row, not by a kind.
-  same(Object.keys(FINDING_LEVELS).length, 70, "the finding level table is still 70 kinds — no new kind was added");
+  same(Object.keys(FINDING_LEVELS).length, 72, "the finding level table is 72 kinds — no new kind was added by this slice (the two that moved it are plan 09 slice 1's extraction checks)");
   const levels = Object.values(FINDING_LEVELS).map((row) => row.level);
   const countOf = (level) => levels.filter((value) => value === level).length;
-  same(countOf("STOP"), 18, "STOP 18");
-  same(countOf("MAJOR"), 30, "MAJOR 30, one down from the demotion");
+  same(countOf("STOP"), 19, "STOP 19 (the extra one is plan 09 slice 1's `ruby-markup-not-canonical`)");
+  same(countOf("MAJOR"), 31, "MAJOR 31 — one down from the demotion this slice made, one up from plan 09 slice 1's `ruby-markup-count-mismatch`");
   same(countOf("MINOR"), 16, "MINOR 16");
   same(countOf("NOTE"), 6, "NOTE 6, one up from the demotion");
-  same(countOf("STOP") + countOf("MAJOR") + countOf("MINOR") + countOf("NOTE"), 70, "and the four add back up to 70");
+  same(countOf("STOP") + countOf("MAJOR") + countOf("MINOR") + countOf("NOTE"), 72, "and the four add back up to 72");
 
   // No new declared artifact, no new run expectation.
   const artifactLayer = readModuleLayer(path.join(__dirname, ".."), "utils/artifacts.js");
@@ -925,7 +925,7 @@ console.log("\n=== 9. what this slice did not add ===");
   same(bucketsRun.json.schema, RECONCILIATION_RECORD_SCHEMA, "the machine twin declares its schema");
   same(bucketsRun.json.limit.notFungibleMinVolumes, NOT_FUNGIBLE_MIN_VOLUMES, "and prints the bound it applied");
   same(bucketsRun.json.limit.maxNamesListed, RECONCILIATION_MAX_NAMES_LISTED, "and the print bound");
-  console.log(`  9. 70 kinds (${countOf("STOP")}/${countOf("MAJOR")}/${countOf("MINOR")}/${countOf("NOTE")}), 0 new artifacts, 0 new doors, 0 new settings, 0 new commands, 1 call site, 0 SQL`);
+  console.log(`  9. 72 kinds (${countOf("STOP")}/${countOf("MAJOR")}/${countOf("MINOR")}/${countOf("NOTE")}), 0 new artifacts, 0 new doors, 0 new settings, 0 new commands, 1 call site, 0 SQL`);
 }
 
 // ─── 10. The split is a pure function over the record's own rows ──────────────

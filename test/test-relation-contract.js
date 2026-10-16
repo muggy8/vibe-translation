@@ -916,7 +916,7 @@ async function main() {
   console.log("10. what this slice did not add");
 
   const kinds = Object.keys(FINDING_LEVELS);
-  same(kinds.length, 70, "the finding level table is still 70 kinds — this slice added none");
+  same(kinds.length, 72, "the finding level table is 72 kinds — this slice added none");
   same(kinds.filter((kind) => /relation/i.test(kind)), [], "and no kind is named for a relation");
   same(Object.values(FINDING_LEVELS).filter((entry) => /relation/i.test(entry.reason || "")).length, 0, "and no level was declared for one either");
   same(Object.keys(FREEZE_DOORS).length, 12, "the freeze gate is still 12 doors — this slice added none");

@@ -107,6 +107,7 @@ const SUITES = [
   suite("test-relations-isolation", "test/test-relations-isolation.js", []),
   suite("test-relation-contract", "test/test-relation-contract.js", []),
   suite("test-annotated-view", "test/test-annotated-view.js", []),
+  suite("test-guide-free-search", "test/test-guide-free-search.js", []),
   suite("test-register-declaration", "test/test-register-declaration.js", []),
   suite("test-axis-answers", "test/test-axis-answers.js", []),
   suite("test-no-language-axis-list", "test/test-no-language-axis-list.js", []),

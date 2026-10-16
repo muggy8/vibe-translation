@@ -105,10 +105,11 @@ Per volume, and nothing else: **no model call, no prompt, no agent.** `npx gulp 
    The second run over the same 17 books reports **190 ms** and re-extracts nothing; a cold pass, measured
    on a copy whose extracted files had been deleted, is 2.2 s — and both passes report the same 133 chapters
    and 45,429 guides.
-3. **Run the six deterministic checks** (`utils/source/audit.js` — `source-not-archive`,
+3. **Run the eight deterministic checks** (`utils/source/audit.js` — `source-not-archive`,
    `no-usable-chapter`, `chapter-extracted-empty`, `title-is-filename`, `ruby-harvest-missing`,
-   `guide-split-in-text`) and count what the volume holds: chapters, packaging groups, characters,
-   pronunciation guides set aside, images.
+   `guide-split-in-text`, and since plan 09 slice 1 `ruby-markup-not-canonical` and
+   `ruby-markup-count-mismatch`) and count what the volume holds: chapters, packaging groups, characters,
+   pronunciation guides kept in the text, images.
 4. **Write the record**: `extraction-<NN>.md` + `.json` per volume and `extraction-summary.md` + `.json`
    for the series, all under the run's own records folder (`.run/postmortem/`). **Nothing is written into
    a volume folder by this step** beyond the bundle files the extraction itself already writes, and every
@@ -123,9 +124,13 @@ Per volume, and nothing else: **no model call, no prompt, no agent.** `npx gulp 
 
 Measured over a **copy** of all 17 real archives: 133 chapters, 109 packaging groups, 2,450,415
 characters, 45,429 pronunciation guides, 457 images, **0 HIGH and 0 MEDIUM** — the six checks produce no
-false positives on legitimate material. Measured on the offline loop's plain-text fixture: 2 volumes,
-2 chapters, **0 HIGH and 2 MEDIUM** (`title-is-filename`, one per volume — a `.txt` book that declares no
-heading of its own is titled after its file), and the loop continues.
+false positives on legitimate material. **Re-measured 2026-10-16 after plan 09 (the guides are now kept in the
+chapter text as `<ruby>蒲田<rt>かまた</rt></ruby>`): 133 chapters, 3,596,043 characters, 45,429 guides,
+0 HIGH / 0 MEDIUM / 0 LOW — the eight checks, two of them new, still produce no false positives on the same
+17 legitimate books** (`utils/source/plan/02-reading-aids-in-the-text.md` §2.6, gotcha 177). Measured on the
+offline loop's plain-text fixture: 2 volumes, 2 chapters, **0 HIGH and 2 MEDIUM** (`title-is-filename`, one
+per volume — a `.txt` book that declares no heading of its own is titled after its file), and the loop
+continues.
 
 What it does **not** do: it does not re-extract a warm cache, it does not repair anything it finds, it
 writes nothing into a volume folder, and it is not the converter (`utils/source/extract.js` is). What it

@@ -841,8 +841,8 @@ const acceptance = (() => {
 {
   console.log("8. what this slice did not add");
 
-  // No finding kind. The level table is the same 70 it was before this door existed.
-  same(Object.keys(FINDING_LEVELS).length, 70, "the finding level table is still 70 kinds — this door reports refusals, not findings");
+  // No finding kind. The level table is the same 72 it was before this door existed (the two that moved it are plan 09 slice 1's extraction checks).
+  same(Object.keys(FINDING_LEVELS).length, 72, "the finding level table is 72 kinds — this door reports refusals, not findings");
   const doorText = `${readModuleLayer(path.resolve(__dirname, ".."), "utils/reference-store/voice-revision.js")}`;
   for (const kind of Object.keys(FINDING_LEVELS)) {
     ok(!doorText.includes(`"${kind}"`), `the door does not emit the finding kind "${kind}"`);
@@ -896,7 +896,7 @@ const acceptance = (() => {
   ok(renderLayer.includes("supersededVoiceClaims"), "the render asks the shared arc read rather than walking `supersedes` itself");
   same(/supersedes\s*=/.test(renderLayer), false, "and it issues no query of its own over the chain");
 
-  console.log(`  70 finding kinds, 0 new verbs, 0 settings, 0 callers of the door outside its own layer (${doorCallers.length} files name it, all of them the layer or this suite)`);
+  console.log(`  72 finding kinds, 0 new verbs, 0 settings, 0 callers of the door outside its own layer (${doorCallers.length} files name it, all of them the layer or this suite)`);
 }
 
 console.log(`\nvoice revisions: ${checks} checks, 0 model calls, 0 requests to the endpoint.`);

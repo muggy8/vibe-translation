@@ -848,7 +848,7 @@ const ENTRIES_SIX = [
 
   // A register refusal is a refusal, not a finding: the level table did not gain a kind.
   const kinds = Object.keys(FINDING_LEVELS);
-  same(kinds.length, 70, "the finding level table is still 70 kinds — this slice added none");
+  same(kinds.length, 72, "the finding level table is 72 kinds — this slice added none");
   same(kinds.filter((k) => k.startsWith("register-")), [], "and none of them is a register kind");
 
   // The schema moved by one migration, appended, and the pair is nullable. Slice 7 appended migration 11
@@ -887,7 +887,7 @@ const ENTRIES_SIX = [
   ok(/sentenceending: "register"[\s\S]*formality: "register"[\s\S]*vocabulary: "register"/.test(adapterLayer),
     "the aspect collapse is still there, untouched: undoing it is slice 5, and it needs this slice first");
 
-  console.log("  six rules, all reachable; no knob; 70 finding kinds; schema 13; the answer shape stayed open");
+  console.log("  six rules, all reachable; no knob; 72 finding kinds; schema 13; the answer shape stayed open");
 }
 
 console.log(`\nregister declaration: ${checks} checks, 0 model calls.`);

@@ -206,8 +206,8 @@ const emitted = [...KINDS.keys()].sort();
 
 same(
   emitted.length,
-  70,
-  `the repository emits 70 finding kinds (68 through finding() plus missing-required / missing-expected); found ${emitted.length}`
+  72,
+  `the repository emits 72 finding kinds (70 through finding() plus missing-required / missing-expected); found ${emitted.length}`
 );
 same(
   declared,

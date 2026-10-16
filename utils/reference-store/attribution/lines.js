@@ -14,6 +14,7 @@
 const path = require("path");
 
 const { readChapterLines } = require("../source-chapters");
+const { stripRubyMarkup } = require("../ruby-markup");
 require("../../../types"); // JSDoc type definitions
 
 /**
@@ -42,7 +43,13 @@ const DIALOGUE_OPENERS = ["「", "『", "“", "‘"];
  * @returns {"dialogue"|"narration"}
  */
 function lineSpeechKind(line) {
-  const text = String(line === undefined || line === null ? "" : line).trimStart();
+  // The guide-free line, because the question is what the LINE is and a tag is not a character of the
+  // line (plan 09 slice 1). A line that begins with an annotated word reads `<ruby>…` to a rule that
+  // looks at the first character, and a line whose annotated word *is* an opening bracket reads as
+  // narration although the book prints it as speech. Measured over the 17 real books: 25,790 annotated
+  // lines, **0** verdicts differ either way — this is the shape closed because it is the shape, not
+  // because it was found firing.
+  const text = stripRubyMarkup(line).trimStart();
   return DIALOGUE_OPENERS.some((mark) => text.startsWith(mark)) ? "dialogue" : "narration";
 }
 
@@ -73,6 +80,12 @@ function volumeChapterLines(ctx, volume) {
  * bounded: an agent that is handed a whole chapter reads a whole chapter, and the question "who is
  * speaking this line" is answered by the lines around it. `radius` is in lines, and the cited line is
  * marked so the answer can quote the passage it actually read.
+ *
+ * **The window is the raw line, on purpose** (plan 09 slice 1). The reading aids are part of what the
+ * book prints, and an agent asked who is speaking is helped by 蒲田 guided as 蒲かま田 — that is the
+ * display side of plan 09 decision 2. What is measured guide-free is the `speechKind` verdict, because
+ * that is a classification of the line, not a passage to read. A quote the detective brings back is
+ * checked by `evidence.js`, which strips it before it searches the book.
  *
  * @param {{resolveVolume: Function}} ctx
  * @param {{volume: number, chapter: string, line: number, radius?: number}} opts

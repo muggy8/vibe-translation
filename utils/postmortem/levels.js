@@ -66,7 +66,7 @@ const LEVELS = ["STOP", "MAJOR", "MINOR", "NOTE"];
 /**
  * Every finding kind this repository emits, with its level.
  *
- * 70 rows: 68 kinds built by `finding()` plus `missing-required` / `missing-expected`, which
+ * 72 rows: 70 kinds built by `finding()` plus `missing-required` / `missing-expected`, which
  * ./file.js builds from the expectation's own `level`. `test/test-finding-levels.js` enumerates the
  * kinds from the source text and fails if this table and that list ever differ.
  *
@@ -123,6 +123,11 @@ const FINDING_LEVEL_ROWS = [
     kind: "guide-split-in-text",
     level: "STOP",
     why: "the book's own text is corrupted in the exact shape every later artifact is built from, and `extract` has no volume-boundary pause to catch it with.",
+  },
+  {
+    kind: "ruby-markup-not-canonical",
+    level: "STOP",
+    why: "a pronunciation guide in the chapter text is marked up in a shape this converter cannot write — the word is no longer provably whole, and `extract` has no volume-boundary pause to catch it with.",
   },
   {
     kind: "reference-copy-path-undecided",
@@ -245,6 +250,11 @@ const FINDING_LEVEL_ROWS = [
     kind: "reference-evidence-does-not-verify",
     level: "MAJOR",
     why: "a published claim quotes a line the book does not print, and the claim travels into every later volume's copy.",
+  },
+  {
+    kind: "ruby-markup-count-mismatch",
+    level: "MAJOR",
+    why: "a chapter's text and its own volume's pronunciation-guide record disagree about how many readings that chapter prints, so a reading the author printed is missing from what every later stage reads.",
   },
   {
     kind: "reference-impossible-provenance",

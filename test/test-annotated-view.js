@@ -37,7 +37,8 @@
  *     glued shape is printed in the assertion, because the damage plan 07 §4.6 names is a published claim
  *     body with markup welded onto the end of it.
  *   - **Nothing was wired or added**: 0 callers of the three view doors outside their own layer (a tree walk),
- *     70 finding kinds, 12 freeze doors, schema 13, no counted table added, no npm script, no verb on the
+ *     72 finding kinds (the two added are plan 09 slice 1's extraction kinds), 12 freeze doors, schema 13,
+ *     no counted table added, no npm script, no verb on the
  *     store's handle, and every name the written-forms cover exports reaching the store's barrel.
  *
  * Fixtures only, under `/tmp/opencode/series-fixtures`. Nothing here reads the real 17 volumes or any file
@@ -705,7 +706,7 @@ function scenarioNothingWired() {
 
   same(SCHEMA_VERSION, 13, "no schema bump: the view is a read over rows that already exist");
   same(COUNTED_TABLES.filter((table) => /view|annotat/i.test(table)), [], "no new table");
-  same(Object.keys(FINDING_LEVELS).length, 70, "the finding level table is still 70 kinds");
+  same(Object.keys(FINDING_LEVELS).length, 72, "the finding level table is 72 kinds — the two added are plan 09 slice 1's extraction kinds, not this slice's");
   same(Object.keys(FINDING_LEVELS).filter((kind) => /annotat|view-|-view/i.test(kind)), [], "and none of them is a view kind: a chapter with nothing to annotate is a fact about that book, not a defect (`ruby-harvest-missing` is the extraction audit's own kind and predates this slice)");
   same(Object.keys(FREEZE_DOORS).length, 12, "the freeze gate is still 12 doors");
   same(Object.keys(FREEZE_DOORS).filter((door) => /view|annotat/i.test(door)), [], "and no door is named for a view");
@@ -735,7 +736,7 @@ function scenarioNothingWired() {
   }
   ok(!fs.existsSync(path.join(ROOT, "annotated-view.js")), "and no command module at the repository root");
 
-  console.log("10. nothing wired: 0 callers outside the layer, 0 harvest readers in it, 70 finding kinds, 12 freeze doors, schema 13, 0 new command, 0 new handle verb");
+  console.log("10. nothing wired: 0 callers outside the layer, 0 harvest readers in it, 72 finding kinds (plan 09 slice 1's two extraction kinds), 12 freeze doors, schema 13, 0 new command, 0 new handle verb");
 }
 
 // ─── Run ──────────────────────────────────────────────────────────────────────

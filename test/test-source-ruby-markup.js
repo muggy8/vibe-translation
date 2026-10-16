@@ -30,9 +30,13 @@
  *      matter does not start looking like a chapter of the book;
  *   6. **a chapter heading and a chapter title stay guide-free**, because a name carrying markup matches no
  *      name that does not;
- *   7. **BUNDLE_SCHEMA_VERSION moved 8 → 9**, and a cache written under 8 is refused rather than reused —
- *      the mistake that made gotcha 123 invisible for a whole series run;
- *   8. **the six extraction audits run over markup-bearing text and stay silent** on a legitimate book.
+ *   7. **BUNDLE_SCHEMA_VERSION moved 9 → 10**, and a cache written under 9 is refused rather than reused —
+ *      the mistake that made gotcha 123 invisible for a whole series run, in its new form: a schema-9 cache
+ *      carries the annotated text but no measurement of it, so the two new markup checks would be silent on
+ *      every book the pipeline reads;
+ *   8. **the eight extraction audits run over markup-bearing text and stay silent** on a legitimate book;
+ *   9. **the markup a chapter carries and the guides that chapter was harvested with are the same number**,
+ *      and the converter's own shape scan reports 0 defects on a legitimate book.
  *
  * Run: node test/test-source-ruby-markup.js
  */
@@ -59,6 +63,9 @@ const {
   RUBY_MARKUP_UNSAFE_RE,
   canonicalRubyMarkup,
   rubyTextFor,
+  rubyWritesMarkup,
+  rubyUnitCountOf,
+  canonicalRubyShapeScan,
   guideFreeTextOf,
   textCharsOf,
   classifySectionGroup,
@@ -507,14 +514,15 @@ function scenarioGuideFreeMeasurements() {
   ok("textCharsOf, classifySectionGroup, titleOfUnnamedSection and stripRepeatedHeading all answer guide-free");
 }
 
-// ─── 7. a cache written under schema 8 is refused, not reused ────────────────
+// ─── 7. a cache written under the previous schema is refused, not reused ─────
 
 /**
- * The exact state every real volume folder is in right now: a healthy bundle cached under schema 8, whose
- * text is guide-free. It must be thrown away, and the operator must be told why.
+ * The exact state every real volume folder is in right now: a healthy bundle cached under schema 9, whose
+ * chapter files carry the ruby markup but whose meta records nothing about that markup. It must be thrown
+ * away, and the operator must be told why.
  */
 async function scenarioSchema8CacheRefused() {
-  assert.strictEqual(BUNDLE_SCHEMA_VERSION, 9, "the bundle schema is 9");
+  assert.strictEqual(BUNDLE_SCHEMA_VERSION, 10, "the bundle schema is 10");
   const fx = await fixtureVolume("cache", {
     title: "Markup Cache",
     sourceName: "markup_cache(1).epub",
@@ -529,19 +537,19 @@ async function scenarioSchema8CacheRefused() {
   // Now put the bundle back to schema 8 — which is what every real volume's cache says today.
   const metaPath = path.join(fx.volumeDir, `${fx.base}-bundle.meta.json`);
   const meta = JSON.parse(await fs.promises.readFile(metaPath, "utf8"));
-  assert.strictEqual(meta.schema, BUNDLE_SCHEMA_VERSION, "the extraction just wrote a schema-9 cache");
-  meta.schema = 8;
+  assert.strictEqual(meta.schema, BUNDLE_SCHEMA_VERSION, "the extraction just wrote a schema-10 cache");
+  meta.schema = BUNDLE_SCHEMA_VERSION - 1;
   await fs.promises.writeFile(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
 
   const stale = await quiet(() => resolveSourceBundle({ seriesDir: fx.seriesDir, volume: fx.volume, volumeDir: fx.volumeDir }));
-  assert.strictEqual(stale.result.cacheHit, false, "a schema-8 cache is re-extracted rather than served");
+  assert.strictEqual(stale.result.cacheHit, false, "a schema-9 cache is re-extracted rather than served");
   const rewritten = JSON.parse(await fs.promises.readFile(metaPath, "utf8"));
-  assert.strictEqual(rewritten.schema, BUNDLE_SCHEMA_VERSION, "and the cache that comes back is a schema-9 one");
+  assert.strictEqual(rewritten.schema, BUNDLE_SCHEMA_VERSION, "and the cache that comes back is a schema-10 one");
   const staleLine = stale.logs.find((l) => l.includes("is stale"));
   assert.ok(staleLine, `the operator was told the cache was stale:\n${stale.logs.join("\n")}`);
-  assert.ok(staleLine.includes("8 → 9"), `the line names both versions: ${staleLine}`);
+  assert.ok(staleLine.includes("9 → 10"), `the line names both versions: ${staleLine}`);
   assert.ok(staleLine.includes(SCHEMA_CHANGE_NOTE), `and what changed: ${staleLine}`);
-  assert.ok(staleLine.includes("ruby markup"), `in words that say the guides are back in the text: ${staleLine}`);
+  assert.ok(staleLine.includes("ruby-markup measurements"), `in words that say what the new schema records: ${staleLine}`);
 
   // The chapter file on disk is the annotated one, not the guide-free one it replaced.
   const chapter = await fs.promises.readFile(path.join(fx.volumeDir, `${fx.base}-ch1.md`), "utf8");
@@ -579,7 +587,7 @@ async function annotatedBook() {
 }
 
 /**
- * The six extraction checks over a book whose chapters carry ruby markup.
+ * The eight extraction checks over a book whose chapters carry ruby markup.
  */
 async function scenarioAuditsStaySilent() {
   const fx = await annotatedBook();
@@ -595,15 +603,29 @@ async function scenarioAuditsStaySilent() {
   assert.deepStrictEqual(
     result.findings.map((f) => `${f.severity} ${f.kind}`),
     [],
-    `six checks over annotated text found: ${result.findings.map((f) => `${f.severity} ${f.kind} — ${f.message}`).join(" | ")}`
+    `eight checks over annotated text found: ${result.findings.map((f) => `${f.severity} ${f.kind} — ${f.message}`).join(" | ")}`
   );
   assert.strictEqual(result.counts.chapters, 3, "and it still counts the book");
   assert.strictEqual(result.counts.HIGH, 0, "0 HIGH");
   assert.strictEqual(result.counts.MEDIUM, 0, "0 MEDIUM");
   for (const seg of fx.bundle.segments) {
     assert.strictEqual(seg.guideSplitForms, 0, `${seg.id}: the split tripwire measured 0 as it wrote the file`);
+    // The two new measurements, on the segment the extraction wrote and on the bundle that reads it back.
+    assert.ok(Number.isFinite(seg.rubyUnits), `${seg.id}: the bundle carries the chapter's ruby-unit count`);
+    assert.strictEqual(seg.rubyShapeDefects, 0, `${seg.id}: the converter's own output is not a shape defect`);
+    assert.strictEqual(
+      seg.rubyUnits + seg.rubyUndisplayed,
+      seg.rubyAnnotations,
+      `${seg.id}: every harvested guide is either markup in the text or a guide written as plain text`
+    );
   }
   assert.strictEqual(fx.bundle.rubyGuides.splitForms, 0, "the volume total is 0");
+  assert.strictEqual(fx.bundle.rubyGuides.rubyShapeDefects, 0, "and so is the shape-defect total");
+  assert.strictEqual(
+    fx.bundle.rubyGuides.rubyUnits + fx.bundle.rubyGuides.rubyUndisplayed,
+    fx.bundle.rubyGuides.guides,
+    "the volume's markup adds up to the volume's harvest"
+  );
   assert.strictEqual(fx.bundle.rubyGuides.guides, 2, "and the harvest still records the two guides");
   assert.ok(
     fx.volumeFiles.includes(`${fx.base}-ruby-guides.json`),
@@ -613,7 +635,7 @@ async function scenarioAuditsStaySilent() {
     assert.ok(EXTRACTION_AUDIT_KINDS[f.kind], `any finding this audit can raise has a declared kind (${f.kind})`);
   }
   await fs.promises.rm(fx.seriesDir, { recursive: true, force: true });
-  ok("the six extraction audits run over markup-bearing text and report 0 findings on a legitimate book");
+  ok("the eight extraction audits run over markup-bearing text and report 0 findings on a legitimate book");
 }
 
 // ─── 9. the tripwire still fires when a chapter really does hold the split string ─
@@ -671,6 +693,126 @@ async function scenarioPlainTextUntouched() {
   ok("a plain-text volume gains no harvest file, no markup and no behaviour change");
 }
 
+// ─── 11. the converter's ruby-unit count is the store's, on every shape ──────
+
+/**
+ * `rubyUnitCountOf` (the converter's copy) and `rubyMarkupUnitCount` (the store's) are the same question
+ * asked from two sides that may not require each other. The extraction's count check compares this count
+ * against the harvest, so a drift between the two is a drift between the guard and the thing it guards.
+ */
+function scenarioUnitCountsAgree() {
+  /** @type {Array<[string, number]>} */
+  const shapes = [
+    ["no markup at all", 0],
+    ["<ruby>蒲田<rt>かまた</rt></ruby>", 1],
+    ["<ruby>蒲田<rt>かまた</rt></ruby>と<ruby>三色院<rt>パンジー</rt></ruby>", 2],
+    // The book's own per-piece markup: still ONE element, whatever the shape error inside it is.
+    ["<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>", 1],
+    // A nested ruby is two elements opened, and the shape scan calls it a defect for a different reason.
+    ["<ruby>外<ruby>内<rt>ない</rt></ruby>側</ruby>", 2],
+    // An element never closed is still an element opened.
+    ["<ruby>蒲田<rt>かまた", 1],
+    // A guide tag on its own is not a ruby.
+    ["<rt>だけ</rt>", 0],
+    ["text with <b>other</b> tags", 0],
+    ["", 0],
+  ];
+  for (const [text, expected] of shapes) {
+    assert.strictEqual(rubyUnitCountOf(text), expected, `rubyUnitCountOf(${JSON.stringify(text)})`);
+    assert.strictEqual(rubyMarkupUnitCount(text), expected, `the store's count disagrees on ${JSON.stringify(text)}`);
+  }
+  ok("the converter's ruby-unit count and the store's are the same number on all 9 shapes");
+}
+
+// ─── 12. the canonical shape scan: silent on what the converter writes, loud on what it does not ─
+
+/**
+ * The scan is the guard behind `ruby-markup-not-canonical`. Two halves: it must report 0 defects on every
+ * element the two converters actually write (otherwise it fires on every legitimate book, which is the
+ * failure mode `utils/source/plan/01-extraction-step.md` §3 measured 666 of), and it must name each of the
+ * six shapes it exists to name.
+ */
+function scenarioCanonicalShapeScan() {
+  // (a) the converter's own output, both converters, over the shapes the real corpus is made of.
+  const annotated = [
+    `<p>彼は<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>を見た。</p>`,
+    `<p><ruby>三色院<rt>パンジー</rt></ruby>も<ruby>三色院菫子<rt>パンジー</rt></ruby>もいた。</p>`,
+    `<p><ruby>亜茶花<rt>あ</rt><rt>さ</rt><rt>か</rt></ruby>と<ruby>玄武<rt>ジヨーロ</rt></ruby>。</p>`,
+    `<p>ガイドのない<ruby>蒲田<rt>かまた</rt></ruby>だけの文。</p>`,
+  ];
+  for (const html of annotated) {
+    const md = xhtmlToMarkdown(html, (s) => s, () => {});
+    const plain = htmlToPlainText(html, () => {});
+    for (const [label, text] of [["markdown", md], ["plain text", plain]]) {
+      const scan = canonicalRubyShapeScan(text);
+      assert.strictEqual(scan.defects, 0, `${label} of ${html}: the converter's own output is reported as defective: ${scan.examples.join(" | ")}`);
+      assert.ok(scan.units > 0, `${label} of ${html}: the scan found no element to measure`);
+      assert.strictEqual(scan.units, rubyUnitCountOf(text), `${label}: units counted twice, differently`);
+    }
+  }
+  // The two converters must agree on the count for the same source, or the count check depends on which
+  // path a page took.
+  for (const html of annotated) {
+    assert.strictEqual(
+      rubyUnitCountOf(xhtmlToMarkdown(html, (s) => s, () => {})),
+      rubyUnitCountOf(htmlToPlainText(html, () => {})),
+      `the two converters disagree about how many guides ${html} carries`
+    );
+  }
+  ok("the shape scan reports 0 defects on everything both converters actually write");
+
+  // (b) each defect shape, named.
+  /** @type {Array<[string, string, string]>} */
+  const planted = [
+    ["base-not-contiguous", "<ruby>蒲<rt>かま</rt>田<rt>た</rt></ruby>", "the base is not one contiguous run — the old interleaving"],
+    ["multiple-guide-runs", "<ruby>蒲田<rt>かま</rt><rt>た</rt></ruby>", "two guide runs over one word"],
+    ["empty-guide", "<ruby>蒲田<rt></rt></ruby>", "markup with nothing in the guide"],
+    ["empty-base", "<ruby><rt>だけ</rt></ruby>", "markup with no word in it"],
+    ["nested-markup", "<ruby>外<ruby>内<rt>ない</rt></ruby>側</ruby>", "a tag inside the ruby that is not a guide"],
+    ["unbalanced-markup", "<ruby>蒲田<rt>かまた", "an element that was never closed"],
+    ["nested-markup", "<ruby>蒲田<rb>蒲</rb><rt>かまた</rt></ruby>", "a base tag the converter never writes"],
+  ];
+  for (const [reason, text, why] of planted) {
+    const scan = canonicalRubyShapeScan(text);
+    assert.strictEqual(scan.units, rubyUnitCountOf(text), `${text}: units`);
+    assert.ok(scan.defects >= 1, `${text} (${why}) is not reported as a defect`);
+    assert.ok(scan.reasons.includes(reason), `${text} (${why}) is not named "${reason}": ${scan.reasons.join(", ")}`);
+    assert.ok(scan.examples.length >= 1 && scan.examples.length <= 3, `${text}: the scan quotes between 1 and 3 examples`);
+    // A defect is a fact about the markup, and the guide-free projection is still the word: the two
+    // measurements are independent, and the audit reports both.
+    assert.ok(guideFreeTextOf(text).includes("蒲") || !text.includes("蒲"), `${text}: the strip lost the word`);
+  }
+
+  // (c) a clean element and a planted defect in the same chapter: the count is exact, and only the bad
+  // element counts.
+  const mixed = `<ruby>蒲田<rt>かまた</rt></ruby>と<ruby>三色院<rb>色</rb><rt>パンジー</rt></ruby>を見た。`;
+  const scan = canonicalRubyShapeScan(mixed);
+  assert.strictEqual(scan.units, 2, "two elements opened");
+  assert.strictEqual(scan.defects, 1, "one of them is not canonical");
+  assert.ok(scan.reasons.includes("nested-markup"), `and it is named: ${scan.reasons.join(", ")}`);
+
+  // (d) `rubyWritesMarkup` is the stamp `displayed` carries, and it is `rubyTextFor`'s own rule.
+  assert.strictEqual(rubyWritesMarkup({ base: "蒲田", reading: "かまた" }), true, "a whole word with a reading becomes markup");
+  assert.strictEqual(rubyWritesMarkup({ base: "", reading: "だけ" }), false, "a reading with no word is plain text");
+  assert.strictEqual(rubyWritesMarkup({ base: "蒲田", reading: "" }), false, "a word with no reading is plain text");
+  assert.strictEqual(rubyWritesMarkup({ base: "a<b", reading: "x" }), false, "a half carrying a tag is plain text");
+  assert.strictEqual(rubyWritesMarkup(null), false, "and nothing at all is plain text");
+  for (const annotation of [
+    { base: "蒲田", reading: "かまた" },
+    { base: "", reading: "だけ" },
+    { base: "蒲田", reading: "" },
+    { base: "a<b", reading: "x" },
+  ]) {
+    const written = rubyTextFor(annotation);
+    assert.strictEqual(
+      rubyUnitCountOf(written),
+      rubyWritesMarkup(annotation) ? 1 : 0,
+      `rubyWritesMarkup disagrees with what rubyTextFor wrote for ${JSON.stringify(annotation)}: ${written}`
+    );
+  }
+  ok("the shape scan names all six defects, counts them exactly, and `displayed` is `rubyTextFor`'s own rule");
+}
+
 (async () => {
   console.log("source-ruby-markup: the guide stays in the text, over a word that stays whole");
   scenarioCanonicalShape();
@@ -683,6 +825,8 @@ async function scenarioPlainTextUntouched() {
   await scenarioAuditsStaySilent();
   await scenarioTripwireStillFires();
   await scenarioPlainTextUntouched();
+  scenarioUnitCountsAgree();
+  scenarioCanonicalShapeScan();
   console.log(`\nsource-ruby-markup: all ${passed} checks passed.`);
 })().catch((err) => {
   console.error("source-ruby-markup: FAILED");

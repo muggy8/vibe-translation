@@ -945,7 +945,7 @@ async function main() {
 
 {
   const kinds = Object.keys(FINDING_LEVELS);
-  same(kinds.length, 70, "the finding level table is still 70 kinds — this slice added none");
+  same(kinds.length, 72, "the finding level table is 72 kinds — this slice added none");
   same(kinds.filter((kind) => /confirm/i.test(kind)), [], "and none of them is a confirmation kind");
 
   same(SCHEMA_VERSION, 13, "the store is at schema 13 — plan 07 slice 3 appended migration 13 after plan 07 slice 1 appended migration 12");

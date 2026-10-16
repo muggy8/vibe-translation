@@ -44,6 +44,8 @@ const EXTRACTION_AUDIT_KINDS = {
   "no-usable-chapter": "HIGH",
   "chapter-extracted-empty": "HIGH",
   "guide-split-in-text": "HIGH",
+  "ruby-markup-not-canonical": "HIGH",
+  "ruby-markup-count-mismatch": "HIGH",
   "title-is-filename": "MEDIUM",
   "ruby-harvest-missing": "MEDIUM",
 };
