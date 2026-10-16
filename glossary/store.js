@@ -61,6 +61,7 @@ const {
   buildGradeSample,
   glossaryNewestSections,
   rosterReconciliationLog,
+  writtenFormsLog,
 } = require("../utils/reference-store");
 // The finding constructor, used only to NAME a term-list read that never answered (see
 // auditGlossaryArtifact). Reaching for the post-mortem's own constructor rather than inventing a local
@@ -103,6 +104,7 @@ function openGlossaryRecord(ctx, previousVolume) {
       );
     }
     for (const line of rosterReconciliationLog(ctx.values.INSTALLMENT_NUMBER, opened.roster)) console.log(line);
+    for (const line of writtenFormsLog(ctx.values.INSTALLMENT_NUMBER, opened.writtenForms)) console.log(line);
     return { ok: true, opened, error: null };
   }
   const detail = opened.findings.map((f) => `${f.severity} ${f.kind}: ${f.message}`).join("\n  ");

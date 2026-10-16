@@ -363,6 +363,7 @@ async function runExtractPass({ seriesDir, volumeArg, dryRun = false, force = fa
       log(`  record:  read this volume's glossary.md into itself — ${backfill.imported} new row(s), ${backfill.carried} carried, ${backfill.refused.length} refused, ${backfill.castRegistered} roster entr(ies)`);
     }
     for (const line of rs.rosterReconciliationLog(installmentNumber, attempt.opened.roster)) log(line);
+    for (const line of rs.writtenFormsLog(installmentNumber, attempt.opened.writtenForms)) log(line);
 
     const read = await reading.readVolumeChapters({
       ctx,

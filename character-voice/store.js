@@ -34,6 +34,7 @@ const {
   buildGradeSample,
   voiceNewestSections,
   rosterReconciliationLog,
+  writtenFormsLog,
   moveArtifactAside,
   ensureArtifactRejectIgnoreRule,
 } = require("../utils/reference-store");
@@ -94,6 +95,7 @@ function openVoiceRecord(ctx, previousVolume) {
       );
     }
     for (const line of rosterReconciliationLog(ctx.values.INSTALLMENT_NUMBER, opened.roster)) console.log(line);
+    for (const line of writtenFormsLog(ctx.values.INSTALLMENT_NUMBER, opened.writtenForms)) console.log(line);
     return { ok: true, opened, error: null };
   }
   const detail = opened.findings.map((f) => `${f.severity} ${f.kind}: ${f.message}`).join("\n  ");

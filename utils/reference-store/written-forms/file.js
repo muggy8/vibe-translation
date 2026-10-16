@@ -75,9 +75,11 @@
  * this volume's copy"* — a later volume works in its own copy, so a seal on a row that reaches no published
  * file protects nothing. Same reasoning `identity/file.js` already gives: `castAlias` refuses to merge on a
  * sealed record because a merge re-points rows the record already published, and filing a written-forms row
- * re-points nothing — no renderer, audit rule, presence matcher, coverage rule, chapter-facts query or stage
- * reads this table (plan 07 slice 1's acceptance line, and `test/test-written-forms.js` greps the tree to
- * prove the count is zero). A row that reaches nothing published cannot damage what a seal protects.
+ * re-points nothing — no renderer, audit rule, presence matcher, coverage rule or chapter-facts query reads
+ * this table (plan 07 slice 1's acceptance line, and `test/test-written-forms.js` greps the tree to prove
+ * the count is zero). A row that reaches nothing published cannot damage what a seal protects. **The door
+ * is now called by the pipeline** (plan 09 slice 3a, `pipeline-store.js`), and that changes who *writes*
+ * rows, not who reads them: nothing published reads this table yet, which is what the next slice changes.
  *
  * ## Idempotence
  *
@@ -86,6 +88,17 @@
  * plan 07 §5's acceptance line asks for. A collision that the read did not predict throws rather than
  * overwriting a row another volume filed.
  *
+ * ## The door is synchronous, and that is what lets the pipeline reach it (plan 09 slice 3a)
+ *
+ * Plan 07 §6 item 3 — *who runs this door* — was answered on 2026-10-16 by the account owner's decision
+ * to reuse `written_forms` for the glossary's readings, and the answer is: **`openVolumeRecord` does**,
+ * through `pipeline-store.js`'s `ensureVolumeWrittenFormsInRecord`, the same door
+ * `ensureVolumeGlossaryInRecord` sits in (gotcha 103). That door is synchronous — every stage opens a
+ * record from synchronous code — so this one had to become synchronous too. Its only asynchronous step
+ * ever was reading one JSON file, and `readHarvestDocument` above is why the read now lives here rather
+ * than in a promise-returning helper the caller could not wait for. Every existing caller `await`s this
+ * function and still works; nothing about what it files, refuses or reports changed.
+ *
  * @module utils/reference-store/written-forms/file
  */
 
@@ -93,7 +106,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { refusal } = require("../refusals");
-const { RUBY_GUIDE_FILE_SUFFIX, readRubyGuideFile } = require("../../source/ruby-guides");
+const { RUBY_GUIDE_FILE_SUFFIX } = require("../../source/ruby-guides");
 const { normalizeSpaces } = require("../../source/html");
 const {
   GUIDE_GROUP_MIN_READING_CHARS,
@@ -124,8 +137,8 @@ function rosterKeysInRecord(store) {
  * The extraction names the file `<base>-ruby-guides.json` after the volume's source archive, and the
  * store does not know the base name — so the folder is scanned for the suffix and the base is read back
  * out of the name. A volume with no harvest (a plain-text book, or one extracted before the harvest
- * existed) is **named**, not treated as an empty harvest: `readRubyGuideFile` answers "there is no file
- * here" with null, and a reader that turns that into zero rows reports a zero it did not measure.
+ * existed) is **named**, not treated as an empty harvest: the read answers "there is no file here" with
+ * null, and a reader that turns that into zero rows reports a zero it did not measure.
  *
  * @param {string} volumeDir - The volume folder the store resolved.
  * @returns {{files: Array<{file: string, base: string}>, error: string|null}}
@@ -146,20 +159,52 @@ function writtenFormHarvestFiles(volumeDir) {
 }
 
 /**
- * Read one volume's harvest into the shape `collectGuideGroups` folds.
+ * One harvest file's `guides` array, read straight out of the volume folder.
+ *
+ * **Why this door reads the file itself instead of calling `utils/source/ruby-guides.js`'s reader.**
+ * That reader is promise-based, and this door is now reached from `openVolumeRecord`, which is
+ * synchronous — every stage that opens a record calls it from synchronous code, and making the open
+ * async would rewrite twenty call sites to service one file read. `test/test-written-forms.js`
+ * scenario 12 pins that **this file** is the only door inside `utils/reference-store/` allowed to open
+ * a harvest, so the synchronous read belongs here rather than in a second reader added to the source
+ * layer (which would be a second door by another name). The contract is the shipped reader's, kept
+ * field for field: parse the JSON, require a `guides` **array**, and answer `null` for anything else —
+ * including a file that is there but unreadable, which the caller reports rather than files.
  *
  * @param {string} volumeDir - The volume folder.
- * @param {number} volume - The volume label to stamp on the harvest, so the fold can date each form.
- * @returns {Promise<{harvests: Array<{volume: number, guides: Array<Object>, file: string}>, missing: string[], errors: Array<{file: string, error: string}>}>}
+ * @param {string} file - The harvest file's name, as `writtenFormHarvestFiles` found it.
+ * @returns {{guides: Array<Object>}|null} The harvest, or null when the file is not a readable harvest.
  */
-async function readWrittenFormHarvest(volumeDir, volume) {
+function readHarvestDocument(volumeDir, file) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(path.join(volumeDir, file), "utf8"));
+  } catch {
+    return null;
+  }
+  if (!parsed || !Array.isArray(parsed.guides)) return null;
+  return parsed;
+}
+
+/**
+ * Read one volume's harvest into the shape `collectGuideGroups` folds.
+ *
+ * Synchronous, for the reason given on {@link readHarvestDocument}. A volume with no harvest is reported
+ * in `missing`, and a file that is there but does not parse is reported in `errors` — neither is folded
+ * into the filing as an empty harvest.
+ *
+ * @param {string} volumeDir - The volume folder the store resolved.
+ * @param {number} volume - The volume label to stamp on the harvest, so the fold can date each form.
+ * @returns {{harvests: Array<{volume: number, guides: Array<Object>, file: string}>, missing: string[], errors: Array<{file: string, error: string}>}}
+ */
+function readWrittenFormHarvest(volumeDir, volume) {
   const { files, error } = writtenFormHarvestFiles(volumeDir);
   /** @type {Array<{volume: number, guides: Array<Object>, file: string}>} */
   const harvests = [];
   /** @type {Array<{file: string, error: string}>} */
   const errors = [];
   for (const entry of files) {
-    const harvest = await readRubyGuideFile(volumeDir, entry.base);
+    const harvest = readHarvestDocument(volumeDir, entry.file);
     if (!harvest) {
       errors.push({ file: entry.file, error: "the file is there and its `guides` array is not readable" });
       continue;
@@ -320,11 +365,11 @@ function eligibleWrittenFormRows(harvestRows) {
  * @param {Object} [opts]
  * @param {number} [opts.volume] - The volume whose harvest is being read. Defaults to this store's volume.
  * @param {Array<{volume: number, guides: Array<Object>}>} [opts.harvests] - Pre-read harvests, for a
- *   caller that already holds them (the measurement script). Every one must belong to this volume or an
+ *   caller that already holds them (the measurement scripts). Every one must belong to this volume or an
  *   earlier one; a later volume is refused by name.
- * @returns {Promise<{ok: boolean, volume: number, harvestFiles: string[], harvestMissing: boolean, harvestErrors: Array<Object>, harvestReadError: string|null, filing: WrittenFormFilingTally, totals: Object, candidateGroups: number, candidateForms: number, candidateRows: number, candidateOccurrences: number, identityBearing: {groups: number, rows: number, occurrences: number, readings: string[]}, unselected: {groups: number, rows: number, occurrences: number, spellingVariants: number, soundAlikes: number}, spellingVariantGroups: Array<Object>, soundAlikeGroups: Array<Object>, ambiguousReadingScripts: string[], harvestVolumesIgnored: number[], formsFiled: Array<Object>, rowsFiled: number, rowsAlreadyFiled: number, counts: Object, refusal: ReferenceRefusal|null}>}
+ * @returns {{ok: boolean, volume: number, harvestFiles: string[], harvestMissing: boolean, harvestErrors: Array<Object>, harvestReadError: string|null, filing: WrittenFormFilingTally, totals: Object, candidateGroups: number, candidateForms: number, candidateRows: number, candidateOccurrences: number, identityBearing: {groups: number, rows: number, occurrences: number, readings: string[]}, unselected: {groups: number, rows: number, occurrences: number, spellingVariants: number, soundAlikes: number}, spellingVariantGroups: Array<Object>, soundAlikeGroups: Array<Object>, ambiguousReadingScripts: string[], harvestVolumesIgnored: number[], formsFiled: Array<Object>, rowsFiled: number, rowsAlreadyFiled: number, counts: Object, refusal: ReferenceRefusal|null}}
  */
-async function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
+function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
   const empty = {
     harvestFiles: [],
@@ -393,7 +438,7 @@ async function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
   let harvestReadError = null;
 
   if (harvests === undefined) {
-    const fromDisk = await readWrittenFormHarvest(store.volumeDir, vol);
+    const fromDisk = readWrittenFormHarvest(store.volumeDir, vol);
     read = fromDisk.harvests;
     harvestFiles = fromDisk.harvests.map((harvest) => harvest.file);
     harvestMissing = fromDisk.missing.length > 0;
@@ -531,6 +576,7 @@ async function fileVolumeWrittenForms(store, { volume, harvests } = {}) {
 module.exports = {
   rosterKeysInRecord,
   writtenFormHarvestFiles,
+  readHarvestDocument,
   readWrittenFormHarvest,
   scriptOfGroup,
   eligibleWrittenFormRows,

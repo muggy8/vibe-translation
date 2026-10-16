@@ -18,11 +18,14 @@
  *
  * ## What nothing in this repository does with these rows yet
  *
- * **No renderer, no audit rule, no presence matcher, no coverage rule, no chapter-facts query, no
- * validator query and no stage reads this table.** That is not an oversight waiting for a follow-up; it
- * is how the owner's asymmetry — *filing is easy to extend and effectively impossible to undo* — is
- * honoured while the shape is still being argued. The reads below exist for the door itself and for the
- * measurement, and `test/test-written-forms.js` greps the rest of the tree to prove the count is zero.
+ * **No renderer, no audit rule, no presence matcher, no coverage rule, no chapter-facts query and no
+ * validator query reads this table, and no stage queries it directly.** That is not an oversight waiting
+ * for a follow-up; it is how the owner's asymmetry — *filing is easy to extend and effectively impossible
+ * to undo* — is honoured while the shape is still being argued. The reads below exist for the door itself
+ * and for the measurement, and `test/test-written-forms.js` greps the rest of the tree to prove the count
+ * is zero. Since plan 09 slice 3a the **door** is called from `pipeline-store.js` when a volume's record
+ * is opened, so the rows arrive whether or not a stage runs; nothing published reads them until plan 09
+ * slice 3b gives the glossary its reading column.
  *
  * @module utils/reference-store/written-forms/rows
  */

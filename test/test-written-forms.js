@@ -46,14 +46,17 @@
  *      and did not appear at the earlier one.
  *   10. **insert-only.** A duplicate row throws rather than overwriting; a damaged `chapters` cell is named
  *      rather than repaired.
- *   11. **what this slice did not add**: no finding kind, no setting, no command, no freeze door, no declared
- *      artifact, no verb on the store's handle, **no stage that calls the door**, and **nothing outside the
- *      layer that reads the table**. The one door outside the layer that asks the **grouping** question is
- *      pinned by name — `utils/reference-store/identity/file.js`, slice 2's — because a scan that expects
- *      zero callers after slice 2 wired one would be a scan that fails on correct code. And the cover's whole
- *      export list is compared against the store's barrel, because the barrel is a spread and a name a
- *      submodule forgets disappears from it silently (gotcha 151) — the widened door added one name,
- *      `eligibleWrittenFormRows`, and slice 2b's reports added 23 more.
+ *   11. **what this wiring did not add**: no finding kind, no setting, no command, no freeze door, no
+ *      declared artifact, no verb on the store's handle, **no stage that calls the door**, and **nothing
+ *      outside the layer that reads the table**. The one door outside the layer that asks the **grouping**
+ *      question is pinned by name — `utils/reference-store/identity/file.js`, slice 2's — because a scan that
+ *      expects zero callers after slice 2 wired one would be a scan that fails on correct code. Since plan 09
+ *      slice 3a the door has **exactly one caller**, pinned by name for the same reason: `pipeline-store.js`,
+ *      the record-open every stage already comes through — and the same scan is run against a scratch tree
+ *      with a second caller planted beside it, so the pin is seen to fire. And the cover's whole export list
+ *      is compared against the store's barrel, because the barrel is a spread and a name a submodule forgets
+ *      disappears from it silently (gotcha 151) — the widened door added one name, `eligibleWrittenFormRows`,
+ *      and slice 2b's reports added 23 more.
  *   12. **the store has exactly one door onto the harvest file** — `written-forms/file.js`, plan 07 §2.4.
  *      This pin used to live in `test/test-glossary-reading-block.js` scenario 10; plan 09 slice 2 deleted
  *      that suite with the reading block it tested, and the assertion moved here rather than going with it,
@@ -61,6 +64,12 @@
  *      It is a guard, not a sentence: the same scan is run against a scratch tree holding the real door plus
  *      two planted ones — one calling the shipped reader, one hand-rolling the read to dodge it — and both
  *      planted doors must come back named.
+ *   13. **the wiring, end to end** (plan 09 slice 3a). Opening a volume's record files that volume's own
+ *      harvest; the rows travel to the next volume's record through the copy and are never re-read from an
+ *      earlier book; a second open files 0; a volume with **no** harvest still opens and says the harvest is
+ *      missing; a harvest file that does not read is **named and not fatal**; and the published glossary and
+ *      the block a chapter is shown come out **byte-identical** with the harvest present and absent, which is
+ *      the fixture half of "no published artifact gains a byte".
  *
  * The two row guards the door applies are pinned in scenario 2 beside the two group guards the fold still
  * applies to its own report, and the two tallies are asserted to agree field for field — the door's guards
@@ -101,6 +110,7 @@ const {
   parseChaptersCell,
   rosterKeysInRecord,
   fileVolumeWrittenForms,
+  openVolumeRecord,
   identityBearingGroups,
   splitGroupsByRoster,
   classifyUnselectedGroups,
@@ -806,13 +816,39 @@ function pipelineSourceFiles(dir = ROOT, out = []) {
   return out.sort();
 }
 
+/**
+ * Which `.js` files under one folder **call** the written-forms door, by the call shape.
+ *
+ * Parameterised on the folder for the same reason `harvestReadersUnder` is: the only way to show a
+ * caller pin is a guard rather than a sentence is to run it against a tree with a caller planted in it.
+ *
+ * @param {string} dir - Folder to walk.
+ * @param {string} [root] - What reported paths are made relative to. Defaults to `dir`.
+ * @returns {string[]} Matching file paths, relative to `root`, sorted.
+ */
+function doorCallersUnder(dir, root = dir) {
+  /** @type {string[]} */
+  const found = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      found.push(...doorCallersUnder(full, root));
+      continue;
+    }
+    if (!entry.name.endsWith(".js")) continue;
+    if (/fileVolumeWrittenForms\s*\(/.test(fs.readFileSync(full, "utf8"))) found.push(path.relative(root, full));
+  }
+  return found.sort();
+}
+
 /** Scenario 11. @returns {void} */
 function scenarioNothingAdded() {
   const kinds = Object.keys(FINDING_LEVELS);
-  same(kinds.length, 72, "the finding level table is 72 kinds — this slice added none");
+  same(kinds.length, 72, "the finding level table is 72 kinds — this wiring added none");
   same(kinds.filter((kind) => /written|form/i.test(kind)), [], "and none of them is a written-form kind: a volume whose harvest produced no candidate group is a fact about that book, not a defect");
 
-  same(Object.keys(FREEZE_DOORS).length, 12, "the freeze gate is still 12 doors — this slice added none (measured against `utils/prereqs/freeze/doors.js`; `AGENTS.md` still says 15, which is stale)");
+  same(Object.keys(FREEZE_DOORS).length, 12, "the freeze gate is still 12 doors — this wiring added none (measured against `utils/prereqs/freeze/doors.js`; `AGENTS.md` still says 15, which is stale)");
   same(Object.keys(FREEZE_DOORS).filter((door) => /written/i.test(door)), [], "and no door is named for a written form");
   same(Object.keys(STEP_ARTIFACT_SPECS).filter((step) => /written/i.test(step)), [], "and no step declares a written-forms artifact");
 
@@ -830,6 +866,7 @@ function scenarioNothingAdded() {
   const coverFile = path.join(ROOT, "utils", "reference-store", "written-forms.js");
   const schemaFile = path.join(ROOT, "utils", "reference-store", "schema.js");
   const barrelFile = path.join(ROOT, "utils", "reference-store.js");
+  const pipelineStore = path.join("utils", "reference-store", "pipeline-store.js");
 
   /** @type {string[]} */ const doorCallers = [];
   /** @type {string[]} */ const tableReaders = [];
@@ -845,10 +882,39 @@ function scenarioNothingAdded() {
     if (/candidateGroupsInRecord\s*\(/.test(text) && !insideLayer) groupQueryCallers.push(path.relative(ROOT, file));
   }
 
-  same(doorCallers, [], "no stage, no step, no command and no door calls it: the only mentions outside the layer are the barrel's re-export, which never calls it");
-  same(tableReaders, [], "and nothing outside the layer and the migration reads the table: no renderer, no audit rule, no presence matcher, no coverage rule, no chapter-facts query, no stage");
-  same(identityRequires, [], "the layer requires nothing under `utils/reference-store/identity/`: the identity claim is slice 2's, and this slice does not reach it");
+  /**
+   * The wiring, pinned as exactly one file rather than as zero.
+   *
+   * Plan 09 slice 3a answered plan 07 §6 item 3 — *who runs this door* — and the answer is
+   * `openVolumeRecord`, because that is the door every stage that writes into a volume's record already has
+   * to come through (gotcha 103). So "no stage calls the door" is no longer the true sentence, and a scan
+   * that still expected zero would fail on correct code. What is still true, and still pinned: **no stage,
+   * no step, no command and no agent calls it directly** — the one caller is the record-open itself — and
+   * **nothing outside the layer reads the table**, which is the half that keeps the wiring from reaching a
+   * published file. That half is what plan 09 slice 3b has to change on purpose.
+   */
+  same(doorCallers, [pipelineStore], "the door has exactly one caller outside its own layer — `pipeline-store.js`, the record-open every stage already comes through — and no stage, step or command calls it directly");
+  same(tableReaders, [], "and nothing outside the layer and the migration reads the table: no renderer, no audit rule, no presence matcher, no coverage rule, no chapter-facts query, no stage — not even the file that now runs the door");
+  same(identityRequires, [], "the layer requires nothing under `utils/reference-store/identity/`: the identity claim is slice 2's, and this wiring does not reach it");
   same(groupQueryCallers, [path.join("utils", "reference-store", "identity", "file.js")], "the only door outside this layer that asks the grouping question is slice 2's identity door — no stage, no report renderer, and no audit rule asks it");
+
+  // The proof the caller pin fires: the same scan over a scratch tree holding the real wiring plus a planted
+  // second caller. A pin that has never been seen to fail is a sentence, not a guard (the same shape as
+  // scenario 12's planted doors).
+  const scratch = path.join(resolveFixturesRoot(), "caller-pin-planted");
+  fs.rmSync(scratch, { recursive: true, force: true });
+  fs.mkdirSync(scratch, { recursive: true });
+  fs.copyFileSync(path.join(ROOT, "utils", "reference-store", "pipeline-store.js"), path.join(scratch, "pipeline-store.js"));
+  fs.writeFileSync(
+    path.join(scratch, "planted-stage.js"),
+    'const { fileVolumeWrittenForms } = require("../utils/reference-store");\n' +
+      "function runTheDoor(store) { return fileVolumeWrittenForms(store, { volume: 1 }); }\n" +
+      "module.exports = { runTheDoor };\n",
+    "utf8"
+  );
+  same(doorCallersUnder(scratch), ["pipeline-store.js", "planted-stage.js"],
+    "the scan named the planted stage beside the real wiring — a second caller would be reported, not absorbed");
+  fs.rmSync(scratch, { recursive: true, force: true });
 
   const coverText = fs.readFileSync(coverFile, "utf8");
   ok(/fileVolumeWrittenForms/.test(coverText) && /candidateGroupsInRecord/.test(coverText) && /identityBearingGroups/.test(coverText), "the cover re-exports the door, the read and the pure half");
@@ -867,7 +933,7 @@ function scenarioNothingAdded() {
   ok(/__writtenForms/.test(barrelText), "and the store's barrel re-exports the cover");
   same(RUBY_GUIDE_FILE_SUFFIX, "-ruby-guides.json", "the file name the door scans for is the name the extraction writes");
 
-  console.log("11. nothing added: 72 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 0 stage callers, 0 readers of the table, 1 reader of the grouping question (the identity door)");
+  console.log("11. nothing added: 72 finding kinds, 12 freeze doors, 0 new artifact, 0 new command, 1 caller (the record-open), 0 readers of the table, 1 reader of the grouping question (the identity door)");
 }
 
 // ─── 12. the store's one door onto the harvest file ───────────────────────────
@@ -972,6 +1038,218 @@ function scenarioOneStoreDoorOntoTheHarvest() {
   console.log("12. the harvest has exactly one door inside the store, and the scan names two planted doors when they are planted");
 }
 
+// ─── 13. the wiring: opening a volume's record files that volume's harvest ──────
+
+/**
+ * Volume 2's own harvest, for the walk.
+ *
+ * Two rows the two row guards keep, and one they refuse (a one-character reading — the guard that drops
+ * 1,084 rows across the real corpus). It shares no form with volume 1's harvest, so every row in the walk
+ * is attributable to the volume whose folder printed it.
+ */
+const HARVEST_02 = {
+  schema: 2,
+  whatThisIs: "fixture harvest for the wiring scenario",
+  generatedBy: "test/test-written-forms.js",
+  sourceFile: "test_story(2).epub",
+  totals: { guides: 3, rows: 3 },
+  guides: [
+    { word: "駱駝", reading: "らくだ", count: 4, readingScript: "hiragana", chapters: ["ch0"], annotated: [{ base: "駱駝", reading: "らくだ" }] },
+    { word: "駱駝", reading: "フタコブラクダ", count: 2, readingScript: "katakana", chapters: ["ch0"], annotated: [{ base: "駱駝", reading: "フタコブラクダ" }] },
+    { word: "駱駝", reading: "ろ", count: 1, readingScript: "hiragana", chapters: ["ch0"], annotated: [{ base: "駱駝", reading: "ろ" }] },
+  ],
+};
+
+/**
+ * Add a third volume to a fixture series, laid out the way the extraction lays a volume out, and **with no
+ * harvest file beside it** — the shape of a plain-text book, and of a book extracted before the harvest
+ * existed. The shared fixture is two volumes on purpose; the copy-forward half needs a third.
+ *
+ * @param {{dir: string, volumes: Array<Object>}} fx
+ * @returns {{folder: string, installmentNumber: string, base: string, dir: string}}
+ */
+function addVolumeThree(fx) {
+  const volume = { folder: "Test Story(03)", installmentNumber: "03", base: "test_story(3)" };
+  volume.dir = path.join(fx.dir, volume.folder);
+  fs.mkdirSync(volume.dir, { recursive: true });
+  const lines = ["# 第三章", "如月雨露は卒業した。", "駱駝はあとがきに書いた。"];
+  const file = `${volume.base}-ch0.md`;
+  fs.writeFileSync(path.join(volume.dir, file), lines.join("\n") + "\n", "utf8");
+  fs.writeFileSync(
+    path.join(volume.dir, `${volume.base}-bundle.meta.json`),
+    JSON.stringify({ format: "epub", schema: 6, base: volume.base, wholeFile: `${volume.base}-whole.md`, segments: [{ id: "ch0", file, title: "第三章", chars: lines.join("\n").length }] }, null, 2) + "\n",
+    "utf8"
+  );
+  fs.writeFileSync(path.join(volume.dir, `${volume.base}-whole.md`), lines.join("\n") + "\n", "utf8");
+
+  const planFile = path.join(fx.dir, "translation-target.json");
+  const plan = JSON.parse(fs.readFileSync(planFile, "utf8"));
+  plan.volumes.push({
+    folder: volume.folder,
+    sourceFile: `${volume.folder}/${volume.base}.epub`,
+    installmentNumber: volume.installmentNumber,
+    title: "Test Story",
+    integrity: { isNarrative: true, confidence: 0.9, basis: "fixture" },
+  });
+  fs.writeFileSync(planFile, JSON.stringify(plan, null, 2) + "\n", "utf8");
+  fx.volumes = [...fx.volumes, volume];
+  return volume;
+}
+
+/**
+ * Write one harvest into a fixture volume folder, under the name the extraction would write it under.
+ * @param {string} volumeDir @param {string} base @param {Object} harvest @returns {void}
+ */
+function writeHarvest(volumeDir, base, harvest) {
+  fs.writeFileSync(path.join(volumeDir, `${base}${RUBY_GUIDE_FILE_SUFFIX}`), JSON.stringify(harvest, null, 2) + "\n", "utf8");
+}
+
+/**
+ * Every written-forms row in one record, without timestamps, so two records can be compared field for field.
+ * @param {Object} store @returns {Array<Object>}
+ */
+function rowsOfRecord(store) {
+  return writtenFormsInRecord(store).map((row) => `${row.volume}|${row.form}|${row.reading}|${row.occurrences}`);
+}
+
+/**
+ * Scenario 13. The wiring, end to end through the real door.
+ *
+ * Plan 09 slice 3a put the door inside `openVolumeRecord`. What that has to prove, in order:
+ *
+ *   - **an already-finished volume gets rows.** The whole point of the wiring is the seventeen books whose
+ *     glossary stage already ran; a volume is filed from its own folder whether or not a stage does anything
+ *     else for it.
+ *   - **the rows travel.** `written_forms` is in `COUNTED_TABLES`, so volume 3's record carries volume 1's and
+ *     volume 2's rows without volume 3 reading anybody's book.
+ *   - **a second pass files 0** and reports them as already filed, and the record is byte-identical.
+ *   - **a volume with no harvest still opens.** The offline pipeline loop's fixture books are plain text; if
+ *     the wiring refused on them it would break every stage in the loop for a book that guided nothing.
+ *   - **a harvest that cannot be read is named, not fatal** — the open succeeds, files nothing, and says why.
+ *   - **nothing published changes.** The rendered glossary and the block a chapter is shown are byte-identical
+ *     with the harvest present and absent, which is the fixture half of "no published artifact gains a byte".
+ *
+ * @returns {void}
+ */
+function scenarioWiringAtTheOpen() {
+  const fx = fixtureStoreSeries("written-forms-wiring");
+  const seriesDir = fx.dir;
+  writeHarvest(fx.volumes[0].dir, fx.volumes[0].base, HARVEST);
+  writeHarvest(fx.volumes[1].dir, fx.volumes[1].base, HARVEST_02);
+  const volumeThree = addVolumeThree(fx);
+
+  /** @type {Array<Object>} */ const openedStores = [];
+  try {
+    // ── Volume 1: its own harvest, filed at the open, with no stage involved. ──────────────────────
+    const one = openVolumeRecord({ volume: 1, folder: "Test Story(01)", seriesDir });
+    ok(one.ok, `volume 1's record opened: ${one.refusal && one.refusal.because}`);
+    openedStores.push(one.store);
+    assertInsideFixture(one.store.file, seriesDir);
+    same(one.writtenForms.ran, true, "the written-forms rule ran at the open");
+    same(one.writtenForms.harvestMissing, false, "and it found this volume's harvest beside its source");
+    same(one.writtenForms.rowsFiled, 13, "13 of the 15 harvested rows reached the record — the same 13 the door files on its own, so the wiring changed nothing about what is filed");
+    same(one.writtenForms.rowsAlreadyFiled, 0, "and none of them were there already");
+    same(one.writtenForms.counts.total, 13, "the record now holds 13 written forms");
+    same(one.writtenForms.counts.perVolume, { 1: 13 }, "all of them filed under the volume whose book printed them");
+    const oneRows = rowsOfRecord(one.store);
+    same(oneRows.length, 13, "and they are readable back out of the record");
+    one.store.sealVolume(1);
+
+    // ── Volume 2: its own harvest, on top of the copy that carried volume 1's. ─────────────────────
+    const two = openVolumeRecord({ volume: 2, folder: "Test Story(02)", seriesDir, previousVolume: 1, previousFolder: "Test Story(01)" });
+    ok(two.ok, `volume 2's record opened: ${two.refusal && two.refusal.because}`);
+    openedStores.push(two.store);
+    same(two.writtenForms.rowsFiled, 2, "volume 2 files its own 2 rows (the third is refused by the row guard, exactly as it is when the door runs alone)");
+    same(two.writtenForms.counts.perVolume, { 1: 13, 2: 2 }, "and its record carries volume 1's 13 beside them — the rows travel through the copy, not through a second reading of volume 1's book");
+    same(two.writtenForms.counts.total, 15, "15 in total");
+    const twoRows = rowsOfRecord(two.store);
+    same(twoRows.filter((row) => row.startsWith("1|")).length, 13, "volume 1's rows arrived whole");
+    same(twoRows.filter((row) => row.startsWith("2|")).length, 2, "and volume 2 filed only its own");
+    two.store.sealVolume(2);
+
+    // ── Volume 3: no harvest at all, and the open still succeeds. ─────────────────────────────────
+    const three = openVolumeRecord({ volume: 3, folder: volumeThree.folder, seriesDir, previousVolume: 2, previousFolder: "Test Story(02)" });
+    ok(three.ok, "a volume whose folder holds no pronunciation-guide harvest still opens its record — a plain-text book is not a stage failure");
+    openedStores.push(three.store);
+    same(three.writtenForms.harvestMissing, true, "and the pass says the harvest is missing, rather than reporting a zero it did not measure");
+    same(three.writtenForms.rowsFiled, 0, "it files nothing");
+    same(three.writtenForms.counts.total, 15, "and the record still carries the 15 rows the volumes before it measured");
+    same(three.writtenForms.counts.perVolume, { 1: 13, 2: 2 }, "with no phantom rows for volume 3");
+
+    // ── The log lines, including the one that prints when nothing was filed. ──────────────────────
+    const logOne = rs.writtenFormsLog("01", one.writtenForms);
+    same(logOne.length, 1, "a volume that filed rows says so once");
+    ok(/filed 13 written form/.test(logOne[0]), `and names the number: ${logOne[0]}`);
+    const logThree = rs.writtenFormsLog("03", three.writtenForms);
+    same(logThree.length, 1, "and a volume that filed nothing says so too — silence is how a pass that found nothing becomes indistinguishable from one that could not look");
+    ok(/no pronunciation-guide harvest/.test(logThree[0]), `naming what is missing: ${logThree[0]}`);
+    same(rs.writtenFormsLog("01", null), [], "and a report that does not exist prints nothing");
+
+    // ── A second open files 0 and changes nothing. ────────────────────────────────────────────────
+    for (const store of openedStores) store.close();
+    openedStores.length = 0;
+    const twoAgain = openVolumeRecord({ volume: 2, folder: "Test Story(02)", seriesDir, previousVolume: 1, previousFolder: "Test Story(01)" });
+    ok(twoAgain.ok, "the same volume opens again");
+    openedStores.push(twoAgain.store);
+    same(twoAgain.writtenForms.rowsFiled, 0, "the second pass files 0");
+    same(twoAgain.writtenForms.rowsAlreadyFiled, 2, "and reports this volume's 2 rows as already filed");
+    same(rowsOfRecord(twoAgain.store), twoRows, "with the record's rows identical, field for field");
+    same(twoAgain.writtenForms.counts.total, 15, "and the total unmoved");
+    for (const store of openedStores) store.close();
+    openedStores.length = 0;
+  } finally {
+    for (const store of openedStores) store.close();
+  }
+
+  // ── A harvest that is there and cannot be read: named, and the open still works. ────────────────
+  const broken = fixtureStoreSeries("written-forms-wiring-broken-harvest");
+  fs.writeFileSync(path.join(broken.volumes[0].dir, `test_story(1)${RUBY_GUIDE_FILE_SUFFIX}`), "{ this is not a harvest\n", "utf8");
+  const brokenOpen = openVolumeRecord({ volume: 1, folder: "Test Story(01)", seriesDir: broken.dir });
+  try {
+    ok(brokenOpen.ok, "a damaged harvest file does not stop a stage from opening its record — the defect is in the book folder, not in the stage");
+    ok(brokenOpen.writtenForms.harvestError !== null, `and it is named: ${brokenOpen.writtenForms.because}`);
+    same(brokenOpen.writtenForms.rowsFiled, 0, "nothing is filed from a file that does not read");
+    same(brokenOpen.writtenForms.harvestMissing, false, "and it is not reported as a volume with no harvest — those are different facts and the log line says different things");
+    same(brokenOpen.writtenForms.counts.total, 0, "the record holds no written forms");
+    const brokenLog = rs.writtenFormsLog("01", brokenOpen.writtenForms);
+    same(brokenLog.length, 1, "and the stage log carries the sentence");
+    ok(/could not be read/.test(brokenLog[0]), `naming the file rather than the stage: ${brokenLog[0]}`);
+  } finally {
+    brokenOpen.store.close();
+  }
+
+  // ── Nothing published reads it: the same stage acts, with the harvest and without. ──────────────
+  const withHarvest = fixtureStoreSeries("written-forms-wiring-published");
+  writeHarvest(withHarvest.volumes[0].dir, withHarvest.volumes[0].base, HARVEST);
+  const withoutHarvest = fixtureStoreSeries("written-forms-wiring-published-bare");
+
+  const withStore = openVolumeRecord({ volume: 1, folder: "Test Story(01)", seriesDir: withHarvest.dir }).store;
+  const bareStore = openVolumeRecord({ volume: 1, folder: "Test Story(01)", seriesDir: withoutHarvest.dir }).store;
+  try {
+    same(withStore.db.prepare("SELECT COUNT(*) n FROM written_forms").get().n, 13, "the record with the harvest holds 13 written forms");
+    same(bareStore.db.prepare("SELECT COUNT(*) n FROM written_forms").get().n, 0, "and the one without holds none");
+
+    const importWith = importGlossary(withStore, GLOSSARY);
+    const importBare = importGlossary(bareStore, GLOSSARY);
+    same(importBare.refused.length, importWith.refused.length, "the glossary import refuses the same rows either way");
+
+    const renderedWith = rs.renderGlossary(withStore, { volume: 1 });
+    const renderedBare = rs.renderGlossary(bareStore, { volume: 1 });
+    same(renderedWith, renderedBare, "and the published glossary is byte-identical: the rows reach no artifact");
+    ok(!/らくだ|にせもの|うま/.test(renderedWith), "no harvested reading appears in the published file");
+
+    const chapterText = fs.readFileSync(path.join(withHarvest.volumes[0].dir, "test_story(1)-ch1.md"), "utf8");
+    const shownWith = rs.chapterKnownFacts(withStore, { chapterText, volume: 1 });
+    const shownBare = rs.chapterKnownFacts(bareStore, { chapterText, volume: 1 });
+    same(JSON.stringify(shownWith), JSON.stringify(shownBare), "and the block a chapter is shown is identical too — which is what keeps every prompt size unmoved");
+  } finally {
+    withStore.close();
+    bareStore.close();
+  }
+
+  console.log("13. the wiring: 13 rows filed at the open, 15 carried to volume 3, a second pass files 0, a plain-text volume still opens, a damaged harvest is named, and 0 bytes move in a published file");
+}
+
 // ─── Run ──────────────────────────────────────────────────────────────────────
 
 (async () => {
@@ -987,6 +1265,7 @@ function scenarioOneStoreDoorOntoTheHarvest() {
   scenarioInsertOnly();
   scenarioNothingAdded();
   scenarioOneStoreDoorOntoTheHarvest();
+  scenarioWiringAtTheOpen();
   console.log(`\nwritten forms: ${checks} checks, 0 model calls.`);
 })().catch((err) => {
   console.error(err);

@@ -1089,6 +1089,20 @@ Still open:
    concrete:** wiring the identity door is no longer a question about a table nothing reaches — it is the
    difference between the acts of address a run already pays to read being filed and being thrown away. It is
    still the owner's, and it is still item 3's / item 8's.
+   **The written-forms half of this item is answered (2026-10-16, plan 09 slice 3a): the door runs from
+   `openVolumeRecord`.** `pipeline-store.js`'s `ensureVolumeWrittenFormsInRecord` sits beside
+   `ensureVolumeGlossaryInRecord`, for the reason gotcha 103 records — the glossary stage finished for all 17
+   volumes of this series before the store existed and skips a volume whose accepted `glossary.md` is on disk,
+   so a stage-side wiring would have filed **nothing** for any of them without re-paying every model call the
+   stage already made. Measured on **copies** of all 17 records, 0 model calls, 0 corpus writes: **8,910 rows /
+   41,710 occurrences** filed (volume 01 825, volume 08 978, volume 17 329 of its own and 8,910 cumulative), a
+   second walk files **0**, a volume with no harvest files nothing and says so, and a harvest file that does not
+   read is named without stopping the open. **Nothing published reads the rows** — no renderer, audit rule,
+   presence matcher, coverage rule or chapter-facts query — which is what plan 09 slice 3b changes on purpose.
+   **The identity door and the relations door are still unwired**, and this answer does not answer them: the
+   written-forms door needs no roster, so it could be asked at the open; the identity door's output changes what
+   the coverage guard counts, and the relations door's parties are foreign keys to identities that do not exist
+   yet. `/tmp/opencode/plan09-slice3a-questions.md`.
 11. **Who owns the rename list — the one rule in this layer that names a writing system.** Slice 5's view needs
    to know which guided forms are **renames** (a name the author changes by writing a reading over it — 三色院菫子
    → パンジー, 玄武 → ジヨーロ) rather than ordinary pronunciation guides, because a rename is the only case where

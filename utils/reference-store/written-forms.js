@@ -70,11 +70,21 @@
  * **no verb** to the store, **no finding kind** (the level table stays at 70 kinds), **no setting**, **no
  * command**, **no freeze door** and **no declared artifact**.
  *
- * **Nothing reads it yet, on purpose.** No renderer, audit rule, presence matcher, coverage rule,
- * chapter-facts query, validator query or stage reads `written_forms` in this slice — plan 07 §5's slice-1
- * acceptance line, and `test/test-written-forms.js` greps the tree to prove the count is zero. That is how
- * the account owner's asymmetry (*filing is easy to extend and effectively impossible to undo*) is honoured
- * while the shape is still being argued, and it is why **no stage calls the door**.
+ * **Nothing published reads it yet, on purpose.** No renderer, audit rule, presence matcher, coverage
+ * rule, chapter-facts query or validator query reads `written_forms` — plan 07 §5's slice-1 acceptance
+ * line, and `test/test-written-forms.js` greps the tree to prove the count is zero. That is how the
+ * account owner's asymmetry (*filing is easy to extend and effectively impossible to undo*) is honoured
+ * while the shape is still being argued.
+ *
+ * **The door is wired, and that answers plan 07 §6 item 3 (2026-10-16, plan 09 slice 3a).** The account
+ * owner chose to reuse this table for the glossary's readings rather than build a second one, so the door
+ * now runs from `utils/reference-store/pipeline-store.js`'s `ensureVolumeWrittenFormsInRecord`, asked
+ * inside `openVolumeRecord` beside `ensureVolumeGlossaryInRecord` — the door every stage that writes into
+ * a volume's record already has to come through, for the reason gotcha 103 records: a rule that only
+ * fires when a stage remembers to run files nothing for the seventeen books whose stage already finished.
+ * It is a top-up, never an overwrite, idempotent per (volume, form, reading), and on a volume whose
+ * folder holds no harvest it files nothing and says so. **Nothing published reads the rows it files** —
+ * that is plan 09 slice 3b, the glossary's reading column.
  *
  * It is a **guard** layer: it lives inside `utils/reference-store/`, which is already a banned patch path
  * for the dev team, and every file of it — `shapes.js`, `rows.js`, `file.js` and the whole nested
@@ -119,6 +129,7 @@ module.exports = {
   // The door: one volume's harvest, filed once, and the roster it was asked against.
   rosterKeysInRecord: file.rosterKeysInRecord,
   writtenFormHarvestFiles: file.writtenFormHarvestFiles,
+  readHarvestDocument: file.readHarvestDocument,
   readWrittenFormHarvest: file.readWrittenFormHarvest,
   scriptOfGroup: file.scriptOfGroup,
   eligibleWrittenFormRows: file.eligibleWrittenFormRows,

@@ -26,7 +26,7 @@
  *      volume 01's voice reference exists, so "the end of a volume's pre-production" is not one moment.
  *      Sealing is idempotent, and the second seal marks the rows the voice stage added.
  *
- * Two rules are asked at the open, not inside a stage, because a stage can be skipped and an open cannot:
+ * Three rules are asked at the open, not inside a stage, because a stage can be skipped and an open cannot:
  *
  *   - **the glossary completeness rule** — a volume with a published `glossary.md` and no glossary rows
  *     in its record is an incomplete record (gotcha 103);
@@ -35,6 +35,12 @@
  *     Volume 01's entry keyed `俺` with the heading `俺（如月雨露・第二章終盤）` is the case: volume 01's
  *     record is published and stays exactly as it is, and volume 02's copy is where the split gets folded
  *     before it becomes sixteen volumes' worth of split.
+ *   - **the written-forms rule** (plan 09 slice 3a, answering plan 07 §6 item 3) — a volume's own
+ *     pronunciation-guide harvest is filed into that volume's record, the same answer to the same wall:
+ *     the glossary stage finished for all 17 volumes of the live series before the store existed and skips
+ *     a volume whose accepted `glossary.md` is on disk, so a stage-side wiring would file nothing for any
+ *     of them without re-paying every call. It tops up and never overwrites, it is idempotent per
+ *     (volume, form, reading), and a volume with no harvest files nothing and says so.
  *
  * Where the hard stop actually lands, since it is not where it looks like it should be: a volume whose
  * character-voice reference lost characters is caught by **its own** audit (HIGH), and it is the *next*
@@ -60,6 +66,7 @@ const { DOCUMENT_SOURCE_STAGE } = require("./schema");
 const { importGlossary } = require("./glossary-adapter");
 const { importVoice } = require("./voice-adapter");
 const { importVoiceExtraction, importNewTerms } = require("./extraction-adapter");
+const { fileVolumeWrittenForms } = require("./written-forms");
 const { markGlossaryBackfilled, glossaryBackfilled, markRosterReconciled, rosterReconciled } = require("./document-prose");
 const { rosterIdentityConflicts } = require("./name-resolution");
 const {
@@ -204,6 +211,153 @@ function ensureVolumeGlossaryInRecord(store, { volume } = {}) {
 }
 
 /**
+ * The completeness rule for the book's own pronunciation guides: a volume's written forms have to be in
+ * that volume's record.
+ *
+ * **Why it is asked here, and not in the glossary stage.** This is the same wall gotcha 103 records, and
+ * it is the reason `ensureVolumeGlossaryInRecord` exists. The glossary stage finished for all 17 volumes
+ * of the live series in a run that predates the reference store, and its idempotence check skips a volume
+ * whose accepted `glossary.md` is already on disk — a check that runs **before** the stage's store block.
+ * Wiring the written-forms door into the stage would therefore file **nothing** for any of the 17 books
+ * unless every volume were re-run with `--force`, which re-pays every model call the stage already made.
+ * Asked at the open instead, it fires whether the stage ran, skipped, or was never invoked, and it works
+ * for every door that opens a record: the glossary stage, the character-voice stage, `extract-voice`,
+ * `rebuild-voice`, and the terminology settlement pass.
+ *
+ * **It is a top-up, never an overwrite** — and here the guarantee is the table's own primary key rather
+ * than a "already has rows, leave it alone" test. The written-forms table is insert-only and keyed on
+ * (volume, form, reading), and `fileVolumeWrittenForms` asks `writtenFormAlreadyFiled` before every row,
+ * so a second pass files 0 and reports them as already filed. That is deliberately *not* the glossary
+ * rule's shape: the glossary rule skips a record that already owns rows because re-importing a published
+ * document is a different problem. Here the door is safe to re-run, and re-running it is what lets a
+ * harvest that changed (a re-extraction, a corrected book) reach the record without anybody deleting a
+ * row first.
+ *
+ * **A volume with no harvest is a fact, not a failure.** A plain-text book, or one extracted before the
+ * harvest existed, has no pronunciation-guide file beside it. The door reports `harvestMissing`, files
+ * nothing, and the open continues — the same "named, not punished" rule `extract-voice` prints for a
+ * volume with no register axis. A stage that could not open a record because the book is plain text would
+ * be a new way to break a stage that has nothing to do with pronunciation.
+ *
+ * **And a harvest that cannot be read is named, not fatal.** `fileVolumeWrittenForms` throws rather than
+ * file half a volume when a row cannot say how its reading is written. That is right for the door and
+ * wrong for the open: this rule now sits in front of **every** stage that writes into a volume's record,
+ * and a damaged JSON in a book folder would stop the glossary, the voice reference, the wiki and the
+ * translation for a defect none of them caused. So the throw is caught, named in the stage log, and files
+ * nothing — the record is left exactly as it was. It is not a finding, because a finding would need a new
+ * kind in the level table, which is its own slice.
+ *
+ * **Nothing published reads what it files.** No renderer, audit rule, presence matcher, coverage rule or
+ * chapter-facts query reads the table this door writes (plan 07 slice 1's acceptance line, pinned by
+ * `test/test-written-forms.js`). The published glossary gaining its reading column is plan 09 slice 3b.
+ *
+ * @param {ReferenceStore} store - The volume's record, already opened and topped up.
+ * @param {{volume?: number|string}} [opts]
+ * @returns {{ran: boolean, volume: number, harvestFiles: string[], harvestMissing: boolean, rowsFiled: number, rowsAlreadyFiled: number, filing: Object|null, counts: Object|null, harvestError: string|null, refusal: ReferenceRefusal|null, because: string}}
+ */
+function ensureVolumeWrittenFormsInRecord(store, { volume } = {}) {
+  const vol = Number(volume === undefined ? store.volume : volume);
+  const nothing = (extra) => ({
+    ran: false,
+    volume: vol,
+    harvestFiles: [],
+    harvestMissing: false,
+    rowsFiled: 0,
+    rowsAlreadyFiled: 0,
+    filing: null,
+    counts: null,
+    harvestError: null,
+    refusal: null,
+    because: "",
+    ...extra,
+  });
+
+  let pass;
+  try {
+    pass = fileVolumeWrittenForms(store, { volume: vol });
+  } catch (err) {
+    const message = String(err && err.message ? err.message : err);
+    return nothing({
+      harvestError: message,
+      because:
+        `this volume's pronunciation-guide harvest could not be read into its record, so nothing was filed: ${message}`,
+    });
+  }
+
+  if (!pass || !pass.ok) {
+    const ref = (pass && pass.refusal) || null;
+    return nothing({
+      refusal: ref,
+      because: ref ? `filing this volume's written forms was refused (${ref.rule}): ${ref.because}` : "the written-forms door returned no result",
+    });
+  }
+
+  /**
+   * A harvest file that is there and does not read is an error; a folder with no harvest file is a fact.
+   * The door reports both, and they must not be collapsed: `harvestMissing` is the sentence "this book
+   * guided no readings", and `harvestErrors` is the sentence "this book's harvest is damaged". Folding
+   * them would let a broken file be announced as a plain-text book.
+   */
+  const unreadable = (pass.harvestErrors || []).map((entry) => `${entry.file}: ${entry.error}`);
+
+  return {
+    ran: true,
+    volume: pass.volume,
+    harvestFiles: pass.harvestFiles,
+    harvestMissing: pass.harvestMissing,
+    rowsFiled: pass.rowsFiled,
+    rowsAlreadyFiled: pass.rowsAlreadyFiled,
+    filing: pass.filing,
+    counts: pass.counts,
+    harvestError: unreadable.length ? unreadable.join("; ") : null,
+    refusal: null,
+    because: pass.harvestMissing
+      ? `this volume's folder holds no pronunciation-guide harvest, so the record filed no written forms from it`
+      : unreadable.length
+        ? `this volume's harvest file(s) could not be read, so nothing was filed: ${unreadable.join("; ")}`
+        : `this volume's own harvest filed ${pass.rowsFiled} written form(s) into its record (${pass.rowsAlreadyFiled} already filed)`,
+  };
+}
+
+/**
+ * The stage-facing sentence about what the written-forms rule did, so every door that opens a record says
+ * the same thing about it — the same job `rosterReconciliationLog` does for the roster rule.
+ *
+ * It prints on the no-harvest case on purpose. "This book guided no reading, so the record can answer
+ * nothing about how its names are spoken" is a fact about the series, and a pass that files nothing in
+ * silence is indistinguishable from one that found nothing to file.
+ *
+ * @param {number|string} volume
+ * @param {Object|null} report - What `ensureVolumeWrittenFormsInRecord` returned.
+ * @returns {string[]} Lines to log. Empty when there is nothing to say.
+ */
+function writtenFormsLog(volume, report) {
+  if (!report) return [];
+  if (report.harvestError) {
+    return [
+      `Volume ${volume}: this volume's pronunciation-guide harvest could not be read into its record, so no written ` +
+        `form was filed (${report.harvestError}). Fix the harvest, or re-run \`npx gulp extract\` for this volume.`,
+    ];
+  }
+  if (report.refusal) {
+    return [`Volume ${volume}: filing this volume's written forms was refused (${report.refusal.rule}) — ${report.refusal.because}`];
+  }
+  if (report.harvestMissing) {
+    return [
+      `Volume ${volume}: this volume's folder holds no pronunciation-guide harvest, so its record filed 0 written ` +
+        `forms. "Was this name read a different way in a later volume?" stays unanswerable for this book until the ` +
+        "extraction writes the harvest beside it.",
+    ];
+  }
+  const held = report.counts ? report.counts.thisVolume : 0;
+  return [
+    `Volume ${volume}: the record filed ${report.rowsFiled} written form(s) from this volume's own pronunciation-guide ` +
+      `harvest (${report.rowsAlreadyFiled} already filed; ${held} row(s) for this volume now in the record, ` +
+      `${report.counts ? report.counts.total : 0} in total across the volumes this record carries).`,
+  ];
+}
+
+/**
  * Open this volume's reference record, carrying the previous volume's published record in first
  * when this volume does not have one yet.
  *
@@ -223,7 +377,7 @@ function ensureVolumeGlossaryInRecord(store, { volume } = {}) {
  * @param {Array<{id: string, file: string, chars?: number}>} [opts.bundleSegments] - The volume's
  *   source segments as the stage resolved them (`utils/source.js`'s bundle). Passed because a
  *   plain-text volume has no bundle file on disk for `listVolumeChapters` to find.
- * @returns {{ok: boolean, store: ReferenceStore|null, carried: Object|null, toppedUp: Object|null, glossaryBackfill: Object|null, roster: Object|null, refusal: ReferenceRefusal|null, findings: PostMortemFinding[]}}
+ * @returns {{ok: boolean, store: ReferenceStore|null, carried: Object|null, toppedUp: Object|null, glossaryBackfill: Object|null, roster: Object|null, writtenForms: Object|null, refusal: ReferenceRefusal|null, findings: PostMortemFinding[]}}
  */
 function openVolumeRecord({ volume, folder, seriesDir, previousVolume = null, previousFolder = null, stage = DOCUMENT_SOURCE_STAGE, bundleSegments = null }) {
   let carried = null;
@@ -332,7 +486,15 @@ function openVolumeRecord({ volume, folder, seriesDir, previousVolume = null, pr
    */
   const roster = reconcileInheritedRoster(store);
 
-  return { ok: true, store, carried, toppedUp, glossaryBackfill, roster, refusal: null, findings: [] };
+  /**
+   * The written-forms rule, asked at the same door for the same reason as the other two: the stage that
+   * would have run it is the stage that skips a volume whose artifact is already on disk, and the readings
+   * the book printed have to be in the record before the terminology review can ask which of them changed.
+   * It files nothing and says so when the volume's folder holds no harvest.
+   */
+  const writtenForms = ensureVolumeWrittenFormsInRecord(store, { volume: store.volume });
+
+  return { ok: true, store, carried, toppedUp, glossaryBackfill, roster, writtenForms, refusal: null, findings: [] };
 }
 
 /**
@@ -689,8 +851,10 @@ module.exports = {
   glossaryRowsInRecord,
   glossaryContribution,
   ensureVolumeGlossaryInRecord,
+  ensureVolumeWrittenFormsInRecord,
   reconcileInheritedRoster,
   rosterReconciliationLog,
+  writtenFormsLog,
   importVolumeExtraction,
   importVolumeArtifacts,
   resetDocumentMirror,
