@@ -34,7 +34,7 @@ Then **compare against the previous glossary** and keep only the terms that are 
 2. **Only new terms.** If a term is already in the previous glossary, do not list it again — unless this volume's text shows its rendering is wrong, in which case it belongs in `revisions`, never in `terms`.
 3. **Use the source-language form** for `term` — the exact spelling as it appears in the source text, copied **character for character**. A reading written in small text beside a word (furigana) is not part of the word: write 渋谷, not 渋しぶ谷や. A term copied in its annotated form is a term the book does not print, and the reference record refuses it.
 4. **Give the canonical target-language rendering** in `rendering` — the form every later volume of this series must use for it. This is the decision the glossary exists to record, and it is the one thing only you can supply: the file is rendered out of a record, and a record with no rendering has nothing to publish. For a name, use the romanization the series' own style implies; for an in-world term, translate it or transliterate it, and make the choice in `note`. **A term with no `rendering` is dropped.**
-5. **Say something useful in `note`** — one or two sentences a translator needs: what the thing is, who says it, whether it is a joke, a parody of a real brand or person (name the real one), or another spelling of a term already in the glossary. Quote the source phrase when the wording is the point.
+5. **Say something useful in `note`, and write the note in the language the volume's source text is written in** — one or two sentences a translator needs: what the thing is, who says it, whether it is a joke, a parody of a real brand or person (name the real one), or another spelling of a term already in the glossary. Quote the source phrase when the wording is the point. The note is written in the language `term` is written in, **not** in the language `rendering` is written in: a note is read beside the book, and a later pass reads it to decide whether the rendering the series settled on is still the right one — a note in a language that pass cannot read is a note that pass cannot ask about. A brand name, a person's name, or a term from another work keeps its own spelling inside the note.
 6. **Provide a good search query** for each term — the form most likely to find a reference online. For a character, use the full name (drop the nickname). For a concept, use the core term. If the term is specific to this series and unlikely to have an external reference, still provide the term itself as the query.
 7. **Classify each term** with a short `type`: one of `character`, `place`, `item`, `faction`, `concept`.
 8. **No hallucination.** Only list terms that actually appear in this volume's source text.
@@ -45,7 +45,7 @@ Respond with **only** a JSON object holding two keys, `terms` and `revisions` �
 
 - `term` — the source-language term, exactly as the book prints it (string)
 - `rendering` — the canonical target-language rendering (string, required)
-- `note` — what a translator needs to know about it (string)
+- `note` — what a translator needs to know about it, **written in the language the source text is written in** (string)
 - `type` — one of `character`, `place`, `item`, `faction`, `concept` (string)
 - `query` — the suggested search query (string)
 
@@ -55,7 +55,8 @@ volume's text shows to be wrong. Each element is an object with exactly these ke
 - `term` — the term **exactly as the previous glossary spells it** (string). A term that is not in the
   previous glossary does not belong here: it belongs in `terms`.
 - `rendering` — the rendering this volume says the series must use from now on (string, required)
-- `note` — what a translator needs to know about the changed term (string)
+- `note` — what a translator needs to know about the changed term, **written in the language the source
+  text is written in** (string)
 - `quote` — one line copied **character for character from this volume's source text**, the line the
   revision comes from (string). It is checked against this volume's book and a revision whose quote the
   book does not print is refused, so quote the line you actually read — not the previous glossary's row.
@@ -73,14 +74,17 @@ If there are **no new terms and no revisions**, respond with an object holding b
 `{"terms": [], "revisions": []}`
 
 Example shape (do not copy these values):
+
+Each `note` is written in the same language as its `term`; each `rendering` is written in the language the
+series is being translated into.
 ```
 {
   "terms": [
-    { "term": "例 名前", "rendering": "Example Name", "note": "A student introduced in this volume.", "type": "character", "query": "例 名前" },
-    { "term": "例の町", "rendering": "Example Town", "note": "Named location; the club trip goes here.", "type": "place", "query": "例の町" }
+    { "term": "例 名前", "rendering": "Example Name", "note": "この巻で初出の生徒。名前はフルネームで書く。", "type": "character", "query": "例 名前" },
+    { "term": "例の町", "rendering": "Example Town", "note": "部活の旅行先として名前が出る場所。", "type": "place", "query": "例の町" }
   ],
   "revisions": [
-    { "term": "例あだ名", "rendering": "Example Nickname", "note": "The series prints the full form from this volume on.", "quote": "例あだ名は、実は本名だった。", "reason": "This volume reveals the shortened form is a nickname for the full name." }
+    { "term": "例あだ名", "rendering": "Example Nickname", "note": "この巻以降、正式な名前の方で印刷される。", "quote": "例あだ名は、実は本名だった。", "reason": "This volume reveals the shortened form is a nickname for the full name." }
   ]
 }
 ```

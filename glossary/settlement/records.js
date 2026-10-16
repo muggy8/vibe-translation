@@ -46,6 +46,22 @@
  * its old identity nor this pass's alias, so it is asked again. That is correct: it is a different
  * question.
  *
+ * ## The other thing these files have to get right: what the agenda could not read
+ *
+ * The agenda has a structural half (a rendering a later volume already replaced) and a **vocabulary** half
+ * (a note that promises the book has not finished making). The vocabulary half is written in one script,
+ * and a note written in another is invisible to it. A log that prints only `0 terms point forward` cannot
+ * tell "this series has nothing to settle" from "the phrases we can match are not written in the language
+ * these notes are written in" — and the second one is the failure plan 07 §4.8 exists to prevent, because
+ * the notes move into the language of the book the moment the extraction prompt asks for them there.
+ *
+ * So both files carry the coverage as its own record: `noteRule` in the JSON and a named section in the
+ * markdown, each stating the state (`covered` / `partially-blind` / `blind` / `no-notes`), how many notes
+ * were read, how many the vocabulary could not read, which vocabulary was in force (the shipped shapes,
+ * plus whatever markers this series declared), and a sentence saying what the count therefore is. A pass
+ * that reports no coverage at all writes `not-reported` rather than an empty section, because an absent
+ * key reads exactly like a clean bill of health.
+ *
  * ## Where these files live, and why not in a volume folder
  *
  * In the run's own records (`<series>/.run/postmortem/`), which is where the `extract` step's reports
@@ -78,6 +94,12 @@ const SETTLEMENT_MD_FILE = "glossary-settlement.md";
  * decides whether an entry closes its agenda identity ({@link decisionClosesQuestion} and
  * {@link decisionIdentityKeys}), and both read fields every entry already carried. A record written by
  * the first version of this pass is therefore read correctly by the new rule rather than re-paid for.
+ *
+ * Not bumped by the 2026-10-15 coverage fields either, for the same reason: `agenda`, `noteRule` and
+ * `markerDeclaration` sit **beside** `decisions`, and {@link decisionClosesQuestion} and
+ * {@link decisionIdentityKeys} still read only entry fields. A record written before the coverage existed
+ * is read correctly by a pass that now reports it — and {@link NOTE_RULE_NOT_REPORTED} is what a reader
+ * sees when a file genuinely has no coverage to read, rather than a silence that looks like a clean result.
  *
  * @type {number}
  */
@@ -237,6 +259,11 @@ function recordedDecision(byKey, item) {
 /**
  * One decision, in the shape the record stores.
  *
+ * `agenda` names **which half** put the term on the agenda, and the two halves of the note half are named
+ * apart on purpose: `forward-note` means the shipped vocabulary read it, `declared-marker` means the
+ * series' own declared phrase read it. A record that could not tell those two apart could not tell a
+ * covered agenda from a lucky one.
+ *
  * @param {Object} item - The agenda item.
  * @param {Object} answer - What the pass decided: `{decision, rendering, quote, reason}`.
  * @param {Object} [opts]
@@ -245,14 +272,16 @@ function recordedDecision(byKey, item) {
  * @returns {Object}
  */
 function buildDecision(item, answer, { filed, asked } = {}) {
+  const markers = Array.isArray(item.markers) ? item.markers : [];
   return {
     key: decisionKey({ term: item.term, flaggingVolume: item.flaggingVolume, currentRendering: item.rendering }),
     term: item.term,
     section: item.section,
     flaggingVolume: item.flaggingVolume,
     currentRendering: item.rendering,
-    agenda: [item.chain ? "chain" : null, item.shapes.length ? "forward-note" : null].filter(Boolean),
+    agenda: [item.chain ? "chain" : null, item.shapes.length ? "forward-note" : null, markers.length ? "declared-marker" : null].filter(Boolean),
     shapes: item.shapes,
+    markers,
     because: item.because,
     asked: asked === undefined ? answer.asked === true : asked === true,
     decision: answer.decision,
@@ -270,6 +299,30 @@ function buildDecision(item, answer, { filed, asked } = {}) {
 }
 
 /**
+ * The note half could not be reported. Named rather than left out, because the invariant this pass is
+ * held to is that an agenda nobody could ask must never be readable as an agenda that found nothing — and
+ * a JSON file with no `noteRule` key is exactly that reading.
+ *
+ * @type {Object}
+ */
+const NOTE_RULE_NOT_REPORTED = {
+  state: "not-reported",
+  askable: false,
+  vocabularyScripts: [],
+  notesRead: 0,
+  notesOutsideVocabulary: 0,
+  notesWithNoLetters: 0,
+  outsideExamples: [],
+  markerCount: 0,
+  markersThatFiredOnNothing: [],
+  rowsFiredByShapes: 0,
+  rowsFiredByMarkers: 0,
+  because:
+    "this record was written without the note half's coverage, so nothing in this file can tell an agenda " +
+    "that found nothing apart from an agenda that could not be asked.",
+};
+
+/**
  * The decision record, written.
  *
  * Written whole rather than appended: the file is the index the next pass reads, and a file that has
@@ -281,14 +334,48 @@ function buildDecision(item, answer, { filed, asked } = {}) {
  * @param {number} opts.limit - The bound that was in force.
  * @param {Array<Object>} opts.decisions - Every entry, newly decided and carried over.
  * @param {Array<Object>} opts.skipped - The agenda terms the bound cut.
+ * @param {{candidateCount: number, chainCount: number, forwardCount: number}} [opts.agendaCounts] - What the agenda was made of.
+ * @param {Object} [opts.textRule] - The {@link forwardRuleCoverage} result for this pass — what the note
+ *   half could actually read. Absent is written as {@link NOTE_RULE_NOT_REPORTED}, never as nothing.
+ * @param {Object} [opts.declaration] - The series' declared marker block as read (`declared` / `empty` /
+ *   `absent` / `malformed`), so a later reader can tell which vocabulary was in force.
  * @returns {{written: boolean, file: string, error: string|null}}
  */
-function writeSettlementRecord({ file, settled, limit, decisions, skipped }) {
+function writeSettlementRecord({ file, settled, limit, decisions, skipped, agendaCounts, textRule, declaration }) {
+  const rule = textRule || NOTE_RULE_NOT_REPORTED;
   const body = {
     schema: SETTLEMENT_RECORD_SCHEMA,
     writtenAt: new Date().toISOString(),
     settledRecord: { folder: settled.folder, volume: settled.volume, file: settled.file },
     limit,
+    agenda: {
+      candidates: agendaCounts ? Number(agendaCounts.candidateCount) : decisions.length,
+      chain: agendaCounts ? Number(agendaCounts.chainCount) : null,
+      forward: agendaCounts ? Number(agendaCounts.forwardCount) : null,
+    },
+    noteRule: {
+      state: rule.state,
+      askable: rule.askable === true,
+      vocabularyScripts: rule.vocabularyScripts || [],
+      notesRead: Number(rule.notesRead) || 0,
+      notesOutsideVocabulary: Number(rule.notesOutsideVocabulary) || 0,
+      notesWithNoLetters: Number(rule.notesWithNoLetters) || 0,
+      outsideExamples: rule.outsideExamples || [],
+      markerCount: Number(rule.markerCount) || 0,
+      markersThatFiredOnNothing: rule.markersThatFiredOnNothing || [],
+      rowsFiredByShapes: Number(rule.rowsFiredByShapes) || 0,
+      rowsFiredByMarkers: Number(rule.rowsFiredByMarkers) || 0,
+      because: rule.because,
+    },
+    markerDeclaration: declaration
+      ? {
+          state: declaration.state,
+          file: declaration.file,
+          note: declaration.note || null,
+          markers: (declaration.markers || []).map((marker) => ({ phrase: marker.phrase, because: marker.because || null })),
+          problems: declaration.problems || [],
+        }
+      : { state: "not-read", file: null, note: null, markers: [], problems: [] },
     skippedByBound: skipped.map((item) => ({ term: item.term, flaggingVolume: item.flaggingVolume, because: item.because })),
     decisions,
   };
@@ -308,11 +395,12 @@ function writeSettlementRecord({ file, settled, limit, decisions, skipped }) {
  * refused. A log that only prints the decisions that worked is a log that hides the decisions that
  * did not, and the account owner is the one who has to be able to argue with the bound.
  *
- * @param {Object} header - `{settled, limit, agendaCount, chainCount, forwardCount, skipped}`
+ * @param {Object} header - `{settled, limit, agendaCount, chainCount, forwardCount, skipped, textRule, declaration}`
  * @param {Array<Object>} decisions - Every entry, newly decided and carried over.
  * @returns {string} The file content, ending in a newline.
  */
 function renderSettlementLog(header, decisions) {
+  const rule = header.textRule || NOTE_RULE_NOT_REPORTED;
   const out = [
     "# Glossary Settlement",
     "",
@@ -325,7 +413,52 @@ function renderSettlementLog(header, decisions) {
       `(${header.chainCount} already revised, ${header.forwardCount} whose own note points forward). ` +
       `The bound is ${header.limit} terms per run — a constant in \`glossary/settlement/agenda.js\`, not a setting._`,
     "",
+    "## What the note half of the agenda was able to read",
+    "",
+    `_State: **${rule.state}**. The shipped vocabulary is written in ` +
+      `${rule.vocabularyScripts.length ? rule.vocabularyScripts.join(", ") : "(nothing reported)"}; ` +
+      `it read ${rule.notesRead} note(s), ${rule.notesOutsideVocabulary} of them written in a script that ` +
+      `vocabulary is not written in, and ${rule.notesWithNoLetters} held no letters at all. ` +
+      `${rule.rowsFiredByShapes} row(s) fired a shipped shape and ${rule.rowsFiredByMarkers} fired a declared marker._`,
+    "",
+    `_${rule.because}_`,
+    "",
   ];
+
+  if (rule.outsideExamples.length) {
+    out.push(`Notes the shipped vocabulary cannot read, examples: ${rule.outsideExamples.map((e) => `"${e.term}" (${e.script})`).join(", ")}.`, "");
+  }
+  if (rule.markerCount > 0) {
+    out.push(`${rule.markerCount} marker(s) this series declared were matched as literal text over every note.`, "");
+    if (rule.markersThatFiredOnNothing.length) {
+      out.push(
+        `Declared markers that fired on 0 notes: ${rule.markersThatFiredOnNothing.map((phrase) => `"${phrase}"`).join(", ")}. ` +
+          `A declared phrase that matches nothing this record says is a vocabulary gap, not a clean bill of health.`,
+        ""
+      );
+    }
+  }
+  const declaration = header.declaration || null;
+  if (declaration) {
+    if (declaration.state === "declared") {
+      out.push(`Declared by ${declaration.file}: ${declaration.markers.map((m) => `"${m.phrase}"`).join(", ")}.`, "");
+    } else if (declaration.state === "empty") {
+      out.push(`This series' plan of record declares no markers of its own — ${declaration.note}`, "");
+    } else if (declaration.state === "malformed") {
+      out.push(
+        `**${declaration.file} has a \`settlement\` block that cannot be read**, so the note half ran on the ` +
+          `shipped vocabulary alone:` +
+          declaration.problems.map((p) => `\n- ${p}`).join(""),
+        ""
+      );
+    } else if (declaration.state === "absent") {
+      out.push(
+        "No `settlement` block in this series' plan of record, so the note half ran on the shipped vocabulary " +
+          "alone. That vocabulary covers the scripts its own phrases are written in and nothing else.",
+        ""
+      );
+    }
+  }
 
   const asked = decisions.filter((d) => d.asked);
   const carried = decisions.filter((d) => d.carriedOver === true);
@@ -400,6 +533,7 @@ module.exports = {
   SETTLEMENT_MD_FILE,
   SETTLEMENT_RECORD_SCHEMA,
   UNANSWERED_DECISIONS,
+  NOTE_RULE_NOT_REPORTED,
   settlementRecordPaths,
   decisionKey,
   decisionClosesQuestion,

@@ -29,6 +29,9 @@ const { sha256OfFile } = require("../utils/source");
 const { MANIFEST_SCHEMA, discoverMinConfidence } = require("./config");
 const { validateVolumeIntegrity } = require("./integrity");
 const { REGISTER_MANIFEST_KEY, validateRegisterDeclaration } = require("../utils/reference-store/register");
+// The leaf, not the barrel: `glossary/settlement/declaration.js` needs nothing but `fs`/`path`, so the
+// intake can check a decision it writes without loading the stage that reads it.
+const { SETTLEMENT_MANIFEST_KEY, validateSettlementDeclaration } = require("../glossary/settlement/declaration");
 
 /**
  * Validate (and tidy) a manifest the intake agent wrote. Everything the rest of
@@ -70,6 +73,17 @@ function validateManifest(manifest) {
   // volume is processed, because the intake writes this decision and nobody else reviews it.
   if (manifest[REGISTER_MANIFEST_KEY] !== undefined) {
     validateRegisterDeclaration(manifest[REGISTER_MANIFEST_KEY]);
+  }
+  // The settlement declaration (plan 07 slice 7) is the same shape of decision and gets the same treatment
+  // for the same reason: it is **optional here and read by the glossary step's settlement pass**, it is
+  // written by the intake from the book, and there is no marker list in code for a plan to fall back on.
+  // A plan that predates the block stays valid — which is what `readSettlementDeclaration` reports as
+  // `absent`, and what the settlement pass then says out loud instead of counting silently. A plan that
+  // HAS the block and wrote it badly is refused here, before any volume is processed, because a marker
+  // list decides what the pipeline is allowed to spend a reading call on and a one-character marker puts
+  // every term in the series on the agenda.
+  if (manifest[SETTLEMENT_MANIFEST_KEY] !== undefined) {
+    validateSettlementDeclaration(manifest[SETTLEMENT_MANIFEST_KEY]);
   }
   if (!Array.isArray(manifest.volumes) || manifest.volumes.length === 0) {
     throw new Error(

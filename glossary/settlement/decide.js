@@ -36,6 +36,17 @@
  * fired its calls at the same instant would lengthen every wait and trip the harness's idle deadline.
  * It files no `cast_alias`, opens no dispute, and reaches no translation file.
  *
+ * ## The vocabulary half is reported, not just counted
+ *
+ * The agenda's structural half needs no words from any language. Its other half reads notes for a promise,
+ * and that is a **vocabulary** written in one script. So this module reads the series' own declared
+ * markers out of its plan of record (`settlement/declaration.js`), hands them to the agenda as data, and
+ * prints what the note half was actually able to read — `covered`, `partially-blind`, `blind` or
+ * `no-notes` — on its own line, at a warning level whenever it is not `covered`, and into both record
+ * files. **An agenda that could not be asked must never look like an agenda that found nothing**
+ * (plan 07 §4.8). The markers are matched as literal text and never compiled, and this module holds none
+ * of its own beyond the shipped shapes.
+ *
  * @module glossary/settlement/decide
  */
 
@@ -54,6 +65,7 @@ const {
 } = require("../../utils/reference-store");
 const { settledGlossaryRecord, withSettledRecord } = require("../../utils/translate");
 const { settlementAgenda, SETTLEMENT_MAX_TERMS_PER_RUN } = require("./agenda");
+const { readSettlementDeclaration, SETTLEMENT_MANIFEST_KEY } = require("./declaration");
 const {
   settlementRecordPaths,
   readSettlementDecisions,
@@ -424,6 +436,65 @@ async function defaultSettlementAsk({ systemPrompt, prompt, label, responseForma
 }
 
 /**
+ * Say, out loud, what the text half of the agenda was actually able to read.
+ *
+ * This is the line plan 07 §4.8 exists for. The forward half of the agenda is a vocabulary, and a count
+ * of `0` from a vocabulary that cannot read these notes is printed exactly like a count of `0` from a
+ * vocabulary that read them and found nothing. The invariant this pass is held to: **an agenda that could
+ * not be asked must never look like an agenda that found nothing** — so the state is printed on its own
+ * line, at a warning level whenever it is not `covered`, and it travels into both record files.
+ *
+ * It reports. It does not refuse, and it is not a finding: a series whose plan of record predates the
+ * declared-marker block has a documentation gap, and failing its glossary step for that turns a gap into
+ * a broken run.
+ *
+ * @param {Object} agenda - A {@link settlementAgenda} result.
+ * @param {Object} declaration - A {@link readSettlementDeclaration} result.
+ * @param {string} markdownFile - Where the same statement is written for a person to argue with.
+ * @returns {void}
+ */
+function reportTextRuleCoverage(agenda, declaration, markdownFile) {
+  const rule = agenda.textRule;
+  const declared =
+    declaration.state === "declared"
+      ? `${declaration.markers.length} marker(s) declared by this series' plan of record`
+      : declaration.state === "empty"
+        ? `this series' plan of record declares none (${declaration.note})`
+        : declaration.state === "malformed"
+          ? `this series' plan of record has a ${SETTLEMENT_MANIFEST_KEY} block that cannot be read`
+          : `no ${SETTLEMENT_MANIFEST_KEY} block in this series' plan of record`;
+
+  console.log(
+    `[glossary-settlement] the note half of the agenda is written in ${rule.vocabularyScripts.join(", ")}; ` +
+      `it read ${rule.notesRead} note(s) and is ${rule.state}: ${rule.because} ` +
+      `(${declared}.)`
+  );
+  if (rule.state === "blind" || rule.state === "partially-blind") {
+    console.warn(
+      `[glossary-settlement] the note half of this agenda is ${rule.state}: ` +
+        `${rule.notesOutsideVocabulary} of ${rule.notesRead} note(s) are written in a script the shipped ` +
+        `vocabulary is not written in (${rule.outsideExamples.map((e) => `"${e.term}" is ${e.script}`).join(", ")}). ` +
+        `The ${agenda.forwardCount} term(s) it found are a FLOOR, not a count — and 0 would not mean this ` +
+        `series has nothing to settle. Declared markers are the door onto this; see ${markdownFile}.`
+    );
+  }
+  if (declaration.state === "malformed") {
+    console.warn(
+      `[glossary-settlement] the ${SETTLEMENT_MANIFEST_KEY} block in ${declaration.file} is malformed, so no ` +
+        `declared marker was matched and the note half ran on the shipped vocabulary alone: ` +
+        `${declaration.problems.map((p) => `- ${p}`).join(" ")}`
+    );
+  }
+  if (rule.markerCount > 0 && rule.markersThatFiredOnNothing.length === rule.markerCount) {
+    console.warn(
+      `[glossary-settlement] all ${rule.markerCount} declared marker(s) fired on 0 note(s): ` +
+        `${rule.markersThatFiredOnNothing.map((phrase) => `"${phrase}"`).join(", ")}. The declared vocabulary ` +
+        `does not match what this record's notes actually say.`
+    );
+  }
+}
+
+/**
  * Work out what a settlement pass WOULD do, without asking the model anything or writing anything.
  *
  * Split out because the freeze gate asks "would this act rewrite something?", and the only honest
@@ -435,7 +506,9 @@ async function defaultSettlementAsk({ systemPrompt, prompt, label, responseForma
  * @param {string} opts.seriesDir - Absolute series folder.
  * @param {Array<{folder: string, installmentNumber: number}>} opts.volumeRefs - Every volume this run's plan lists, with its folder.
  * @param {{limit?: number}} [options] - `limit` overrides the bound for a measurement; a run never passes it.
- * @returns {{settled: Object, locate: Function, agenda: Object, pending: Array<Object>, stored: Object, paths: Object}}
+ * @returns {{seriesDir: string, settled: Object, locate: Function, agenda: Object, pending: Array<Object>, stored: Object, paths: Object, declaration: Object}}
+ *   `declaration` is this series' declared marker block as read — `declared` / `empty` / `absent` /
+ *   `malformed` — and `agenda.textRule` is what the note half of the agenda was actually able to read.
  * @throws {Error} A structural refusal when the series has no readable settled record.
  */
 function planSettlementPass({ seriesDir, volumeRefs }, { limit = SETTLEMENT_MAX_TERMS_PER_RUN } = {}) {
@@ -457,7 +530,13 @@ function planSettlementPass({ seriesDir, volumeRefs }, { limit = SETTLEMENT_MAX_
    */
   const locate = (volume) => byVolume.get(Number(volume)) || null;
 
-  const agenda = withSettledRecord({ seriesDir, record: settled }, (handle) => settlementAgenda(handle, { limit }));
+  // The markers are read from the plan of record and handed to the agenda as data. This module holds no
+  // vocabulary of its own beyond the shipped shapes, and it never compiles a declared phrase.
+  const declaration = readSettlementDeclaration(seriesDir);
+  const agenda = withSettledRecord(
+    { seriesDir, record: settled },
+    (handle) => settlementAgenda(handle, { limit, forwardMarkers: declaration.markers })
+  );
   const paths = settlementRecordPaths(seriesDir);
   const stored = readSettlementDecisions(paths.json);
   const pending = agenda.agenda.filter((item) => !recordedDecision(stored.byKey, item));
@@ -469,12 +548,15 @@ function planSettlementPass({ seriesDir, volumeRefs }, { limit = SETTLEMENT_MAX_
 
   console.log(
     `[glossary-settlement] agenda: ${agenda.candidateCount} term(s) (${agenda.chainCount} already revised, ` +
-      `${agenda.forwardCount} whose own note points forward) from ${settled.folder} (volume ${settled.volume}). ` +
+      `${agenda.forwardCount} whose own note points forward` +
+      `${agenda.markerCount ? `, ${agenda.textRule.rowsFiredByMarkers} of them found by a declared marker` : ""}) ` +
+      `from ${settled.folder} (volume ${settled.volume}). ` +
       `The bound is ${agenda.limit} terms per run.` +
       `${agenda.skipped.length ? ` ${agenda.skipped.length} cut by the bound.` : ""}` +
       ` ${pending.length} question(s) have never been answered` +
       `${owed.length ? ` (${owed.length} of them asked before and never answered).` : "."}`
   );
+  reportTextRuleCoverage(agenda, declaration, paths.markdown);
   if (stored.error) console.error(`[glossary-settlement] ${stored.error}`);
   if (agenda.skipped.length) {
     console.warn(
@@ -483,7 +565,7 @@ function planSettlementPass({ seriesDir, volumeRefs }, { limit = SETTLEMENT_MAX_
     );
   }
 
-  return { seriesDir, settled, locate, agenda, pending, stored, paths };
+  return { seriesDir, settled, locate, agenda, pending, stored, paths, declaration };
 }
 
 /**
@@ -491,10 +573,10 @@ function planSettlementPass({ seriesDir, volumeRefs }, { limit = SETTLEMENT_MAX_
  *
  * @param {Object} plan - A {@link planSettlementPass} result.
  * @param {{values: Object, ask?: Function}} [options] - `ask` stands where the model stands (the offline suite passes a fixture); the stage never passes one.
- * @returns {Promise<{ran: boolean, agendaCount: number, asked: number, carriedOver: number, revised: number, kept: number, refused: number, skipped: Array<Object>, limit: number, capped: boolean, settled: Object, files: {json: string, markdown: string}, decisions: Array<Object>}>}
+ * @returns {Promise<{ran: boolean, agendaCount: number, asked: number, carriedOver: number, revised: number, kept: number, refused: number, skipped: Array<Object>, limit: number, capped: boolean, settled: Object, files: {json: string, markdown: string}, decisions: Array<Object>, open: number, textRule: Object, declaration: Object}>}
  */
 async function executeSettlementPass(plan, { values, ask = defaultSettlementAsk } = {}) {
-  const { settled, locate, agenda, stored, paths } = plan;
+  const { settled, locate, agenda, stored, paths, declaration } = plan;
   const seriesDir = plan.seriesDir;
 
   /** @type {Array<Object>} */
@@ -634,6 +716,9 @@ async function executeSettlementPass(plan, { values, ask = defaultSettlementAsk 
     limit: agenda.limit,
     decisions,
     skipped: agenda.skipped,
+    agendaCounts: { candidateCount: agenda.candidateCount, chainCount: agenda.chainCount, forwardCount: agenda.forwardCount },
+    textRule: agenda.textRule,
+    declaration,
   });
   if (!written.written) console.error(`[glossary-settlement] could not write ${written.file} (${written.error}) — the next pass will pay for these decisions again.`);
 
@@ -645,6 +730,8 @@ async function executeSettlementPass(plan, { values, ask = defaultSettlementAsk 
       chainCount: agenda.chainCount,
       forwardCount: agenda.forwardCount,
       skipped: agenda.skipped,
+      textRule: agenda.textRule,
+      declaration,
     },
     decisions
   );
@@ -676,6 +763,8 @@ async function executeSettlementPass(plan, { values, ask = defaultSettlementAsk 
     settled,
     files: { json: paths.json, markdown: paths.markdown },
     decisions,
+    textRule: agenda.textRule,
+    declaration: declaration || null,
   };
 }
 
@@ -711,6 +800,7 @@ module.exports = {
   carryRevisionForward,
   fileAndCarry,
   defaultSettlementAsk,
+  reportTextRuleCoverage,
   planSettlementPass,
   executeSettlementPass,
   runSettlementPass,

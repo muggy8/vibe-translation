@@ -39,7 +39,19 @@ layer**, and with no new table, level, finding kind, freeze door, command, setti
 selects **4,497 pairs / 5,546 occurrences / +145,054 characters**, not §2.12's 4,808 / 6,739 / +192,251 — and
 names the three reasons, every one of them printed by `test/measure-annotated-view.js`, which recomputes
 §2.12's four rows from the 17 harvests and **fails its own run** if row 2 stops reproducing 4,808 / 6,739.
-**Slices 6–7 are not built.**
+**Slice 6 is BUILT (2026-10-15)** — the glossary headings become `Original` / `Translated` / `Notes` from one
+constant, and `npm run re-render-glossary` re-renders a published glossary from a **copy** of the record that
+published it, comparing against the file on disk as a **gate** and publishing only under `--apply --move-aside`;
+measured on all 17 real volumes (**11,219 rows, 0 lost, 0 gained, 0 cell changed**), and the corpus act it ran
+is gotcha 172. `test/test-glossary-re-render.js` (**186 checks**) joins `npm test`. **Slice 7 is BUILT
+(2026-10-15)** — the glossary prompt asks for its notes in the language of the book, and the settlement agenda
+reports what its note half could actually read (`covered` / `partially-blind` / `blind` / `no-notes`) instead of
+only a count, with a declared-marker door (`manifest.settlement`) in the shape plan 06 slice 3 established.
+`test/test-settlement-agenda-coverage.js` (**202 checks**) joins `npm test` and `test/measure-settlement-agenda.js`
+sits beside it; **§4.8 carries the measurements, and §5's slice-7 verdict records that the acceptance line's
+second sentence is not true of the shipped rule** — the agenda finds candidates against notes written in the one
+script its patterns are written in, and the language-neutral replacement was measured and failed. **Who authors
+the marker list is §6 item 12, and it is open.**
 **§6.7 is answered (2026-10-15): the door files
 every harvested row that passes the two row guards and the group question is answered by query**, which slice 1
 now does, and **slice 2 is built on it**.
@@ -766,6 +778,62 @@ the prompt asks for source-language notes, and the terminology-settlement agenda
 its agenda by reading **English phrasing** in notes ("revealed later", "turns out to be", future tense) —
 is re-taught, or it silently reports an empty agenda against a source-language glossary.
 
+**Built 2026-10-15 (slice 7), and the measurement changed what "re-taught" had to mean.** The prompt half is
+`system-prompts/glossary-terms.md`: rule 5 and both `note` bullets now require the note in the language the
+volume's source text is written in, and the example demonstrates the boundary instead of describing it — its
+`note` cells moved into the term's own script while its `reason` stayed in the target language, because
+`reason` is the settlement report's sentence about a change, not a cell a translator reads beside the book.
+
+**The agenda half is not a re-teach, it is a coverage report, because the replacement was measured and
+failed.** Three structural candidates for the text rule were run over the settled record (a copy of volume
+17's, **1,028** published rows, 0 model calls, `test/measure-settlement-agenda.js`): a note naming a volume
+number greater than the row's own (**1 term**, and **0** of the 10 terms the shipped rule finds); a term a
+later volume's own read pass re-reports (**974 of 1,028**, catching 9 of the 10); a term a later volume's
+read pass renders **differently** (**974**, identical to the one before it, because the read pass re-words a
+rendering every time it writes one). Two of the three widen the agenda **54×** and would spend the whole
+bound of 24 on terms chosen by a signal true of nearly every row — gotcha 144's failure mode arrived from
+the widen side rather than the narrow one. **So the 15 shapes stay exactly as they are**, and what was built
+instead is the thing that makes an unreadable half impossible to mistake for an empty one:
+
+- **The vocabulary declares its own reach.** `vocabularyScripts()` derives the scripts the shipped patterns
+  are themselves written in — from the letters inside them, never from a declared list, because a declared
+  list is a claim somebody can edit into covering more than it covers. It returns **one** script name.
+- **Every notes cell is classified by the script its letters come from**, and `forwardRuleCoverage` returns
+  `covered` / `partially-blind` / `blind` / `no-notes` with the counts behind it: notes read, notes the
+  vocabulary is not written in, notes holding no letters at all, rows a shipped shape fired on, rows a
+  declared marker fired on, and a sentence saying what the count therefore **is**.
+- **It is printed, warned, and filed.** `reportTextRuleCoverage` puts it on its own console line and raises a
+  **warning** whenever the state is not `covered` — including when every declared marker fired on 0 notes.
+  `glossary-settlement.json` carries it as `noteRule`, `glossary-settlement.md` as a named section, and a file
+  written with no coverage at all writes `state: "not-reported"` rather than an empty section, because an
+  absent key reads exactly like a clean bill of health.
+- **The door onto a vocabulary the pipeline may not hold is a declaration**, in the shape plan 06 slice 3
+  established for the register questions: `translation-target.json` may carry
+  `settlement: { forwardMarkers: [{ phrase, because }], note }`. A `phrase` is matched as a **literal
+  substring and never compiled** — a declaration a model wrote is data, and data that can execute is a defect
+  waiting to happen. Bounds: 2–60 characters per marker, **40** markers per series, constants with no knob,
+  because a list long enough to match every note is not an agenda rule, it is "ask about everything".
+  `intake/validate.js` refuses a malformed block and does **not** refuse a missing one, so `MANIFEST_SCHEMA`
+  stays **2** and a plan written before the block exists keeps working for every stage.
+- **It reports; it never refuses, and it is not a finding.** A series whose plan of record predates the block
+  has a documentation gap, and failing its glossary step for that turns a gap into a broken run. The level
+  table is a banned patch path in any case.
+
+**The numbers, measured 2026-10-15 against copies of the corpus** (0 model calls, 0 corpus writes, 68 guarded
+files unmoved): the agenda the settled record actually produces is **18 terms — 9 chain + 10 forward, 0
+overlap** — against the bound of 24 and not capped, which **corrects this plan's anchor of 10**: that figure
+(gotcha 144) was measured over the *previous* run's 17 published markdown files (5,392 rows), and the forward
+half is still 10 while the chain half is now 9. **5 of the 15 shapes fire at all**, on 10 rows / 10 terms;
+the other 10 fire on 0 rows, and they stay because cutting them would drop the agenda from 18 to 9. Across
+all 17 records' **11,219** notes cells, **100%** are Latin-dominant and **10,612** hold letters of more than
+one script — so the shipped vocabulary and this corpus's notes agree **today**, and the entire hazard is the
+state **after** the prompt change, when the note half becomes `blind` unless a series declares its markers.
+A 1-marker probe (the shipped vocabulary's own phrase) fires on **2** rows and adds **0** terms.
+
+**What is not decided is item 12 below**: who authors the marker list. The intake was **not** asked to write
+one, and `system-prompts/translation-target.md` is unchanged, so a paid intake run today produces the plan it
+produced yesterday.
+
 ### 4.9 The source book is allowed to be wrong
 
 The owner's answer on the near-miss names was "treat them as typos made by the author or the editing staff",
@@ -844,7 +912,8 @@ gotcha 121 is about exactly what happens when a spelling rule is allowed to deci
 | **6 — verdict** | **Met, and the plan's own premise about row loss was measuring the wrong thing** (measured 2026-10-15, `test/measure-glossary-re-render.js`, 0 model calls, copies only; the reports are `.run/postmortem/glossary-re-render-measure.md` / `.json`). | **§4.7's warning is corrected above**: the 124 → 120 / 554 → 520 pair it carried was a render compared against an **authored** file, and every glossary in this corpus is already a render of its own record. Measured on all 17 volumes: **11,219 rows on disk → 0 lost, 0 gained, 0 rendering or notes cell changed, 0 sections lost, 0 rows refused by the evidence rule, 0 research notes to merge, 0 superseded renderings**; the render is **byte-identical** to a header-only text edit of each published file (all 17 report
 `hand-renamed file === render: yes`), and the re-measure after the rename reports **17 of 17 files
 identical** to their own record's render. **No sealed row moved:** 22,469 glossary rows compared column by column between a record copy and its source — **0 columns moved, 0 `row_version` moved**; the schema 8 → 13 migration a copy goes through adds 2 columns and fills nothing in them. **The freeze gate excuses nothing:** the corpus has **0 published translations**, the `glossary` door's verdict for every volume is `allowed`, and the door table stays at **12**. **Every call baseline unmoved** — 82 / 17 and 28 / 6, **0 on the second pass in both**, prompt audit **23 / 0** — and no prompt changed, because no stage calls this door. **What broke that nothing predicted, and it was the door's own shape:** the first `--apply` run put the record copy in a scratch folder **inside the series folder**, so the copy landed on the corpus record and opening it checkpointed every write-ahead log (**34 sidecars deleted**) and ran the schema 8 → 13 migration **in place on all 17 records**. Measured before repairing: **465,572 rows compared, 0 stored values changed** — only `store_info.schema_version` moved, plus 5 new empty tables and 2 new empty columns. Repaired by restoring the corpus records and sidecars from the snapshots taken before the run: **16 of 17 `series.db` byte-for-byte**, volume 03 content-identical with its 49,472-byte WAL folded in (its original bytes are unrecoverable because the only snapshot of them was itself opened), and all **34 sidecars rewritten from committed git blobs** (32 byte-identical to before). Two refusals now make the shape impossible, each pinned by a test: the command never uses the series folder as its scratch root, and `copyRecordForReading` refuses a scratch folder equal to or inside the volume folder. **Two limits named, not solved:** the **series-root** `glossary.md` (358,436 bytes) is the settlement pass's artifact and still prints the old headings — this door does not touch it; and the door is **not wired into any stage**, so a re-render is something a person asks for. |
-| **7** | **Source-language notes, and the re-taught agenda.** Built and pinned; not run for real. | A fixture glossary renders with source-language notes. The settlement agenda still finds its candidates against source-language notes — measured, not assumed. The paid run is explicitly not taken. |
+| **7** | **BUILT 2026-10-15 — the note is written in the language of the book, and the agenda says what it can read.** `system-prompts/glossary-terms.md` requires each `note` in the language its `term` is written in (rule 5 and both `note` bullets), and its example demonstrates the boundary: notes in the term's script, `rendering` and `reason` in the target language. The agenda gained a **coverage** layer — `glossary/settlement/agenda.js` **352 → 674** lines: `SCRIPT_RANGES` / `scriptOfCharacter` / `scriptCountsOf` / `dominantScriptOf`, `vocabularyScripts()` (derived from the letters inside the 15 patterns, never declared), `FORWARD_RULE_STATES`, `forwardRuleCoverage`, `firedForwardMarkers`, and `classifyRow` now carrying `noteScript` and `markers` — and `settlementAgenda` takes `forwardMarkers` as **caller-supplied data** and returns `markerCount` and `textRule`. The declaration is a new leaf, `glossary/settlement/declaration.js` (**317**), re-exported from the barrel (**37 → 59** unique names): `manifest.settlement = { forwardMarkers: [{phrase, because}], note }`, four states, `MARKER_MIN_CHARS = 2` / `MARKER_MAX_CHARS = 60` / `MARKER_MAX_PER_SERIES = 40`, matched as **literal text and never compiled**. `decide.js` **717 → 807** reads the declaration off the plan of record and prints `reportTextRuleCoverage` (a **warning** whenever the state is not `covered`); `records.js` **412 → 546** writes `agenda` / `noteRule` / `markerDeclaration` into the JSON and a named section into the markdown, tags an entry `declared-marker` when a declared phrase is what put it on the agenda, and exports `NOTE_RULE_NOT_REPORTED`. `intake/validate.js` **298 → 312** refuses a malformed block and does not refuse a missing one. **No new table, no schema bump (13), no finding kind (70), no level, no freeze door (12), no declared artifact, no command, no setting, no environment knob, no verb on the store's handle; `MANIFEST_SCHEMA` stays 2 and `SETTLEMENT_RECORD_SCHEMA` stays 1.** `test/test-settlement-agenda-coverage.js` (10 scenarios / **202** checks, 880 lines, a Cyrillic record and Cyrillic notes) joins `npm test`; `test/measure-settlement-agenda.js` (481) does not. | A fixture glossary renders with source-language notes. The settlement agenda still finds its candidates against source-language notes — measured, not assumed. The paid run is explicitly not taken. |
+| **7 — verdict** | **Half met, and the acceptance line's second sentence is not true of the shipped rule** (measured 2026-10-15: `test/test-settlement-agenda-coverage.js` 202 checks, `test/measure-settlement-agenda.js` over copies of all 17 records, 0 model calls). | **Met:** a fixture `glossary.md` prints a source-language note and **reads back unchanged** through the store's own markdown reader; a Cyrillic record whose notes the shipped phrases cannot read reports **0 forward terms AND `blind`** — the pair, never the count alone; a declared marker puts the same term back on the agenda with `declared:<phrase>` named as the reason; a marker is proven **not compiled** (`.*` and `будет+объяснена` fire on 0 notes); all four states are reachable over real records; the end-to-end pass pays **1** call, names the blind spot in its log, its JSON and its console, and pays **0** on the second pass; **no sealed row is edited** — every content column compared, and only the two `markSuperseded` has always moved can move. **Not met as written:** the agenda does **not** find its candidates against source-language notes. It finds them against notes written in the **one** script its 15 patterns are written in, and against whatever phrases a series declares. That is the honest shape, and the slice's finding is that the alternative the acceptance line implied — a language-neutral replacement — **was measured and failed**: a note naming a later volume number finds **1** term and **0** of the 10 the shipped rule finds, while "a later volume re-reports the term" and "a later volume renders it differently" each find **974 of 1,028** (9 of the 10), which replaces the agenda with "ask about everything" and spends the whole bound of 24 on a signal true of 95% of the glossary. **The plan's own anchor of 10 agenda terms (gotcha 144) is corrected to 18** — 9 chain + 10 forward, 0 overlap — measured against the settled record rather than the previous run's markdown files; **5 of the 15 shapes fire at all**, on 10 rows / 10 terms, and the idle ten stay because cutting them drops the agenda to 9. **And the re-measurement reproduces the real run's own agenda exactly**: the corpus's `.run/postmortem/glossary-settlement.json` (written 2026-10-14 by the pass that actually ran) holds **18 decisions** tagged **9 `forward-note` + 8 `chain` + 1 `chain+forward-note`**, and its `shapes` field names the same five — `later-then-reveal` 4, `turns-out-to-be` 2, `reveal-then-later` 2, `future-volume` 1, `confirm-later` 1 — with **0** `declared-marker`. That file has **no `noteRule` key**, which is the case the coverage exists for: read today it says 18 questions were asked and cannot say whether the note half could read the notes it asked about. **Corpus untouched:** 17 `series.db` + 17 `-wal` + 17 `-shm` + 17 `glossary.md` hashed before and after — **0 differences across 68 guarded files**, 0 model calls, 0 corpus writes. **Every call baseline unmoved** — **82 / 17** and **28 / 6**, **0 on the second pass in both**, prompt audit **23 / 0** — and `glossary-settlement`'s own prompt is unchanged at **2,745** characters, because nothing in the pass changed what it asks the model. **What moved is the glossary read pass's prompt**, which is the point of the slice: `glossary-extract` **11,421 → 12,114** (main loop) and **11,698 → 12,391** (chunked), the +693 being the note-language rule and the rewritten example; `acceptance` **12,103 / 12,916** and `voice-extract` **16,964 / 16,898** unmoved. `test/test-module-layer.js` **410 → 417** (57 → 60 nested files) because a file was added inside an existing layer folder. **Two limits named, not solved:** the research pass's notes are still written in the **target** language, so a merged Notes cell is now deliberately mixed-script (10,612 of 11,219 rows already are), and the revision door files the settlement's own `reason` as the **new** row's notes cell — a settled revision therefore replaces a book-language note with a pass-written target-language one, the old row surviving marked superseded, which the suite asserts rather than hides. **Who authors the marker list is item 12 below, and the intake was not asked to.** |
 
 **Slice 0 is first because everything else reads its numbers.** Slice 2b sits beside 2 because the same
 measurement feeds both, and because a rule that groups "two forms guided to the same reading" is exactly the
@@ -1037,3 +1106,22 @@ Still open:
    list at all and costs the 1,440 (volume, form) pairs the bound refuses. **Recommendation: keep A**, and if the
    list should be derived rather than typed, derive it in the **measurement** and keep the door script-neutral;
    (C) is the option to reach for if the owner wants the view wired without ever maintaining a list.
+12. **Who authors the forward-marker list — the same question, one layer over** (opened by slice 7, 2026-10-15).
+   The glossary's note half is a **vocabulary**: 15 closed phrasings in one script, and §4.8 measured that the
+   record cannot replace it with a structural query — the three candidates find **1** term or **974 of 1,028**,
+   never the 10 the shipped rule finds. So the only door onto a series whose notes are written in another script
+   is a **declaration**: `translation-target.json`'s `settlement.forwardMarkers`, matched as literal text and
+   bounded at 40 markers. The door is built and takes the list as **caller-supplied data**; what is not built is
+   anyone being **asked** to write one, because `system-prompts/translation-target.md` is unchanged. The options:
+   **(A)** the intake authors it, the way it authors the register axes — but the register questions are visible
+   *in the book*, while forward-pointing phrasings are the words the **glossary stage's own model** will write in
+   its notes, so the intake would be predicting another stage's prose style, and a wrong prediction is invisible:
+   it looks exactly like "nothing points forward". **(B)** derive it from a measurement after a real run — run the
+   glossary once with source-language notes, count which source-language phrases the notes actually used, and hand
+   those in as data, which is the shape item 11 chose for the rename list and needs no change to the door.
+   **(C)** leave it undeclared, and let the coverage line report `blind` for a series that writes source-language
+   notes, with the shipped 15 shapes finding nothing and saying so. **Recommendation: B.** It costs one real run —
+   the paid run this plan defers — and it is the only option where the markers come from what the pipeline
+   actually wrote rather than from a guess about it. Until then this corpus's plan of record declares no markers,
+   the shipped vocabulary covers the notes it covers, and the coverage line is the thing standing between
+   "found nothing" and "could not ask".

@@ -154,6 +154,7 @@ module.exports = {
   publishSettledGlossaryToSeriesRoot,
   settlementRecordPaths,
   ...require("./settlement/agenda"),
+  ...require("./settlement/declaration"),
   ...require("./settlement/decide"),
   ...require("./settlement/records"),
 };
