@@ -245,6 +245,32 @@ async function runAssembledVolume(ctx) {
       `saw again (${built.rebuild.confirmations.alreadyFiled.length} already recorded)` +
       (built.rebuild.confirmations.refused.length ? `; ${built.rebuild.confirmations.refused.length} refused: ${built.rebuild.confirmations.refused.map((r) => `${r.character || "?"} — ${r.rule}`).join(", ")}` : ".")
   );
+  // Plan 07 slice 4. The same kind of fact, from the fourth entry kind in the same answer: how many acts of
+  // address this volume's reading reported, how many the record could key on an identity it already holds,
+  // and — the part that would otherwise be invisible — how many it could not, and which chapters reported
+  // nothing at all. Nothing here is a defect and nothing here stops the run; a cast the record has no
+  // identity for is plan 07 §6.8's open question, and the only way it reaches a human is this line.
+  {
+    const rel = built.rebuild.relations;
+    const parts = [
+      `${rel.relations} act(s) of address reported`,
+      `${rel.filed.length} filed (${rel.alreadyFiled.length} already recorded)`,
+      `${rel.namedLimits.length} with a party this record has no identity for`,
+      `${rel.unlevelled.length} the ladder could not level`,
+    ];
+    if (rel.refused.length) parts.push(`${rel.refused.length} refused (${rel.refused.map((r) => r.rule).join(", ")})`);
+    console.log(
+      `Volume ${values.INSTALLMENT_NUMBER}: addressed — ${parts.join("; ")}. ` +
+      `${rel.chaptersWithoutRelations.length} chapter(s) reported no act of address` +
+      (rel.chaptersNamingNobody.length ? `; ${rel.chaptersNamingNobody.length} chapter(s) name no roster entry in their own text (${rel.chaptersNamingNobody.join(", ")}).` : ".")
+    );
+    for (const limit of rel.namedLimits.slice(0, 8)) {
+      console.log(`  ${limit.side || "party"} "${limit.name}" — ${limit.because}`);
+    }
+    for (const gap of rel.unlevelled.slice(0, 8)) {
+      console.log(`  unlevelled ${gap.channel || "?"} act${gap.chapter ? ` in ${gap.chapter}` : ""}: ${gap.because}`);
+    }
+  }
   if (built.rendered.truncated || built.povRendered.truncated) {
     console.log(`Volume ${values.INSTALLMENT_NUMBER}: ${built.rendered.truncated + built.povRendered.truncated} bullet(s) were cut to fit one line.`);
   }

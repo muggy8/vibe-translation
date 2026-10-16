@@ -60,7 +60,7 @@ This is the hardest to detect — look for third-person narration that uses a ch
 
 ## Output
 
-Respond with **only** a JSON object holding one key, `entries` — no prose, no markdown fences, no commentary. `entries` is an array, and each element of it is an object of one of the three kinds below.
+Respond with **only** a JSON object holding one key, `entries` — no prose, no markdown fences, no commentary. `entries` is an array, and each element of it is an object of one of the four kinds below.
 
 For **voice quirks**:
 ```json
@@ -104,6 +104,26 @@ For **something this volume saw again** — a claim the record already stands be
 
 A confirm entry names **no `axis`, no `value` and no `description`**: the claim it confirms is already in the record, and the record — not you — decides which of that character's claims an entry means. If what you noticed is something the record does **not** already say, it is a `voice` entry, not a confirm entry. If a character's quirks changed, it is a `voice` entry too.
 
+For **an act of address** — who is speaking the words, whom they are addressing, and the form they used to do it:
+```json
+{
+  "type": "relation",
+  "channel": "spoken|self-address|inner-monologue|narration|withheld",
+  "addresser": "who is speaking, named the way this book prints it — omit it for `narration` and `withheld`",
+  "addressee": "whom they are addressing, named the way this book prints it — omit it when nobody is addressed",
+  "formUsed": "the form the speaker used to address them, exactly as this chapter prints it",
+  "examples": ["a line copied exactly from this chapter"],
+  "statement": "what this record asserts about the act, written in the words this book prints"
+}
+```
+
+Report one when the form somebody is addressed **with** is the thing a translator would have to decide about: a name, a nickname, a title, a word for "I", or a word for "you" that this character uses and another does not. Do not report every line of dialogue.
+
+- `narration` means the words are the narration's. `withheld` means **the book pointedly does not say** whose words they are — that is a fact worth keeping, not a gap to apologise for. Neither names an `addresser`.
+- Never name an `addresser` the chapter does not show. If you cannot tell who is speaking and the book did not pointedly refuse to say, do not emit the entry at all: the record has no door for a guess, and an entry you are unsure about is filed as a claim about the wrong person.
+- Name the parties **as this book prints them**, not as the reference spells them. The record resolves the spelling itself.
+- Never name how sure you are. The record decides that from the line you quote, the names that line contains, and what it already knows about who is in whose group — and it refuses a level its own evidence does not support.
+
 If there is **nothing new to extract**, respond with an object holding an empty array: `{"entries": []}`
 
 Example shape (do not copy these values):
@@ -125,6 +145,15 @@ Example shape (do not copy these values):
       "povCategory": "marker",
       "marker": "the delimiter this volume prints",
       "description": "The only delimiter this volume uses, and it appears at every perspective shift"
+    },
+    {
+      "type": "relation",
+      "channel": "spoken",
+      "addresser": "the name of the one speaking, as this book prints it",
+      "addressee": "the name of the one being addressed, as this book prints it",
+      "formUsed": "the nickname the speaker used, exactly as this chapter prints it",
+      "examples": ["a line copied exactly from this chapter"],
+      "statement": "what this record asserts about the act, in the words this book prints"
     }
   ]
 }

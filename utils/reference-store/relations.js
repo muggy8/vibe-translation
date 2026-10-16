@@ -20,13 +20,15 @@
  * limit and files nothing. `narrator` and `withheld` are recorded as a null party with
  * a named kind, so neither invents a person and neither reaches the roster.
  *
- * The certainty ladder itself is **not** computed here — that is slice 4. This layer
- * holds the closed vocabulary and each level's record-checkable precondition, and
- * refuses a level whose precondition the record cannot show.
+ * The certainty ladder **is** computed in this layer, but not by the door: `relations/contract.js` (plan 07 slice 4)
+ * reads one extraction entry into one proposal and decides which level the record can show, from the line
+ * the entry quotes, the cast forms that line names, and the identities the record already holds. The door
+ * still validates the level and refuses one whose precondition the record cannot show.
  *
  * Submodules: `relations/shapes.js` (the closed vocabularies and the pairing tables),
  * `relations/rows.js` (the mapping, the insert, the only update, the queries),
- * `relations/file.js` (the door: file a relation, close a span).
+ * `relations/file.js` (the door: file a relation, close a span),
+ * `relations/contract.js` (the extraction contract: the entry kind, the ladder, the filing pass).
  */
 
 const {
@@ -73,6 +75,18 @@ const {
   fileRelations,
 } = require("./relations/file");
 
+const {
+  RELATION_ENTRY_TYPE,
+  isPersonChannel,
+  kindOfNamelessChannel,
+  identityForName,
+  castFormsNamedInLine,
+  chapterLineCache,
+  certaintyOfObservation,
+  relationProposalFromEntry,
+  fileRelationsFromExtraction,
+} = require("./relations/contract");
+
 module.exports = {
   // shapes
   RELATION_CHANNELS,
@@ -114,4 +128,15 @@ module.exports = {
   fileRelation,
   closeRelationSpan,
   fileRelations,
+
+  // the extraction contract (plan 07 slice 4): the entry kind, the ladder, the filing pass
+  RELATION_ENTRY_TYPE,
+  isPersonChannel,
+  kindOfNamelessChannel,
+  identityForName,
+  castFormsNamedInLine,
+  chapterLineCache,
+  certaintyOfObservation,
+  relationProposalFromEntry,
+  fileRelationsFromExtraction,
 };

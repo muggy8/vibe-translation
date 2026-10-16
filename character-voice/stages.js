@@ -151,16 +151,18 @@ function truncateVoiceRef(content, sourceText) {
 // on purpose, so neither drifts into the other.
 
 /**
- * The keys `system-prompts/character-voice-extract.md` names for its two element kinds, plus the ones its
+ * The keys `system-prompts/character-voice-extract.md` names for its four element kinds, plus the ones its
  * own example answer produces. Read off the prompt, because no real extraction answer is on disk to read
  * them off of.
  *
  * Declared voice keys: `type`, `character`, `quirkType`, `description`, `examples`, `axis`, `value`,
  * `notes`. Declared POV keys: `type`, `povCategory`, `marker`, `description`, `assignedCharacter`,
- * `narrationType`, `sectionDescription`, `examples`, `notes`. The example voice object produces exactly
- * the eight declared voice keys; the example POV object produces `type`, `povCategory`, `marker`,
- * `description` — and `description` is the one that was missing from the declared POV list until the
- * envelope slice.
+ * `narrationType`, `sectionDescription`, `examples`, `notes`. Declared act-of-address keys (plan 07 slice
+ * 4): `type`, `channel`, `addresser`, `addressee`, `formUsed`, `statement`, `examples`. The confirm kind
+ * adds nothing new — it reuses `type`, `character`, `quirkType`, `examples` and `notes`. The example voice
+ * object produces exactly the eight declared voice keys; the example POV object produces `type`,
+ * `povCategory`, `marker`, `description` — and `description` is the one that was missing from the declared
+ * POV list until the envelope slice.
  *
  * ## What moved when the prompt stopped naming a language (plan 06 slice 4)
  *
@@ -172,6 +174,15 @@ function truncateVoiceRef(content, sourceText) {
  * into `facts.axis` / `facts.axis_value`, and the filing gate is what refuses a value the series never
  * declared — which is why the pair is declared on the wire but **not** closed into an enumeration here:
  * the value set belongs to the series, and a set in this file would be the axis list the owner forbade.
+ *
+ * ## Why the act-of-address keys are on the wire and the certainty level is not
+ *
+ * The four new wire keys name **what the model saw**: which channel the act happened in, whom the book says
+ * spoke, whom they addressed, and the form used to do it. The certainty level is **not** on the wire, on
+ * purpose — plan 07 §0 decision 10 forbids a number a model reports about itself, and `measured` /
+ * `addressee-risk` / `reading-resolved` are computed from the record by
+ * `utils/reference-store/relations/contract.js`. A `certainty` key here would be the ladder asking the
+ * suspect to grade themselves.
  *
  * @type {string[]}
  */
@@ -189,6 +200,11 @@ const VOICE_ENTRY_KEYS = [
   "assignedCharacter",
   "narrationType",
   "sectionDescription",
+  "channel",
+  "addresser",
+  "addressee",
+  "formUsed",
+  "statement",
 ];
 
 /**

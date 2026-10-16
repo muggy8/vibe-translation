@@ -47,6 +47,10 @@ const { registerFilingRefusal } = require("./register/filing");
 // A pure leaf, so this door can recognise the confirmation entry kind without requiring the door that
 // files it — which would close a cycle, because that door needs the aspect table this file owns.
 const { CONFIRMATION_ENTRY_TYPE } = require("./confirmations/shapes");
+// The fourth entry kind in the same answer array (plan 07 slice 4). Named here so this door can route the
+// kind **out** of the claim path; the door that files it is `relations/contract.js`, and this file never
+// calls it, never reads the table and never resolves a party.
+const { RELATION_ENTRY_TYPE } = require("./relations/contract");
 require("../../types"); // JSDoc type definitions
 
 /**
@@ -254,7 +258,7 @@ function povCandidateRow(entry, key) {
  * @param {ReferenceStore} store
  * @param {Array<Object>} entries - The parsed `character-voice-new.json` array.
  * @param {{volume?: number}} [opts]
- * @returns {{ok: boolean, imported: Array<Object>, importedCount: number, carried: Array<Object>, refused: Array<Object>, unresolved: Array<{name: string, key: string, because: string}>, characters: number, povCount: number}}
+ * @returns {{ok: boolean, imported: Array<Object>, importedCount: number, carried: Array<Object>, refused: Array<Object>, unresolved: Array<{name: string, key: string, because: string}>, characters: number, povCount: number, confirmations: Array<{kind: string, character: string|null}>, relations: Array<{kind: string, addresser: string|null, addressee: string|null, channel: string|null}>}}
  */
 function importVoiceExtraction(store, entries, { volume } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -268,6 +272,8 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
   const characters = new Set();
   /** @type {Array<{kind: "confirm", character: string|null}>} */
   const confirmations = [];
+  /** @type {Array<{kind: "relation", addresser: string|null, addressee: string|null, channel: string|null}>} */
+  const relations = [];
   let povCount = 0;
 
   for (const entry of Array.isArray(entries) ? entries : []) {
@@ -301,6 +307,28 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
      */
     if (entry.type === CONFIRMATION_ENTRY_TYPE) {
       confirmations.push({ kind: "confirm", character: typeof entry.character === "string" ? entry.character.trim() : null });
+      continue;
+    }
+
+    /**
+     * An act of address is not a claim either, and this door files claims (plan 07 slice 4).
+     *
+     * Left in the `type` dispatch it would be read as a voice claim: aspect `unclassified`, label
+     * `relation`, a bullet under the speaker's heading in the published reference, and — worse — a second
+     * roster entry for whoever was addressed, because the claim door registers the character it is filed
+     * under. So the kind is named here and **nothing is filed**: the door that files it is
+     * `relations/contract.js`, reached from `rebuildVoiceFromExtraction`, which is the door that has this
+     * volume's chapters, its adopted claims and its identities in front of it. Naming them rather than
+     * dropping them is what keeps "this volume's cast addressed 6 people in 2 forms the record can place"
+     * visible in the stage's own log.
+     */
+    if (entry.type === RELATION_ENTRY_TYPE) {
+      relations.push({
+        kind: "relation",
+        addresser: typeof entry.addresser === "string" ? entry.addresser.trim() : null,
+        addressee: typeof entry.addressee === "string" ? entry.addressee.trim() : null,
+        channel: typeof entry.channel === "string" ? entry.channel.trim() : null,
+      });
       continue;
     }
 
@@ -398,6 +426,7 @@ function importVoiceExtraction(store, entries, { volume } = {}) {
     characters: characters.size,
     povCount,
     confirmations,
+    relations,
   };
 }
 

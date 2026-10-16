@@ -80,9 +80,14 @@
  * adds **no verb to the store's handle** (the door is a function reached through the cover and the barrel,
  * the way `fileVolumeWrittenForms` is), **no finding kind** (the level table stays at 70), **no level**, no
  * freeze door, no declared artifact, no command, no setting, no npm script and no environment knob. It
- * makes **no model call** and reads no prompt. It is **wired into nothing**: no stage, step, command or door
- * calls it, and `test/test-relations-table.js` and `test/test-relations-isolation.js` scan the tree to prove
- * the count is zero. Plan 07 slice 4 is the extraction contract that would feed it; that is not this slice.
+ * makes **no model call** and reads no prompt. **Plan 07 slice 4 is now wired to it**:
+ * `relations/contract.js` turns one `type: "relation"` entry from the chapter call that already runs into
+ * one proposal, computes the certainty level from what the record can measure, and files it here — and
+ * `rebuild/filing.js` is the one module outside this layer that calls it, which is the caller
+ * `test/test-relations-table.js` pins by name and `test/test-relations-isolation.js` allows by name. Nothing
+ * downstream reads the table yet: no renderer, no audit rule, no chapter block and no translator prompt asks
+ * a relation a question, and §6.3 (whether the stage gets wired further, and who runs the identity door) is
+ * still the owner's.
  *
  * @module utils/reference-store/relations/file
  */

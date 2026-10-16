@@ -112,6 +112,13 @@ const RELATION_NAMES = [
   "identityStatedByGuide",
   "registeredChapterIds",
   "citationForQuote",
+  // The extraction contract (plan 07 slice 4). The entry kind and the contract door are in the ban list
+  // too: a module on the claim path must not be able to recognise an act of address, let alone file one.
+  "RELATION_ENTRY_TYPE",
+  "fileRelationsFromExtraction",
+  "certaintyOfObservation",
+  "relationProposalFromEntry",
+  "castFormsNamedInLine",
 ];
 
 /**
@@ -120,6 +127,13 @@ const RELATION_NAMES = [
  * Each one is named with the question it answers, because the point of the list is that these are the
  * doors a claim, a roster entry and a published artifact actually go through — not a survey of the
  * folder.
+ *
+ * **Plan 07 slice 4 moved two names out of this list**, and the move is the honest one rather than a
+ * widening: `rebuild.js` now *files* the acts of address this volume's reading reported (the same door
+ * that files the `confirm` kind), and `extraction-adapter.js` names the entry kind so it can route it
+ * **out** of the claim path and file nothing. Both are listed in `RELATION_AWARE_MODULES` below under a
+ * narrower ban, and the tree-wide scan at the end of scenario 1 is what stops a third module joining by
+ * simply being left out of a list.
  */
 const PROTECTED_MODULES = [
   ["utils/reference-store/name-resolution.js", "decides whose roster entry an extraction name lands under"],
@@ -130,8 +144,6 @@ const PROTECTED_MODULES = [
   ["utils/reference-store/drafting.js", "screens a claim body before it is filed"],
   ["utils/reference-store/glossary-adapter.js", "imports the glossary and renders it"],
   ["utils/reference-store/voice-adapter.js", "imports the voice reference and renders it"],
-  ["utils/reference-store/extraction-adapter.js", "files an extraction claim"],
-  ["utils/reference-store/rebuild.js", "renders a volume's reference from its extraction output"],
   ["utils/reference-store/pov-map.js", "renders the point-of-view map"],
   ["utils/reference-store/confirmations.js", "files the observation that a claim still holds"],
   ["utils/reference-store/voice-revision.js", "replaces one register answer with a later volume's"],
@@ -150,6 +162,44 @@ const PROTECTED_MODULES = [
   ["glossary/store.js", "files the glossary stage's terms into the record"],
   ["utils/translate/settled-glossary.js", "the render of the settled record a translator is handed"],
 ];
+
+/**
+ * The two modules that know the entry kind exists, and nothing more.
+ *
+ * `rebuild.js` files acts of address; `extraction-adapter.js` recognises the kind and files nothing. Both
+ * reach the layer through the cover or through `relations/contract.js` alone, and neither may name a row,
+ * a column, a vocabulary, a door of the door layer, or the table itself. The list is checked against a
+ * scan of the whole pipeline: a module that starts filing relations without being named here fails this
+ * suite by name.
+ */
+const RELATION_AWARE_MODULES = [
+  ["utils/reference-store/rebuild.js", "files the acts of address this volume's reading reported, through the contract door only"],
+  ["utils/reference-store/extraction-adapter.js", "recognises the entry kind and files nothing — the door that files is the rebuild's"],
+];
+
+/** The only relations names an aware module may contain. */
+const RELATION_AWARE_NAMES = ["RELATION_ENTRY_TYPE", "fileRelationsFromExtraction"];
+
+/** Folders that are not pipeline code — the same list `test/test-relations-table.js` states. */
+const SKIP_DIRS = new Set(["node_modules", "test", "docs", "plan", "epub_source", "hooks", "calibration", "test-series"]);
+
+/**
+ * The pipeline's own `.js` files, so "only these modules know the kind exists" is a scan and not a claim.
+ * @param {string} [dir] @param {string[]} [out] @returns {string[]}
+ */
+function walkPipeline(dir = ROOT, out = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      walkPipeline(full, out);
+    } else if (entry.name.endsWith(".js")) {
+      out.push(full);
+    }
+  }
+  return out.sort();
+}
 
 /** The glossary both arms import. Identical by construction. */
 const GLOSSARY = `# Glossary
@@ -311,7 +361,60 @@ function sameDigest(a, b, message) {
   }
   ok(files === PROTECTED_MODULES.length, `every protected module was scanned (${files}/${PROTECTED_MODULES.length})`);
   ok(mentions === 0, `and ${RELATION_NAMES.length} relations names appear 0 times across them`);
-  console.log(`  1. source scan: ${files} module layers, ${RELATION_NAMES.length} relations names, 0 mentions, 0 requires, 0 reads of the table`);
+
+  // The two modules that know the entry kind exists (plan 07 slice 4), under a narrower ban that is still
+  // a ban: they may name the kind and the contract door, and nothing else this layer owns. The bare word
+  // "relations" is excluded from their ban because they require the layer by name; every specific row,
+  // read, count, door and vocabulary constant in the list is matched as a whole word and refused.
+  const AWARE_BAN_EXCEPTIONS = new Set(["relations", ...RELATION_AWARE_NAMES]);
+  const wholeWord = (name) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+  const awareFiles = new Set();
+  for (const [file, why] of RELATION_AWARE_MODULES) {
+    const layer = readModuleLayer(ROOT, file);
+    ok(layer.split("\n").length > 0, `${file} was read`);
+    let named = 0;
+    for (const name of RELATION_NAMES) {
+      if (AWARE_BAN_EXCEPTIONS.has(name)) continue;
+      if (wholeWord(name).test(layer)) {
+        assert.ok(false, `${file} may name only ${RELATION_AWARE_NAMES.join(" / ")} — it named "${name}", and ${why}`);
+      }
+    }
+    for (const name of RELATION_AWARE_NAMES) if (layer.includes(name)) named++;
+    ok(named > 0, `${file} names none of ${RELATION_AWARE_NAMES.join(" / ")} — the allow-list is stale, and a module that no longer files relations should not still be on it (${why})`);
+    // The cover or the contract, never the door's internals: a module that reaches `relations/rows` or
+    // `relations/file` is writing the table through a door that was never meant to have a second caller.
+    ok(!/require\((["'])[^"']*relations\/(rows|file|shapes)(["'])/.test(layer), `${file} must not require the relations layer's rows, door or vocabularies — ${why}`);
+    ok(/require\((["'])[^"']*\/relations(\/contract)?(["'])/.test(layer), `${file} does not reach the relations layer through its cover or its contract — ${why}`);
+    ok(!/(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+relations\b/.test(layer), `${file} must not read or write the relations table — ${why}`);
+    if (file === "utils/reference-store/rebuild.js") {
+      const prefix = path.join(ROOT, "utils", "reference-store", "rebuild") + path.sep;
+      for (const f of walkPipeline(ROOT)) if (f.startsWith(prefix) || f === path.join(ROOT, file)) awareFiles.add(f);
+    } else {
+      awareFiles.add(path.join(ROOT, file));
+    }
+  }
+
+  // The self-checking half: the tree is scanned for every file that names the contract door or the entry
+  // kind, and the answer must be exactly the layer plus the two named modules. A third module joining the
+  // club cannot do it by being left out of a list.
+  const layerPrefix = path.join(ROOT, "utils", "reference-store", "relations") + path.sep;
+  const coverFile = path.join(ROOT, "utils", "reference-store", "relations.js");
+  /** @type {string[]} */
+  const outsiders = [];
+  for (const file of walkPipeline(ROOT)) {
+    if (file.startsWith(layerPrefix) || file === coverFile) continue;
+    if (awareFiles.has(file)) continue;
+    const text = fs.readFileSync(file, "utf8");
+    if (/\b(RELATION_ENTRY_TYPE|fileRelationsFromExtraction)\b/.test(text)) outsiders.push(path.relative(ROOT, file));
+  }
+  same(outsiders, [], "and no other module in the pipeline names the entry kind or the contract door: the two named producers are the only ones");
+
+  ok(files === PROTECTED_MODULES.length, `the claim path is ${files} module layers that never heard of a relation`);
+  console.log(
+    `  1. source scan: ${files} protected module layers + ${RELATION_AWARE_MODULES.length} named producers, ` +
+      `${RELATION_NAMES.length} relations names, 0 mentions outside the producers, 0 requires of the door's internals, ` +
+      `0 reads of the table, 0 unnamed producers (${walkPipeline(ROOT).length} pipeline files scanned)`
+  );
 }
 
 // ─── 2. the two arms ──────────────────────────────────────────────────────────

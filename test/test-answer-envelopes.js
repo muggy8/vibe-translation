@@ -415,7 +415,16 @@ function scenarioTheThreeShapesAreDifferentOnPurpose() {
     "the voice key inventory names `formalityLevel` again — it was replaced by the declared `axis` / `value` pair");
   ok(!Object.prototype.hasOwnProperty.call(voiceItem.properties, "formalityLevel"),
     "the voice shape declares `formalityLevel` again");
-  same(VOICE_ENTRY_KEYS.length, 13, "the voice key inventory is the 13 keys the prompt names for its two element kinds");
+  same(VOICE_ENTRY_KEYS.length, 18, "the voice key inventory is the 18 keys the prompt names for its four element kinds (voice, POV, confirm, act of address)");
+  // The act-of-address keys (plan 07 slice 4), and the one key deliberately NOT among them.
+  for (const key of ["channel", "addresser", "addressee", "formUsed", "statement"]) {
+    ok(VOICE_ENTRY_KEYS.includes(key), `the voice key inventory no longer names the act-of-address key "${key}"`);
+    ok(Object.prototype.hasOwnProperty.call(voiceItem.properties, key), `the voice shape does not declare the act-of-address key "${key}"`);
+  }
+  ok(!VOICE_ENTRY_KEYS.includes("certainty"),
+    "the voice key inventory names `certainty` — plan 07 §0 decision 10: certainty is never a number the model reports about itself");
+  ok(!Object.prototype.hasOwnProperty.call(voiceItem.properties, "certainty"),
+    "the voice shape declares `certainty`, which is the ladder asking the suspect to grade themselves");
   same(voiceItem.required, ["type"], "the voice entry shape changed what it requires");
   same(glossaryItem.required, ["term", "rendering", "note", "type", "query"], "the glossary entry shape changed what it requires");
   same(styleItem.required, ["category", "pattern", "description", "examples", "frequency", "notes"], "the style entry shape changed what it requires");
@@ -567,7 +576,8 @@ function scenarioThePromptsAskForTheEnvelope() {
   ok(povBlock.includes('"sectionDescription"'), "the voice prompt's POV key block lost `sectionDescription`");
   // Every key the example answer produces is a key the prompt names.
   const example = voice.slice(voice.indexOf("Example shape (do not copy these values):"));
-  for (const key of ["type", "povCategory", "marker", "description", "character", "quirkType", "examples", "axis", "value", "notes"]) {
+  for (const key of ["type", "povCategory", "marker", "description", "character", "quirkType", "examples", "axis", "value", "notes",
+    "channel", "addresser", "addressee", "formUsed", "statement"]) {
     ok(example.includes(`"${key}"`), `the voice prompt's example no longer produces "${key}"`);
     ok(VOICE_ENTRY_KEYS.includes(key), `the voice prompt's example produces "${key}", which the declared inventory does not hold`);
   }

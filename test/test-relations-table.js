@@ -886,12 +886,23 @@ function scenarioNothingAdded() {
   for (const file of files) {
     const text = fs.readFileSync(file, "utf8");
     const insideLayer = file.startsWith(layerPrefix) || file === coverFile;
-    if (/\b(fileRelation|fileRelations|closeRelationSpan|relationsInRecord|relationsForIdentity|relationCounts)\s*\(/.test(text) && !insideLayer) doorCallers.push(path.relative(ROOT, file));
+    if (/\b(fileRelation|fileRelations|closeRelationSpan|relationsInRecord|relationsForIdentity|relationCounts|fileRelationsFromExtraction)\s*\(/.test(text) && !insideLayer) doorCallers.push(path.relative(ROOT, file));
     if (/(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+relations\b/.test(text) && !insideLayer && file !== schemaFile) tableReaders.push(path.relative(ROOT, file));
     if (insideLayer && /process\.env/.test(text)) envKnobs.push(path.relative(ROOT, file));
   }
 
-  same(doorCallers, [], "no stage, no step, no command and no door calls it: the only mentions outside the layer are the barrel's re-export, which never calls it");
+  same(
+    doorCallers,
+    ["utils/reference-store/rebuild/filing.js"],
+    "exactly one module outside the layer calls the door: `rebuild/filing.js`, the door the stage route and " +
+      "`rebuild-voice.js` both file through, and the same one that files the `confirm` kind. No stage, no step, " +
+      "no command and no renderer calls it, and the barrel's re-export never calls it either."
+  );
+  same(
+    doorCallers.filter((file) => !/rebuild\/filing\.js$/.test(file)),
+    [],
+    "and no second producer joined: a module that starts filing acts of address has to be added to this list, in words, by whoever wires it"
+  );
   same(tableReaders, [], "and nothing outside the layer and the migration reads or writes the table: no renderer, no audit rule, no presence matcher, no coverage rule, no chapter-facts query, no stage");
   same(envKnobs, [], "and no file in the layer reads an environment variable: every bound in it is a constant, so there is nothing to switch a guard off with");
 

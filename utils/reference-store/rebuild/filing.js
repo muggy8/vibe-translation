@@ -41,6 +41,11 @@ const { registerFilingRefusal } = require("../register/filing");
 // this does not close a cycle with `../extraction-adapter`, which needs the same constant.
 const { fileVoiceConfirmations } = require("../confirmations/file");
 const { CONFIRMATION_ENTRY_TYPE } = require("../confirmations/shapes");
+// The extraction contract (plan 07 slice 4): the fourth entry kind in the same answer array, the ladder
+// that decides how sure the record is about who is speaking, and the door that files what it levels.
+// Reached through the relations cover, which is that layer's public surface — this file never names a
+// relations row, a relations column or the table itself.
+const { RELATION_ENTRY_TYPE, fileRelationsFromExtraction } = require("../relations");
 
 const { rebuildClaimAlreadyStored, inspectVoiceMirrorForRebuild } = require("./mirror");
 const {
@@ -80,7 +85,7 @@ require("../../../types"); // JSDoc type definitions
  *   on the **same volume's record opened with the extract stage**: the write scope is what decides
  *   which kind of row a handle may write, so the rebuild's own handle cannot file candidates and does
  *   not try to.
- * @returns {{ok: boolean, filed: Array<Object>, filedCount: number, carried: Array<Object>, refused: Array<Object>, characters: number, adoptedClaims: number, adoptedCharacters: number, adoptedUnkeyed: number, candidateClaims: number, povAttached: number, povUnattached: number, resolved: Array<{name: string, key: string, how: string}>, unresolved: Array<{name: string, key: string}>, candidates: {filed: number, carried: number, refused: Array<Object>}, confirmations: {filed: Array<Object>, alreadyFiled: Array<Object>, refused: Array<Object>, confirmations: number, nonConfirmations: number}, screened: Array<Object>, refusal: ReferenceRefusal|null}}
+ * @returns {{ok: boolean, filed: Array<Object>, filedCount: number, carried: Array<Object>, refused: Array<Object>, characters: number, adoptedClaims: number, adoptedCharacters: number, adoptedUnkeyed: number, candidateClaims: number, povAttached: number, povUnattached: number, resolved: Array<{name: string, key: string, how: string}>, unresolved: Array<{name: string, key: string}>, candidates: {filed: number, carried: number, refused: Array<Object>}, confirmations: {filed: Array<Object>, alreadyFiled: Array<Object>, refused: Array<Object>, confirmations: number, nonConfirmations: number}, relations: {filed: Array<Object>, alreadyFiled: Array<Object>, refused: Array<Object>, namedLimits: Array<Object>, unlevelled: Array<Object>, chapters: Array<Object>, chaptersWithoutRelations: string[], chaptersNamingNobody: string[], relations: number, nonRelations: number, unstampedRelations: number, filedCount: number, alreadyFiledCount: number, refusedCount: number, namedLimitCount: number, unlevelledCount: number, ok: boolean, volume: number, refusal: ReferenceRefusal|null}, screened: Array<Object>, refusal: ReferenceRefusal|null}}
  */
 function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved = 0, candidateStore = null } = {}) {
   const vol = Number(volume === undefined ? store.volume : volume);
@@ -497,6 +502,11 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
     // claim. The kind is routed out here and filed by `confirmations/file.js` below, in the same breath,
     // with this volume's chapters and its adopted claims already in front of it.
     else if (entry.type === CONFIRMATION_ENTRY_TYPE) continue;
+    // The same reason for an act of address (plan 07 slice 4): `fileVoice` would file it as a voice claim —
+    // aspect `unclassified`, label `relation`, a bullet under the speaker's heading quoting words the
+    // extraction never claimed as that character's quirk. It is routed out here and filed by
+    // `relations/contract.js` below, and it never becomes a `facts` row, a candidate or a bullet.
+    else if (entry.type === RELATION_ENTRY_TYPE) continue;
     else fileVoice(entry);
   }
 
@@ -509,6 +519,20 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
    * into `claim_confirmations` and leaves every claim row exactly as it is.
    */
   const confirmations = fileVoiceConfirmations(store, entries, { volume: vol, volumeDir: store.volumeDir, chapters });
+
+  /**
+   * The acts of address this volume's reading pass reported, filed after its claims.
+   *
+   * After the claims for the same reason the confirmations are: an act of address is an observation about
+   * characters this record already publishes, and the ladder that decides who is speaking reads the roster
+   * and the identities the record holds — not the answer it was handed. The door files one row per act into
+   * `relations` and writes nothing into `facts`, the roster, or any published file.
+   *
+   * A relation the door refuses does not fail this volume. `ok` below means "no claim was refused", and an
+   * act of address whose parties this record has no identity for is a limit plan 07 §6.8 names as the
+   * owner's open decision, not a broken book.
+   */
+  const relations = fileRelationsFromExtraction(store, entries, { volume: vol, volumeDir: store.volumeDir, chapters });
 
   const resolved = [];
   const unresolved = [];
@@ -577,6 +601,7 @@ function rebuildVoiceFromExtraction(store, entries, { volume, mirrorRowsRemoved 
     candidates,
     screened,
     confirmations,
+    relations,
     // True when this volume's record was already sealed by another stage (the glossary seals at the end
     // of its own work). The render went ahead because the seal froze no character-voice rows — but it is
     // worth a line in the log, because it says the reference being written here is the first one this
