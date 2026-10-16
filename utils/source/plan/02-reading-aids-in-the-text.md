@@ -534,18 +534,25 @@ it is a decision about an existing guard, not an addition.
    leaving it means the interleaved shape is guarded at extraction time and not at filing time. Options and
    costs: `/tmp/opencode/plan09-slice1-questions.md` question 1. **Slice 1 chose "leave it", and pinned the
    limit as a test assertion rather than hiding it.**
-8. **Whether the schema 9 → 10 bump should be followed by another deliberate `npx gulp extract`** (opened by
-   slice 1, 2026-10-16). The corpus's caches are schema 9, so the next stage run re-extracts all 17 volumes
-   without being asked. **Measured on the corpus itself (read-only, 0 database opens): all 17
-   `*-bundle.meta.json` files report `schema: 9` and not one of their segments carries a ruby measurement
-   field** — so `ruby-markup-not-canonical` and `ruby-markup-count-mismatch` are **silent on the corpus as it
-   stands**: they answer nothing, and they correctly refuse to call an unmeasured segment clean. The checks are
-   proven (re-converting all 17 archives into a scratch folder: 133 files, 0 findings, 45,428 + 1 = 45,429
-   accounted, identity holds 17/17) but they are not **live** on the books until a run pays the cache miss.
-   Measured, that act is harmless — **133 of 133 chapter files byte-identical**, the harvest identical, 0
-   findings — but it is still 17 bundle metas and 17 harvest files rewritten, and the books' repository has 273
-   uncommitted modified files from the first act. Running it deliberately, or leaving the re-extraction to the
-   next stage run, is the owner's. `/tmp/opencode/plan09-slice1-questions.md` question 2.
+8. **~~Whether the schema 9 → 10 bump should be followed by another deliberate `npx gulp extract`~~ ANSWERED
+   2026-10-16: run it now** (opened by slice 1). The owner chose the deliberate act over leaving the two new checks
+   silent. **It was run**: all 17 volumes printed RE-EXTRACTED on the schema 9 → 10 pass (2.32 s, 0 model calls,
+   **0 HIGH / 0 MEDIUM**), and all 17 `*-bundle.meta.json` now report `schema: 10` with **133 of 133 segments
+   carrying a ruby measurement**, so both checks are live on the books. What the act changed and did not change,
+   measured file by file against the schema-9 output: **all 218 `.md` files byte-identical** (133 chapters + 17
+   whole-volume + the 68 stage reports the step never writes), the **17 harvest files differ by exactly one byte
+   each** — the `generatedBy` label reading `bundle schema 10` instead of `9` — and the 17 `series.db` digests and
+   34 sidecars are unchanged. Re-running the evidence replay against the new state: **22,469 facts, 0 failures**.
+   `/tmp/opencode/plan09-slice1-questions.md` question 2.
+9. **Whether a citation may paste part of a printed reading** (opened by slice 1b, 2026-10-16). The guard matches a
+   whole annotated word with its whole guide, so `牡丹一華ぼたん` — the word plus the **first four characters** of
+   the reading it is guided with — still matches by skeleton and is filed as evidence that the book prints a string
+   it does not print. Closing it means deciding **where a reading ends**, which is a claim about what one language's
+   script looks like; this repository is language-neutral by policy (`test/test-no-language-axis-list.js` scans 460
+   files for exactly that mistake and reports 0 findings), so the door that closes it without inventing a reading
+   shape is the one in item 7 — letting the evidence door read the harvest's pairing. **Slice 1b chose "leave it",
+   and pinned the limit as a test assertion rather than hiding it.** `/tmp/opencode/plan09-slice1b-questions.md`
+   question 1.
 
 ---
 
