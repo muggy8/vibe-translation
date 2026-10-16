@@ -247,6 +247,23 @@ before and after against the pinned record digests (gotcha 124, gotcha 172).
 > are written up with their costs in `/tmp/opencode/plan09-slice0-questions.md` question 1. **Slice 0 picked
 > none of them, and changed no code to force one.**
 
+**The act was taken on 2026-10-16, by the account owner, before any stage ran** (`npx gulp extract`, 2.34 s,
+0 model calls): all 17 volumes printed **RE-EXTRACTED**, and the audit is **17 volumes, 133 chapters, 109 packaging
+groups, 3,596,043 characters, 45,429 guides kept in the text, 457 images, 0 HIGH, 0 MEDIUM**. Two measurements were
+taken before trusting it, and both are the reason the act is safe rather than merely tolerated:
+
+- **133 of 133 chapter files' guide-free projection is byte-identical to the committed file** —
+  `/tmp/opencode/verify-corpus-projection.js` reads the old bytes out of the books' git (`git show HEAD:<path>`) and
+  compares them against `stripRubyMarkup(newFile)`. The markup in the books is **1,145,628 characters over 45,428
+  annotated words**, which is §2.5's arithmetic reproduced on the corpus rather than on a projection.
+- **All 22,469 published facts in the 17 records replay clean against the re-extracted books — 0 evidence
+  failures** — `/tmp/opencode/verify-evidence-after-reextract.js`, which runs the store's own
+  `verifyStoredEvidence` over **copies** of every record (gotcha 124). This is gotcha 123's unpaid bill paid: the
+  16 HIGH + 31 MEDIUM findings that plan 07 recorded against the guide-free re-extraction **do not fire**, and
+  nothing had to be re-derived.
+- The 17 `series.db` digests and all 34 `-wal` / `-shm` sidecars are **unchanged** before and after, and the warm
+  cache is back to **176 ms** with every volume printing VERIFIED.
+
 ---
 
 ## 5. The slices, in build order
@@ -305,9 +322,10 @@ it is a decision about an existing guard, not an addition.
 
 ## 6. Open decisions, for the account owner
 
-1. **When the corpus is re-extracted.** Nothing in this plan is observable on the real books until it is. It
-   grows 133 chapter files and 17 whole-volume files by 46.75 % (measured, §2.2), re-runs the six extraction audits, and moves
-   every pinned character-count figure in the docs. The reference records themselves are not touched.
+1. **~~When the corpus is re-extracted.~~ ANSWERED 2026-10-16** — the owner chose "run it now, deliberately", it
+   ran, and the two safety measurements are in §4.3. What is still the owner's is **committing the result in the
+   books' own repository**: 273 files are modified there (133 chapter files, 17 whole-volume files, 17 harvests,
+   17 bundle metas, the extraction reports) and `ai-client` does not commit into that repository (gotcha 75).
 2. **Whether the other stages' prompts are taught the markup** in this plan or left to read it cold. The wiki,
    the style guide and the character-voice pass all read the same chapter files and will see the tags whether
    they are told about them or not.
@@ -318,6 +336,11 @@ it is a decision about an existing guard, not an addition.
    only guards the output.
 5. **Whether the guide-split tripwire is still worth a HIGH finding** once the split string can no longer be
    produced by the converter, or whether it becomes the guard against a *hand-edited* chapter file.
+6. **~~Whether to spend one model call on a token calibration probe~~ ANSWERED 2026-10-16: no.** The owner chose
+   to keep the token figures labelled as estimates. Every token number in §2.2 and §2.5 is therefore an estimate
+   built from this repository's own coefficients (0.69 per CJK character, 0.25 per other, ×1.15) and **assumes a
+   tag run tokenizes like ordinary ASCII**, which `<ruby>…<rt>…</rt></ruby>` may not. Nobody should read
+   **+23.4 %** as a measurement.
 
 ---
 
