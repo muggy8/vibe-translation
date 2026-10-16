@@ -54,7 +54,7 @@ const glossaryStore = require("../glossary/store");
 const { researchVolumeTerms, researchResponseFormat } = require("../glossary/research");
 const { classifyResearchable, RESEARCH_MAX_TERMS_PER_VOLUME, selectResearchTargets } = require("../glossary/researchable");
 const { readModuleLayer } = require("./module-layer");
-const { assertInsideFixture } = require("./fixture-reference-store");
+const { assertInsideFixture, FIXTURES_ROOT } = require("./fixture-reference-store");
 
 let checks = 0;
 /**
@@ -83,7 +83,10 @@ function same(a, b, message) {
 // ─── The fixture ──────────────────────────────────────────────────────────────
 
 /** Where this suite's fixtures live. */
-const FIXTURES_ROOT = "/tmp/opencode/series-fixtures";
+// The root comes from the fixture helper, which honours AI_CLIENT_TEST_FIXTURES_ROOT: the runner
+// gives every suite a root of its own, so a label reused by another suite cannot delete this one's
+// fixture mid-run. Unset (a person running this suite by hand) means the same shared default as ever.
+// FIXTURES_ROOT is destructured from the require above.
 
 /** The two fixture volumes, in reading order. */
 const VOLUMES = [

@@ -42,7 +42,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { readModuleLayer } = require("./module-layer");
-const { assertInsideFixture } = require("./fixture-reference-store");
+const { assertInsideFixture, FIXTURES_ROOT } = require("./fixture-reference-store");
 const rs = require("../utils/reference-store");
 const {
   REGISTER_MANIFEST_KEY,
@@ -78,7 +78,10 @@ const { FINDING_LEVELS } = require("../utils/postmortem/levels");
 const { resolveStageRegisterDeclaration } = require("../character-voice");
 
 const ROOT = path.resolve(__dirname, "..");
-const FIXTURES_ROOT = "/tmp/opencode/series-fixtures";
+// The root comes from the fixture helper, which honours AI_CLIENT_TEST_FIXTURES_ROOT: the runner
+// gives every suite a root of its own, so a label reused by another suite cannot delete this one's
+// fixture mid-run. Unset (a person running this suite by hand) means the same shared default as ever.
+// FIXTURES_ROOT is destructured from the require above.
 
 let checks = 0;
 /** Count one assertion and run it. @param {boolean|void} condition @param {string} message */

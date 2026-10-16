@@ -1,5 +1,5 @@
 /**
- * The machine runs the checks, because the harness gives an agent no shell. The command comes from the table, never from the caller; a check that never ran is reported as missing, not as failed; and the `npm test` chain is compared before and after the turn, because the banned-path table cannot see a patch that leaves package.json alone and quietly drops a suite.
+ * The machine runs the checks, because the harness gives an agent no shell. The command comes from the table, never from the caller; a check that never ran is reported as missing, not as failed; and the list of suites `npm test` runs (`test/suites.js`, read through `readTestChain`) is compared before and after the turn, because the banned-path table cannot see a patch that leaves `package.json` alone and quietly drops a suite.
  *
  * Part of the patches.js layer (split out of the original single file).
  */
@@ -36,24 +36,65 @@ function testChainIsIntact(before, after) {
 
 
 /**
- * The `npm test` script as it currently stands in `package.json`.
+ * The list of suites `npm test` runs, in the text shape `testChainIsIntact` diffs.
  *
  * Read before the dev turn and again after it, so `testChainIsIntact` can answer the question the
- * banned-path list cannot: a patch is not allowed to edit `package.json`'s test chain at all, but the
- * chain is also what the gate runs, so a chain that quietly lost a suite has to be caught even by a
- * patch that never names `package.json` in its proposal.
+ * banned-path list cannot: a patch is not allowed to edit the test list at all, but the list is also
+ * what the gate runs, so a list that quietly lost a suite has to be caught even by a patch that never
+ * names `package.json` in its proposal.
+ *
+ * The list moved. It used to be `package.json`'s `test` script, a serial `&&` chain; it is now
+ * `test/suites.js`, and `package.json`'s `test` script is the one command that runs it. So this reads
+ * the manifest when the tree has one — and keeps checking `package.json` beside it, because pointing
+ * `npm test` at something smaller is the exact shortening this guard exists to catch, and reading only
+ * the manifest would miss it. A tree with no manifest (a dev-team fixture repository, which ships its
+ * own tiny `package.json` and no test list) still falls back to the script, so the guard works there
+ * exactly as it did.
  *
  * @param {string} [root]
  * @returns {{script: string|null, error: string|null}}
  */
 function readTestChain(root = ROOT) {
+  /** @type {string|null} */
+  let script = null;
   try {
     const raw = fs.readFileSync(path.join(root, "package.json"), "utf8");
     const pkg = JSON.parse(raw);
-    return { script: (pkg.scripts && pkg.scripts.test) || "", error: null };
+    script = (pkg.scripts && pkg.scripts.test) || "";
   } catch (err) {
     return { script: null, error: `cannot read the npm test chain from ${root}/package.json: ${err.message}` };
   }
+
+  const manifestPath = path.join(root, "test", "suites.js");
+  if (!fs.existsSync(manifestPath)) return { script, error: null };
+
+  /** @type {{SUITES?: Array<{file: string, args: string[]}>, renderTestChain?: (entries: any) => string}} */
+  let manifest;
+  try {
+    manifest = require(manifestPath);
+  } catch (err) {
+    return { script: null, error: `cannot read the npm test manifest from ${manifestPath}: ${err.message}` };
+  }
+  if (typeof manifest.renderTestChain !== "function" || !Array.isArray(manifest.SUITES)) {
+    return { script: null, error: `${manifestPath} exports no SUITES array and no renderTestChain function.` };
+  }
+  if (!manifest.SUITES.length) {
+    return { script: null, error: `${manifestPath} names zero suites, so \`npm test\` would run nothing.` };
+  }
+
+  const named = String(script)
+    .split("&&")
+    .map((part) => (part.trim().split(/\s+/)[1] || "").replace(/\\/g, "/"));
+  if (!named.some((p) => p === "test/runner.js" || p.endsWith("/test/runner.js"))) {
+    return {
+      script: null,
+      error:
+        `${root}/package.json's "test" script is "${script}", which does not run test/runner.js. ` +
+        `The suite list lives in test/suites.js and only that runner executes it, so a "test" script ` +
+        `that names anything else is a gate that was shortened (gotcha 169).`,
+    };
+  }
+  return { script: manifest.renderTestChain(), error: null };
 }
 
 // ─── Reading it ───────────────────────────────────────────────────────────────

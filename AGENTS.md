@@ -51,7 +51,7 @@ index for working on it.
 | `npm run diagnose -- --ticket=<id>` | Answer a ticket with a **read-only** agent (it may open the code and the logs; it may not write) |
 | `npm run fix -- --ticket=<id>` | Answer a ticket with a **code change**, inside a boundary; the machine runs the pinned checks |
 | `npm run autopilot` | The manager driving the loop. Default `--mode=watch`: decide, print, write nothing |
-| `npm test` | Offline tests (no AI, no network) — pure functions **plus** whole-task runs against the scripted model server in `test/fake-backend.js` |
+| `npm test` | **The gate.** `test/runner.js` runs the manifest in `test/suites.js` — 87 invocations today — as separate `node` processes, **up to 6 at a time**, each with a fixture root of its own; the three offline pipeline-loop invocations are the manifest's `serial` phase and run one at a time **last**, which is what keeps rule 11 true. Offline (no AI, no network): pure functions **plus** whole-task runs against the scripted model server in `test/fake-backend.js`. A `test/test-*.js` file the manifest does not name **fails the run before anything starts** (gotcha 169), and a suite that exits 0 having printed nothing is a failure. `--only=<substring>` runs a subset and prints that it is not the gate; `--serial` reproduces the old one-at-a-time order. The cap and the 180 s per-suite timeout are constants with no flag and no environment variable in front of them → `docs/map-tests.md`, gotcha 169, gotcha 174 |
 | `npm run pipeline-loop` | **The whole pipeline offline** on a two-volume fixture, then a second pass that must make zero calls, then a 23-rule audit of what the pipeline actually asked the model |
 | `npm run pipeline-loop-chunked-glossary` | **The same offline loop over a fixture cut into chapter-sized parts** (`--stages=discover,extract,glossary,character-voice --chunked=glossary` — `extract` is in the list because the prerequisite gate now requires it), which is the only place the glossary's **chapter-by-chapter** path runs end to end offline. It is also the loop that caught gotcha 120. It used to be `pipeline-loop-store` and to pass `--store-validators`; that switch is deleted (the glossary's reference record is now unconditional), so the loop is named again for what is actually unique about it — `--chunked=glossary`. Passing the old flag is **refused** with a message naming what replaced it |
 | `npx gulp character-voice` | **The character-voice stage. One route, no selector.** It reads the volume chapter by chapter, files what it found in the volume's record, and **renders** `character-voice.md` and `pov-map.md` from that record — no author agent, no feedback round, one acceptance grade, no agent turn anywhere in the stage. **`--route=` is refused for every value**, with a message naming what replaced the route: the author route (an author agent compiling the reference and rewriting it on feedback, with the whole-installment / chapter-by-chapter mode decision and `--chunked` belonging to it) was removed, not hidden, and it is in git history at commit `75e59a7`. `--chunked` is accepted and announced as a no-op — this stage reads chapter by chapter whatever the volume's size. The acceptance gate is the one both routes shared: same rubric, same three files handed to the grader, same quarantine-on-failure, same draft-record consequence. **And the stage now needs the series to have declared its register questions** (plan 06 slice 3): `translation-target.json` carries a `register` block the intake writes, the stage refuses **structurally** when the block is absent or malformed — naming the door that fixes it, with no fallback list in the pipeline in any language — and accepts and announces a series that declares none and says why (`{ "axes": [], "note": "…" }`). `extract-voice` and `rebuild-voice` are unchanged: they file claims that name no register question, so a series whose intake has not re-run still has a working door. **And the questions the extractor is asked are those declarations, not a list the pipeline carries** (plan 06 slice 4, 2026-10-14): `system-prompts/character-voice-extract.md` names no language and prints no character of any one language's script, the extraction answers are the `axis` / `value` pair (the prompt's old `formalityLevel` enumeration is gone), and the declared questions reach the model as a block `character-voice/prompts.js` appends from the series' own plan of record — with no question list behind any branch. `extract-voice` composes the same block and prints `NO register axis` when a volume it filed answers none. → `docs/map-preproduction.md` §6, gotcha 109, gotcha 154, `utils/reference-store/register/`, `test/test-voice-prompt-declaration.js` |
@@ -96,7 +96,7 @@ Each map doc ends with a table of the **implementation folders** its module was 
 
 Code comments cite `AGENTS.md gotcha N`. The numbers are unchanged from when the gotchas were
 one file: the list now lives in the five `docs/gotchas-*.md` slices (1–20, 21–45, 46–63,
-64–69, 70–173), and each slice says which part of the list it holds.
+64–69, 70–174), and each slice says which part of the list it holds.
 
 ## 3. The implementation folders
 
@@ -203,6 +203,15 @@ folder containing the file" would widen it for the wrong reason.
 11. **`npm test` is the gate**, and its last act is the offline pipeline loop plus the prompt
     audit. A green unit suite that breaks what the pipeline asks the model is still broken. →
     gotcha 62, gotcha 63
+    - The gate is `test/suites.js` (the list) plus `test/runner.js` (the thing that runs it), and
+      `package.json`'s `test` script is the one command that calls the runner. The three pipeline-loop
+      invocations are the manifest's `serial` phase and are its last three entries, so "the last act is
+      the loop and the audit inside it" is a property of the manifest's order, not of the scheduler.
+    - **Adding a suite means adding a manifest entry in the same commit.** The runner fails the run when
+      a file matching `test/test-*.js` exists and nothing names it; `SUITE_HELPERS` is the only way a
+      file that matches the pattern without being a suite can sit in `test/`, and it requires a written
+      reason. A suite moved into the `serial` phase has to name what it shares with another suite. →
+      gotcha 169, gotcha 167, gotcha 174
 
 ## 5. Ownership
 

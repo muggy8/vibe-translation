@@ -63,7 +63,7 @@ const glossaryStore = require("../glossary/store");
 const { researchVolumeTerms, lookupCoverageLines, lookupLogLines } = require("../glossary/research");
 const { RESEARCH_MAX_TERMS_PER_VOLUME } = require("../glossary/researchable");
 const { researchNotesInRecord } = require("../utils/reference-store");
-const { assertInsideFixture } = require("./fixture-reference-store");
+const { assertInsideFixture, FIXTURES_ROOT } = require("./fixture-reference-store");
 
 // Pin the pre-existing research settings so a local `.env` cannot change what these scenarios measure,
 // and so no scenario can reach the network through the optional general-search backends.
@@ -479,7 +479,10 @@ async function scenarioMaxlagAndPrimitives() {
 // ─── The fixture the filing scenarios run on ──────────────────────────────────
 
 /** Where these fixtures live. Each scenario passes its own label so they cannot collide. */
-const FIXTURES_ROOT = "/tmp/opencode/series-fixtures";
+// The root comes from the fixture helper, which honours AI_CLIENT_TEST_FIXTURES_ROOT: the runner
+// gives every suite a root of its own, so a label reused by another suite cannot delete this one's
+// fixture mid-run. Unset (a person running this suite by hand) means the same shared default as ever.
+// FIXTURES_ROOT is destructured from the require above.
 
 /** The one fixture volume. */
 const FX_VOLUME = { folder: "Lookup Story(01)", installmentNumber: "01", base: "lookup_story(1)" };

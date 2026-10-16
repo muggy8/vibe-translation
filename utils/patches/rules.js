@@ -39,8 +39,8 @@ const UNJUDGED_STATUSES = ["proposed", "verified"];
  * `npm test` already ends with the whole offline pipeline, so the second entry looks redundant. It is
  * not: `npm test` is a **list**, and a list is the thing a patch could shorten. Running the pipeline
  * loop by name is the half of the gate that does not depend on the list still being complete — and
- * `package.json`'s test chain is checked separately (`testChainIsIntact`) so a patch cannot quietly
- * drop a test from it.
+ * the list itself is checked separately (`testChainIsIntact`, which reads `test/suites.js` and the
+ * `package.json` script that runs it) so a patch cannot quietly drop a test from it.
  *
  * @type {Array<{id: string, command: string, args: string[], why: string}>}
  */

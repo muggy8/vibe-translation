@@ -45,8 +45,15 @@ const { GLOSSARY_HEADER } = require("../utils/reference-store/glossary-adapter")
  */
 const GLOSSARY_TABLE_HEADER = `| ${GLOSSARY_HEADER.join(" | ")} |`;
 
-/** Where these fixtures live. Each suite passes its own label so they cannot collide. */
-const FIXTURES_ROOT = "/tmp/opencode/series-fixtures";
+/**
+ * Where these fixtures live. Each suite passes its own label so they cannot collide, and
+ * `test/runner.js` gives each suite a root of its own so a reused label cannot collide either.
+ * See `test/fixture-guard.js` for the rule and `test/fixture-series.js` for why the override exists.
+ */
+const { FIXTURES_ROOT_DEFAULT, FIXTURES_ROOT_ENV, assertSafeFixturesRoot, resolveFixturesRoot } =
+  require("./fixture-guard");
+
+const FIXTURES_ROOT = resolveFixturesRoot();
 
 /** The two volumes, in reading order. */
 const VOLUMES = [
@@ -278,8 +285,8 @@ const EXTRACTION_01_UNVERIFIABLE = {
  * @param {string} [root] - Where to put it. Defaults to `FIXTURES_ROOT`.
  * @returns {{dir: string, volumes: Array<{folder: string, installmentNumber: string, base: string, dir: string}>}}
  */
-function fixtureStoreSeries(label, root = FIXTURES_ROOT) {
-  const dir = path.join(root, label);
+function fixtureStoreSeries(label, root) {
+  const dir = path.join(resolveFixturesRoot(root), label);
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
 
@@ -369,6 +376,9 @@ function assertInsideFixture(file, fixtureDir) {
 
 module.exports = {
   FIXTURES_ROOT,
+  FIXTURES_ROOT_DEFAULT,
+  FIXTURES_ROOT_ENV,
+  assertSafeFixturesRoot,
   VOLUMES,
   SOURCE_01,
   SOURCE_02,

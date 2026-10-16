@@ -36,8 +36,29 @@ const { STEP_ARTIFACT_SPECS } = require("../utils/artifacts");
 const { runScopeVolumeKey } = require("../utils/postmortem");
 const { PIPELINE_STEPS } = require("../gulpfile");
 
-/** Where the throwaway series live. Each suite passes its own label, so they cannot collide. */
-const FIXTURES_ROOT = path.resolve("/tmp/opencode/series-fixtures");
+/**
+ * Where the throwaway series live when nobody says otherwise.
+ *
+ * `AI_CLIENT_TEST_FIXTURES_ROOT` overrides it, and `test/runner.js` sets that variable to a folder of its
+ * own for every suite it starts. The default is unchanged, so running a suite by hand lands exactly where
+ * it always landed. The override exists because `fixtureSeries` and `fixtureStoreSeries` `rm -rf`
+ * `<root>/<label>` on entry, so two suites that pick the same label in one shared root delete each other's
+ * fixture mid-run.
+ *
+ * Measured 2026-10-16, that collision does NOT fire today: the 19 suites that reach this default with a
+ * literal label use **117 distinct labels and 0 shared ones**, and running those 19 six at a time in the
+ * shared root passes **19 of 19** (`/tmp/opencode/probe-shared-root.sh`). The override is the guard that
+ * keeps a label a later suite invents from becoming that collision — and it is the door `test/runner.js`
+ * walks through to give every suite a root of its own.
+ */
+const {
+  FIXTURES_ROOT_DEFAULT,
+  FIXTURES_ROOT_ENV,
+  assertSafeFixturesRoot,
+  resolveFixturesRoot,
+} = require("./fixture-guard");
+
+const FIXTURES_ROOT = resolveFixturesRoot();
 
 /** A Markdown table — the shape the glossary's whole contract IS. */
 const TABLE = `# Glossary
@@ -106,8 +127,8 @@ function contentFor(name, shape) {
  * @param {string} [root] - Where to put it. Defaults to `FIXTURES_ROOT`.
  * @returns {Promise<{dir: string, ledgerDir: string, volumes: Array<{folder: string, installmentNumber: string}>}>}
  */
-async function fixtureSeries(label, root = FIXTURES_ROOT) {
-  const dir = path.join(root, label);
+async function fixtureSeries(label, root) {
+  const dir = path.join(resolveFixturesRoot(root), label);
   await fs.promises.rm(dir, { recursive: true, force: true });
   await fs.promises.mkdir(dir, { recursive: true });
   // The ledger, the tickets, the patches, the delivery plan and the run lock all live in
@@ -295,7 +316,7 @@ async function leaveGateEvidenceBesideTheGap(seriesDir, folder, installment, ste
  * @param {string} label
  * @param {string} [root]
  */
-async function completeSeries(label, root = FIXTURES_ROOT) {
+async function completeSeries(label, root) {
   const fx = await fixtureSeries(label, root);
   for (const { name } of PIPELINE_STEPS) {
     for (const v of fx.volumes) await writeVolumeOutputs(fx.dir, v, name);
@@ -342,6 +363,10 @@ async function writeChannel(dir, name, payload) {
 
 module.exports = {
   FIXTURES_ROOT,
+  FIXTURES_ROOT_DEFAULT,
+  FIXTURES_ROOT_ENV,
+  assertSafeFixturesRoot,
+  resolveFixturesRoot,
   TABLE,
   DOC,
   PASS_DOC,
